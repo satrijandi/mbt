@@ -57,6 +57,7 @@ class Runner:
         self.storage = LocalStoragePlugin()  # Phase 1: hardcoded local storage
         self.run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
         self.artifact_registry: dict[str, str] = {}  # artifact_name -> URI
+        self.profile_config = manifest.profile_config
 
     def run(self) -> RunResults:
         """Execute all steps in the pipeline.
@@ -116,6 +117,7 @@ class Runner:
             context = RunContext(
                 config=step_def.config,
                 run_id=self.run_id,
+                profile_config=self.profile_config,
             )
 
             # Load and instantiate step class

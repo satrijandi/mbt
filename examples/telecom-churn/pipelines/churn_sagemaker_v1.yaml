@@ -1,0 +1,44 @@
+schema_version: 1
+
+project:
+  name: churn_sagemaker_v1
+  problem_type: binary_classification
+  owner: data_science_team
+  tags: [churn, telecom, sagemaker, cloud]
+
+training:
+  data_source:
+    label_table: customers
+
+  schema:
+    target:
+      label_column: churned
+      classes: [0, 1]
+      positive_class: 1
+    identifiers:
+      primary_key: customer_id
+
+  # Use SageMaker framework for cloud-based training
+  model_training:
+    framework: sagemaker
+    config:
+      # Built-in SageMaker algorithm
+      algorithm: xgboost
+
+      # Instance configuration
+      instance_type: ml.m5.xlarge
+      instance_count: 1
+      max_run_time: 3600  # 1 hour
+
+      # XGBoost hyperparameters
+      hyperparameters:
+        num_round: 100
+        max_depth: 5
+        eta: 0.2
+        objective: binary:logistic
+        eval_metric: auc
+
+  evaluation:
+    primary_metric: roc_auc
+    additional_metrics: [accuracy, f1, precision, recall]
+    generate_plots: true

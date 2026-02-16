@@ -64,8 +64,8 @@ class TrainModelStep(Step):
         registry = PluginRegistry()
         framework = registry.get("mbt.frameworks", framework_name)
 
-        # Setup framework (e.g., h2o.init())
-        framework.setup({})
+        # Setup framework with profile configuration
+        framework.setup(context.profile_config)
 
         try:
             # Wrap data as MBTFrames

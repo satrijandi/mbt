@@ -77,3 +77,10 @@ telecom-churn:
 
       secrets:
         provider: env
+
+      # SageMaker connection for cloud-based training
+      sagemaker_connection:
+        region: us-east-1
+        role_arn: "{{ env_var('SAGEMAKER_ROLE_ARN', 'arn:aws:iam::123456789:role/SageMakerRole') }}"
+        s3_bucket: "{{ env_var('SAGEMAKER_S3_BUCKET', 'ml-artifacts-bucket') }}"
+        s3_prefix: mbt-models/telecom-churn/

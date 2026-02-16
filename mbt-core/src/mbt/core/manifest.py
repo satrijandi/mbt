@@ -46,6 +46,10 @@ class Manifest(BaseModel):
     metadata: ManifestMetadata
     steps: dict[str, StepDefinition] = Field(..., description="step_name -> StepDefinition")
     dag: DAGDefinition
+    profile_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Resolved profile configuration from profiles.yaml"
+    )
 
     class Config:
         extra = "allow"  # Allow additional fields for extensibility

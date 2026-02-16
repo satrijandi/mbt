@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Optional
 
 from mbt.config.schema import PipelineConfig
+from mbt.config.profiles import ProfilesLoader, ProfileNotFoundError
 from mbt.core.dag import DAGBuilder
 from mbt.core.manifest import Manifest, ManifestMetadata
 from mbt.core.composition import CompositionResolver
@@ -37,13 +38,20 @@ class Compiler:
         self.dag_builder = DAGBuilder()
         self.runtime_vars = runtime_vars or {}
         self.composition_resolver = CompositionResolver(self.pipelines_dir, runtime_vars=self.runtime_vars)
+        self.profiles_loader = ProfilesLoader(self.project_root)
 
-    def compile(self, pipeline_name: str, target: str = "dev") -> Manifest:
+    def compile(
+        self,
+        pipeline_name: str,
+        target: str = "dev",
+        profile_name: Optional[str] = None
+    ) -> Manifest:
         """Compile pipeline to manifest.
 
         Args:
             pipeline_name: Name of pipeline (without .yaml extension)
             target: Target environment (dev, staging, prod)
+            profile_name: Profile name (defaults to pipeline_name or project directory name)
 
         Returns:
             Compiled Manifest object
@@ -69,8 +77,11 @@ class Compiler:
             # Phase 4: DAG assembly
             steps, dag = self._build_dag(pipeline_config)
 
+            # NEW: Load and resolve profile configuration
+            resolved_profile = self._resolve_profile(profile_name or pipeline_name, target)
+
             # Phase 5: Manifest generation
-            manifest = self._generate_manifest(pipeline_config, steps, dag, target)
+            manifest = self._generate_manifest(pipeline_config, steps, dag, target, resolved_profile)
 
             # Save manifest to target directory
             self._save_manifest(manifest, pipeline_name)
@@ -188,17 +199,36 @@ class Compiler:
         else:
             raise CompilationError("No training or serving configuration found")
 
+    def _resolve_profile(self, profile_name: str, target: str) -> dict:
+        """Resolve profile configuration.
+
+        Args:
+            profile_name: Profile name
+            target: Target environment
+
+        Returns:
+            Resolved profile configuration dict
+        """
+        try:
+            return self.profiles_loader.resolve_target(
+                profile_name=profile_name,
+                target=target,
+                runtime_vars=self.runtime_vars,
+            )
+        except ProfileNotFoundError:
+            # No profile found - return empty dict (use defaults)
+            print(f"  ⚠ No profile '{profile_name}' found, using defaults")
+            return {}
+
     def _generate_manifest(
         self,
         pipeline_config: PipelineConfig,
         steps: dict,
         dag,
         target: str,
+        profile_config: dict,
     ) -> Manifest:
-        """Phase 5: Generate final manifest with all configuration merged.
-
-        For Phase 1: No profile merging yet, just create manifest from pipeline.
-        """
+        """Phase 5: Generate final manifest with all configuration merged."""
         # Detect pipeline type
         config_dict = pipeline_config.model_dump()
         if config_dict.get("serving"):
@@ -220,6 +250,7 @@ class Compiler:
             metadata=metadata,
             steps=steps,
             dag=dag,
+            profile_config=profile_config,
         )
 
     def _save_manifest(self, manifest: Manifest, pipeline_name: str):
