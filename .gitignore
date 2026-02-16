@@ -205,3 +205,22 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# MBT (Model Build Tool) - ML Pipeline Framework
+# MLflow tracking artifacts
+mlruns/
+mlflow.db
+mlflow.db-*
+
+# MBT local artifacts and outputs
+local_artifacts/
+artifacts/
+*.manifest.json
+
+# Model outputs and predictions
+predictions.csv
+model_outputs/
+
+# Compiled manifests (development only)
+# Keep committed manifests in production contexts
+# manifest.json
