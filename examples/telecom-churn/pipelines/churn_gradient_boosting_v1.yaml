@@ -1,0 +1,18 @@
+# Churn prediction using Gradient Boosting
+# Inherits common configuration from _base_churn
+
+schema_version: 1
+base_pipeline: _base_churn
+
+project:
+  name: churn_gradient_boosting_v1
+  tags: [churn, telecom, phase3, gradient_boosting]
+
+training:
+  model_training:
+    framework: sklearn
+    config:
+      model: GradientBoostingClassifier
+      n_estimators: 200
+      learning_rate: 0.1
+      max_depth: 5

@@ -1,0 +1,46 @@
+schema_version: 1
+
+project:
+  name: churn_serving_v1
+  experiment_name: churn_prediction
+  problem_type: binary_classification
+  owner: customer_analytics_team
+  tags: [churn, telecom, serving]
+
+# Reuse training configuration for framework info
+training:
+  data_source:
+    label_table: customers  # Not used in serving, but needed for schema validation
+  schema:
+    target:
+      label_column: churned
+      classes: [0, 1]
+      positive_class: 1
+    identifiers:
+      primary_key: customer_id
+  model_training:
+    framework: sklearn  # Must match the framework used in training
+    config: {}
+  evaluation:
+    primary_metric: roc_auc
+    additional_metrics: []
+
+# Serving-specific configuration
+deployment:
+  mode: batch
+  cadence: daily
+
+serving:
+  model_source:
+    registry: mlflow
+    run_id: "{{ var('run_id') }}"  # Pass via --vars run_id=<mlflow_run_id>
+    artifact_snapshot: false
+    fallback_run_id: null
+
+  data_source:
+    scoring_table: customers_to_score
+
+  output:
+    destination: local_file
+    path: ./predictions.csv
+    include_probabilities: true

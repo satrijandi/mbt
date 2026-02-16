@@ -1,0 +1,12 @@
+# Reusable schema definition for telecom churn pipelines
+# Can be included in multiple pipelines via !include
+
+target:
+  label_column: churned
+  classes: [0, 1]
+  positive_class: 1
+
+identifiers:
+  primary_key: customer_id
+
+ignored_columns: []

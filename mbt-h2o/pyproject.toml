@@ -1,0 +1,19 @@
+[project]
+name = "mbt-h2o"
+version = "0.1.0"
+description = "H2O AutoML adapter for MBT (Model Build Tool)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "h2o>=3.40.0",
+]
+
+[project.entry-points."mbt.frameworks"]
+h2o_automl = "mbt_h2o.framework:H2OAutoMLFramework"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

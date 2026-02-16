@@ -1,0 +1,43 @@
+pipeline: churn_serving_v1
+
+assertions:
+  # Check that serving steps exist
+  - type: step_exists
+    step: load_scoring_data
+
+  - type: step_exists
+    step: load_model
+
+  - type: step_exists
+    step: apply_transforms
+
+  - type: step_exists
+    step: predict
+
+  - type: step_exists
+    step: publish
+
+  # Check that training steps are absent
+  - type: step_absent
+    step: train_model
+
+  - type: step_absent
+    step: evaluate
+
+  # Check step ordering
+  - type: step_order
+    before: load_model
+    after: apply_transforms
+
+  - type: step_order
+    before: apply_transforms
+    after: predict
+
+  - type: step_order
+    before: predict
+    after: publish
+
+  # Check step count
+  - type: step_count
+    min: 5
+    max: 5

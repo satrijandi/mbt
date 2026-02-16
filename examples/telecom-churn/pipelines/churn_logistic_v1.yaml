@@ -1,0 +1,31 @@
+schema_version: 1
+
+project:
+  name: churn_logistic_v1
+  problem_type: binary_classification
+  owner: data_science_team
+  tags: [churn, telecom, phase2, logistic_regression]
+
+training:
+  data_source:
+    label_table: customers
+
+  schema:
+    target:
+      label_column: churned
+      classes: [0, 1]
+      positive_class: 1
+    identifiers:
+      primary_key: customer_id
+
+  model_training:
+    framework: sklearn
+    config:
+      model: LogisticRegression
+      max_iter: 1000
+      C: 1.0
+
+  evaluation:
+    primary_metric: roc_auc
+    additional_metrics: [accuracy, f1, precision, recall]
+    generate_plots: true

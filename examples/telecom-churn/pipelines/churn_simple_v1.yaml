@@ -1,0 +1,30 @@
+schema_version: 1
+
+project:
+  name: churn_simple_v1
+  problem_type: binary_classification
+  owner: data_science_team
+  tags: [churn, telecom, phase1]
+
+training:
+  data_source:
+    label_table: customers
+
+  schema:
+    target:
+      label_column: churned
+      classes: [0, 1]
+      positive_class: 1
+    identifiers:
+      primary_key: customer_id
+
+  model_training:
+    framework: sklearn
+    config:
+      model: RandomForestClassifier
+      n_estimators: 100
+
+  evaluation:
+    primary_metric: roc_auc
+    additional_metrics: [accuracy, f1, precision, recall]
+    generate_plots: true

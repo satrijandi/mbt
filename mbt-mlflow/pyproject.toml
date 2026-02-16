@@ -1,0 +1,19 @@
+[project]
+name = "mbt-mlflow"
+version = "0.1.0"
+description = "MLflow model registry adapter for MBT (Model Build Tool)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "mlflow>=2.0.0",
+]
+
+[project.entry-points."mbt.model_registries"]
+mlflow = "mbt_mlflow.registry:MLflowRegistry"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

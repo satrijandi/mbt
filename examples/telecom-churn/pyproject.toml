@@ -1,0 +1,10 @@
+[project]
+name = "telecom-churn-example"
+version = "0.1.0"
+description = "Example MBT project for telecom churn prediction"
+dependencies = [
+    "mbt-core>=0.1.0",
+]
+
+[tool.mbt]
+profile = "telecom-churn"

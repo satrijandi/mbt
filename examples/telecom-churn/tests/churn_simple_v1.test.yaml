@@ -1,0 +1,44 @@
+pipeline: churn_simple_v1
+
+assertions:
+  # Check that required steps exist
+  - type: step_exists
+    step: load_data
+
+  - type: step_exists
+    step: split_data
+
+  - type: step_exists
+    step: train_model
+
+  - type: step_exists
+    step: evaluate
+
+  - type: step_exists
+    step: log_run
+
+  # Check that normalize step is absent (not in simple pipeline)
+  - type: step_absent
+    step: normalize
+
+  # Check step ordering
+  - type: step_order
+    before: load_data
+    after: split_data
+
+  - type: step_order
+    before: split_data
+    after: train_model
+
+  - type: step_order
+    before: train_model
+    after: evaluate
+
+  - type: step_order
+    before: evaluate
+    after: log_run
+
+  # Check step count
+  - type: step_count
+    min: 5
+    max: 10

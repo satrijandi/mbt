@@ -1,0 +1,79 @@
+# MBT Profiles Configuration
+# Defines environment-specific configuration (dev, staging, prod)
+
+telecom-churn:
+  # Default target if not specified
+  target: dev
+
+  # Profile-level configuration (shared across all targets)
+  mlflow:
+    experiment_name: telecom_churn_prediction
+
+  # Target-specific configuration
+  outputs:
+    # Development environment (local)
+    dev:
+      executor:
+        type: local
+
+      storage:
+        type: local
+        config:
+          base_path: ./local_artifacts
+
+      data_connector:
+        type: local_file
+        config:
+          data_path: ./sample_data
+
+      mlflow:
+        tracking_uri: "file://./mlruns"
+
+      secrets:
+        provider: env
+
+    # Staging environment (cloud infrastructure)
+    staging:
+      executor:
+        type: local  # TODO: kubernetes in future
+        config:
+          namespace: ml-staging
+
+      storage:
+        type: local  # TODO: s3 in future
+        config:
+          base_path: ./staging_artifacts
+
+      data_connector:
+        type: local_file  # TODO: snowflake in future
+        config:
+          data_path: ./sample_data
+
+      mlflow:
+        tracking_uri: "file://./mlruns_staging"
+
+      secrets:
+        provider: env
+
+    # Production environment (cloud infrastructure)
+    prod:
+      executor:
+        type: local  # TODO: kubernetes in future
+        config:
+          namespace: ml-production
+
+      storage:
+        type: local  # TODO: s3 in future
+        config:
+          base_path: ./prod_artifacts
+
+      data_connector:
+        type: local_file  # TODO: snowflake in future
+        config:
+          data_path: ./sample_data
+
+      mlflow:
+        tracking_uri: "file://./mlruns_prod"
+
+      secrets:
+        provider: env
