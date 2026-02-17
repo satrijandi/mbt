@@ -149,8 +149,17 @@ class StepExecutor:
         return {}
 
     def _save_artifact_registry(self):
-        """Persist artifact registry to storage."""
-        data = json.dumps(self.artifact_registry).encode()
+        """Persist artifact registry to storage.
+
+        Uses read-merge-write to handle concurrent steps: re-loads the
+        latest registry from storage, merges in this step's outputs,
+        then writes back.  This prevents parallel steps from overwriting
+        each other's entries.
+        """
+        current = self._load_artifact_registry()
+        current.update(self.artifact_registry)
+        self.artifact_registry = current
+        data = json.dumps(current).encode()
         self.storage.put(
             artifact_name=".artifact_registry.json",
             data=data,

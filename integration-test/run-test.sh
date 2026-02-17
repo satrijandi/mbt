@@ -253,79 +253,17 @@ echo "  MLflow Run ID: $MLFLOW_RUN_ID"
 echo ""
 
 # ============================================================
-# PHASE 4: DAG Generation
+# PHASE 4: Step Executor (pod-per-step simulation)
 # ============================================================
-echo -e "${YELLOW}Phase 4: DAG Generation${NC}"
+echo -e "${YELLOW}Phase 4: Step Executor (pod-per-step simulation)${NC}"
 echo ""
 
-# Step 15: Recompile pipelines for docker target (DockerOperator DAGs)
-echo "Step 15: Compile pipelines for docker target..."
+# Uses the prod manifest compiled in Phase 3 (training_churn_model_v1).
+# IMPORTANT: This must run BEFORE the docker-target compilation in Phase 6,
+# because mbt stores one manifest per pipeline and the last compile wins.
 
-# Update serving pipeline YAML with the MLflow run_id
-if [ "$MLFLOW_RUN_ID" != "unknown" ] && [ -n "$MLFLOW_RUN_ID" ]; then
-    $PYTHON -c "
-import yaml
-with open('pipelines/serving_churn_model_v1.yaml') as f:
-    data = yaml.safe_load(f)
-data['serving']['model_source']['run_id'] = '$MLFLOW_RUN_ID'
-with open('pipelines/serving_churn_model_v1.yaml', 'w') as f:
-    yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-print(f'Updated serving pipeline with MLflow run_id: $MLFLOW_RUN_ID')
-" 2>&1
-fi
-
-$MBT compile training_churn_model_v1 --target docker 2>&1 | tail -3
-check "Training pipeline compilation (docker target) succeeds" $?
-
-$MBT compile serving_churn_model_v1 --target docker 2>&1 | tail -3
-check "Serving pipeline compilation (docker target) succeeds" $?
-
-# Step 16: Generate Airflow DAGs
-echo "Step 16: Generate Airflow DAGs..."
-rm -rf "$SCRIPT_DIR/generated_dags" 2>/dev/null
-mkdir -p "$SCRIPT_DIR/generated_dags"
-$MBT generate-dags --target docker --output "$SCRIPT_DIR/generated_dags" --project-host-dir "$PROJECT_DIR" 2>&1 | tail -5
-check "DAG generation succeeds" $?
-
-# Step 17: Verify generated DAGs
-echo "Step 17: Verify generated DAG files..."
-if [ -f "$SCRIPT_DIR/generated_dags/training_churn_model_v1_dag.py" ]; then
-    check "Training DAG file generated" 0
-else
-    check "Training DAG file generated" 1
-fi
-
-if [ -f "$SCRIPT_DIR/generated_dags/serving_churn_model_v1_dag.py" ]; then
-    check "Serving DAG file generated" 0
-else
-    check "Serving DAG file generated" 1
-fi
-
-# Step 18: Verify DAG syntax
-echo "Step 18: Verify DAG syntax..."
-python3 -c "
-import ast, sys
-for dag_file in ['$SCRIPT_DIR/generated_dags/training_churn_model_v1_dag.py', '$SCRIPT_DIR/generated_dags/serving_churn_model_v1_dag.py']:
-    try:
-        with open(dag_file) as f:
-            ast.parse(f.read())
-    except Exception as e:
-        print(f'Syntax error in {dag_file}: {e}')
-        sys.exit(1)
-print('All DAG files have valid Python syntax')
-" 2>&1
-check "DAG files have valid Python syntax" $?
-
-echo ""
-
-# ============================================================
-# PHASE 5: Step Executor (pod-per-step simulation)
-# ============================================================
-echo -e "${YELLOW}Phase 5: Step Executor (pod-per-step simulation)${NC}"
-echo ""
-
-# Step 19: Execute individual steps via step executor
-echo "Step 19: Execute steps individually (simulating pod-per-step)..."
+# Step 15: Execute individual steps via step executor
+echo "Step 15: Execute steps individually (simulating pod-per-step)..."
 STEP_RUN_ID="run_integration_test_$(date +%Y%m%d_%H%M%S)"
 
 echo "  Executing load_data..."
@@ -348,8 +286,8 @@ echo "  Executing log_run..."
 $MBT step execute --pipeline training_churn_model_v1 --step log_run --target prod --run-id "$STEP_RUN_ID" 2>&1 | tail -3
 check "Step executor: log_run succeeds" $?
 
-# Step 20: Verify artifact registry persistence
-echo "Step 20: Verify artifact registry in S3..."
+# Step 16: Verify artifact registry persistence
+echo "Step 16: Verify artifact registry in S3..."
 REGISTRY_EXISTS=$($PYTHON -c "
 import boto3
 s3 = boto3.client('s3', endpoint_url='http://localhost:8333', aws_access_key_id='any', aws_secret_access_key='any')
@@ -368,24 +306,99 @@ fi
 echo ""
 
 # ============================================================
-# PHASE 6: Serving Pipeline (prod target)
+# PHASE 5: Serving Pipeline (prod target)
 # ============================================================
-echo -e "${YELLOW}Phase 6: Serving Pipeline (prod target)${NC}"
+echo -e "${YELLOW}Phase 5: Serving Pipeline (prod target)${NC}"
 echo ""
 
 cd "$PROJECT_DIR"
 
-echo "Step 21: Run serving pipeline (prod target)..."
+# Step 17: Update serving pipeline with training run_id
+echo "Step 17: Prepare and compile serving pipeline..."
+if [ "$MLFLOW_RUN_ID" != "unknown" ] && [ -n "$MLFLOW_RUN_ID" ]; then
+    $PYTHON -c "
+import yaml
+with open('pipelines/serving_churn_model_v1.yaml') as f:
+    data = yaml.safe_load(f)
+data['serving']['model_source']['run_id'] = '$MLFLOW_RUN_ID'
+with open('pipelines/serving_churn_model_v1.yaml', 'w') as f:
+    yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+print(f'Updated serving pipeline with MLflow run_id: $MLFLOW_RUN_ID')
+" 2>&1
+fi
+
+$MBT compile serving_churn_model_v1 --target prod 2>&1 | tail -3
+check "Serving pipeline compilation (prod target) succeeds" $?
+
+# Step 18: Run serving pipeline
+echo "Step 18: Run serving pipeline (prod target)..."
 $MBT run --select serving_churn_model_v1 --target prod 2>&1 | tail -15
 check "Serving pipeline with prod target succeeds" $?
 
-echo "Step 22: Verify predictions in PostgreSQL..."
+# Step 19: Verify predictions
+echo "Step 19: Verify predictions in PostgreSQL..."
 PRED_COUNT=$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T postgres psql -U mbt_user -d warehouse -t -c "SELECT COUNT(*) FROM churn_predictions;" 2>/dev/null | tr -d ' ')
 if [ "$PRED_COUNT" -gt 0 ] 2>/dev/null; then
     check "Predictions stored in PostgreSQL ($PRED_COUNT rows)" 0
 else
     check "Predictions stored in PostgreSQL" 1
 fi
+
+echo ""
+
+# ============================================================
+# PHASE 6: DAG Generation (docker target)
+# ============================================================
+echo -e "${YELLOW}Phase 6: DAG Generation (docker target)${NC}"
+echo ""
+
+# NOTE: This phase compiles with --target docker which OVERWRITES the prod
+# manifests. This is why it must be the last phase - no subsequent phases
+# can rely on prod manifests.
+
+# Step 20: Compile pipelines for docker target (DockerOperator DAGs)
+echo "Step 20: Compile pipelines for docker target..."
+$MBT compile training_churn_model_v1 --target docker 2>&1 | tail -3
+check "Training pipeline compilation (docker target) succeeds" $?
+
+$MBT compile serving_churn_model_v1 --target docker 2>&1 | tail -3
+check "Serving pipeline compilation (docker target) succeeds" $?
+
+# Step 21: Generate Airflow DAGs
+echo "Step 21: Generate Airflow DAGs..."
+rm -rf "$SCRIPT_DIR/generated_dags" 2>/dev/null
+mkdir -p "$SCRIPT_DIR/generated_dags"
+$MBT generate-dags --target docker --output "$SCRIPT_DIR/generated_dags" --project-host-dir "$PROJECT_DIR" 2>&1 | tail -5
+check "DAG generation succeeds" $?
+
+# Step 22: Verify generated DAGs
+echo "Step 22: Verify generated DAG files..."
+if [ -f "$SCRIPT_DIR/generated_dags/training_churn_model_v1_dag.py" ]; then
+    check "Training DAG file generated" 0
+else
+    check "Training DAG file generated" 1
+fi
+
+if [ -f "$SCRIPT_DIR/generated_dags/serving_churn_model_v1_dag.py" ]; then
+    check "Serving DAG file generated" 0
+else
+    check "Serving DAG file generated" 1
+fi
+
+# Step 23: Verify DAG syntax
+echo "Step 23: Verify DAG syntax..."
+python3 -c "
+import ast, sys
+for dag_file in ['$SCRIPT_DIR/generated_dags/training_churn_model_v1_dag.py', '$SCRIPT_DIR/generated_dags/serving_churn_model_v1_dag.py']:
+    try:
+        with open(dag_file) as f:
+            ast.parse(f.read())
+    except Exception as e:
+        print(f'Syntax error in {dag_file}: {e}')
+        sys.exit(1)
+print('All DAG files have valid Python syntax')
+" 2>&1
+check "DAG files have valid Python syntax" $?
 
 echo ""
 

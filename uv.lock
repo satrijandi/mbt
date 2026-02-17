@@ -1497,7 +1497,7 @@ requires-dist = [
     { name = "mbt-core", editable = "mbt-core" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.0" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "sqlalchemy", specifier = ">=1.4.0" },
 ]
 
 [[package]]
