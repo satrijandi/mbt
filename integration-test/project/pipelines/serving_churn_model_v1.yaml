@@ -32,7 +32,7 @@ deployment:
 serving:
   model_source:
     registry: mlflow
-    run_id: f9a6219d2ca049f79b3b18acec4d960f
+    run_id: 0acce032dcd243dc995ceda827c278fc
     artifact_snapshot: false
   data_source:
     scoring_table: customers_to_score
