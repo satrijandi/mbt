@@ -518,7 +518,8 @@ def step_execute(
 def generate_dags(
     target: str = typer.Option("dev", "--target", "-t", help="Target environment"),
     output: str = typer.Option("./generated_dags", "--output", "-o", help="Output directory for DAG files"),
-    project_dir: str = typer.Option(None, "--project-dir", help="Working directory for DAG task commands (e.g., /opt/airflow/project)"),
+    project_dir: str = typer.Option(None, "--project-dir", help="Working directory for DAG task commands (e.g., /opt/mbt/project)"),
+    project_host_dir: str = typer.Option(None, "--project-host-dir", help="Host path to project directory for Docker volume mount"),
 ):
     """Generate orchestrator DAG files from compiled manifests."""
     try:
@@ -587,6 +588,7 @@ def generate_dags(
                 retry_delay_minutes=default_args.get("retry_delay_minutes", 5),
                 cadence=cadence,
                 project_dir=project_dir,
+                project_host_dir=project_host_dir,
             )
 
             console.print(f"  [green]✓[/green] {pipeline_name} -> {dag_output_path}")

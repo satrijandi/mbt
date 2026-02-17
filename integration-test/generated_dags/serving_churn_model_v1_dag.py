@@ -5,7 +5,8 @@ Target: docker
 """
 
 from airflow import DAG
-from airflow.operators.bash import BashOperator
+from airflow.providers.docker.operators.docker import DockerOperator
+from docker.types import Mount
 from datetime import datetime, timedelta
 
 default_args = {
@@ -13,6 +14,13 @@ default_args = {
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
 }
+
+_project_mount = Mount(
+    target="/opt/mbt/project",
+    source="/home/satrijandi/code/mbt/integration-test/project",
+    type="bind",
+    read_only=False,
+)
 
 with DAG(
     dag_id="serving_churn_model_v1",
@@ -23,64 +31,119 @@ with DAG(
     tags=["mbt", "serving_churn_model_v1"],
 ) as dag:
 
-    load_scoring_data = BashOperator(
+    load_scoring_data = DockerOperator(
         task_id="load_scoring_data",
-        bash_command=(
-            "cd /opt/airflow/project &&"
-            " mbt step execute"
+        image="mbt-runner:latest",
+        command=(
+            "step execute"
             " --pipeline serving_churn_model_v1"
             " --step load_scoring_data"
             " --target docker"
             ' --run-id "run_{{ ds_nodash }}_{{ ts_nodash }}"'
         ),
+        working_dir="/opt/mbt/project",
+        mounts=[_project_mount],
+        network_mode="integration-test_default",
+        environment={
+            "AWS_ACCESS_KEY_ID": "any",
+            "AWS_SECRET_ACCESS_KEY": "any",
+            "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
+        },
+        docker_url="unix://var/run/docker.sock",
+        auto_remove=True,
+        mount_tmp_dir=False,
     )
 
-    load_model = BashOperator(
+    load_model = DockerOperator(
         task_id="load_model",
-        bash_command=(
-            "cd /opt/airflow/project &&"
-            " mbt step execute"
+        image="mbt-runner:latest",
+        command=(
+            "step execute"
             " --pipeline serving_churn_model_v1"
             " --step load_model"
             " --target docker"
             ' --run-id "run_{{ ds_nodash }}_{{ ts_nodash }}"'
         ),
+        working_dir="/opt/mbt/project",
+        mounts=[_project_mount],
+        network_mode="integration-test_default",
+        environment={
+            "AWS_ACCESS_KEY_ID": "any",
+            "AWS_SECRET_ACCESS_KEY": "any",
+            "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
+        },
+        docker_url="unix://var/run/docker.sock",
+        auto_remove=True,
+        mount_tmp_dir=False,
     )
 
-    apply_transforms = BashOperator(
+    apply_transforms = DockerOperator(
         task_id="apply_transforms",
-        bash_command=(
-            "cd /opt/airflow/project &&"
-            " mbt step execute"
+        image="mbt-runner:latest",
+        command=(
+            "step execute"
             " --pipeline serving_churn_model_v1"
             " --step apply_transforms"
             " --target docker"
             ' --run-id "run_{{ ds_nodash }}_{{ ts_nodash }}"'
         ),
+        working_dir="/opt/mbt/project",
+        mounts=[_project_mount],
+        network_mode="integration-test_default",
+        environment={
+            "AWS_ACCESS_KEY_ID": "any",
+            "AWS_SECRET_ACCESS_KEY": "any",
+            "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
+        },
+        docker_url="unix://var/run/docker.sock",
+        auto_remove=True,
+        mount_tmp_dir=False,
     )
 
-    predict = BashOperator(
+    predict = DockerOperator(
         task_id="predict",
-        bash_command=(
-            "cd /opt/airflow/project &&"
-            " mbt step execute"
+        image="mbt-runner:latest",
+        command=(
+            "step execute"
             " --pipeline serving_churn_model_v1"
             " --step predict"
             " --target docker"
             ' --run-id "run_{{ ds_nodash }}_{{ ts_nodash }}"'
         ),
+        working_dir="/opt/mbt/project",
+        mounts=[_project_mount],
+        network_mode="integration-test_default",
+        environment={
+            "AWS_ACCESS_KEY_ID": "any",
+            "AWS_SECRET_ACCESS_KEY": "any",
+            "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
+        },
+        docker_url="unix://var/run/docker.sock",
+        auto_remove=True,
+        mount_tmp_dir=False,
     )
 
-    publish = BashOperator(
+    publish = DockerOperator(
         task_id="publish",
-        bash_command=(
-            "cd /opt/airflow/project &&"
-            " mbt step execute"
+        image="mbt-runner:latest",
+        command=(
+            "step execute"
             " --pipeline serving_churn_model_v1"
             " --step publish"
             " --target docker"
             ' --run-id "run_{{ ds_nodash }}_{{ ts_nodash }}"'
         ),
+        working_dir="/opt/mbt/project",
+        mounts=[_project_mount],
+        network_mode="integration-test_default",
+        environment={
+            "AWS_ACCESS_KEY_ID": "any",
+            "AWS_SECRET_ACCESS_KEY": "any",
+            "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
+        },
+        docker_url="unix://var/run/docker.sock",
+        auto_remove=True,
+        mount_tmp_dir=False,
     )
 
     # Dependencies

@@ -58,7 +58,15 @@ demo-project:
 
     docker:
       executor:
-        type: local
+        type: docker
+        config:
+          image: mbt-runner:latest
+          network_mode: integration-test_default
+          docker_url: unix://var/run/docker.sock
+          environment:
+            AWS_ACCESS_KEY_ID: "any"
+            AWS_SECRET_ACCESS_KEY: "any"
+            MLFLOW_S3_ENDPOINT_URL: "http://seaweedfs-filer:8333"
       storage:
         type: s3
         config:

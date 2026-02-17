@@ -1,7 +1,8 @@
 """Airflow orchestrator adapter for MBT.
 
 Generates Airflow DAG Python files from MBT manifest files.
-Each pipeline step becomes an Airflow task using BashOperator or KubernetesPodOperator.
+Each pipeline step becomes an Airflow task using BashOperator, DockerOperator,
+or KubernetesPodOperator depending on executor type.
 """
 
 import json
@@ -75,6 +76,8 @@ class AirflowOrchestrator(OrchestratorPlugin):
         executor_type = kwargs.get("executor_type", executor_config.get("type", "local"))
 
         # Generate DAG content
+        exec_cfg = executor_config.get("config", {})
+
         if executor_type == "kubernetes":
             dag_content = self._generate_k8s_dag(
                 pipeline_name=pipeline_name,
@@ -84,9 +87,25 @@ class AirflowOrchestrator(OrchestratorPlugin):
                 owner=owner,
                 retries=retries,
                 retry_delay_minutes=retry_delay_minutes,
-                image=kwargs.get("image", executor_config.get("config", {}).get("image", "mbt-runner:latest")),
-                namespace=kwargs.get("namespace", executor_config.get("config", {}).get("namespace", "mbt-pipelines")),
-                service_account=kwargs.get("service_account", executor_config.get("config", {}).get("service_account", "mbt-runner")),
+                image=kwargs.get("image", exec_cfg.get("image", "mbt-runner:latest")),
+                namespace=kwargs.get("namespace", exec_cfg.get("namespace", "mbt-pipelines")),
+                service_account=kwargs.get("service_account", exec_cfg.get("service_account", "mbt-runner")),
+            )
+        elif executor_type == "docker":
+            dag_content = self._generate_docker_dag(
+                pipeline_name=pipeline_name,
+                target=target,
+                parent_map=parent_map,
+                schedule=schedule,
+                owner=owner,
+                retries=retries,
+                retry_delay_minutes=retry_delay_minutes,
+                image=kwargs.get("image", exec_cfg.get("image", "mbt-runner:latest")),
+                network_mode=kwargs.get("network_mode", exec_cfg.get("network_mode", "bridge")),
+                project_mount_source=kwargs.get("project_host_dir") or exec_cfg.get("project_mount_source"),
+                project_mount_target=kwargs.get("project_dir") or exec_cfg.get("project_mount_target", "/opt/mbt/project"),
+                environment=exec_cfg.get("environment", {}),
+                docker_url=kwargs.get("docker_url", exec_cfg.get("docker_url", "unix://var/run/docker.sock")),
             )
         else:
             # Filter kwargs to only pass extra keys not already explicit
@@ -173,6 +192,122 @@ class AirflowOrchestrator(OrchestratorPlugin):
             f'}}\n'
             f'\n'
             f'with DAG(\n'
+            f'    dag_id="{pipeline_name}",\n'
+            f'    default_args=default_args,\n'
+            f'    schedule="{schedule}",\n'
+            f'    start_date=datetime(2026, 1, 1),\n'
+            f'    catchup=False,\n'
+            f'    tags=["mbt", "{pipeline_name}"],\n'
+            f') as dag:\n'
+            f'\n'
+            + "\n".join(task_defs)
+            + "\n"
+            + "    # Dependencies\n"
+            + ("\n".join(dep_lines) if dep_lines else "    pass")
+            + "\n"
+        )
+
+    def _generate_docker_dag(
+        self,
+        pipeline_name: str,
+        target: str,
+        parent_map: dict,
+        schedule: str,
+        owner: str,
+        retries: int,
+        retry_delay_minutes: int,
+        image: str,
+        network_mode: str,
+        project_mount_source: str | None,
+        project_mount_target: str,
+        environment: dict,
+        docker_url: str,
+    ) -> str:
+        """Generate DAG with DockerOperator tasks."""
+        steps = list(parent_map.keys())
+
+        # Build environment dict string
+        env_str = ""
+        if environment:
+            env_items = ",\n".join(
+                f'            "{k}": "{v}"' for k, v in environment.items()
+            )
+            env_str = (
+                f"        environment={{\n"
+                f"{env_items},\n"
+                f"        }},\n"
+            )
+
+        # Build mount definition (outside the DAG context)
+        mount_def = ""
+        mounts_arg = ""
+        if project_mount_source:
+            mount_def = (
+                f'_project_mount = Mount(\n'
+                f'    target="{project_mount_target}",\n'
+                f'    source="{project_mount_source}",\n'
+                f'    type="bind",\n'
+                f'    read_only=False,\n'
+                f')\n\n'
+            )
+            mounts_arg = f"        mounts=[_project_mount],\n"
+
+        # Build task definitions
+        task_defs = []
+        for step_name in steps:
+            task_defs.append(
+                f'    {step_name} = DockerOperator(\n'
+                f'        task_id="{step_name}",\n'
+                f'        image="{image}",\n'
+                f'        command=(\n'
+                f'            "step execute"\n'
+                f'            " --pipeline {pipeline_name}"\n'
+                f'            " --step {step_name}"\n'
+                f'            " --target {target}"\n'
+                f'            \' --run-id "run_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}"\'\n'
+                f'        ),\n'
+                f'        working_dir="{project_mount_target}",\n'
+                + mounts_arg
+                + f'        network_mode="{network_mode}",\n'
+                + env_str
+                + f'        docker_url="{docker_url}",\n'
+                f'        auto_remove=True,\n'
+                f'        mount_tmp_dir=False,\n'
+                f'    )\n'
+            )
+
+        # Build dependency lines
+        dep_lines = []
+        for step_name, parents in parent_map.items():
+            for parent in parents:
+                dep_lines.append(f"    {parent} >> {step_name}")
+
+        # Build imports
+        imports = (
+            f'from airflow import DAG\n'
+            f'from airflow.providers.docker.operators.docker import DockerOperator\n'
+        )
+        if project_mount_source:
+            imports += f'from docker.types import Mount\n'
+        imports += f'from datetime import datetime, timedelta\n'
+
+        return (
+            f'"""\n'
+            f'Auto-generated by MBT. Do not edit.\n'
+            f'Pipeline: {pipeline_name}\n'
+            f'Target: {target}\n'
+            f'"""\n'
+            f'\n'
+            + imports
+            + f'\n'
+            f'default_args = {{\n'
+            f'    "owner": "{owner}",\n'
+            f'    "retries": {retries},\n'
+            f'    "retry_delay": timedelta(minutes={retry_delay_minutes}),\n'
+            f'}}\n'
+            f'\n'
+            + mount_def
+            + f'with DAG(\n'
             f'    dag_id="{pipeline_name}",\n'
             f'    default_args=default_args,\n'
             f'    schedule="{schedule}",\n'

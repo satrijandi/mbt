@@ -118,6 +118,11 @@ echo "Step 7: Starting Docker Compose services..."
 docker compose up -d 2>&1 | tail -5
 check "Docker Compose services started" $?
 
+# Step 7b: Build mbt-runner image (used by DockerOperator)
+echo "Step 7b: Building mbt-runner image..."
+docker build -t mbt-runner:latest -f infra/mbt-runner/Dockerfile .. 2>&1 | tail -5
+check "mbt-runner image built" $?
+
 # Step 8: Wait for services
 echo "Step 8: Waiting for services to be healthy..."
 echo "  Waiting for PostgreSQL..."
@@ -253,8 +258,9 @@ echo ""
 echo -e "${YELLOW}Phase 4: DAG Generation${NC}"
 echo ""
 
-# Step 15: Update serving pipeline with training run_id, then compile
-echo "Step 15: Compile serving pipeline (prod target)..."
+# Step 15: Recompile pipelines for docker target (DockerOperator DAGs)
+echo "Step 15: Compile pipelines for docker target..."
+
 # Update serving pipeline YAML with the MLflow run_id
 if [ "$MLFLOW_RUN_ID" != "unknown" ] && [ -n "$MLFLOW_RUN_ID" ]; then
     $PYTHON -c "
@@ -268,14 +274,17 @@ print(f'Updated serving pipeline with MLflow run_id: $MLFLOW_RUN_ID')
 " 2>&1
 fi
 
-$MBT compile serving_churn_model_v1 --target prod 2>&1 | tail -3
-check "Serving pipeline compilation succeeds" $?
+$MBT compile training_churn_model_v1 --target docker 2>&1 | tail -3
+check "Training pipeline compilation (docker target) succeeds" $?
+
+$MBT compile serving_churn_model_v1 --target docker 2>&1 | tail -3
+check "Serving pipeline compilation (docker target) succeeds" $?
 
 # Step 16: Generate Airflow DAGs
 echo "Step 16: Generate Airflow DAGs..."
 rm -rf "$SCRIPT_DIR/generated_dags" 2>/dev/null
 mkdir -p "$SCRIPT_DIR/generated_dags"
-$MBT generate-dags --target prod --output "$SCRIPT_DIR/generated_dags" 2>&1 | tail -5
+$MBT generate-dags --target docker --output "$SCRIPT_DIR/generated_dags" --project-host-dir "$PROJECT_DIR" 2>&1 | tail -5
 check "DAG generation succeeds" $?
 
 # Step 17: Verify generated DAGs
