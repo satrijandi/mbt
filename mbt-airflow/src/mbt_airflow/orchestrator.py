@@ -181,8 +181,8 @@ class AirflowOrchestrator(OrchestratorPlugin):
             f'Target: {target}\n'
             f'"""\n'
             f'\n'
-            f'from airflow import DAG\n'
-            f'from airflow.operators.bash import BashOperator\n'
+            f'from airflow.sdk import DAG\n'
+            f'from airflow.providers.standard.operators.bash import BashOperator\n'
             f'from datetime import datetime, timedelta\n'
             f'\n'
             f'default_args = {{\n'
@@ -271,7 +271,7 @@ class AirflowOrchestrator(OrchestratorPlugin):
                 + f'        network_mode="{network_mode}",\n'
                 + env_str
                 + f'        docker_url="{docker_url}",\n'
-                f'        auto_remove=True,\n'
+                f'        auto_remove="success",\n'
                 f'        mount_tmp_dir=False,\n'
                 f'    )\n'
             )
@@ -284,7 +284,7 @@ class AirflowOrchestrator(OrchestratorPlugin):
 
         # Build imports
         imports = (
-            f'from airflow import DAG\n'
+            f'from airflow.sdk import DAG\n'
             f'from airflow.providers.docker.operators.docker import DockerOperator\n'
         )
         if project_mount_source:
@@ -375,7 +375,7 @@ class AirflowOrchestrator(OrchestratorPlugin):
             f'Target: {target}\n'
             f'"""\n'
             f'\n'
-            f'from airflow import DAG\n'
+            f'from airflow.sdk import DAG\n'
             f'from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator\n'
             f'from datetime import datetime, timedelta\n'
             f'\n'

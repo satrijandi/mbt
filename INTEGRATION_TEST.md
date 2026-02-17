@@ -300,7 +300,7 @@ woodpecker-agent:
 
 ```yaml
 airflow-webserver:
-  image: apache/airflow:2.8-python3.10
+  image: apache/airflow:3.1.7-python3.12
   command: webserver
   ports:
     - "8080:8080"
@@ -314,7 +314,7 @@ airflow-webserver:
     - postgres
 
 airflow-scheduler:
-  image: apache/airflow:2.8-python3.10
+  image: apache/airflow:3.1.7-python3.12
   command: scheduler
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor

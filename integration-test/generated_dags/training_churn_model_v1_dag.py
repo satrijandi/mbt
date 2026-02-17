@@ -4,7 +4,7 @@ Pipeline: training_churn_model_v1
 Target: docker
 """
 
-from airflow import DAG
+from airflow.sdk import DAG
 from airflow.providers.docker.operators.docker import DockerOperator
 from docker.types import Mount
 from datetime import datetime, timedelta
@@ -50,7 +50,7 @@ with DAG(
             "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
         },
         docker_url="unix://var/run/docker.sock",
-        auto_remove=True,
+        auto_remove="success",
         mount_tmp_dir=False,
     )
 
@@ -73,7 +73,7 @@ with DAG(
             "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
         },
         docker_url="unix://var/run/docker.sock",
-        auto_remove=True,
+        auto_remove="success",
         mount_tmp_dir=False,
     )
 
@@ -96,7 +96,7 @@ with DAG(
             "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
         },
         docker_url="unix://var/run/docker.sock",
-        auto_remove=True,
+        auto_remove="success",
         mount_tmp_dir=False,
     )
 
@@ -119,7 +119,7 @@ with DAG(
             "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
         },
         docker_url="unix://var/run/docker.sock",
-        auto_remove=True,
+        auto_remove="success",
         mount_tmp_dir=False,
     )
 
@@ -142,7 +142,7 @@ with DAG(
             "MLFLOW_S3_ENDPOINT_URL": "http://seaweedfs-filer:8333",
         },
         docker_url="unix://var/run/docker.sock",
-        auto_remove=True,
+        auto_remove="success",
         mount_tmp_dir=False,
     )
 
