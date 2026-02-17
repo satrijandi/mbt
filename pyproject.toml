@@ -8,6 +8,9 @@ dependencies = [
     "mbt-sklearn",
     "mbt-h2o",
     "mbt-mlflow",
+    "mbt-postgres",
+    "mbt-s3",
+    "mbt-airflow",
 ]
 
 [dependency-groups]
@@ -24,6 +27,9 @@ members = [
     "mbt-sklearn",
     "mbt-h2o",
     "mbt-mlflow",
+    "mbt-postgres",
+    "mbt-s3",
+    "mbt-airflow",
     "examples/telecom-churn",
 ]
 
@@ -32,3 +38,6 @@ mbt-core = { workspace = true }
 mbt-sklearn = { workspace = true }
 mbt-h2o = { workspace = true }
 mbt-mlflow = { workspace = true }
+mbt-postgres = { workspace = true }
+mbt-s3 = { workspace = true }
+mbt-airflow = { workspace = true }

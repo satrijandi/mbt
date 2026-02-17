@@ -1,0 +1,36 @@
+schema_version: 1
+
+project:
+  name: training_churn_model_v1
+  experiment_name: churn_prediction
+  problem_type: binary_classification
+  owner: ds-team
+  tags: [churn, telecom, training]
+
+deployment:
+  mode: batch
+  cadence: monthly
+
+training:
+  data_source:
+    label_table: customers
+
+  schema:
+    target:
+      label_column: churned
+      classes: [0, 1]
+      positive_class: 1
+    identifiers:
+      primary_key: customer_id
+
+  model_training:
+    framework: sklearn
+    config:
+      model: RandomForestClassifier
+      n_estimators: 100
+      random_state: 42
+
+  evaluation:
+    primary_metric: roc_auc
+    additional_metrics: [accuracy, f1, precision, recall]
+    generate_plots: true

@@ -5,11 +5,9 @@ Loads data from scoring_table configured in serving section.
 """
 
 from typing import Any
-import pandas as pd
-from pathlib import Path
 
 from mbt.steps.base import Step
-from mbt.core.data import PandasFrame
+from mbt.core.registry import PluginRegistry
 
 
 class LoadScoringDataStep(Step):
@@ -26,20 +24,16 @@ class LoadScoringDataStep(Step):
 
         print(f"  Loading scoring data from: {scoring_table}")
 
-        # For Phase 5: Hardcoded local file loading
-        # In production: would use data connector plugin
-        data_path = Path("sample_data") / f"{scoring_table}.csv"
+        # Resolve data connector from profile config
+        registry = PluginRegistry()
+        dc_config = context.profile_config.get("data_connector", {})
+        dc_type = dc_config.get("type", "local_file")
+        connector = registry.get("mbt.data_connectors", dc_type)
+        connector.connect(dc_config.get("config", {"data_path": "./sample_data"}))
 
-        if not data_path.exists():
-            raise FileNotFoundError(
-                f"Scoring data not found: {data_path}\n"
-                f"Expected CSV file at: {data_path}"
-            )
+        scoring_data = connector.read_table(scoring_table)
 
-        # Load CSV
-        df = pd.read_csv(data_path)
+        print(f"    Loaded {scoring_data.num_rows()} rows, {len(scoring_data.columns())} columns")
+        print(f"    Columns: {scoring_data.columns()}")
 
-        print(f"    ✓ Loaded {len(df)} rows, {len(df.columns)} columns")
-        print(f"    Columns: {list(df.columns)}")
-
-        return {"scoring_data": PandasFrame(df)}
+        return {"scoring_data": scoring_data}

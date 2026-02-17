@@ -3,14 +3,14 @@
 from typing import Any
 
 from mbt.steps.base import Step
-from mbt.builtins.local_connector import LocalFileConnector
+from mbt.core.registry import PluginRegistry
 
 
 class LoadDataStep(Step):
     """Load data from data source.
 
-    For Phase 1: Uses LocalFileConnector to read CSV files.
-    For Phase 3+: Uses data_connector plugin from profiles.yaml
+    Uses data_connector plugin resolved from profiles.yaml.
+    Falls back to local_file connector if no profile config.
     """
 
     def run(self, inputs: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -25,9 +25,12 @@ class LoadDataStep(Step):
         if not label_table:
             raise ValueError("label_table not specified in data_source config")
 
-        # Initialize connector (Phase 1: hardcoded local)
-        connector = LocalFileConnector()
-        connector.connect({"data_path": "./sample_data"})
+        # Resolve data connector from profile config
+        registry = PluginRegistry()
+        dc_config = context.profile_config.get("data_connector", {})
+        dc_type = dc_config.get("type", "local_file")
+        connector = registry.get("mbt.data_connectors", dc_type)
+        connector.connect(dc_config.get("config", {"data_path": "./sample_data"}))
 
         # Read data
         raw_data = connector.read_table(label_table)

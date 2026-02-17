@@ -1,0 +1,11 @@
+.venv
+.git
+__pycache__
+*.pyc
+*.egg-info
+.pytest_cache
+examples
+integration-test/infra
+integration-test/generated_dags
+integration-test/project/target
+integration-test/project/local_artifacts

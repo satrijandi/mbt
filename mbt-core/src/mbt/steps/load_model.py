@@ -41,6 +41,27 @@ class LoadModelStep(Step):
 
         print(f"  Loading model from {registry_name} run: {run_id}")
 
+        # Configure MLflow tracking URI and S3 credentials from profile
+        mlflow_config = context.profile_config.get("mlflow", {})
+        tracking_uri = mlflow_config.get("tracking_uri")
+        if tracking_uri:
+            try:
+                import mlflow
+                mlflow.set_tracking_uri(tracking_uri)
+            except ImportError:
+                pass
+
+        storage_config = context.profile_config.get("storage", {})
+        if storage_config.get("type") == "s3":
+            import os
+            s3_config = storage_config.get("config", {})
+            if "endpoint_url" in s3_config:
+                os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", s3_config["endpoint_url"])
+            if "access_key" in s3_config:
+                os.environ.setdefault("AWS_ACCESS_KEY_ID", s3_config["access_key"])
+            if "secret_key" in s3_config:
+                os.environ.setdefault("AWS_SECRET_ACCESS_KEY", s3_config["secret_key"])
+
         # Load model registry plugin
         plugin_registry = PluginRegistry()
 

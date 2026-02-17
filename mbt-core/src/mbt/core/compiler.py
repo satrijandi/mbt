@@ -40,6 +40,25 @@ class Compiler:
         self.composition_resolver = CompositionResolver(self.pipelines_dir, runtime_vars=self.runtime_vars)
         self.profiles_loader = ProfilesLoader(self.project_root)
 
+    def _read_project_profile_name(self) -> Optional[str]:
+        """Read the profile name from pyproject.toml [tool.mbt].profile."""
+        pyproject_path = self.project_root / "pyproject.toml"
+        if not pyproject_path.exists():
+            return None
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib
+            except ImportError:
+                return None
+        try:
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+            return data.get("tool", {}).get("mbt", {}).get("profile")
+        except Exception:
+            return None
+
     def compile(
         self,
         pipeline_name: str,
@@ -51,7 +70,7 @@ class Compiler:
         Args:
             pipeline_name: Name of pipeline (without .yaml extension)
             target: Target environment (dev, staging, prod)
-            profile_name: Profile name (defaults to pipeline_name or project directory name)
+            profile_name: Profile name (defaults to [tool.mbt].profile from pyproject.toml, then pipeline_name)
 
         Returns:
             Compiled Manifest object
@@ -77,8 +96,11 @@ class Compiler:
             # Phase 4: DAG assembly
             steps, dag = self._build_dag(pipeline_config)
 
+            # Resolve profile name: explicit > pyproject.toml > pipeline_name
+            effective_profile = profile_name or self._read_project_profile_name() or pipeline_name
+
             # NEW: Load and resolve profile configuration
-            resolved_profile = self._resolve_profile(profile_name or pipeline_name, target)
+            resolved_profile = self._resolve_profile(effective_profile, target)
 
             # Phase 5: Manifest generation
             manifest = self._generate_manifest(pipeline_config, steps, dag, target, resolved_profile)

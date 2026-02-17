@@ -186,6 +186,8 @@ class DAGBuilder:
             config={
                 "output_config": output_config,
                 "run_id": serving_config["model_source"]["run_id"],
+                "model_run_id": serving_config["model_source"]["run_id"],
+                "schema": pipeline_config["training"]["schema"],
             },
             inputs=["predictions", "prediction_probabilities", "scoring_data"],
             outputs=["output_path"],

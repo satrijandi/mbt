@@ -60,27 +60,41 @@ class H2OAutoMLFramework(FrameworkPlugin):
 
     def __init__(self):
         self._h2o_initialized = False
+        self._is_remote = False
         self._temp_dir = None
 
     def setup(self, config: dict) -> None:
-        """Initialize H2O cluster.
+        """Initialize H2O cluster (local or remote).
 
         Args:
-            config: Full pipeline configuration
+            config: Full profile configuration. If config["h2o"]["url"] is set,
+                    connects to a remote H2O server instead of starting local.
         """
         if not self._h2o_initialized:
-            # Initialize H2O with reasonable defaults
-            h2o.init(
-                max_mem_size="4G",  # Can be overridden via H2O_MAX_MEM_SIZE env var
-                strict_version_check=False,
-            )
+            h2o_config = config.get("h2o", {})
+            h2o_url = h2o_config.get("url")
+
+            if h2o_url:
+                h2o.init(url=h2o_url, strict_version_check=False)
+                self._is_remote = True
+            else:
+                h2o.init(
+                    max_mem_size="4G",
+                    strict_version_check=False,
+                )
+                self._is_remote = False
+
             self._h2o_initialized = True
 
     def teardown(self) -> None:
-        """Shutdown H2O cluster and cleanup temporary files."""
-        if self._h2o_initialized:
+        """Shutdown H2O cluster and cleanup temporary files.
+
+        Only shuts down local clusters; remote clusters are left running.
+        """
+        if self._h2o_initialized and not self._is_remote:
             h2o.cluster().shutdown(prompt=False)
-            self._h2o_initialized = False
+        self._h2o_initialized = False
+        self._is_remote = False
 
         # Cleanup temporary directory
         if self._temp_dir and Path(self._temp_dir).exists():

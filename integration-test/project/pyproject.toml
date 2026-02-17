@@ -1,0 +1,9 @@
+[project]
+name = "demo-project"
+version = "0.1.0"
+dependencies = [
+    "mbt-core>=0.1.0",
+]
+
+[tool.mbt]
+profile = "demo-project"

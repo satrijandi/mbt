@@ -58,3 +58,15 @@ class StoragePlugin(ABC):
     def list_artifacts(self, run_id: str, step_name: str) -> list[str]:
         """List all artifact URIs for a step in a run."""
         ...
+
+    def configure(self, config: dict) -> None:
+        """Configure the storage plugin with connection/path settings.
+
+        Called after plugin instantiation to pass environment-specific config
+        from profiles.yaml. Default implementation is a no-op.
+
+        Args:
+            config: Storage configuration (e.g., {"base_path": "./artifacts"}
+                    or {"bucket": "my-bucket", "endpoint_url": "..."})
+        """
+        pass

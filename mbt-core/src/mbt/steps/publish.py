@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 from mbt.steps.base import Step
+from mbt.core.registry import PluginRegistry
+from mbt.core.data import PandasFrame
 
 
 class PublishStep(Step):
@@ -22,7 +24,7 @@ class PublishStep(Step):
         """Write predictions.
 
         Returns:
-            {"output_path": str} - Path to written predictions
+            {"output_path": str} - Path or destination of written predictions
         """
         # Get predictions and original data
         predictions = inputs["predictions"]
@@ -33,8 +35,8 @@ class PublishStep(Step):
 
         # Get configuration
         output_config = context.get_config("output_config", default={})
-        output_path = output_config.get("path", "./predictions.csv")
         include_probabilities = output_config.get("include_probabilities", True)
+        destination = output_config.get("destination", "local_file")
 
         # Get metadata
         run_id = context.get_config("run_id", default=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -43,7 +45,18 @@ class PublishStep(Step):
         print(f"  Publishing {len(predictions)} predictions...")
 
         # Build output dataframe
-        output_df = df.copy()
+        # For database destination, only include identifier columns (not features)
+        if destination == "database":
+            # Get primary key from schema config
+            schema = context.get_config("schema", default={})
+            pk = schema.get("identifiers", {}).get("primary_key", None)
+            if pk and pk in df.columns:
+                output_df = df[[pk]].copy()
+            else:
+                # Fall back to just the first column as identifier
+                output_df = df[[df.columns[0]]].copy()
+        else:
+            output_df = df.copy()
 
         # Add predictions
         output_df["prediction"] = predictions
@@ -66,14 +79,29 @@ class PublishStep(Step):
         output_df["model_run_id"] = model_run_id
         output_df["serving_run_id"] = run_id
 
-        # Ensure output directory exists
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if destination == "database":
+            # Write to database via data connector plugin
+            table_name = output_config.get("table", "predictions")
 
-        # Write to CSV
-        output_df.to_csv(output_path, index=False)
+            registry = PluginRegistry()
+            dc_config = context.profile_config.get("data_connector", {})
+            dc_type = dc_config.get("type", "local_file")
+            connector = registry.get("mbt.data_connectors", dc_type)
+            connector.connect(dc_config.get("config", {}))
 
-        print(f"    ✓ Wrote predictions to: {output_path}")
-        print(f"    Columns: {list(output_df.columns)}")
+            connector.write_table(PandasFrame(output_df), table_name, mode="append")
 
-        return {"output_path": str(output_path)}
+            print(f"    Wrote {len(output_df)} rows to table: {table_name}")
+            return {"output_path": f"database://{table_name}"}
+        else:
+            # Write to CSV file (default)
+            output_path = output_config.get("path", "./predictions.csv")
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            output_df.to_csv(output_path, index=False)
+
+            print(f"    Wrote predictions to: {output_path}")
+            print(f"    Columns: {list(output_df.columns)}")
+
+            return {"output_path": str(output_path)}

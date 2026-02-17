@@ -11,7 +11,11 @@ class LocalStoragePlugin(StoragePlugin):
 
     def __init__(self, base_path: str = "./local_artifacts"):
         self.base_path = Path(base_path)
-        self.base_path.mkdir(parents=True, exist_ok=True)
+
+    def configure(self, config: dict) -> None:
+        """Configure storage from profile config."""
+        if "base_path" in config:
+            self.base_path = Path(config["base_path"])
 
     def put(
         self,

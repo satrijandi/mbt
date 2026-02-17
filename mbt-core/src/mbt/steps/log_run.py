@@ -46,6 +46,36 @@ class LogRunStep(Step):
             print(f"  Skipping run logging. Install with: pip install mbt-{registry_name}")
             return {"run_id": None}
 
+        # Configure MLflow tracking URI and experiment from profile
+        mlflow_config = context.profile_config.get("mlflow", {})
+        tracking_uri = mlflow_config.get("tracking_uri")
+        if tracking_uri:
+            try:
+                import mlflow
+                mlflow.set_tracking_uri(tracking_uri)
+            except ImportError:
+                pass
+
+        # Configure S3 credentials for MLflow artifact storage
+        storage_config = context.profile_config.get("storage", {})
+        if storage_config.get("type") == "s3":
+            import os
+            s3_config = storage_config.get("config", {})
+            if "endpoint_url" in s3_config:
+                os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", s3_config["endpoint_url"])
+            if "access_key" in s3_config:
+                os.environ.setdefault("AWS_ACCESS_KEY_ID", s3_config["access_key"])
+            if "secret_key" in s3_config:
+                os.environ.setdefault("AWS_SECRET_ACCESS_KEY", s3_config["secret_key"])
+        experiment_name = mlflow_config.get("experiment_name")
+        if experiment_name and hasattr(model_registry, "experiment_name"):
+            model_registry.experiment_name = experiment_name
+            try:
+                import mlflow
+                mlflow.set_experiment(experiment_name)
+            except ImportError:
+                pass
+
         # Get pipeline name from context
         pipeline_name = context.get_config("pipeline_name", default="unknown")
 

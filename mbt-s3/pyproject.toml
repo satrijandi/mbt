@@ -1,0 +1,19 @@
+[project]
+name = "mbt-s3"
+version = "0.1.0"
+description = "S3-compatible storage adapter for MBT (Model Build Tool)"
+requires-python = ">=3.10"
+dependencies = [
+    "boto3>=1.26.0",
+    "mbt-core",
+]
+
+[project.entry-points."mbt.storage"]
+s3 = "mbt_s3.storage:S3StoragePlugin"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

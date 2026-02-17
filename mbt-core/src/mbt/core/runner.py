@@ -21,7 +21,7 @@ from importlib import import_module
 
 from mbt.core.manifest import Manifest
 from mbt.core.context import RunContext
-from mbt.builtins.local_storage import LocalStoragePlugin
+from mbt.core.registry import PluginRegistry
 
 
 class RunResults:
@@ -54,10 +54,17 @@ class Runner:
     def __init__(self, manifest: Manifest, project_root: Path):
         self.manifest = manifest
         self.project_root = Path(project_root)
-        self.storage = LocalStoragePlugin()  # Phase 1: hardcoded local storage
+        self.profile_config = manifest.profile_config
+
+        # Resolve storage plugin from profile config
+        registry = PluginRegistry()
+        storage_config = self.profile_config.get("storage", {})
+        storage_type = storage_config.get("type", "local")
+        self.storage = registry.get("mbt.storage", storage_type)
+        self.storage.configure(storage_config.get("config", {}))
+
         self.run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
         self.artifact_registry: dict[str, str] = {}  # artifact_name -> URI
-        self.profile_config = manifest.profile_config
 
     def run(self) -> RunResults:
         """Execute all steps in the pipeline.

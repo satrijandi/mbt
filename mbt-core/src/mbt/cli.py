@@ -14,6 +14,11 @@ app = typer.Typer(
     help="MBT (Model Build Tool) - Declarative ML pipeline framework",
     add_completion=False,
 )
+
+# Sub-app for `mbt step` commands
+step_app = typer.Typer(help="Single-step execution for distributed pipelines")
+app.add_typer(step_app, name="step")
+
 console = Console()
 
 
@@ -471,6 +476,137 @@ def version():
     """Show MBT version."""
     from mbt import __version__
     console.print(f"MBT version: {__version__}")
+
+
+@step_app.command("execute")
+def step_execute(
+    pipeline: str = typer.Option(..., "--pipeline", help="Pipeline name"),
+    step: str = typer.Option(..., "--step", help="Step name to execute"),
+    target: str = typer.Option("dev", "--target", "-t", help="Target environment"),
+    run_id: str = typer.Option(None, "--run-id", help="Run ID (generated if not provided)"),
+):
+    """Execute a single pipeline step (for pod-per-step distributed execution)."""
+    try:
+        project_root = Path.cwd()
+
+        # Load manifest
+        manifest_path = project_root / "target" / pipeline / "manifest.json"
+        if not manifest_path.exists():
+            console.print(f"[red]Error: Manifest not found. Run 'mbt compile {pipeline}' first.[/red]")
+            raise typer.Exit(code=1)
+
+        with open(manifest_path) as f:
+            from mbt.core.manifest import Manifest
+            manifest = Manifest(**json.load(f))
+
+        # Execute single step
+        from mbt.core.step_executor import StepExecutor
+        executor = StepExecutor(manifest, project_root, run_id=run_id)
+        result = executor.execute_step(step)
+
+        console.print(f"\n[green]Step '{step}' completed successfully[/green]")
+        console.print(f"Run ID: {result['run_id']}")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Step execution failed: {str(e)}[/red]")
+        raise typer.Exit(code=1)
+
+
+@app.command("generate-dags")
+def generate_dags(
+    target: str = typer.Option("dev", "--target", "-t", help="Target environment"),
+    output: str = typer.Option("./generated_dags", "--output", "-o", help="Output directory for DAG files"),
+    project_dir: str = typer.Option(None, "--project-dir", help="Working directory for DAG task commands (e.g., /opt/airflow/project)"),
+):
+    """Generate orchestrator DAG files from compiled manifests."""
+    try:
+        project_root = Path.cwd()
+        target_dir = project_root / "target"
+
+        if not target_dir.exists():
+            console.print("[red]Error: No compiled manifests found. Run 'mbt compile' first.[/red]")
+            raise typer.Exit(code=1)
+
+        # Find all manifest files
+        manifest_files = list(target_dir.glob("*/manifest.json"))
+        if not manifest_files:
+            console.print("[yellow]No compiled manifests found in target/[/yellow]")
+            return
+
+        # Load orchestrator config from profiles
+        from mbt.config.profiles import ProfilesLoader
+        profiles_loader = ProfilesLoader(project_root)
+        profiles = profiles_loader.load_profiles()
+
+        # Find orchestrator config from any profile
+        orchestrator_config = {}
+        for profile_name, profile in profiles.items():
+            if "orchestrator" in profile:
+                orchestrator_config = profile["orchestrator"]
+                break
+
+        orchestrator_type = orchestrator_config.get("type", "airflow")
+        orch_settings = orchestrator_config.get("config", {})
+
+        # Load orchestrator plugin
+        from mbt.core.registry import PluginRegistry
+        registry = PluginRegistry()
+        orchestrator = registry.get("mbt.orchestrators", orchestrator_type)
+
+        console.print(f"[bold]Generating {orchestrator_type} DAGs[/bold]")
+        console.print(f"Output directory: {output}\n")
+
+        output_dir = Path(output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for manifest_path in manifest_files:
+            with open(manifest_path) as f:
+                manifest_data = json.load(f)
+
+            pipeline_name = manifest_data["metadata"]["pipeline_name"]
+
+            # Get deployment cadence from manifest metadata
+            cadence = orch_settings.get("cadence", "daily")
+
+            # Check if manifest has deployment info stored
+            # The cadence typically comes from the pipeline YAML deployment section
+            # We pass it through kwargs
+            default_args = orch_settings.get("default_args", {})
+
+            dag_output_path = output_dir / f"{pipeline_name}_dag.py"
+            schedule = CADENCE_MAP.get(cadence, "@daily")
+
+            orchestrator.generate_dag_file(
+                manifest_path=str(manifest_path),
+                output_path=str(dag_output_path),
+                schedule=schedule,
+                owner=default_args.get("owner", "mbt"),
+                retries=default_args.get("retries", 2),
+                retry_delay_minutes=default_args.get("retry_delay_minutes", 5),
+                cadence=cadence,
+                project_dir=project_dir,
+            )
+
+            console.print(f"  [green]✓[/green] {pipeline_name} -> {dag_output_path}")
+
+        console.print(f"\n[green]✓ Generated {len(manifest_files)} DAG file(s)[/green]")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]DAG generation failed: {str(e)}[/red]")
+        raise typer.Exit(code=1)
+
+
+# Cadence to Airflow schedule mapping
+CADENCE_MAP = {
+    "hourly": "@hourly",
+    "daily": "@daily",
+    "weekly": "@weekly",
+    "monthly": "@monthly",
+}
 
 
 if __name__ == "__main__":
