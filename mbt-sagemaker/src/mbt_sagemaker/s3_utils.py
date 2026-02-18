@@ -11,6 +11,7 @@ def upload_dataframe_to_s3(
     bucket: str,
     prefix: str,
     session: boto3.Session,
+    include_header: bool = False,
 ) -> str:
     """Upload DataFrame to S3 as CSV.
 
@@ -19,11 +20,16 @@ def upload_dataframe_to_s3(
     - No header row
     - No index column
 
+    SageMaker Autopilot expects CSV format with:
+    - Header row included
+    - Target column can be in any position
+
     Args:
-        df: DataFrame to upload (target as first column)
+        df: DataFrame to upload (target as first column for built-in algos)
         bucket: S3 bucket name
         prefix: S3 key prefix (e.g., "mbt-models/training-data/")
         session: Boto3 session with AWS credentials
+        include_header: If True, include column headers (required for Autopilot)
 
     Returns:
         S3 URI of uploaded file (s3://bucket/key)
@@ -31,9 +37,8 @@ def upload_dataframe_to_s3(
     Raises:
         Exception: If S3 upload fails
     """
-    # Convert to CSV (no index, no header for SageMaker built-in algos)
     csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False, header=False)
+    df.to_csv(csv_buffer, index=False, header=include_header)
 
     # Generate unique key
     key = f"{prefix}train-{uuid.uuid4().hex[:8]}.csv"

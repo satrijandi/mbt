@@ -30,6 +30,7 @@ except ImportError:
 from mbt_sagemaker.algorithms import (
     get_builtin_algorithm_spec,
     validate_algorithm_config,
+    MBT_TO_AUTOPILOT_PROBLEM_TYPE,
     SUPPORTED_ALGORITHMS,
 )
 from mbt_sagemaker.s3_utils import upload_dataframe_to_s3
@@ -212,13 +213,9 @@ class SageMakerFramework(FrameworkPlugin):
     def train(self, X_train: MBTFrame, y_train: MBTFrame, config: dict) -> Any:
         """Train model on SageMaker.
 
-        Steps:
-        1. Convert data to pandas and prepare for S3
-        2. Upload training data to S3
-        3. Configure SageMaker Estimator
-        4. Launch training job
-        5. Wait for completion
-        6. Return model artifact information
+        Supports two modes:
+        - Built-in algorithms (xgboost, linear-learner, etc.): Uses SageMaker Estimator
+        - Autopilot: Uses SageMaker AutoML to automatically find the best model
 
         Args:
             X_train: Training features
@@ -226,13 +223,30 @@ class SageMakerFramework(FrameworkPlugin):
             config: SageMaker-specific configuration
 
         Returns:
-            Dictionary with model_data_s3_uri and job_name
+            Dictionary with model info (model_data_s3_uri, job_name, etc.)
         """
-        # 1. Convert to pandas
+        algorithm = config["algorithm"]
+
+        if algorithm == "autopilot":
+            return self._train_autopilot(X_train, y_train, config)
+        else:
+            return self._train_builtin(X_train, y_train, config)
+
+    def _train_builtin(self, X_train: MBTFrame, y_train: MBTFrame, config: dict) -> dict:
+        """Train using a SageMaker built-in algorithm.
+
+        Args:
+            X_train: Training features
+            y_train: Training labels
+            config: Algorithm configuration
+
+        Returns:
+            Dictionary with model_data_s3_uri, job_name, and estimator
+        """
         X_df = X_train.to_pandas()
         y_df = y_train.to_pandas()
 
-        # 2. Combine for SageMaker (target as first column for built-in algos)
+        # Combine for SageMaker (target as first column for built-in algos)
         if len(y_df.columns) == 1:
             target_col = y_df.columns[0]
             train_df = y_df.copy()
@@ -243,31 +257,28 @@ class SageMakerFramework(FrameworkPlugin):
 
         print(f"  Preparing training data: {len(train_df)} rows, {len(train_df.columns)} columns")
 
-        # 3. Upload to S3
+        # Upload to S3 (no header for built-in algos)
         try:
             s3_input_uri = upload_dataframe_to_s3(
                 df=train_df,
                 bucket=self._s3_bucket,
                 prefix=f"{self._s3_prefix}training-data/",
                 session=self._session,
+                include_header=False,
             )
             print(f"  ✓ Data uploaded to: {s3_input_uri}")
         except Exception as e:
             raise SageMakerTrainingError(f"Failed to upload data to S3: {str(e)}") from e
 
-        # 4. Get algorithm configuration
+        # Get algorithm configuration
         algorithm = config["algorithm"]
         algo_spec = get_builtin_algorithm_spec(algorithm, self._region)
 
-        # 5. Configure hyperparameters
         hyperparameters = config.get("hyperparameters", {})
-
-        # 6. Configure instance settings
         instance_type = config.get("instance_type", "ml.m5.xlarge")
         instance_count = config.get("instance_count", 1)
         max_run_time = config.get("max_run_time", 3600)
 
-        # 7. Generate unique job name
         job_name = f"mbt-{algorithm}-{uuid.uuid4().hex[:8]}"
         self._current_job_name = job_name
 
@@ -275,7 +286,6 @@ class SageMakerFramework(FrameworkPlugin):
         print(f"    Algorithm: {algorithm}")
         print(f"    Instance: {instance_type} x {instance_count}")
 
-        # 8. Create Estimator
         try:
             estimator = sagemaker.estimator.Estimator(
                 image_uri=algo_spec["image_uri"],
@@ -289,18 +299,17 @@ class SageMakerFramework(FrameworkPlugin):
                 base_job_name=algorithm,
             )
 
-            # Launch training job (blocking)
             estimator.fit({"train": s3_input_uri}, job_name=job_name, wait=True)
 
             print(f"  ✓ Training completed: {job_name}")
 
-            # Get model artifact location
             model_data_uri = estimator.model_data
 
             return {
+                "algorithm": algorithm,
                 "job_name": job_name,
                 "model_data_s3_uri": model_data_uri,
-                "estimator": estimator,  # Keep reference for predict
+                "estimator": estimator,
             }
 
         except Exception as e:
@@ -308,46 +317,262 @@ class SageMakerFramework(FrameworkPlugin):
                 f"SageMaker training job failed: {str(e)}"
             ) from e
 
+    def _train_autopilot(self, X_train: MBTFrame, y_train: MBTFrame, config: dict) -> dict:
+        """Train using SageMaker Autopilot (AutoML).
+
+        Autopilot automatically explores multiple algorithms and hyperparameters
+        to find the best model — similar to H2O AutoML but running on SageMaker
+        managed infrastructure.
+
+        Args:
+            X_train: Training features
+            y_train: Training labels
+            config: Autopilot configuration
+
+        Returns:
+            Dictionary with best candidate info, job name, and model artifacts
+        """
+        from sagemaker.automl.automlv2 import AutoMLV2
+        from sagemaker.automl.automlv2 import AutoMLTabularConfig
+
+        X_df = X_train.to_pandas()
+        y_df = y_train.to_pandas()
+
+        if len(y_df.columns) != 1:
+            raise ValueError("y_train must have exactly one column")
+
+        target_col = config["target_attribute"]
+
+        # Combine X and y — Autopilot expects a single dataset with the target column
+        train_df = X_df.copy()
+        train_df[target_col] = y_df.iloc[:, 0].values
+
+        print(f"  Preparing Autopilot training data: {len(train_df)} rows, {len(train_df.columns)} columns")
+        print(f"    Target column: {target_col}")
+
+        # Upload to S3 (WITH header — Autopilot requires column names)
+        try:
+            s3_input_uri = upload_dataframe_to_s3(
+                df=train_df,
+                bucket=self._s3_bucket,
+                prefix=f"{self._s3_prefix}autopilot-data/",
+                session=self._session,
+                include_header=True,
+            )
+            print(f"  ✓ Data uploaded to: {s3_input_uri}")
+        except Exception as e:
+            raise SageMakerTrainingError(
+                f"Failed to upload Autopilot data to S3: {str(e)}"
+            ) from e
+
+        # Resolve problem type
+        problem_type = config.get("autopilot_problem_type")
+        if not problem_type:
+            # Auto-map from MBT problem type if available in config context
+            # Fall back to letting Autopilot infer it
+            problem_type = None
+
+        # Build Autopilot configuration
+        tabular_config_kwargs = {
+            "target_attribute_name": target_col,
+        }
+        if problem_type:
+            tabular_config_kwargs["problem_type"] = problem_type
+
+        tabular_config = AutoMLTabularConfig(**tabular_config_kwargs)
+
+        # Timing constraints
+        automl_kwargs = {
+            "problem_config": tabular_config,
+            "role": self._role_arn,
+            "sagemaker_session": self._sagemaker_session,
+            "output_path": f"s3://{self._s3_bucket}/{self._s3_prefix}autopilot/",
+        }
+
+        if "max_candidates" in config:
+            automl_kwargs["max_candidates"] = config["max_candidates"]
+
+        if "max_runtime_per_training_job_in_seconds" in config:
+            automl_kwargs["max_runtime_per_training_job_in_seconds"] = (
+                config["max_runtime_per_training_job_in_seconds"]
+            )
+
+        if "total_job_runtime_in_seconds" in config:
+            automl_kwargs["total_job_runtime_in_seconds"] = (
+                config["total_job_runtime_in_seconds"]
+            )
+
+        job_name = f"mbt-autopilot-{uuid.uuid4().hex[:8]}"
+        self._current_job_name = job_name
+
+        print(f"  Launching SageMaker Autopilot job: {job_name}")
+        if problem_type:
+            print(f"    Problem type: {problem_type}")
+        else:
+            print(f"    Problem type: Auto (inferred by Autopilot)")
+        print(f"    Max candidates: {config.get('max_candidates', 'default')}")
+
+        try:
+            automl = AutoMLV2(**automl_kwargs)
+
+            automl.fit(s3_input_uri, job_name=job_name, wait=True)
+
+            best_candidate = automl.best_candidate()
+
+            print(f"  ✓ Autopilot completed: {job_name}")
+            print(f"    Best candidate: {best_candidate['CandidateName']}")
+
+            return {
+                "algorithm": "autopilot",
+                "job_name": job_name,
+                "best_candidate": best_candidate,
+                "model_data_s3_uri": best_candidate.get("InferenceContainers", [{}])[0].get("ModelDataUrl", ""),
+                "automl": automl,
+            }
+
+        except Exception as e:
+            raise SageMakerTrainingError(
+                f"SageMaker Autopilot job failed: {str(e)}"
+            ) from e
+
     def predict(self, model: Any, X: MBTFrame) -> np.ndarray:
         """Generate predictions using trained SageMaker model.
 
-        For Phase 1: Simplified implementation returns zeros.
-        Full implementation would use SageMaker Batch Transform or endpoints.
+        Uses SageMaker Batch Transform to generate predictions on the provided data.
+        For Autopilot models, creates a Model from the best candidate's inference
+        containers and runs Batch Transform.
 
         Args:
-            model: Model dict from train() containing model_data_s3_uri
+            model: Model dict from train() containing model info
             X: Features to predict on
 
         Returns:
             Predictions as numpy array
         """
+        import pandas as pd
+
         X_df = X.to_pandas()
 
-        # For Phase 1: Return placeholder predictions
-        # Full implementation would:
-        # 1. Upload inference data to S3
-        # 2. Use SageMaker Batch Transform
-        # 3. Download predictions from S3
+        algorithm = model.get("algorithm", "")
 
-        print(f"  ⚠ Using placeholder predictions (Phase 1 implementation)")
-        return np.zeros(len(X_df))
+        # Upload inference data to S3
+        try:
+            s3_input_uri = upload_dataframe_to_s3(
+                df=X_df,
+                bucket=self._s3_bucket,
+                prefix=f"{self._s3_prefix}inference-data/",
+                session=self._session,
+                include_header=(algorithm == "autopilot"),
+            )
+        except Exception as e:
+            raise SageMakerTrainingError(
+                f"Failed to upload inference data to S3: {str(e)}"
+            ) from e
+
+        s3_output_path = f"s3://{self._s3_bucket}/{self._s3_prefix}predictions/{uuid.uuid4().hex[:8]}/"
+
+        try:
+            if algorithm == "autopilot":
+                automl = model.get("automl")
+                best_candidate = model["best_candidate"]
+
+                # Create a Model from the best candidate's inference containers
+                inference_containers = best_candidate.get("InferenceContainers", [])
+                if not inference_containers:
+                    raise SageMakerTrainingError(
+                        "Autopilot best candidate has no inference containers"
+                    )
+
+                sm_model = automl.create_model(
+                    name=f"mbt-autopilot-model-{uuid.uuid4().hex[:8]}",
+                    candidate=best_candidate,
+                    sagemaker_session=self._sagemaker_session,
+                )
+
+                transformer = sm_model.transformer(
+                    instance_count=1,
+                    instance_type="ml.m5.xlarge",
+                    output_path=s3_output_path,
+                )
+            else:
+                estimator = model.get("estimator")
+                if not estimator:
+                    raise SageMakerTrainingError(
+                        "Model dict missing 'estimator' reference. "
+                        "Predict is only supported on models from the current session."
+                    )
+                transformer = estimator.transformer(
+                    instance_count=1,
+                    instance_type="ml.m5.xlarge",
+                    output_path=s3_output_path,
+                )
+
+            print(f"  Launching Batch Transform job for predictions...")
+            transformer.transform(
+                s3_input_uri,
+                content_type="text/csv",
+                split_type="Line",
+                wait=True,
+            )
+            print(f"  ✓ Batch Transform completed")
+
+            # Download predictions from S3
+            s3_client = self._session.client("s3")
+            output_prefix = s3_output_path.replace(f"s3://{self._s3_bucket}/", "")
+
+            response = s3_client.list_objects_v2(
+                Bucket=self._s3_bucket, Prefix=output_prefix
+            )
+            if "Contents" not in response:
+                raise SageMakerTrainingError("No prediction output found in S3")
+
+            # Read the first output file
+            output_key = response["Contents"][0]["Key"]
+            obj = s3_client.get_object(Bucket=self._s3_bucket, Key=output_key)
+            predictions_csv = obj["Body"].read().decode("utf-8")
+
+            predictions = pd.read_csv(
+                pd.io.common.StringIO(predictions_csv), header=None
+            )
+            return predictions.iloc[:, 0].values
+
+        except SageMakerTrainingError:
+            raise
+        except Exception as e:
+            raise SageMakerTrainingError(
+                f"Batch Transform prediction failed: {str(e)}"
+            ) from e
 
     def serialize(self, model: Any, path: str) -> None:
         """Save model metadata to disk.
 
+        Stores job name, S3 URI, algorithm type, and for Autopilot models,
+        the best candidate info needed to recreate the model for inference.
+
         Args:
-            model: Model dict with S3 URI
+            model: Model dict from train()
             path: Local path to save metadata
         """
         import json
 
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
+        metadata = {
+            "algorithm": model.get("algorithm", "unknown"),
+            "job_name": model["job_name"],
+            "model_data_s3_uri": model["model_data_s3_uri"],
+        }
+
+        # For Autopilot, persist the best candidate info for later inference
+        if model.get("algorithm") == "autopilot" and "best_candidate" in model:
+            candidate = model["best_candidate"]
+            metadata["best_candidate"] = {
+                "CandidateName": candidate.get("CandidateName"),
+                "InferenceContainers": candidate.get("InferenceContainers", []),
+            }
+
         with open(path, "w") as f:
-            json.dump({
-                "job_name": model["job_name"],
-                "model_data_s3_uri": model["model_data_s3_uri"],
-            }, f)
+            json.dump(metadata, f, indent=2)
 
     def deserialize(self, path: str) -> Any:
         """Load model metadata from disk.
@@ -356,7 +581,7 @@ class SageMakerFramework(FrameworkPlugin):
             path: Path to metadata file
 
         Returns:
-            Model dict
+            Model dict with job_name, model_data_s3_uri, algorithm, etc.
         """
         import json
 
@@ -365,6 +590,10 @@ class SageMakerFramework(FrameworkPlugin):
 
     def get_training_metrics(self, model: Any) -> dict[str, float]:
         """Extract training metrics from SageMaker job.
+
+        For built-in algorithms, reads FinalMetricDataList from the training job.
+        For Autopilot, reads the best candidate's objective metric and inference
+        container details.
 
         Args:
             model: Model dict from train()
@@ -376,16 +605,49 @@ class SageMakerFramework(FrameworkPlugin):
         if not job_name:
             return {}
 
+        algorithm = model.get("algorithm", "")
+
         try:
             sm_client = self._session.client("sagemaker")
-            job_desc = sm_client.describe_training_job(TrainingJobName=job_name)
 
-            # Extract final metrics if available
-            metrics = {}
-            if "FinalMetricDataList" in job_desc:
-                for metric in job_desc["FinalMetricDataList"]:
-                    metrics[metric["MetricName"]] = float(metric["Value"])
-
-            return metrics
+            if algorithm == "autopilot":
+                return self._get_autopilot_metrics(sm_client, model)
+            else:
+                return self._get_builtin_metrics(sm_client, job_name)
         except Exception:
             return {}
+
+    def _get_builtin_metrics(self, sm_client: Any, job_name: str) -> dict[str, float]:
+        """Extract metrics from a built-in algorithm training job."""
+        job_desc = sm_client.describe_training_job(TrainingJobName=job_name)
+
+        metrics = {}
+        if "FinalMetricDataList" in job_desc:
+            for metric in job_desc["FinalMetricDataList"]:
+                metrics[metric["MetricName"]] = float(metric["Value"])
+
+        return metrics
+
+    def _get_autopilot_metrics(self, sm_client: Any, model: dict) -> dict[str, float]:
+        """Extract metrics from an Autopilot job's best candidate."""
+        metrics = {}
+
+        best_candidate = model.get("best_candidate", {})
+        if not best_candidate:
+            return metrics
+
+        # Extract the objective metric from the best candidate
+        objective_metric = best_candidate.get("FinalAutoMLJobObjectiveMetric", {})
+        if objective_metric:
+            metric_name = objective_metric.get("MetricName", "ObjectiveMetric")
+            metric_value = objective_metric.get("Value")
+            if metric_value is not None:
+                metrics[metric_name] = float(metric_value)
+                metrics["objective_type"] = 1.0 if objective_metric.get("Type") == "Maximize" else 0.0
+
+        # Include candidate name as metadata
+        candidate_name = best_candidate.get("CandidateName", "")
+        if candidate_name:
+            metrics["_candidate_name"] = hash(candidate_name) % 1000000  # numeric summary
+
+        return metrics

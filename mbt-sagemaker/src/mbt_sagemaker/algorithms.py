@@ -5,7 +5,22 @@ SUPPORTED_ALGORITHMS = [
     "linear-learner",
     "factorization-machines",
     "knn",
+    "autopilot",
 ]
+
+# Valid problem types for SageMaker Autopilot
+AUTOPILOT_PROBLEM_TYPES = [
+    "BinaryClassification",
+    "MulticlassClassification",
+    "Regression",
+]
+
+# Mapping from MBT problem types to Autopilot problem types
+MBT_TO_AUTOPILOT_PROBLEM_TYPE = {
+    "binary_classification": "BinaryClassification",
+    "multiclass_classification": "MulticlassClassification",
+    "regression": "Regression",
+}
 
 # Algorithm image URIs by region
 # Note: These are specific to SageMaker built-in algorithms
@@ -80,7 +95,8 @@ def validate_algorithm_config(algorithm: str, config: dict, problem_type: str):
         _validate_xgboost_config(config, problem_type)
     elif algorithm == "linear-learner":
         _validate_linear_learner_config(config, problem_type)
-    # Add more algorithm-specific validation as needed
+    elif algorithm == "autopilot":
+        _validate_autopilot_config(config, problem_type)
 
 
 def _validate_xgboost_config(config: dict, problem_type: str):
@@ -138,3 +154,51 @@ def _validate_linear_learner_config(config: dict, problem_type: str):
             raise ValueError(
                 f"predictor_type '{predictor}' doesn't match problem_type '{problem_type}'"
             )
+
+
+def _validate_autopilot_config(config: dict, problem_type: str):
+    """Validate SageMaker Autopilot-specific configuration."""
+    # Validate problem_type mapping exists
+    if problem_type not in MBT_TO_AUTOPILOT_PROBLEM_TYPE:
+        raise ValueError(
+            f"Unsupported problem_type '{problem_type}' for Autopilot. "
+            f"Supported: {', '.join(MBT_TO_AUTOPILOT_PROBLEM_TYPE.keys())}"
+        )
+
+    # If user explicitly sets autopilot_problem_type, validate it
+    if "autopilot_problem_type" in config:
+        ap_type = config["autopilot_problem_type"]
+        if ap_type not in AUTOPILOT_PROBLEM_TYPES:
+            raise ValueError(
+                f"Invalid autopilot_problem_type: '{ap_type}'. "
+                f"Valid types: {', '.join(AUTOPILOT_PROBLEM_TYPES)}"
+            )
+
+    # Validate max_candidates
+    if "max_candidates" in config:
+        max_candidates = config["max_candidates"]
+        if not isinstance(max_candidates, int) or max_candidates < 1:
+            raise ValueError("max_candidates must be a positive integer")
+
+    # Validate max_runtime_per_training_job_in_seconds
+    if "max_runtime_per_training_job_in_seconds" in config:
+        val = config["max_runtime_per_training_job_in_seconds"]
+        if not isinstance(val, int) or val < 1:
+            raise ValueError(
+                "max_runtime_per_training_job_in_seconds must be a positive integer"
+            )
+
+    # Validate total_job_runtime_in_seconds
+    if "total_job_runtime_in_seconds" in config:
+        val = config["total_job_runtime_in_seconds"]
+        if not isinstance(val, int) or val < 1:
+            raise ValueError(
+                "total_job_runtime_in_seconds must be a positive integer"
+            )
+
+    # target_attribute is required for Autopilot
+    if "target_attribute" not in config:
+        raise ValueError(
+            "Autopilot config must specify 'target_attribute' — "
+            "the name of the target column in the training data."
+        )
