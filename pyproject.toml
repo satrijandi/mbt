@@ -10,6 +10,7 @@ dependencies = [
     "mbt-mlflow",
     "mbt-postgres",
     "mbt-snowflake",
+    "mbt-duckdb",
     "mbt-s3",
     "mbt-airflow",
 ]
@@ -30,6 +31,7 @@ members = [
     "mbt-mlflow",
     "mbt-postgres",
     "mbt-snowflake",
+    "mbt-duckdb",
     "mbt-s3",
     "mbt-airflow",
     "examples/telecom-churn",
@@ -42,5 +44,6 @@ mbt-h2o = { workspace = true }
 mbt-mlflow = { workspace = true }
 mbt-postgres = { workspace = true }
 mbt-snowflake = { workspace = true }
+mbt-duckdb = { workspace = true }
 mbt-s3 = { workspace = true }
 mbt-airflow = { workspace = true }
