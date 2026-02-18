@@ -1,0 +1,20 @@
+[project]
+name = "mbt-snowflake"
+version = "0.1.0"
+description = "Snowflake data connector adapter for MBT (Model Build Tool)"
+requires-python = ">=3.10"
+dependencies = [
+    "snowflake-connector-python[pandas]>=3.0.0",
+    "pandas>=2.0.0",
+    "mbt-core",
+]
+
+[project.entry-points."mbt.data_connectors"]
+snowflake = "mbt_snowflake.connector:SnowflakeConnector"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
