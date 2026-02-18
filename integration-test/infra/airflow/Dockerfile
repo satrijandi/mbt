@@ -8,4 +8,5 @@ USER airflow
 
 RUN pip install --no-cache-dir \
     apache-airflow-providers-docker>=4.0.0 \
+    apache-airflow-providers-cncf-kubernetes>=10.0.0 \
     apache-airflow-providers-standard>=0.0.1
