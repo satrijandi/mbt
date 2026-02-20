@@ -1,0 +1,42 @@
+schema_version: 1
+project:
+  name: serving_churn_model_v1
+  experiment_name: churn_prediction
+  problem_type: binary_classification
+  owner: ds-team
+  tags:
+  - churn
+  - telecom
+  - serving
+training:
+  data_source:
+    label_table: customers
+  schema:
+    target:
+      label_column: churned
+      classes:
+      - 0
+      - 1
+      positive_class: 1
+    identifiers:
+      primary_key: customer_id
+  model_training:
+    framework: sklearn
+    config: {}
+  evaluation:
+    primary_metric: roc_auc
+    additional_metrics: []
+deployment:
+  mode: batch
+  cadence: daily
+serving:
+  model_source:
+    registry: mlflow
+    run_id: placeholder
+    artifact_snapshot: false
+  data_source:
+    scoring_table: customers_to_score
+  output:
+    destination: database
+    table: churn_predictions
+    include_probabilities: true

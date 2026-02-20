@@ -17,3 +17,5 @@ CI/CD pipeline example (Zot registry/Woodpecker CI/Gitea)
 H2O server integration
 Add mbt-snowflake same like mbt-postgres
 See airflow-dag manifest in Gitea
+
+Shifting features is part of feature selection process not just evaluation

@@ -21,8 +21,10 @@ GRANT ALL ON SCHEMA public TO mlflow_user;
 \connect airflow_db;
 GRANT ALL ON SCHEMA public TO airflow_user;
 
--- Connect to warehouse and create tables
+-- Connect to warehouse and grant schema permissions
 \connect warehouse;
+GRANT ALL ON SCHEMA public TO mbt_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO mbt_user;
 
 -- Feature + label table (seeded with historical data)
 CREATE TABLE customers (

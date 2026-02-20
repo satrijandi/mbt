@@ -25,15 +25,36 @@ console = Console()
 @app.command()
 def init(
     project_name: str = typer.Argument(..., help="Name of the project to create"),
+    template: str = typer.Option(
+        "basic",
+        "--template",
+        "-t",
+        help="Project template: basic, typical-ds-pipeline"
+    ),
+    # Data generation options (only used with typical-ds-pipeline template)
+    num_customers: int = typer.Option(10000, "--num-customers", help="Number of unique customers"),
+    num_features_a: int = typer.Option(1000, "--features-a", help="Number of features in table A"),
+    num_features_b: int = typer.Option(1000, "--features-b", help="Number of features in table B"),
+    start_date: str = typer.Option("2025-01-01", "--start-date", help="Start date (YYYY-MM-DD)"),
+    end_date: str = typer.Option(None, "--end-date", help="End date (defaults to today)"),
+    daily_samples: int = typer.Option(10000, "--daily-samples", help="Samples per day"),
+    seed: int = typer.Option(42, "--seed", help="Random seed"),
+    framework: str = typer.Option("h2o_automl", "--framework", help="ML framework (sklearn, h2o_automl, xgboost)"),
 ):
-    """Initialize a new MBT project."""
+    """Initialize a new MBT project.
+
+    Templates:
+    - basic: Empty project structure
+    - typical-ds-pipeline: Full example with synthetic data and multi-table pipeline
+    """
     project_path = Path(project_name)
 
     if project_path.exists():
         console.print(f"[red]Error: Directory {project_name} already exists[/red]")
         raise typer.Exit(code=1)
 
-    console.print(f"[bold]Initializing MBT project: {project_name}[/bold]\n")
+    console.print(f"[bold]Initializing MBT project: {project_name}[/bold]")
+    console.print(f"Template: {template}\n")
 
     # Create directory structure
     directories = [
@@ -67,8 +88,25 @@ profile = "{project_name}"
     (project_path / "lib" / "__init__.py").write_text("")
     console.print(f"  ✓ Created lib/__init__.py")
 
-    # Create README.md
-    readme_content = f"""# {project_name}
+    # Template-specific generation
+    if template == "typical-ds-pipeline":
+        _generate_typical_ds_pipeline(
+            project_path,
+            project_name,
+            {
+                'num_customers': num_customers,
+                'num_features_a': num_features_a,
+                'num_features_b': num_features_b,
+                'start_date': start_date,
+                'end_date': end_date,
+                'daily_samples': daily_samples,
+                'seed': seed,
+                'framework': framework,
+            }
+        )
+    else:
+        # Basic template - just README
+        readme_content = f"""# {project_name}
 
 MBT project for ML pipelines.
 
@@ -82,13 +120,71 @@ mbt compile <pipeline_name>
 mbt run --select <pipeline_name>
 ```
 """
-    (project_path / "README.md").write_text(readme_content)
-    console.print(f"  ✓ Created README.md")
+        (project_path / "README.md").write_text(readme_content)
+        console.print(f"  ✓ Created README.md")
 
     console.print(f"\n[green]✓ Project {project_name} initialized successfully![/green]")
-    console.print(f"\nNext steps:")
-    console.print(f"  cd {project_name}")
-    console.print(f"  # Create your first pipeline in pipelines/")
+
+    if template == "typical-ds-pipeline":
+        console.print(f"\nNext steps:")
+        console.print(f"  cd {project_name}")
+        console.print(f"  mbt compile {project_name}_training_v1")
+        console.print(f"  mbt run --select {project_name}_training_v1")
+    else:
+        console.print(f"\nNext steps:")
+        console.print(f"  cd {project_name}")
+        console.print(f"  # Create your first pipeline in pipelines/")
+
+
+def _generate_typical_ds_pipeline(
+    project_path: Path,
+    project_name: str,
+    data_config: dict
+):
+    """Generate typical DS pipeline template with synthetic data."""
+    from mbt.utils.datagen import TypicalDSDataGenerator, DataGenConfig
+    from mbt.utils.pipeline_templates import (
+        generate_typical_pipeline_yaml,
+        generate_profiles_yaml,
+        generate_readme
+    )
+
+    # Generate synthetic data
+    console.print("\n[bold]Generating synthetic data...[/bold]")
+
+    gen_config = DataGenConfig(
+        num_customers=data_config['num_customers'],
+        num_features_a=data_config['num_features_a'],
+        num_features_b=data_config['num_features_b'],
+        start_date=data_config['start_date'],
+        end_date=data_config['end_date'],
+        daily_samples=data_config['daily_samples'],
+        seed=data_config['seed'],
+        output_dir=str(project_path / "sample_data")
+    )
+
+    generator = TypicalDSDataGenerator(gen_config)
+    generator.save_to_csv(str(project_path / "sample_data"))
+
+    # Generate pipeline YAML
+    console.print("\n[bold]Generating pipeline configuration...[/bold]")
+
+    framework = data_config.get('framework', 'h2o_automl')
+    pipeline_yaml = generate_typical_pipeline_yaml(project_name, framework=framework)
+    pipeline_path = project_path / "pipelines" / f"{project_name}_training_v1.yaml"
+    pipeline_path.write_text(pipeline_yaml)
+    console.print(f"  ✓ Created {pipeline_path.name}")
+
+    # Generate profiles.yaml
+    profiles_yaml = generate_profiles_yaml(project_name)
+    profiles_path = project_path / "profiles.yaml"
+    profiles_path.write_text(profiles_yaml)
+    console.print(f"  ✓ Created profiles.yaml")
+
+    # Generate README
+    readme_content = generate_readme(project_name, data_config)
+    (project_path / "README.md").write_text(readme_content)
+    console.print(f"  ✓ Created README.md")
 
 
 @app.command()

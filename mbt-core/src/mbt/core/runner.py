@@ -82,26 +82,25 @@ class Runner:
         print(f"   Run ID: {self.run_id}")
         print(f"   Target: {self.manifest.metadata.target}\n")
 
-        try:
-            # Execute steps in order from execution_batches
-            for batch in self.manifest.dag.execution_batches:
-                for step_name in batch:
-                    step_result = self._execute_step(step_name)
-                    results.steps[step_name] = step_result
+        # Execute steps in order from execution_batches
+        for batch in self.manifest.dag.execution_batches:
+            for step_name in batch:
+                step_result = self._execute_step(step_name)
+                results.steps[step_name] = step_result
 
+        # Check if any steps failed
+        failed_steps = [name for name, result in results.steps.items() if result["status"] == "failed"]
+        results.completed_at = datetime.utcnow().isoformat() + "Z"
+
+        if failed_steps:
+            results.status = "failed"
+            print(f"\n❌ Pipeline failed. Failed steps: {', '.join(failed_steps)}\n")
+        else:
             results.status = "success"
-            results.completed_at = datetime.utcnow().isoformat() + "Z"
             print(f"\n✅ Pipeline completed successfully\n")
 
-        except Exception as e:
-            results.status = "failed"
-            results.completed_at = datetime.utcnow().isoformat() + "Z"
-            print(f"\n❌ Pipeline failed: {str(e)}\n")
-            raise
-
-        finally:
-            # Save run results
-            self._save_run_results(results)
+        # Save run results
+        self._save_run_results(results)
 
         return results
 

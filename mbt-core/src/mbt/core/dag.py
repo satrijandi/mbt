@@ -30,7 +30,7 @@ class DAGBuilder:
         steps["load_data"] = StepDefinition(
             plugin="mbt.steps.load_data:LoadDataStep",
             config={
-                "label_table": pipeline_config["training"]["data_source"]["label_table"],
+                "data_source": pipeline_config["training"]["data_source"],
                 "schema": pipeline_config["training"]["schema"],
             },
             inputs=[],
@@ -46,12 +46,51 @@ class DAGBuilder:
                 "test_size": 0.2,
                 "stratify": True,
                 "target_column": pipeline_config["training"]["schema"]["target"]["label_column"],
+                "data_source": pipeline_config["training"]["data_source"],
+                "schema": pipeline_config["training"]["schema"],
             },
             inputs=["raw_data"],
             outputs=["train_set", "test_set"],
             depends_on=["load_data"],
             idempotent=True,
         )
+
+        # Optional: feature_selection (if enabled)
+        feature_selection_config = pipeline_config["training"].get("feature_selection")
+        if feature_selection_config and feature_selection_config.get("enabled"):
+            steps["feature_selection"] = StepDefinition(
+                plugin="mbt.steps.feature_selection:FeatureSelectionStep",
+                config={
+                    "feature_selection_methods": feature_selection_config.get("methods", []),
+                    "target_column": pipeline_config["training"]["schema"]["target"]["label_column"],
+                    "problem_type": pipeline_config["project"]["problem_type"],
+                    "schema": pipeline_config["training"]["schema"],
+                },
+                inputs=["train_set", "test_set"],
+                outputs=["train_set", "test_set", "feature_selector"],
+                depends_on=["split_data"],
+                idempotent=True,
+            )
+
+        # Optional: drift_detection (if temporal_analysis enabled)
+        train_depends_on = ["split_data"]
+        temporal_analysis = pipeline_config["training"]["evaluation"].get("temporal_analysis")
+        if temporal_analysis and temporal_analysis.get("enabled"):
+            steps["drift_detection"] = StepDefinition(
+                plugin="mbt.steps.drift_detection:DriftDetectionStep",
+                config={
+                    "temporal_analysis": temporal_analysis,
+                },
+                inputs=["train_set"],
+                outputs=["drift_info"],
+                depends_on=["split_data"],
+                idempotent=True,
+            )
+            train_depends_on.append("drift_detection")
+
+        # feature_selection must complete before train_model
+        if "feature_selection" in steps:
+            train_depends_on.append("feature_selection")
 
         # Step 3: train_model
         resources = pipeline_config["training"]["model_training"].get("resources")
@@ -70,7 +109,7 @@ class DAGBuilder:
             resources=resources,
             inputs=["train_set"],
             outputs=["model", "train_metrics"],
-            depends_on=["split_data"],
+            depends_on=train_depends_on,
             idempotent=False,  # Training is stochastic
         )
 

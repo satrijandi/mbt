@@ -30,12 +30,81 @@ class ProjectConfig(BaseModel):
 # =============================================================================
 
 
+class FeatureTableConfig(BaseModel):
+    """Feature table specification for multi-table joins."""
+
+    table: str = Field(..., description="Feature table name")
+    join_key: list[str] = Field(
+        default=["customer_id", "snapshot_date"],
+        description="Columns to join on (typically primary_key + partition_key)"
+    )
+    join_type: str = Field(
+        default="left",
+        description="Join type: inner, left, right, outer"
+    )
+    fan_out_check: bool = Field(
+        default=True,
+        description="Raise error if join increases row count unexpectedly"
+    )
+
+
+class WindowsSpec(BaseModel):
+    """Window specifications for train/test splitting."""
+
+    test_lookback_units: int = Field(
+        ...,
+        description="How many units of data to use for test set (from latest available)"
+    )
+    train_gap_units: int = Field(
+        default=0,
+        description="Gap between train and test sets (0 = no gap)"
+    )
+    train_lookback_units: int = Field(
+        ...,
+        description="How many units of historical data for training"
+    )
+
+    # For absolute mode (optional)
+    train_start_date: Optional[str] = Field(None, description="Fixed train start (YYYY-MM-DD)")
+    train_end_date: Optional[str] = Field(None, description="Fixed train end (YYYY-MM-DD)")
+    test_start_date: Optional[str] = Field(None, description="Fixed test start (YYYY-MM-DD)")
+    test_end_date: Optional[str] = Field(None, description="Fixed test end (YYYY-MM-DD)")
+
+
+class DataWindowsConfig(BaseModel):
+    """Temporal windowing configuration for train/test splitting.
+
+    Supports two modes:
+    - relative: Windows shift with execution_date (production use)
+    - absolute: Fixed date ranges (reproducible experiments)
+    """
+
+    logic: str = Field(
+        default="relative",
+        description="Window mode: 'relative' or 'absolute'"
+    )
+    unit_type: str = Field(
+        default="months",
+        description="Time unit: days, weeks, months, quarters, years"
+    )
+    windows: WindowsSpec = Field(
+        ...,
+        description="Train/test window specifications"
+    )
+
+
 class DataSourceConfig(BaseModel):
     """Data source specification - where to load data from."""
 
     label_table: str = Field(..., description="Primary table with labels")
-    # Phase 4 additions: feature_tables, data_windows
-    # For Phase 1: just load from single table
+    feature_tables: Optional[list[FeatureTableConfig]] = Field(
+        default=None,
+        description="Additional feature tables to join"
+    )
+    data_windows: Optional[DataWindowsConfig] = Field(
+        default=None,
+        description="Temporal windowing configuration"
+    )
 
 
 class TargetConfig(BaseModel):
@@ -75,6 +144,42 @@ class EvaluationConfig(BaseModel):
     primary_metric: str = Field("roc_auc", description="Primary metric for model selection")
     additional_metrics: list[str] = Field(default_factory=list, description="Additional metrics to compute")
     generate_plots: bool = Field(True, description="Generate evaluation plots")
+    temporal_analysis: Optional[dict] = Field(
+        default=None,
+        description="Temporal drift analysis. Config: {enabled: true, partition_key: 'snapshot_date', metrics: ['roc_auc', 'psi']}"
+    )
+
+
+class PreprocessingConfig(BaseModel):
+    """Data preprocessing configuration."""
+
+    remove_high_missing: Optional[dict] = Field(
+        default=None,
+        description="Remove columns with high missing rate. Config: {enabled: true, threshold: 0.95}"
+    )
+    remove_constant: Optional[dict] = Field(
+        default=None,
+        description="Remove constant features. Config: {enabled: true}"
+    )
+    imputation: Optional[dict] = Field(
+        default=None,
+        description="Missing value imputation. Config: {enabled: true, strategy: 'median'|'mean'|'mode'}"
+    )
+
+
+class FeatureSelectionMethodConfig(BaseModel):
+    """Single feature selection method configuration."""
+
+    name: str = Field(..., description="Method name: variance_threshold, correlation, mutual_info, lgbm_importance")
+    threshold: Optional[float] = Field(None, description="Threshold value (method-specific)")
+    k: Optional[int] = Field(None, description="Number of features to keep (for mutual_info)")
+
+
+class FeatureSelectionConfig(BaseModel):
+    """Feature selection pipeline configuration."""
+
+    enabled: bool = Field(default=False, description="Enable feature selection")
+    methods: list[FeatureSelectionMethodConfig] = Field(default_factory=list, description="Selection methods to apply in order")
 
 
 class TrainingConfig(BaseModel):
@@ -82,6 +187,8 @@ class TrainingConfig(BaseModel):
 
     data_source: DataSourceConfig
     schema: SchemaConfig
+    preprocessing: Optional[PreprocessingConfig] = Field(default=None, description="Data preprocessing steps")
+    feature_selection: Optional[FeatureSelectionConfig] = Field(default=None, description="Feature selection configuration")
     model_training: ModelTrainingConfig
     evaluation: EvaluationConfig
 

@@ -1,28 +1,92 @@
 schema_version: 1
 
+# =============================================================================
+# Advanced Pipeline with Feature Selection - Full Typical DS Pattern
+# =============================================================================
+#
+# This pipeline demonstrates ALL new features:
+#   - Multi-table joins (label + features_a + features_b)
+#   - Temporal windowing (9 months train, 1 month test)
+#   - Advanced feature selection (correlation + LGBM importance)
+#   - Drift detection with PSI
+#   - Monthly retraining cadence
+#
+# =============================================================================
+
 project:
   name: training_churn_model_v1
-  experiment_name: churn_prediction
+  experiment_name: churn_prediction_feature_selection
   problem_type: binary_classification
   owner: ds-team
-  tags: [churn, telecom, training]
+  tags: [churn, telecom, training, advanced, feature-selection]
 
 deployment:
   mode: batch
   cadence: monthly
 
 training:
+  # ---------------------------------------------------------------------------
+  # Multi-Table Data Source
+  # ---------------------------------------------------------------------------
   data_source:
-    label_table: customers
+    label_table: label_table
 
+    feature_tables:
+      - table: features_table_a
+        join_key: [customer_id, snapshot_date]
+        join_type: left
+        fan_out_check: true
+
+      - table: features_table_b
+        join_key: [customer_id, snapshot_date]
+        join_type: left
+        fan_out_check: true
+
+    # Temporal windowing configuration
+    data_windows:
+      logic: relative
+      unit_type: months
+      windows:
+        test_lookback_units: 1    # Test: 1 month
+        train_gap_units: 0        # No gap
+        train_lookback_units: 9   # Train: 9 months
+
+  # ---------------------------------------------------------------------------
+  # Schema
+  # ---------------------------------------------------------------------------
   schema:
     target:
-      label_column: churned
+      label_column: is_churn
       classes: [0, 1]
       positive_class: 1
+
     identifiers:
       primary_key: customer_id
+      partition_key: snapshot_date
 
+    ignored_columns: []
+
+  # ---------------------------------------------------------------------------
+  # Advanced Feature Selection Pipeline
+  # ---------------------------------------------------------------------------
+  feature_selection:
+    enabled: true
+    methods:
+      # 1. Remove constant features
+      - name: variance_threshold
+        threshold: 0.0
+
+      # 2. Remove highly correlated features (>0.9 correlation)
+      - name: correlation
+        threshold: 0.9
+
+      # 3. LGBM importance-based selection (keep 95% cumulative importance)
+      - name: lgbm_importance
+        threshold: 0.95
+
+  # ---------------------------------------------------------------------------
+  # Model Training
+  # ---------------------------------------------------------------------------
   model_training:
     framework: sklearn
     config:
@@ -30,7 +94,18 @@ training:
       n_estimators: 100
       random_state: 42
 
+  # ---------------------------------------------------------------------------
+  # Evaluation with Drift Detection
+  # ---------------------------------------------------------------------------
   evaluation:
     primary_metric: roc_auc
     additional_metrics: [accuracy, f1, precision, recall]
     generate_plots: true
+
+    # Enable temporal drift analysis
+    temporal_analysis:
+      enabled: true
+      partition_key: snapshot_date
+      metrics:
+        - roc_auc
+        - psi

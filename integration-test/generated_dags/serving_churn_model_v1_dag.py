@@ -17,7 +17,7 @@ default_args = {
 
 _project_mount = Mount(
     target="/opt/mbt/project",
-    source="/home/satrijandi/code/mbt/integration-test/project",
+    source="/home/satrijandi/code/mbt/integration-test/churn_demo",
     type="bind",
     read_only=False,
 )

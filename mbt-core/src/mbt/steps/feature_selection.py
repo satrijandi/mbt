@@ -4,15 +4,19 @@ Supported methods:
 - variance_threshold: Remove low-variance features
 - correlation: Remove highly correlated features
 - mutual_info: Select features by mutual information with target
+- lgbm_importance: Select features by LightGBM importance
 """
 
 from typing import Any
 import pandas as pd
 import numpy as np
+import logging
 from sklearn.feature_selection import VarianceThreshold, mutual_info_classif, mutual_info_regression
 
 from mbt.steps.base import Step
 from mbt.core.data import PandasFrame
+
+logger = logging.getLogger(__name__)
 
 
 class FeatureSelectionStep(Step):
@@ -101,6 +105,13 @@ class FeatureSelectionStep(Step):
                 selected_features = kept
                 print(f"    ✓ Mutual info: kept top {k} features, removed {len(removed)}")
 
+            elif method_name == "lgbm_importance":
+                threshold = method_config.get("threshold", 0.95)
+                kept = self._lgbm_importance(X_train, y_train, threshold, problem_type, selected_features)
+                removed = selected_features - kept
+                selected_features = kept
+                print(f"    ✓ LGBM importance: kept {len(kept)} features (threshold={threshold}), removed {len(removed)}")
+
             else:
                 print(f"    ⚠ Unknown method: {method_name}")
 
@@ -119,8 +130,8 @@ class FeatureSelectionStep(Step):
         }
 
         return {
-            "selected_train": PandasFrame(selected_train),
-            "selected_test": PandasFrame(selected_test),
+            "train_set": PandasFrame(selected_train),
+            "test_set": PandasFrame(selected_test),
             "feature_selector": selector_info,
         }
 
@@ -217,3 +228,153 @@ class FeatureSelectionStep(Step):
         top_k_features = X_selected.columns[top_k_indices].tolist()
 
         return set(top_k_features)
+
+    def _lgbm_importance(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        threshold: float,
+        problem_type: str,
+        selected: set
+    ) -> set:
+        """Select features using LightGBM importance with cross-validation.
+
+        Uses stratified K-fold cross-validation to calculate robust feature importances,
+        then selects features based on either:
+        - Zero importance filtering (removes features with 0 importance)
+        - Cumulative importance threshold (e.g., 0.95 for top 95% important features)
+
+        Args:
+            X: Feature dataframe
+            y: Target series
+            threshold: If >= 1.0, removes zero-importance features only.
+                      If < 1.0, uses cumulative importance threshold (e.g., 0.95).
+            problem_type: Problem type (classification or regression)
+            selected: Set of currently selected features
+
+        Returns:
+            Set of selected features
+        """
+        try:
+            import lightgbm as lgb
+            from sklearn.model_selection import StratifiedKFold, KFold
+        except ImportError:
+            logger.error("lightgbm not installed - skipping lgbm_importance. Install with: pip install lightgbm")
+            print("    ⚠ lightgbm not installed - skipping lgbm_importance")
+            return selected
+
+        # Only consider currently selected features
+        X_selected = X[[col for col in X.columns if col in selected]]
+
+        if len(X_selected.columns) == 0:
+            return selected
+
+        # Calculate scale_pos_weight for imbalanced classification
+        scale_pos_weight = 1
+        if problem_type in ["binary_classification", "multiclass_classification"]:
+            value_counts = y.value_counts()
+            if len(value_counts) == 2:
+                scale_pos_weight = int(value_counts.iloc[0] / value_counts.iloc[1])
+
+        # Initialize feature importances array
+        feature_importances = np.zeros(X_selected.shape[1])
+
+        # Setup cross-validation
+        n_splits = 5
+        if problem_type in ["binary_classification", "multiclass_classification"]:
+            kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        else:
+            kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+        # Cross-validation to get robust feature importances
+        logger.info(f"Running {n_splits}-fold CV for feature importance calculation...")
+
+        for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X_selected, y)):
+            X_train_fold = X_selected.iloc[train_idx]
+            y_train_fold = y.iloc[train_idx]
+            X_val_fold = X_selected.iloc[val_idx]
+            y_val_fold = y.iloc[val_idx]
+
+            # Create model
+            if problem_type in ["binary_classification", "multiclass_classification"]:
+                model = lgb.LGBMClassifier(
+                    objective='binary',
+                    boosting_type='gbdt',
+                    n_estimators=100,
+                    scale_pos_weight=scale_pos_weight,
+                    random_state=42,
+                    verbose=-1
+                )
+            else:
+                model = lgb.LGBMRegressor(
+                    n_estimators=100,
+                    random_state=42,
+                    verbose=-1
+                )
+
+            try:
+                # Train with early stopping
+                if problem_type in ["binary_classification", "multiclass_classification"]:
+                    model.fit(
+                        X_train_fold, y_train_fold,
+                        eval_set=[(X_val_fold, y_val_fold)],
+                        eval_metric='auc',
+                        callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)]
+                    )
+                else:
+                    model.fit(
+                        X_train_fold, y_train_fold,
+                        eval_set=[(X_val_fold, y_val_fold)],
+                        callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)]
+                    )
+
+                # Accumulate feature importances
+                feature_importances += model.feature_importances_ / n_splits
+
+            except Exception as e:
+                logger.warning(f"Fold {fold_idx + 1} failed: {e}, using zero importance")
+                continue
+
+        # Create feature importances DataFrame
+        importances_df = pd.DataFrame({
+            'feature': X_selected.columns,
+            'importance': feature_importances
+        }).sort_values('importance', ascending=False)
+
+        # Select features based on threshold
+        if threshold >= 1.0:
+            # Zero-importance filtering: remove features with exactly 0 importance
+            zero_features = importances_df[importances_df['importance'] == 0.0]['feature'].tolist()
+            selected_features = set(importances_df[importances_df['importance'] > 0.0]['feature'].tolist())
+
+            logger.info(f"LGBM zero-importance filter: removed {len(zero_features)} features with 0 importance")
+            print(f"    ✓ LGBM: removed {len(zero_features)} zero-importance features")
+
+        else:
+            # Cumulative importance threshold
+            importances_df['importance_normalized'] = (
+                importances_df['importance'] / importances_df['importance'].sum()
+            )
+            importances_df['cumulative_importance'] = importances_df['importance_normalized'].cumsum()
+
+            # Find features needed for threshold
+            selected_df = importances_df[importances_df['cumulative_importance'] <= threshold]
+
+            # If no features selected, keep at least the top feature
+            if len(selected_df) == 0:
+                selected_df = importances_df.head(1)
+                logger.warning(f"LGBM threshold {threshold} too strict, keeping top feature only")
+
+            selected_features = set(selected_df['feature'].tolist())
+
+            logger.info(
+                f"LGBM cumulative importance: selected {len(selected_features)}/{len(X_selected.columns)} features "
+                f"for {threshold*100}% importance"
+            )
+
+        # Ensure at least one feature is selected
+        if len(selected_features) == 0:
+            selected_features = set([importances_df.iloc[0]['feature']])
+            logger.warning("No features selected by LGBM, keeping top feature")
+
+        return selected_features

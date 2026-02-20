@@ -1,0 +1,9 @@
+[project]
+name = "churn_demo"
+version = "0.1.0"
+dependencies = [
+    "mbt-core>=0.1.0",
+]
+
+[tool.mbt]
+profile = "churn_demo"

@@ -1,0 +1,123 @@
+churn_demo:
+  target: dev
+
+  mlflow:
+    experiment_name: churn_prediction
+
+  orchestrator:
+    type: airflow
+    config:
+      dag_directory: /opt/airflow/dags
+      cadence: daily
+      default_args:
+        owner: de-team
+        retries: 2
+        retry_delay_minutes: 5
+
+  outputs:
+    dev:
+      executor:
+        type: local
+      storage:
+        type: local
+        config:
+          base_path: ./local_artifacts
+      data_connector:
+        type: local_file
+        config:
+          data_path: ./sample_data
+      mlflow:
+        tracking_uri: "./mlruns"
+      secrets:
+        provider: env
+
+    prod:
+      executor:
+        type: local
+      storage:
+        type: s3
+        config:
+          bucket: mbt-pipeline-artifacts
+          endpoint_url: "http://localhost:8333"
+          access_key: "any"
+          secret_key: "any"
+      data_connector:
+        type: postgres
+        config:
+          host: localhost
+          port: 5432
+          database: warehouse
+          schema: public
+          user: mbt_user
+          password: mbt_password
+      mlflow:
+        tracking_uri: "http://localhost:5000"
+        artifact_location: "s3://mbt-mlflow-artifacts/"
+      secrets:
+        provider: env
+
+    docker:
+      executor:
+        type: docker
+        config:
+          image: mbt-runner:latest
+          network_mode: integration-test_default
+          docker_url: unix://var/run/docker.sock
+          environment:
+            AWS_ACCESS_KEY_ID: "any"
+            AWS_SECRET_ACCESS_KEY: "any"
+            MLFLOW_S3_ENDPOINT_URL: "http://seaweedfs-filer:8333"
+      storage:
+        type: s3
+        config:
+          bucket: mbt-pipeline-artifacts
+          endpoint_url: "http://seaweedfs-filer:8333"
+          access_key: "any"
+          secret_key: "any"
+      data_connector:
+        type: postgres
+        config:
+          host: postgres
+          port: 5432
+          database: warehouse
+          schema: public
+          user: mbt_user
+          password: mbt_password
+      mlflow:
+        tracking_uri: "http://mlflow:5000"
+        artifact_location: "s3://mbt-mlflow-artifacts/"
+      secrets:
+        provider: env
+
+    kubernetes:
+      executor:
+        type: kubernetes
+        config:
+          image: mbt-runner:latest
+          namespace: mbt-pipelines
+          service_account: mbt-runner
+          environment:
+            AWS_ACCESS_KEY_ID: "any"
+            AWS_SECRET_ACCESS_KEY: "any"
+            MLFLOW_S3_ENDPOINT_URL: "http://seaweedfs-filer:8333"
+      storage:
+        type: s3
+        config:
+          bucket: mbt-pipeline-artifacts
+          endpoint_url: "http://seaweedfs-filer:8333"
+          access_key: "any"
+          secret_key: "any"
+      data_connector:
+        type: postgres
+        config:
+          host: postgres
+          port: 5432
+          database: warehouse
+          schema: public
+          user: mbt_user
+          password: mbt_password
+      mlflow:
+        tracking_uri: "http://mlflow:5000"
+        artifact_location: "s3://mbt-mlflow-artifacts/"
+      secrets:
+        provider: env

@@ -224,3 +224,9 @@ model_outputs/
 # Compiled manifests (development only)
 # Keep committed manifests in production contexts
 # manifest.json
+
+# Reference/planning directories (not part of the actual codebase)
+typical_ds_pipeline/
+
+# Integration test generated project (created by mbt init during test)
+integration-test/churn_demo/
