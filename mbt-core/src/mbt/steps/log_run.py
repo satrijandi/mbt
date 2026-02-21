@@ -115,11 +115,13 @@ class LogRunStep(Step):
             artifacts["model"] = inputs["model"]
 
         # Include other artifacts (scaler, encoder, feature_selector, etc.)
+        # Known artifact names that should always be saved (even if they are dicts)
+        known_artifacts = {"scaler", "encoder", "feature_selector"}
         for key, value in inputs.items():
             if key not in ["train_metrics", "eval_metrics", "model"]:
-                # Check if it looks like an artifact (not a dict/list)
-                if value is not None and not isinstance(value, (dict, list)):
-                    artifacts[key] = value
+                if value is not None:
+                    if key in known_artifacts or not isinstance(value, (dict, list)):
+                        artifacts[key] = value
 
         # Collect tags
         tags = {

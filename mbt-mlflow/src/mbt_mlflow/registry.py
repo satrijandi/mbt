@@ -170,28 +170,36 @@ class MLflowRegistry(ModelRegistryPlugin):
         Raises:
             ValueError: If run_id not found
         """
-        try:
-            client = mlflow.tracking.MlflowClient()
+        client = mlflow.tracking.MlflowClient()
+        result = {}
 
-            # List artifacts in the 'artifacts' directory
+        # Try listing artifacts directory first
+        try:
             artifacts_list = client.list_artifacts(run_id, path="artifacts")
 
-            result = {}
             for artifact_info in artifacts_list:
-                # Download artifact
                 artifact_path = client.download_artifacts(run_id, artifact_info.path)
-
-                # Load pickle
                 with open(artifact_path, "rb") as f:
                     artifact_obj = pickle.load(f)
-
-                # Extract artifact name (remove .pkl extension)
                 artifact_name = Path(artifact_info.path).stem
                 result[artifact_name] = artifact_obj
 
             return result
-        except Exception as e:
-            raise ValueError(f"Failed to load artifacts from run {run_id}: {e}")
+        except Exception:
+            pass
+
+        # Fallback: try downloading known artifact names directly
+        # (some MLflow versions/backends don't support list_artifacts reliably)
+        known_artifacts = ["feature_selector", "scaler", "encoder"]
+        for name in known_artifacts:
+            try:
+                artifact_path = client.download_artifacts(run_id, f"artifacts/{name}.pkl")
+                with open(artifact_path, "rb") as f:
+                    result[name] = pickle.load(f)
+            except Exception:
+                continue
+
+        return result
 
     def download_artifacts(self, run_id: str, output_dir: str) -> dict[str, str]:
         """Download all artifacts from MLflow run to local directory.

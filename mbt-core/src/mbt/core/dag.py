@@ -131,6 +131,10 @@ class DAGBuilder:
         )
 
         # Step 5: log_run (Phase 2: Log to model registry)
+        log_run_inputs = ["model", "train_metrics", "eval_metrics"]
+        # Include feature_selector if feature selection was enabled
+        if "feature_selection" in steps:
+            log_run_inputs.append("feature_selector")
         steps["log_run"] = StepDefinition(
             plugin="mbt.steps.log_run:LogRunStep",
             config={
@@ -142,7 +146,7 @@ class DAGBuilder:
                 "target_column": pipeline_config["training"]["schema"]["target"]["label_column"],
                 "tags": pipeline_config["project"].get("tags", {}),
             },
-            inputs=["model", "train_metrics", "eval_metrics"],
+            inputs=log_run_inputs,
             outputs=["run_id"],
             depends_on=["evaluate"],
             idempotent=False,  # Each run gets a new ID

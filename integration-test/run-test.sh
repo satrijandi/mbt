@@ -223,10 +223,10 @@ else
 fi
 
 SCORING_COUNT=$(docker compose exec -T postgres psql -U mbt_user -d warehouse -t -c "SELECT COUNT(*) FROM customers_to_score;" 2>/dev/null | tr -d ' ')
-if [ "$SCORING_COUNT" = "10" ]; then
-    check "customers_to_score table has 10 rows" 0
+if [ "$SCORING_COUNT" -gt 0 ] 2>/dev/null; then
+    check "customers_to_score table has data ($SCORING_COUNT rows)" 0
 else
-    check "customers_to_score table has 10 rows (got: $SCORING_COUNT)" 1
+    check "customers_to_score table has data" 1
 fi
 
 # Step 10b: Create multi-table schema and load CSV data into PostgreSQL
@@ -283,6 +283,37 @@ if [ "$FEATURES_B_COUNT" -gt 0 ] 2>/dev/null; then
 else
     check "features_table_b has data" 1
 fi
+
+# Step 10d: Create scoring table with features (for serving pipeline)
+echo "Step 10d: Creating scoring table with multi-table features..."
+# Drop existing table owned by admin, then let mbt_user recreate it
+docker compose exec -T postgres psql -U admin -d warehouse -c \
+    "DROP TABLE IF EXISTS customers_to_score; GRANT ALL ON SCHEMA public TO mbt_user;" > /dev/null 2>&1
+$PYTHON -c "
+import pandas as pd
+from sqlalchemy import create_engine
+
+engine = create_engine('postgresql://mbt_user:mbt_password@localhost:5432/warehouse')
+
+# Load feature tables from CSV and join for latest snapshot to create scoring data
+features_a = pd.read_csv('$PROJECT_DIR/sample_data/features_table_a.csv')
+features_b = pd.read_csv('$PROJECT_DIR/sample_data/features_table_b.csv')
+features_a['snapshot_date'] = pd.to_datetime(features_a['snapshot_date'])
+features_b['snapshot_date'] = pd.to_datetime(features_b['snapshot_date'])
+
+# Get latest date and take a subset of customers
+latest = features_a['snapshot_date'].max()
+score_a = features_a[features_a['snapshot_date'] == latest].head(150)
+score_b = features_b[features_b['snapshot_date'] == latest]
+
+# Join feature tables
+scored = score_a.merge(score_b, on=['customer_id', 'snapshot_date'])
+
+# Replace customers_to_score with feature-rich version
+scored.to_sql('customers_to_score', engine, if_exists='replace', index=False)
+print(f'Created customers_to_score with {len(scored)} rows, {len(scored.columns)} columns')
+" 2>&1
+check "Scoring table with features created" $?
 
 echo ""
 

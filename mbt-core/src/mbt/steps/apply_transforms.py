@@ -109,13 +109,8 @@ class ApplyTransformsStep(Step):
         if missing_features:
             print(f"      ⚠ Warning: {len(missing_features)} features missing in scoring data")
 
-        # Also keep identifier columns (if they exist)
-        identifier_cols = [col for col in df.columns if col not in selected_features]
-        # Filter to only actual identifier columns (customer_id, etc.)
-        identifier_cols = [col for col in identifier_cols if col in df.columns[:5]]  # Heuristic
-
-        result_cols = available_features + identifier_cols
-        return df[result_cols]
+        print(f"      ✓ Feature selection: keeping {len(available_features)}/{len(df.columns)} columns")
+        return df[available_features]
 
     def _apply_scaler(self, df: pd.DataFrame, scaler: Any) -> pd.DataFrame:
         """Apply normalization scaler.
