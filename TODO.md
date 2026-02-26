@@ -20,7 +20,7 @@ See airflow-dag manifest in Gitea
 
 Shifting features is part of feature selection process not just evaluation
 
-Airflow login invalid
+
 Jupyterhub login invalid
 For metabase is it possible to setup the user without setup on first access
 Add pgadmin with existing connection to all the db.

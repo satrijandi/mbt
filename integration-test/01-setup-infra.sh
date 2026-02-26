@@ -587,14 +587,6 @@ phase_10_airflow() {
         --from-literal=fernet-key="$fernet_key" \
         --dry-run=client -o yaml | kubectl apply -f -
 
-    # Create passwords ConfigMap for SimpleAuthManager
-    # SimpleAuthManager auto-generates random passwords unless a fixed file is provided.
-    # This ConfigMap is mounted at /opt/airflow/auth/passwords.json via extraVolumes.
-    kubectl create configmap airflow-auth-passwords \
-        --namespace "$NS_MBT" \
-        --from-literal=passwords.json="{\"${AIRFLOW_ADMIN_USER}\": \"${AIRFLOW_ADMIN_PASSWORD}\"}" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
     # Deploy Airflow — do NOT use --wait here. The chart uses post-install Helm hooks
     # (db migrate + create user) that need to complete before pods become ready.
     # Using --wait would cause a deadlock: Helm waits for pods, pods wait for migration.

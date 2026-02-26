@@ -107,24 +107,24 @@ extraEnv: |
   - name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE
     value: "/opt/airflow/auth/passwords.json"
 
-extraVolumes:
-  - name: auth-passwords
-    emptyDir: {}
-
-extraVolumeMounts:
-  - name: auth-passwords
-    mountPath: /opt/airflow/auth
-
-extraInitContainers:
-  - name: init-auth-passwords
-    image: localhost:30050/mbt/airflow:3.1.7
-    command: ["sh", "-c"]
-    args:
-      - |
-        echo '{"admin": "admin"}' > /opt/airflow/auth/passwords.json
-    volumeMounts:
-      - name: auth-passwords
-        mountPath: /opt/airflow/auth
+# API server needs the passwords volume + init container (per-component, not top-level)
+apiServer:
+  extraVolumes:
+    - name: auth-passwords
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: auth-passwords
+      mountPath: /opt/airflow/auth
+  extraInitContainers:
+    - name: init-auth-passwords
+      image: localhost:30050/mbt/airflow:3.1.7
+      command: ["sh", "-c"]
+      args:
+        - |
+          echo '{"admin": "admin"}' > /opt/airflow/auth/passwords.json
+      volumeMounts:
+        - name: auth-passwords
+          mountPath: /opt/airflow/auth
 
 # Disable createUserJob — not needed with SimpleAuthManager
 createUserJob:
