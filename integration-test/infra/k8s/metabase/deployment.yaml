@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metabase
+  namespace: mbt
+  labels:
+    app.kubernetes.io/name: metabase
+    app.kubernetes.io/part-of: mbt-integration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: metabase
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: metabase
+    spec:
+      containers:
+        - name: metabase
+          image: metabase/metabase:v0.59.x
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: MB_DB_TYPE
+              value: postgres
+            - name: MB_DB_DBNAME
+              value: metabase_db
+            - name: MB_DB_PORT
+              value: "5432"
+            - name: MB_DB_USER
+              value: metabase_user
+            - name: MB_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: metabase-password
+            - name: MB_DB_HOST
+              value: postgres-postgresql.mbt.svc.cluster.local
+            - name: JAVA_OPTS
+              value: "-Xmx512m"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 1000m

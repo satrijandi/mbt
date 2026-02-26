@@ -1,0 +1,57 @@
+# ClusterIP service for in-cluster access
+apiVersion: v1
+kind: Service
+metadata:
+  name: h2o
+  namespace: mbt
+  labels:
+    app.kubernetes.io/name: h2o
+spec:
+  selector:
+    app.kubernetes.io/name: h2o
+  ports:
+    - name: http
+      port: 54321
+      targetPort: 54321
+  type: ClusterIP
+---
+# Headless service for H2O cluster discovery
+# publishNotReadyAddresses ensures DNS resolves before readiness probes pass,
+# which H2O needs for its DNS-based node discovery at startup.
+apiVersion: v1
+kind: Service
+metadata:
+  name: h2o-headless
+  namespace: mbt
+  labels:
+    app.kubernetes.io/name: h2o
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: h2o
+  ports:
+    - name: http
+      port: 54321
+      targetPort: 54321
+    - name: internal
+      port: 54322
+      targetPort: 54322
+---
+# NodePort service for host access
+apiVersion: v1
+kind: Service
+metadata:
+  name: h2o-nodeport
+  namespace: mbt
+  labels:
+    app.kubernetes.io/name: h2o
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: h2o
+  ports:
+    - name: http
+      port: 54321
+      targetPort: 54321
+      nodePort: 30054

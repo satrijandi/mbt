@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: h2o
+  namespace: mbt
+  labels:
+    app.kubernetes.io/name: h2o
+    app.kubernetes.io/part-of: mbt-integration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: h2o
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: h2o
+    spec:
+      containers:
+        - name: h2o
+          image: h2oai/h2o-open-source-k8s:3.46.0.9-1
+          ports:
+            - containerPort: 54321
+              name: http
+            - containerPort: 54322
+              name: internal
+          env:
+            - name: H2O_KUBERNETES_SERVICE_DNS
+              value: "h2o-headless.mbt.svc.cluster.local"
+            - name: H2O_NODE_LOOKUP_TIMEOUT
+              value: "180"
+            - name: H2O_NODE_EXPECTED_COUNT
+              value: "1"
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: 2000m
+          readinessProbe:
+            httpGet:
+              path: /3/About
+              port: 54321
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /3/About
+              port: 54321
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5

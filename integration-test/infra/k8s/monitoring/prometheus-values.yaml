@@ -1,0 +1,61 @@
+# kube-prometheus-stack
+# Includes Prometheus v3.9.1 + Grafana v12.3.2
+
+prometheus:
+  prometheusSpec:
+    image:
+      tag: "v3.9.1"
+    retention: 7d
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 200m
+      limits:
+        memory: 512Mi
+        cpu: 500m
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+  ingress:
+    enabled: true
+    hosts:
+      - prometheus.localhost
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web
+
+grafana:
+  image:
+    tag: "12.3.2"
+  adminPassword: "mbt-grafana"
+  ingress:
+    enabled: true
+    hosts:
+      - grafana.localhost
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web
+
+  # Note: kube-prometheus-stack automatically provisions a Prometheus datasource.
+  # Do NOT add a custom datasources block here — it causes a duplicate default error.
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 200m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+# Disable features not needed for integration testing
+alertmanager:
+  enabled: false
+
+nodeExporter:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: true

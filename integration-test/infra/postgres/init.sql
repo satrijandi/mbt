@@ -13,6 +13,16 @@ CREATE DATABASE warehouse;
 CREATE USER mbt_user WITH PASSWORD 'mbt_password';
 GRANT ALL PRIVILEGES ON DATABASE warehouse TO mbt_user;
 
+-- Gitea backend database
+CREATE DATABASE gitea_db;
+CREATE USER gitea_user WITH PASSWORD 'gitea_password';
+GRANT ALL PRIVILEGES ON DATABASE gitea_db TO gitea_user;
+
+-- Metabase backend database
+CREATE DATABASE metabase_db;
+CREATE USER metabase_user WITH PASSWORD 'metabase_password';
+GRANT ALL PRIVILEGES ON DATABASE metabase_db TO metabase_user;
+
 -- Connect to mlflow_db and grant schema permissions
 \connect mlflow_db;
 GRANT ALL ON SCHEMA public TO mlflow_user;
@@ -20,6 +30,14 @@ GRANT ALL ON SCHEMA public TO mlflow_user;
 -- Connect to airflow_db and grant schema permissions
 \connect airflow_db;
 GRANT ALL ON SCHEMA public TO airflow_user;
+
+-- Connect to gitea_db and grant schema permissions
+\connect gitea_db;
+GRANT ALL ON SCHEMA public TO gitea_user;
+
+-- Connect to metabase_db and grant schema permissions
+\connect metabase_db;
+GRANT ALL ON SCHEMA public TO metabase_user;
 
 -- Connect to warehouse and grant schema permissions
 \connect warehouse;

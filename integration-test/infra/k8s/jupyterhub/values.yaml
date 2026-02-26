@@ -1,0 +1,64 @@
+# Zero to JupyterHub
+# Notebook environment for data scientists
+
+hub:
+  config:
+    Authenticator:
+      admin_users:
+        - admin
+      allowed_users:
+        - ds-user
+    DummyAuthenticator:
+      password: "mbt-jupyter"
+    JupyterHub:
+      authenticator_class: dummy
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 200m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+singleuser:
+  image:
+    name: jupyter/scipy-notebook
+    tag: "latest"
+  storage:
+    capacity: 2Gi
+  defaultUrl: "/lab"
+  extraEnv:
+    MLFLOW_TRACKING_URI: "http://mlflow.mbt.svc.cluster.local:5000"
+    AWS_ACCESS_KEY_ID: "mbt-access-key"
+    AWS_SECRET_ACCESS_KEY: "mbt-secret-key"
+    MLFLOW_S3_ENDPOINT_URL: "http://seaweedfs-filer.mbt.svc.cluster.local:8333"
+    H2O_URL: "http://h2o.mbt.svc.cluster.local:54321"
+  memory:
+    limit: 2G
+    guarantee: 1G
+  cpu:
+    limit: 2
+    guarantee: 0.5
+
+proxy:
+  service:
+    type: ClusterIP
+
+ingress:
+  enabled: true
+  hosts:
+    - jupyter.localhost
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false
+
+scheduling:
+  userScheduler:
+    enabled: false
+  userPlaceholder:
+    enabled: false

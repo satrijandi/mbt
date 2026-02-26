@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seaweedfs-init-buckets
+  namespace: mbt
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init-buckets
+          image: amazon/aws-cli:2.15.0
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: "mbt-access-key"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "mbt-secret-key"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              ENDPOINT="http://seaweedfs-filer.mbt.svc.cluster.local:8333"
+              echo "Waiting for SeaweedFS S3 API..."
+              for i in $(seq 1 60); do
+                if aws --endpoint-url "$ENDPOINT" s3 ls 2>/dev/null; then
+                  echo "SeaweedFS S3 API is ready"
+                  break
+                fi
+                echo "  Retry $i/60..."
+                sleep 5
+              done
+
+              echo "Creating buckets..."
+              aws --endpoint-url "$ENDPOINT" s3 mb s3://mbt-mlflow-artifacts 2>/dev/null || echo "Bucket mbt-mlflow-artifacts may already exist"
+              aws --endpoint-url "$ENDPOINT" s3 mb s3://mbt-pipeline-artifacts 2>/dev/null || echo "Bucket mbt-pipeline-artifacts may already exist"
+
+              echo "Verifying buckets:"
+              aws --endpoint-url "$ENDPOINT" s3 ls
+
+              echo "Testing bucket access..."
+              echo "test" | aws --endpoint-url "$ENDPOINT" s3 cp - s3://mbt-pipeline-artifacts/.health-check
+              aws --endpoint-url "$ENDPOINT" s3 rm s3://mbt-pipeline-artifacts/.health-check
+              echo "Bucket initialization complete"

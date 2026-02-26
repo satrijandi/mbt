@@ -1,0 +1,36 @@
+# ServiceAccount for MBT pipeline pods (created by KubernetesPodOperator)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mbt-runner
+  namespace: mbt-pipelines
+  labels:
+    app.kubernetes.io/part-of: mbt-integration
+---
+# Role: mbt-runner pods need access to configmaps and secrets in their namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mbt-runner-role
+  namespace: mbt-pipelines
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mbt-runner-binding
+  namespace: mbt-pipelines
+subjects:
+  - kind: ServiceAccount
+    name: mbt-runner
+    namespace: mbt-pipelines
+roleRef:
+  kind: Role
+  name: mbt-runner-role
+  apiGroup: rbac.authorization.k8s.io

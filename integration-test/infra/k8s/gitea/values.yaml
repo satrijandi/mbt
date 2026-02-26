@@ -1,0 +1,77 @@
+# Gitea v1.25.4 - Git repository hosting
+
+image:
+  rootless: true
+  tag: "1.25.4"
+
+gitea:
+  admin:
+    username: mbt-admin
+    password: mbt-admin-password
+    email: admin@mbt.local
+
+  config:
+    database:
+      DB_TYPE: postgres
+      HOST: postgres-postgresql.mbt.svc.cluster.local:5432
+      NAME: gitea_db
+      USER: gitea_user
+      PASSWD: gitea_password
+
+    server:
+      DOMAIN: gitea.localhost
+      ROOT_URL: http://gitea.localhost
+      HTTP_PORT: 3000
+
+    service:
+      DISABLE_REGISTRATION: false
+      REQUIRE_SIGNIN_VIEW: false
+
+    webhook:
+      ALLOWED_HOST_LIST: "*"
+
+    # Disable features not needed for integration test
+    mailer:
+      ENABLED: false
+
+# Use external PostgreSQL (our Bitnami instance)
+postgresql:
+  enabled: false
+postgresql-ha:
+  enabled: false
+
+# Redis for caching (use built-in)
+redis-cluster:
+  enabled: false
+
+# Persistence for git repos
+persistence:
+  enabled: true
+  size: 5Gi
+
+service:
+  http:
+    type: ClusterIP
+    port: 3000
+  ssh:
+    type: NodePort
+    port: 22
+    nodePort: 30022
+
+ingress:
+  enabled: true
+  hosts:
+    - host: gitea.localhost
+      paths:
+        - path: /
+          pathType: Prefix
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 200m
+  limits:
+    memory: 512Mi
+    cpu: 500m

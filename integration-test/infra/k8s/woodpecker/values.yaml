@@ -1,0 +1,50 @@
+# Woodpecker CI v3.13.0
+
+server:
+  image:
+    tag: "v3.13.0"
+
+  env:
+    WOODPECKER_HOST: "http://ci.localhost"
+    WOODPECKER_OPEN: "true"
+    WOODPECKER_ADMIN: "mbt-admin"
+    WOODPECKER_GITEA: "true"
+    WOODPECKER_GITEA_URL: "http://gitea-http.mbt.svc.cluster.local:3000"
+
+  extraEnvFrom:
+    - secretRef:
+        name: woodpecker-gitea-oauth
+
+  ingress:
+    enabled: true
+    hosts:
+      - host: ci.localhost
+        paths:
+          - path: /
+            pathType: Prefix
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 200m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+agent:
+  image:
+    tag: "v3.13.0"
+  replicas: 1
+  env:
+    WOODPECKER_BACKEND_K8S_NAMESPACE: "mbt-pipelines"
+    WOODPECKER_BACKEND_K8S_STORAGE_CLASS: "local-path"
+    WOODPECKER_BACKEND_K8S_VOLUME_SIZE: "1Gi"
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 200m
+    limits:
+      memory: 512Mi
+      cpu: 500m

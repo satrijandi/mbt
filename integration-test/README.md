@@ -1,222 +1,176 @@
-# MBT Integration Tests
+# MBT Integration Test
 
-End-to-end integration tests for MBT with PostgreSQL, S3 (SeaweedFS), and MLflow.
+End-to-end integration test that validates the full MBT lifecycle on a Kubernetes cluster. Uses k3d to spin up a local k3s cluster with 12 services, simulating a production-like ML platform environment.
 
-## Available Test Pipelines
+## Prerequisites
 
-The integration test project includes three training pipelines to test different feature levels:
+- k3d v5.3.0+
+- kubectl
+- Helm 3
+- Docker
+- curl, jq
+- Python 3.10+ with MBT installed in `.venv` at the repo root
 
-### training_churn_model_v1.yaml (Basic)
-- **Purpose:** Backward compatibility test
-- **Features:** Single table, simple random split, sklearn RandomForest
-- **Data:** Original `customers.csv` (20 rows)
-- **Use for:** Quick smoke test, backward compatibility verification
+## Infrastructure (12 Services)
 
-### training_churn_model_v2.yaml (Typical DS Pattern)
-- **Purpose:** Test multi-table joins and temporal windowing
-- **Features:**
-  - Multi-table joins (label_table + features_table_a + features_table_b)
-  - Temporal windowing (9 months train, 1 month test)
-  - Drift detection with PSI
-- **Data:** Synthetic data (200 customers, 100 features, 365 days)
-- **Use for:** Testing production-like workflows
+`01-setup-infra.sh` creates a k3d cluster (`mbt-integration`: 1 server + 2 agents) and deploys:
 
-### training_churn_model_v3.yaml (Full Advanced)
-- **Purpose:** Test all advanced features including feature selection
-- **Features:**
-  - Multi-table joins with 100+ features
-  - Temporal windowing
-  - Feature selection (variance threshold + correlation + LGBM importance)
-  - Drift detection with PSI
-- **Data:** Same as v2 but with feature selection enabled
-- **Use for:** Testing complete typical DS pipeline pattern
-- **Note:** Requires `lightgbm` installed: `pip install lightgbm`
+| # | Service | Version | Namespace | Deploy Method |
+|---|---------|---------|-----------|---------------|
+| 1 | PostgreSQL | Bitnami 18.2 | mbt | Helm |
+| 2 | SeaweedFS (S3-compatible) | v4.13 | mbt | Helm |
+| 3 | Zot Registry | v2.1.14 | mbt | Helm |
+| 4 | MLflow | v3.10.0 | mbt | Custom Deployment |
+| 5 | Gitea | v1.25.4 | mbt | Helm |
+| 6 | Woodpecker CI | v3.13.0 | mbt | Helm (OCI) |
+| 7 | Apache Airflow | v3.1.7 | mbt | Helm |
+| 8 | H2O Server | 3.46.0.9-1 | mbt | Custom Deployment |
+| 9 | JupyterHub | Z2JH | mbt | Helm |
+| 10 | Metabase | v0.59 | mbt | Custom Deployment |
+| 11 | Prometheus | v3.9.1 | mbt-monitoring | Helm (kube-prometheus-stack) |
+| 12 | Grafana | v12.3.2 | mbt-monitoring | Helm (kube-prometheus-stack) |
 
-## Test Data
+Three namespaces: `mbt`, `mbt-pipelines` (for Airflow KubernetesExecutor pods), `mbt-monitoring`.
 
-The integration test includes both simple and realistic synthetic data:
+## Service Access
 
-- **Basic data:** `customers.csv` (20 rows, 5 columns) - for v1
-- **Advanced data:** Multi-table setup (generated):
-  - `label_table.csv` - 54,600 rows with customer_id, snapshot_date, is_churn
-  - `features_table_a.csv` - 73,000 rows with 50 features
-  - `features_table_b.csv` - 73,000 rows with 50 features
-  - `customers_to_score.csv` - 2,400 rows for serving
+**HTTP services via Traefik Ingress (`*.localhost` on port 80):**
 
-Data includes realistic characteristics:
-- 15% missing values
-- 5% constant features
-- Highly correlated feature pairs
-- Temporal patterns across 12 months (2025-01-01 to 2025-12-31)
+| Service | URL | Auth |
+|---------|-----|------|
+| MLflow | http://mlflow.localhost | None |
+| Airflow | http://airflow.localhost | admin / admin |
+| Gitea | http://gitea.localhost | mbt-admin / mbt-admin-password |
+| Woodpecker | http://ci.localhost | OAuth via Gitea |
+| JupyterHub | http://jupyter.localhost | admin / mbt-jupyter |
+| Metabase | http://metabase.localhost | Setup wizard |
+| Grafana | http://grafana.localhost | admin / mbt-grafana |
 
-## Running Tests
+**Non-HTTP services via NodePort:**
 
-Here's the step-by-step to run the E2E test manually:
+| Service | Host Access | Auth |
+|---------|-------------|------|
+| PostgreSQL | localhost:30432 | admin / admin_password |
+| SeaweedFS S3 | localhost:30333 | mbt-access-key / mbt-secret-key |
+| H2O | localhost:30054 | None |
+| Zot Registry | localhost:30050 | None |
+| Gitea SSH | localhost:30022 | SSH key |
 
-### Prerequisites
-- Docker and Docker Compose installed
-- `uv sync` already run from the repo root
-- Optional: `pip install lightgbm` for v3 pipeline
+## Directory Structure
 
-### Steps
-1. Start infrastructure
-
-
-cd ~/code/mbt/integration-test
-docker compose up -d --build
-2. Wait for services (PostgreSQL, SeaweedFS, MLflow)
-
-
-# PostgreSQL
-docker compose exec -T postgres pg_isready -U admin
-
-# SeaweedFS
-curl -s http://localhost:8333
-
-# MLflow (may take ~10s for DB migrations)
-curl -s http://localhost:5000/health
-3. Create S3 buckets
-
-
-.venv/bin/python3 -c "
-import boto3
-s3 = boto3.client('s3', endpoint_url='http://localhost:8333', aws_access_key_id='any', aws_secret_access_key='any')
-s3.create_bucket(Bucket='mbt-mlflow-artifacts')
-s3.create_bucket(Bucket='mbt-pipeline-artifacts')
-"
-(run from repo root so .venv resolves)
-
-4. Compile and run training pipeline (prod target)
-
-
-cd ~/code/mbt/integration-test/project
-../../.venv/bin/mbt compile training_churn_model_v1 --target prod
-../../.venv/bin/mbt run --select training_churn_model_v1 --target prod
-
-# OR test the advanced pipeline (v2 with multi-table joins)
-../../.venv/bin/mbt compile training_churn_model_v2 --target prod
-../../.venv/bin/mbt run --select training_churn_model_v2 --target prod
-
-# OR test the full pipeline (v3 with feature selection)
-# Requires: pip install lightgbm
-../../.venv/bin/mbt compile training_churn_model_v3 --target prod
-../../.venv/bin/mbt run --select training_churn_model_v3 --target prod
-5. Get the MLflow run ID and update serving pipeline
-
-
-# Get MLflow run ID from API
-curl -s http://localhost:5000/api/2.0/mlflow/runs/search \
-  -H "Content-Type: application/json" \
-  -d '{"experiment_ids":["1"],"max_results":1}' | python3 -m json.tool
-Copy the run_id value, then edit serving_churn_model_v1.yaml and replace the run_id field with it.
-
-6. Compile and run serving pipeline
-
-
-../../.venv/bin/mbt compile serving_churn_model_v1 --target prod
-../../.venv/bin/mbt run --select serving_churn_model_v1 --target prod
-7. Verify predictions in PostgreSQL
-
-
-cd ~/code/mbt/integration-test
-docker compose exec -T postgres psql -U mbt_user -d warehouse \
-  -c "SELECT * FROM churn_predictions;"
-8. Generate Airflow DAGs
-
-
-cd ~/code/mbt/integration-test/project
-mkdir -p ../generated_dags
-../../.venv/bin/mbt generate-dags --target prod --output ../generated_dags
-9. Test step executor (pod-per-step simulation)
-
-
-RUN_ID="run_manual_test_$(date +%Y%m%d_%H%M%S)"
-../../.venv/bin/mbt step execute --pipeline training_churn_model_v1 --step load_data --target prod --run-id "$RUN_ID"
-../../.venv/bin/mbt step execute --pipeline training_churn_model_v1 --step split_data --target prod --run-id "$RUN_ID"
-../../.venv/bin/mbt step execute --pipeline training_churn_model_v1 --step train_model --target prod --run-id "$RUN_ID"
-../../.venv/bin/mbt step execute --pipeline training_churn_model_v1 --step evaluate --target prod --run-id "$RUN_ID"
-../../.venv/bin/mbt step execute --pipeline training_churn_model_v1 --step log_run --target prod --run-id "$RUN_ID"
-10. Clean up when done
-
-
-cd ~/code/mbt/integration-test
-docker compose down -v
-
-## Verifying Advanced Pipeline Features
-
-When testing v2 or v3 pipelines, verify these additional features:
-
-### Multi-Table Joins
-Check logs for join operations:
-```bash
-grep "Joining.*feature table" integration-test/project/local_artifacts/run_*/logs/load_data.log
+```
+integration-test/
+├── 01-setup-infra.sh              # Step 1: Create k3d cluster + deploy 12 services
+├── README.md
+├── infra/
+│   ├── postgres/
+│   │   └── init.sql               # 5 databases + seed data (customers, scoring)
+│   ├── mlflow/
+│   │   └── Dockerfile             # MLflow v3.10.0 custom image
+│   ├── airflow/
+│   │   └── Dockerfile             # Airflow v3.1.7 custom image
+│   ├── mbt-runner/
+│   │   └── Dockerfile             # MBT runner image for pipeline pods
+│   └── k8s/
+│       ├── namespaces.yaml
+│       ├── postgres/values.yaml
+│       ├── seaweedfs/
+│       │   ├── values.yaml
+│       │   └── init-buckets-job.yaml
+│       ├── zot/values.yaml
+│       ├── mlflow/
+│       │   ├── deployment.yaml
+│       │   ├── service.yaml
+│       │   └── ingress.yaml
+│       ├── gitea/values.yaml
+│       ├── woodpecker/values.yaml
+│       ├── airflow/values.yaml
+│       ├── h2o/
+│       │   ├── deployment.yaml
+│       │   └── service.yaml
+│       ├── jupyterhub/values.yaml
+│       ├── metabase/
+│       │   ├── deployment.yaml
+│       │   ├── service.yaml
+│       │   └── ingress.yaml
+│       ├── monitoring/
+│       │   └── prometheus-values.yaml
+│       └── mbt-pipelines/
+│           ├── rbac.yaml
+│           └── configmap.yaml
 ```
 
-Expected output should show:
-- Loaded label table: X rows, 3 columns
-- Joining 2 feature table(s)...
-- features_table_a: Y rows, 52 columns
-- features_table_b: Z rows, 52 columns
-- Final joined data: X rows, 103 columns
+## Test Steps (14-Step Workflow)
 
-### Temporal Windowing
-Check split logs for temporal windows:
-```bash
-grep "Temporal windows" integration-test/project/local_artifacts/run_*/logs/split_data.log
-```
+| Step | Script | Actor | Description | Status |
+|------|--------|-------|-------------|--------|
+| 1 | `01-setup-infra.sh` | Script | Create k3d cluster and deploy 12 services | Done |
+| 2 | `02-init-env.sh` | Script | Initialize environment (seed PG data, configure profiles) | Pending |
+| 3 | `03-ds-init-project.sh` | DS | `mbt init ml-pipeline`, create `training-churn-v1.yaml` | Pending |
+| 4 | `04-ds-run-training.sh` | DS | Run training pipeline in JupyterHub notebook | Pending |
+| 5 | `05-ds-push-to-gitea.sh` | DS | Commit and push to Gitea (new branch) | Pending |
+| 6 | `06-ci-woodpecker.sh` | CI | Woodpecker runs: validate, build-image, compile | Pending |
+| 7 | `07-de-review-merge.sh` | DE | Review and merge to main in Gitea | Pending |
+| 8 | `08-cd-deploy-dag.sh` | CD | On merge: compile + deploy training DAG to Airflow | Pending |
+| 9 | `09-verify-airflow.sh` | DS/DE | Verify Airflow run matches notebook result | Pending |
+| 10 | `10-ds-view-mlflow.sh` | DS | View results in MLflow | Pending |
+| 11 | `11-ds-get-run-id.sh` | DS | Get MLflow run_id | Pending |
+| 12 | `12-ds-create-serving.sh` | DS | Create `serving-churn-v1.yaml` with run_id | Pending |
+| 13 | `13-ds-serving-pipeline.sh` | DS | Repeat steps 4-7 for serving pipeline (2 DAGs in Airflow) | Pending |
+| 14 | `14-verify-predictions.sh` | DS | Verify predictions in S3 + PostgreSQL | Pending |
 
-Expected output:
-- Train: 2025-01-01 to 2025-10-01 (9 months)
-- Test: 2025-10-01 to 2025-11-01 (1 month)
+**Actors:** DS = Data Scientist, DE = Data Engineer, CI = Continuous Integration, CD = Continuous Deployment
 
-### Drift Detection (v2 and v3)
-Check if drift_info artifact was created:
-```bash
-ls -lh integration-test/project/local_artifacts/run_*/drift_info.csv
-head integration-test/project/local_artifacts/run_*/drift_info.csv
-```
+## Running
 
-Expected: CSV with columns `feature, period, drift_method, drift_value`
-
-### Feature Selection (v3 only)
-Check feature selection logs:
-```bash
-grep "LGBM" integration-test/project/local_artifacts/run_*/logs/feature_selection.log
-```
-
-Expected output showing:
-- Variance threshold: removed X features
-- Correlation filter: removed Y features
-- LGBM importance: kept Z features
-
-## Automated Test Script
-
-Run all checks automatically:
+### Step 1: Setup Infrastructure
 
 ```bash
-cd ~/code/mbt/integration-test
-bash run-test.sh
+cd integration-test
+./01-setup-infra.sh
 ```
 
-This does all of the above automatically (32 checks).
+The script will:
+1. Check prerequisites (k3d, helm, kubectl, docker, curl, jq)
+2. Create k3d cluster `mbt-integration` (1 server + 2 agents)
+3. Install Traefik ingress controller
+4. Deploy PostgreSQL with 5 databases (mlflow_db, airflow_db, warehouse, gitea_db, metabase_db)
+5. Deploy SeaweedFS with S3 buckets (mbt-mlflow-artifacts, mbt-pipeline-artifacts)
+6. Deploy Zot container registry (NodePort 30050)
+7. Build and push custom images (MLflow, Airflow, mbt-runner) to Zot
+8. Deploy all application services
+9. Configure Gitea-Woodpecker OAuth2 integration
+10. Setup RBAC and ConfigMaps for pipeline namespace
+11. Run health checks and print access summary
 
-## Quick Test of New Features (Local)
-
-Test the new features locally without Docker infrastructure:
+### Teardown
 
 ```bash
-cd integration-test/project
-
-# Test v2 (multi-table + temporal windowing + drift)
-../../.venv/bin/mbt compile training_churn_model_v2 --target dev
-../../.venv/bin/mbt run --select training_churn_model_v2 --target dev
-
-# Test v3 (with feature selection)
-../../.venv/bin/mbt compile training_churn_model_v3 --target dev
-../../.venv/bin/mbt run --select training_churn_model_v3 --target dev
-
-# Verify outputs
-ls -lh local_artifacts/run_*/
-cat local_artifacts/run_*/metrics.json
-head local_artifacts/run_*/drift_info.csv
+k3d cluster delete mbt-integration
 ```
+
+### Check Status
+
+```bash
+kubectl get pods -n mbt
+kubectl get pods -n mbt-pipelines
+kubectl get pods -n mbt-monitoring
+```
+
+## Key Integration Points
+
+1. **PostgreSQL**: Single instance with 5 databases. Init via Bitnami `initdb.scriptsConfigMap` using `infra/postgres/init.sql`.
+2. **Gitea <-> Woodpecker**: Script creates OAuth2 app in Gitea via API, stores client_id/secret in K8s Secret, Woodpecker references via `extraEnvFrom`.
+3. **MLflow <-> SeaweedFS**: MLflow uses `s3://mbt-mlflow-artifacts/` with `MLFLOW_S3_ENDPOINT_URL` pointing to SeaweedFS.
+4. **Airflow <-> K8s**: KubernetesExecutor creates pipeline pods in `mbt-pipelines` namespace.
+5. **Pipeline pods**: Run in `mbt-pipelines` with ServiceAccount `mbt-runner`, get env vars from ConfigMap `mbt-pipeline-config`.
+6. **Zot Registry**: Images at `localhost:30050/mbt/*`, containerd configured to pull from `zot-registry.mbt.svc.cluster.local:5000` inside cluster.
+
+## Troubleshooting
+
+- **k3d cluster won't start:** Ensure ports 80, 443, 30000-30100 are free. Check `docker ps` for conflicting containers.
+- **Pods stuck in Init/CrashLoopBackOff:** Check `kubectl logs <pod> -n mbt -c <init-container>` for migration or dependency issues.
+- **Airflow migrations:** The chart uses SimpleAuthManager (no FAB DB). If init containers loop, check `alembic_version` in `airflow_db`.
+- **H2O not discovering peers:** The headless service needs `publishNotReadyAddresses: true` for DNS-based cluster discovery.
+- **Ingress not working:** Verify Traefik is running: `kubectl get pods -n traefik`. Check `*.localhost` resolves to 127.0.0.1.
+- **Registry push failures:** Ensure Zot is accessible at `localhost:30050`. Check `curl http://localhost:30050/v2/`.

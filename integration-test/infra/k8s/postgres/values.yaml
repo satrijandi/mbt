@@ -1,0 +1,31 @@
+# Bitnami PostgreSQL Helm chart v18.2
+# Single instance with multiple databases created via initdb scripts
+
+global:
+  postgresql:
+    auth:
+      postgresPassword: "admin_password"
+
+auth:
+  postgresPassword: "admin_password"
+
+primary:
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 250m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+  service:
+    type: NodePort
+    nodePorts:
+      postgresql: 30432
+
+  initdb:
+    scriptsConfigMap: postgres-init-sql

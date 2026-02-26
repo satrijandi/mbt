@@ -1,0 +1,23 @@
+# Zot Registry v2.1.14 - OCI-native container registry
+# No auth, no TLS for local testing
+
+image:
+  repository: ghcr.io/project-zot/zot-linux-amd64
+  tag: "v2.1.14"
+
+persistence:
+  enabled: true
+  size: 10Gi
+
+service:
+  type: NodePort
+  port: 5000
+  nodePort: 30050
+
+resources:
+  requests:
+    memory: 128Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 500m

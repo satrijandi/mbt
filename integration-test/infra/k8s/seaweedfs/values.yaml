@@ -1,0 +1,43 @@
+# SeaweedFS v4.13
+# Deploys master, volume, filer with S3 gateway
+
+global:
+  imageName: chrislusf/seaweedfs
+  imageTag: "4.13"
+
+master:
+  replicas: 1
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 256Mi
+      cpu: 250m
+
+volume:
+  replicas: 1
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+  data:
+    type: "persistentVolumeClaim"
+    size: 10Gi
+
+filer:
+  replicas: 1
+  s3:
+    enabled: true
+    port: 8333
+    enableAuth: false
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m

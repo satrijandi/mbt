@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mbt-pipeline-config
+  namespace: mbt-pipelines
+  labels:
+    app.kubernetes.io/part-of: mbt-integration
+data:
+  POSTGRES_HOST: "postgres-postgresql.mbt.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DATABASE: "warehouse"
+  POSTGRES_USER: "mbt_user"
+  SEAWEEDFS_ENDPOINT: "http://seaweedfs-filer.mbt.svc.cluster.local:8333"
+  MLFLOW_TRACKING_URI: "http://mlflow.mbt.svc.cluster.local:5000"
+  MLFLOW_S3_ENDPOINT_URL: "http://seaweedfs-filer.mbt.svc.cluster.local:8333"
+  AWS_ACCESS_KEY_ID: "mbt-access-key"
+  AWS_SECRET_ACCESS_KEY: "mbt-secret-key"
+  H2O_URL: "http://h2o.mbt.svc.cluster.local:54321"

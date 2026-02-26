@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mbt
+  labels:
+    app.kubernetes.io/part-of: mbt-integration
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mbt-pipelines
+  labels:
+    app.kubernetes.io/part-of: mbt-integration
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mbt-monitoring
+  labels:
+    app.kubernetes.io/part-of: mbt-integration
