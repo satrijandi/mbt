@@ -24,3 +24,26 @@ Shifting features is part of feature selection process not just evaluation
 Jupyterhub login invalid
 For metabase is it possible to setup the user without setup on first access
 Add pgadmin with existing connection to all the db.
+
+
+Please update @postgres/init.sql where it will
+Init data in postgres but accessible to also via metabase
+customers to score : contains customer_id, snapshot_date
+features table a: contains customer_id, snapshot_date, feature_a, …, feature_z
+features table b: contains customer_id, snapshot_date, feature_1, …, feature_1000
+label contains customer_id, snapshot-date, is_churn
+makes the data as realistic as it can be. let’s say snapshot_date is the cutoff date / prediction date and the label is_churn meaning whether the customer will churn in the next 1 months.
+Test your code before done and provide the report.
+
+
+Please provide a bash script 03-mbt-init.sh simulating DS to do mbt init, create churn_training_pipeline_v1 yaml and after run that run the pipeline in jupyter notebook
+DS then create MR to DE
+CI runs
+DE approve and merge to main branch : which also means will deploy the RAG to airflow eventually in the end. skip the testing on dev staging prod
+DS the can run the pipeline on airflow
+DS then create a serving pipeline churn_serving_pipeline_v1.yaml
+Run the pipeline in the jupyter notebook
+DS then create MR to DE
+CI runs
+DE approve and merge to main branch : which also means will deploy the RAG to airflow eventually in the end. skip the testing on dev staging prod. Since the changes in the repo is adding the serving pipeline, the training pipeline should not change. If the changes in on existing pipeline, then it cannot be done.
+DS the can run the pipeline on airflow
