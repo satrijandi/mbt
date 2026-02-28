@@ -307,7 +307,7 @@ EOF
         --api-port 6550 \
         --port "80:80@loadbalancer" \
         --port "443:443@loadbalancer" \
-        --port "30000-30100:30000-30100@server:0" \
+        --port "30000-30500:30000-30500@server:0" \
         --k3s-arg "--disable=traefik@server:0" \
         --k3s-arg "--kubelet-arg=max-pods=200@agent:*" \
         --registry-config "$registries_config" \
@@ -406,6 +406,30 @@ phase_2_shared_resources() {
         --from-literal=secret-key="$S3_SECRET_KEY" \
         --dry-run=client -o yaml | kubectl apply -f -
 
+    # SeaweedFS S3 identity config (required for S3 API auth)
+    local s3_config
+    s3_config=$(cat <<EOFS3
+{
+  "identities": [
+    {
+      "name": "mbt-admin",
+      "credentials": [
+        {
+          "accessKey": "${S3_ACCESS_KEY}",
+          "secretKey": "${S3_SECRET_KEY}"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
+EOFS3
+)
+    kubectl create secret generic seaweedfs-s3-config \
+        --namespace "$NS_MBT" \
+        --from-literal=seaweedfs_s3_config="$s3_config" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
     # Copy secrets to mbt-pipelines namespace for pipeline pods
     kubectl create secret generic s3-credentials \
         --namespace "$NS_PIPELINES" \
@@ -486,11 +510,7 @@ spec:
       nodePort: 30333
 EOF
 
-    # Create S3 buckets via init Job
-    # Delete previous job if exists (for idempotency)
-    kubectl delete job seaweedfs-init-buckets -n "$NS_MBT" --ignore-not-found=true
-    kubectl apply -f "$K8S_DIR/seaweedfs/init-buckets-job.yaml"
-    wait_for_job "$NS_MBT" "seaweedfs-init-buckets" 180
+    # Buckets are created by the Helm chart via createBuckets in values.yaml
 
     log_success "SeaweedFS deployed with S3 buckets (NodePort: localhost:30333)"
 }
@@ -979,33 +999,53 @@ phase_17_summary() {
     echo ""
     echo -e "  ${GREEN}HTTP Services (via Traefik Ingress):${NC}"
     echo "    MLflow:       http://mlflow.localhost"
-    echo "    Airflow:      http://airflow.localhost      (${AIRFLOW_ADMIN_USER} / ${AIRFLOW_ADMIN_PASSWORD})"
-    echo "    Gitea:        http://gitea.localhost         (${GITEA_ADMIN_USER} / ${GITEA_ADMIN_PASSWORD})"
-    echo "    Woodpecker:   http://ci.localhost            (OAuth via Gitea)"
-    echo "    JupyterHub:   http://jupyter.localhost       (admin / ${JUPYTERHUB_PASSWORD})"
-    echo "    Metabase:     http://metabase.localhost      (setup on first access)"
-    echo "    Grafana:      http://grafana.localhost       (admin / ${GRAFANA_ADMIN_PASSWORD})"
+    echo "    Airflow:      http://airflow.localhost"
+    echo "    Gitea:        http://gitea.localhost"
+    echo "    Woodpecker:   http://ci.localhost"
+    echo "    JupyterHub:   http://jupyter.localhost"
+    echo "    Metabase:     http://metabase.localhost"
+    echo "    Grafana:      http://grafana.localhost"
     echo "    Prometheus:   http://prometheus.localhost"
     echo ""
     echo -e "  ${GREEN}Non-HTTP Services (NodePort):${NC}"
-    echo "    PostgreSQL:   localhost:30432                (admin / ${PG_ADMIN_PASSWORD})"
-    echo "    SeaweedFS S3: localhost:30333                (${S3_ACCESS_KEY} / ${S3_SECRET_KEY})"
+    echo "    PostgreSQL:   localhost:30432"
+    echo "    SeaweedFS S3: localhost:30333"
     echo "    H2O Server:   localhost:30054"
     echo "    Zot Registry: localhost:${ZOT_NODEPORT}"
     echo "    Gitea SSH:    localhost:30022"
     echo ""
-    echo -e "  ${GREEN}Gitea Users:${NC}"
-    echo "    Admin:        ${GITEA_ADMIN_USER} / ${GITEA_ADMIN_PASSWORD}"
-    echo "    DS Team:      ds-team / ds-team-password"
-    echo "    DE Team:      de-team / de-team-password"
-    echo "    Repository:   de-team/ml-pipeline"
+    echo -e "  ${GREEN}Credentials:${NC}"
     echo ""
-    echo -e "  ${GREEN}PostgreSQL Databases:${NC}"
-    echo "    warehouse:    mbt_user / ${PG_MBT_PASSWORD}"
-    echo "    mlflow_db:    mlflow_user / ${PG_MLFLOW_PASSWORD}"
-    echo "    airflow_db:   airflow_user / ${PG_AIRFLOW_PASSWORD}"
-    echo "    gitea_db:     gitea_user / ${PG_GITEA_PASSWORD}"
-    echo "    metabase_db:  metabase_user / ${PG_METABASE_PASSWORD}"
+    echo "    Service          Username             Password / Secret"
+    echo "    -------          --------             -----------------"
+    echo "    Airflow          ${AIRFLOW_ADMIN_USER}                ${AIRFLOW_ADMIN_PASSWORD}"
+    echo "    Gitea (admin)    ${GITEA_ADMIN_USER}            ${GITEA_ADMIN_PASSWORD}"
+    echo "    Gitea (DS)       ds-team              ds-team-password"
+    echo "    Gitea (DE)       de-team              de-team-password"
+    echo "    Woodpecker       (OAuth via Gitea - use any Gitea account)"
+    echo "    JupyterHub       admin                ${JUPYTERHUB_PASSWORD}"
+    echo "    Grafana          admin                ${GRAFANA_ADMIN_PASSWORD}"
+    echo "    Metabase         (first-time setup wizard on first access)"
+    echo "    MLflow           (no auth required)"
+    echo "    H2O Server       (no auth required)"
+    echo "    Zot Registry     (no auth required)"
+    echo "    Prometheus       (no auth required)"
+    echo ""
+    echo "    SeaweedFS S3     Access Key: ${S3_ACCESS_KEY}"
+    echo "                     Secret Key: ${S3_SECRET_KEY}"
+    echo ""
+    echo -e "  ${GREEN}PostgreSQL Databases (host: localhost:30432):${NC}"
+    echo ""
+    echo "    Database         Username             Password"
+    echo "    --------         --------             --------"
+    echo "    postgres         postgres             ${PG_ADMIN_PASSWORD}"
+    echo "    warehouse        mbt_user             ${PG_MBT_PASSWORD}"
+    echo "    mlflow_db        mlflow_user          ${PG_MLFLOW_PASSWORD}"
+    echo "    airflow_db       airflow_user         ${PG_AIRFLOW_PASSWORD}"
+    echo "    gitea_db         gitea_user           ${PG_GITEA_PASSWORD}"
+    echo "    metabase_db      metabase_user        ${PG_METABASE_PASSWORD}"
+    echo ""
+    echo -e "  ${GREEN}Gitea Repository:${NC}  de-team/ml-pipeline"
     echo ""
     echo -e "  ${GREEN}Kubernetes:${NC}"
     echo "    Provider:     ${K8S_PROVIDER}"

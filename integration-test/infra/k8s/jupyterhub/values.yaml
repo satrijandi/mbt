@@ -12,6 +12,8 @@ hub:
       password: "mbt-jupyter"
     JupyterHub:
       authenticator_class: dummy
+      tornado_settings:
+        xsrf_cookies: false
   resources:
     requests:
       memory: 256Mi
@@ -50,6 +52,8 @@ ingress:
     - jupyter.localhost
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/service.sticky.cookie: "true"
+    traefik.ingress.kubernetes.io/service.sticky.cookie.name: "jupyterhub-sticky"
 
 prePuller:
   hook:

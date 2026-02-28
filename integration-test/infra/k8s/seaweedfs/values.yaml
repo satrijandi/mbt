@@ -33,7 +33,13 @@ filer:
   s3:
     enabled: true
     port: 8333
-    enableAuth: false
+    enableAuth: true
+    existingConfigSecret: seaweedfs-s3-config
+    createBuckets:
+      - name: mbt-mlflow-artifacts
+        anonymousRead: false
+      - name: mbt-pipeline-artifacts
+        anonymousRead: false
   resources:
     requests:
       memory: 256Mi
