@@ -112,6 +112,10 @@ GRAFANA_ADMIN_PASSWORD="mbt-grafana"
 # Credentials - JupyterHub
 JUPYTERHUB_PASSWORD="mbt-jupyter"
 
+# Credentials - Metabase
+METABASE_ADMIN_EMAIL="admin@mbt.local"
+METABASE_ADMIN_PASSWORD="mbt-metabase"
+
 # Zot registry port (NodePort)
 ZOT_NODEPORT=30050
 ZOT_HOST="localhost:${ZOT_NODEPORT}"
@@ -861,6 +865,104 @@ phase_13_metabase() {
     # Metabase takes a long time to start (Java app, DB migration)
     wait_for_pod "$NS_MBT" "app.kubernetes.io/name=metabase" 300 || true
 
+    # --- Automated setup via API ---
+    log_info "Configuring Metabase via API..."
+    kubectl port-forward -n "$NS_MBT" svc/metabase 3030:3000 &
+    local pf_pid=$!
+    sleep 3
+
+    local mb="http://localhost:3030"
+
+    if ! wait_for_url "$mb/api/health" 60 5; then
+        log_warn "Metabase API not reachable, skipping automated setup"
+        cleanup_pf "$pf_pid"
+        return
+    fi
+    log_success "Metabase API is ready"
+
+    # Step 1: Create admin user via one-time setup endpoint
+    local setup_token
+    setup_token=$(curl -sf "$mb/api/session/properties" \
+        | jq -r '.["setup-token"] // empty' 2>/dev/null)
+
+    if [ -n "$setup_token" ]; then
+        log_info "Got setup token, creating admin user..."
+        if curl -sf -X POST "$mb/api/setup" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"token\": \"${setup_token}\",
+                \"user\": {
+                    \"email\": \"${METABASE_ADMIN_EMAIL}\",
+                    \"password\": \"${METABASE_ADMIN_PASSWORD}\",
+                    \"first_name\": \"MBT\",
+                    \"last_name\": \"Admin\"
+                },
+                \"prefs\": {
+                    \"site_name\": \"MBT Analytics\",
+                    \"site_locale\": \"en\"
+                }
+            }" > /dev/null 2>&1; then
+            log_success "Metabase admin user created"
+        else
+            log_warn "Metabase setup API call failed"
+            cleanup_pf "$pf_pid"
+            return
+        fi
+    else
+        log_info "Setup token absent — admin user already exists"
+    fi
+
+    # Step 2: Log in to get a session token
+    log_info "Logging into Metabase..."
+    local session_id
+    session_id=$(curl -sf -X POST "$mb/api/session" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"username\": \"${METABASE_ADMIN_EMAIL}\",
+            \"password\": \"${METABASE_ADMIN_PASSWORD}\"
+        }" | jq -r '.id // empty' 2>/dev/null)
+
+    if [ -z "$session_id" ]; then
+        log_warn "Failed to log into Metabase, skipping database setup"
+        cleanup_pf "$pf_pid"
+        return
+    fi
+    log_success "Metabase session obtained"
+
+    # Step 3: Add warehouse PostgreSQL as a data source (skip if already added)
+    local existing_dbs
+    existing_dbs=$(curl -sf "$mb/api/database" \
+        -H "X-Metabase-Session: $session_id" \
+        | jq -r '.data[].name // empty' 2>/dev/null)
+
+    if echo "$existing_dbs" | grep -q "^Warehouse$"; then
+        log_info "Warehouse database connection already exists"
+    else
+        log_info "Adding warehouse database connection..."
+        if curl -sf -X POST "$mb/api/database" \
+            -H "Content-Type: application/json" \
+            -H "X-Metabase-Session: $session_id" \
+            -d "{
+                \"engine\": \"postgres\",
+                \"name\": \"Warehouse\",
+                \"details\": {
+                    \"host\": \"postgres-postgresql.${NS_MBT}.svc.cluster.local\",
+                    \"port\": 5432,
+                    \"dbname\": \"warehouse\",
+                    \"user\": \"metabase_user\",
+                    \"password\": \"${PG_METABASE_PASSWORD}\"
+                },
+                \"auto_run_queries\": true,
+                \"is_full_sync\": true
+            }" > /dev/null 2>&1; then
+            log_success "Warehouse database added to Metabase"
+        else
+            log_warn "Failed to add warehouse database connection"
+        fi
+    fi
+
+    cleanup_pf "$pf_pid"
+
     log_success "Metabase deployed at http://metabase.localhost"
 }
 
@@ -1025,7 +1127,7 @@ phase_17_summary() {
     echo "    Woodpecker       (OAuth via Gitea - use any Gitea account)"
     echo "    JupyterHub       admin                ${JUPYTERHUB_PASSWORD}"
     echo "    Grafana          admin                ${GRAFANA_ADMIN_PASSWORD}"
-    echo "    Metabase         (first-time setup wizard on first access)"
+    echo "    Metabase         ${METABASE_ADMIN_EMAIL}      ${METABASE_ADMIN_PASSWORD}"
     echo "    MLflow           (no auth required)"
     echo "    H2O Server       (no auth required)"
     echo "    Zot Registry     (no auth required)"
