@@ -1,21 +1,78 @@
 #!/usr/bin/env bash
-# 01-setup-infra.sh - Deploy MBT integration test infrastructure on k3d
+# 01-setup-infra.sh - Deploy MBT integration test infrastructure
 #
-# Creates a k3d Kubernetes cluster with all services needed for the MBT
+# Supports two Kubernetes providers:
+#   - k3d:              Creates a dedicated k3d cluster (default if k3d is installed)
+#   - rancher-desktop:  Uses the existing Rancher Desktop k3s cluster
+#
+# Auto-detects the provider, or set MBT_K8S_PROVIDER=k3d|rancher-desktop to override.
+#
+# Creates a Kubernetes environment with all services needed for the MBT
 # integration test: PostgreSQL, SeaweedFS, MLflow, Gitea, Woodpecker CI,
 # Zot Registry, Airflow, H2O, JupyterHub, Metabase, Prometheus, Grafana.
 #
 # Usage:
-#   ./01-setup-infra.sh           # Full setup
-#   ./01-setup-infra.sh teardown  # Destroy cluster and clean up
+#   ./01-setup-infra.sh           # Full setup (auto-detect provider)
+#   ./01-setup-infra.sh teardown  # Destroy cluster / clean up resources
 #   ./01-setup-infra.sh status    # Health check all services
 #
-# Prerequisites: k3d (>=v5.3.0), helm, kubectl, docker, curl, jq
+# Prerequisites:
+#   k3d:              k3d (>=v5.3.0), helm, kubectl, docker, curl, jq
+#   rancher-desktop:  rdctl, helm, kubectl, docker, curl, jq
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="$SCRIPT_DIR/infra/k8s"
 MBT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# ============================================================
+# Provider Detection
+# ============================================================
+
+# Supported providers: k3d, rancher-desktop
+# Override with MBT_K8S_PROVIDER environment variable
+detect_provider() {
+    if [[ -n "${MBT_K8S_PROVIDER:-}" ]]; then
+        case "$MBT_K8S_PROVIDER" in
+            k3d|rancher-desktop) echo "$MBT_K8S_PROVIDER" ;;
+            *) echo ""; return 1 ;;
+        esac
+        return
+    fi
+
+    # Check current kubectl context first
+    local current_ctx
+    current_ctx=$(kubectl config current-context 2>/dev/null || echo "")
+    if [[ "$current_ctx" == "rancher-desktop" ]]; then
+        echo "rancher-desktop"
+        return
+    fi
+
+    # Fall back to binary detection (prefer k3d if both exist)
+    if command -v k3d &>/dev/null; then
+        echo "k3d"
+    elif command -v rdctl &>/dev/null; then
+        echo "rancher-desktop"
+    else
+        echo ""
+    fi
+}
+
+K8S_PROVIDER=$(detect_provider)
+
+if [[ -z "$K8S_PROVIDER" ]]; then
+    echo "ERROR: Could not detect Kubernetes provider."
+    echo "Install k3d or Rancher Desktop, or set MBT_K8S_PROVIDER=k3d|rancher-desktop"
+    exit 1
+fi
+
+# Helper: get the kubectl context name for the current provider
+kube_context() {
+    case "$K8S_PROVIDER" in
+        k3d) echo "k3d-${CLUSTER_NAME}" ;;
+        rancher-desktop) echo "rancher-desktop" ;;
+    esac
+}
 
 # ============================================================
 # Configuration
@@ -134,10 +191,23 @@ cleanup_pf() {
 # ============================================================
 
 phase_0_prerequisites() {
-    log_phase "Phase 0: Checking prerequisites"
+    log_phase "Phase 0: Checking prerequisites (provider: $K8S_PROVIDER)"
+
+    # Common tools required by all providers
+    local required_cmds=(kubectl helm docker curl jq)
+
+    # Provider-specific tools
+    case "$K8S_PROVIDER" in
+        k3d)
+            required_cmds+=(k3d)
+            ;;
+        rancher-desktop)
+            required_cmds+=(rdctl)
+            ;;
+    esac
 
     local missing=()
-    for cmd in k3d kubectl helm docker curl jq; do
+    for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -149,10 +219,25 @@ phase_0_prerequisites() {
         exit 1
     fi
 
-    # Check k3d version
-    local k3d_ver
-    k3d_ver=$(k3d version 2>/dev/null | head -1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-    log_info "k3d version: $k3d_ver"
+    # Provider-specific version/status checks
+    case "$K8S_PROVIDER" in
+        k3d)
+            local k3d_ver
+            k3d_ver=$(k3d version 2>/dev/null | head -1 | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+            log_info "k3d version: $k3d_ver"
+            ;;
+        rancher-desktop)
+            local rd_ver
+            rd_ver=$(rdctl version 2>/dev/null | jq -r '.version // "unknown"' 2>/dev/null || echo "unknown")
+            log_info "Rancher Desktop version: $rd_ver"
+
+            # Verify Rancher Desktop is running
+            if ! rdctl list-settings &>/dev/null; then
+                log_error "Rancher Desktop is not running. Start it before running this script."
+                exit 1
+            fi
+            ;;
+    esac
 
     # Check Docker daemon
     if ! docker info &>/dev/null; then
@@ -169,21 +254,31 @@ phase_0_prerequisites() {
     helm repo add apache-airflow https://airflow.apache.org 2>/dev/null || true
     helm repo add jupyterhub https://hub.jupyter.org/helm-chart/ 2>/dev/null || true
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
-    helm repo add grafana https://grafana.github.io/helm-charts 2>/dev/null || true
     helm repo add traefik https://traefik.github.io/charts 2>/dev/null || true
     helm repo add zotregistry https://zotregistry.dev/helm-charts/ 2>/dev/null || true
-    helm repo update
+    helm repo update || log_warn "Some Helm repos failed to update (may still work with cached index)"
 
     log_success "All prerequisites satisfied"
 }
 
 # ============================================================
-# Phase 1: k3d Cluster
+# Phase 1: Kubernetes Cluster
 # ============================================================
 
 phase_1_cluster() {
-    log_phase "Phase 1: Creating k3d cluster"
+    log_phase "Phase 1: Setting up Kubernetes cluster ($K8S_PROVIDER)"
 
+    case "$K8S_PROVIDER" in
+        k3d)
+            _phase_1_k3d
+            ;;
+        rancher-desktop)
+            _phase_1_rancher_desktop
+            ;;
+    esac
+}
+
+_phase_1_k3d() {
     # Check if cluster already exists
     if k3d cluster list -o json 2>/dev/null | jq -e ".[] | select(.name==\"$CLUSTER_NAME\")" &>/dev/null; then
         log_warn "Cluster '$CLUSTER_NAME' already exists, skipping creation"
@@ -236,6 +331,52 @@ EOF
         --set "ingressRoute.dashboard.enabled=false"
 
     log_success "k3d cluster '$CLUSTER_NAME' is ready"
+}
+
+_phase_1_rancher_desktop() {
+    # Switch to rancher-desktop context
+    log_info "Switching to rancher-desktop kubectl context..."
+    kubectl config use-context rancher-desktop 2>/dev/null \
+        || { log_error "kubectl context 'rancher-desktop' not found. Is Rancher Desktop running with Kubernetes enabled?"; exit 1; }
+
+    # Verify cluster is reachable
+    if ! kubectl cluster-info &>/dev/null; then
+        log_error "Cannot reach Rancher Desktop Kubernetes cluster. Ensure Kubernetes is enabled in Rancher Desktop settings."
+        exit 1
+    fi
+
+    # Wait for nodes
+    log_info "Waiting for cluster nodes to be ready..."
+    kubectl wait --for=condition=ready node --all --timeout=120s
+
+    # Configure containerd registry mirror for Zot (insecure localhost registry)
+    # Rancher Desktop's k3s reads registries.yaml from /etc/rancher/k3s/
+    log_info "Configuring containerd registry mirror for Zot..."
+    local registries_yaml="/etc/rancher/k3s/registries.yaml"
+    local registries_content
+    registries_content=$(cat <<'REGEOF'
+mirrors:
+  "zot-registry.mbt.svc.cluster.local:5000":
+    endpoint:
+      - "http://zot-registry.mbt.svc.cluster.local:5000"
+configs:
+  "zot-registry.mbt.svc.cluster.local:5000":
+    tls:
+      insecure_skip_verify: true
+REGEOF
+)
+
+    if rdctl shell test -f "$registries_yaml" 2>/dev/null; then
+        log_warn "Registries config already exists at $registries_yaml, skipping"
+    else
+        echo "$registries_content" | rdctl shell sudo tee "$registries_yaml" > /dev/null 2>&1 \
+            || log_warn "Could not write registries.yaml via rdctl. Images may need manual containerd config."
+    fi
+
+    # Rancher Desktop ships with Traefik built-in — no need to install via Helm
+    log_info "Using Rancher Desktop's built-in Traefik ingress controller"
+
+    log_success "Rancher Desktop cluster is ready"
 }
 
 # ============================================================
@@ -408,14 +549,37 @@ phase_6_build_images() {
     docker push "${ZOT_HOST}/mbt/mbt-runner:latest"
     log_success "MBT runner image pushed to Zot"
 
-    # Also import images into k3d so nodes can pull them
-    # (in case containerd mirror is not yet configured)
-    log_info "Importing images into k3d cluster..."
-    k3d image import \
-        "${ZOT_HOST}/mbt/mlflow:3.10.0" \
-        "${ZOT_HOST}/mbt/airflow:3.1.7" \
-        "${ZOT_HOST}/mbt/mbt-runner:latest" \
-        -c "$CLUSTER_NAME" 2>/dev/null || log_warn "k3d image import had issues, images may still work via Zot"
+    # Import images into cluster nodes (fallback in case containerd mirror is not yet configured)
+    local images=(
+        "${ZOT_HOST}/mbt/mlflow:3.10.0"
+        "${ZOT_HOST}/mbt/airflow:3.1.7"
+        "${ZOT_HOST}/mbt/mbt-runner:latest"
+    )
+
+    case "$K8S_PROVIDER" in
+        k3d)
+            log_info "Importing images into k3d cluster..."
+            k3d image import "${images[@]}" \
+                -c "$CLUSTER_NAME" 2>/dev/null \
+                || log_warn "k3d image import had issues, images may still work via Zot"
+            ;;
+        rancher-desktop)
+            log_info "Importing images into Rancher Desktop's k3s containerd..."
+            local import_ok=true
+            for img in "${images[@]}"; do
+                docker save "$img" | rdctl shell sudo ctr --address /run/k3s/containerd/containerd.sock \
+                    --namespace k8s.io images import - 2>/dev/null \
+                    || { import_ok=false; break; }
+            done
+            if ! $import_ok; then
+                log_warn "Image import via rdctl failed. Trying nerdctl..."
+                for img in "${images[@]}"; do
+                    docker save "$img" | nerdctl --namespace k8s.io load 2>/dev/null || true
+                done
+                log_warn "Images may still work via Zot registry pull"
+            fi
+            ;;
+    esac
 
     log_success "All custom images built and pushed"
 }
@@ -844,7 +1008,8 @@ phase_17_summary() {
     echo "    metabase_db:  metabase_user / ${PG_METABASE_PASSWORD}"
     echo ""
     echo -e "  ${GREEN}Kubernetes:${NC}"
-    echo "    Context:      k3d-${CLUSTER_NAME}"
+    echo "    Provider:     ${K8S_PROVIDER}"
+    echo "    Context:      $(kube_context)"
     echo "    Namespaces:   ${NS_MBT}, ${NS_PIPELINES}, ${NS_MONITORING}"
     echo "    Pipeline SA:  mbt-runner (in ${NS_PIPELINES})"
     echo "    MBT Runner:   ${ZOT_HOST}/mbt/mbt-runner:latest"
@@ -862,12 +1027,44 @@ phase_17_summary() {
 # ============================================================
 
 teardown() {
-    log_phase "Tearing down k3d cluster"
+    log_phase "Tearing down infrastructure ($K8S_PROVIDER)"
 
-    log_info "Deleting k3d cluster '$CLUSTER_NAME'..."
-    k3d cluster delete "$CLUSTER_NAME" 2>/dev/null || log_warn "Cluster may not exist"
+    case "$K8S_PROVIDER" in
+        k3d)
+            log_info "Deleting k3d cluster '$CLUSTER_NAME'..."
+            k3d cluster delete "$CLUSTER_NAME" 2>/dev/null || log_warn "Cluster may not exist"
+            log_success "Cluster '$CLUSTER_NAME' deleted"
+            ;;
+        rancher-desktop)
+            log_info "Cleaning up MBT resources from Rancher Desktop cluster..."
+            kubectl config use-context rancher-desktop 2>/dev/null || true
 
-    log_success "Cluster '$CLUSTER_NAME' deleted"
+            # Uninstall Helm releases
+            for release in prometheus; do
+                helm uninstall "$release" -n "$NS_MONITORING" 2>/dev/null || true
+            done
+            for release in postgres seaweedfs gitea woodpecker airflow jupyterhub zot-registry; do
+                helm uninstall "$release" -n "$NS_MBT" 2>/dev/null || true
+            done
+
+            # Delete custom deployments
+            for deploy in mlflow h2o metabase; do
+                kubectl delete deployment "$deploy" -n "$NS_MBT" --ignore-not-found=true 2>/dev/null || true
+            done
+
+            # Delete namespaces (this removes all remaining resources)
+            for ns in "$NS_MBT" "$NS_PIPELINES" "$NS_MONITORING"; do
+                kubectl delete namespace "$ns" --ignore-not-found=true 2>/dev/null || true
+            done
+
+            # Clean up cluster-scoped resources
+            kubectl delete clusterrole airflow-pod-operator --ignore-not-found=true 2>/dev/null || true
+            kubectl delete clusterrolebinding airflow-pod-operator-binding --ignore-not-found=true 2>/dev/null || true
+
+            log_success "MBT resources removed from Rancher Desktop cluster"
+            ;;
+    esac
+
     log_info "Note: Docker images built for Zot are still available locally."
     log_info "Run 'docker image prune' to clean up if needed."
 }
@@ -877,11 +1074,23 @@ teardown() {
 # ============================================================
 
 status() {
-    if ! k3d cluster list -o json 2>/dev/null | jq -e ".[] | select(.name==\"$CLUSTER_NAME\")" &>/dev/null; then
-        log_error "Cluster '$CLUSTER_NAME' does not exist"
-        exit 1
-    fi
-    k3d kubeconfig merge "$CLUSTER_NAME" --kubeconfig-switch-context 2>/dev/null
+    case "$K8S_PROVIDER" in
+        k3d)
+            if ! k3d cluster list -o json 2>/dev/null | jq -e ".[] | select(.name==\"$CLUSTER_NAME\")" &>/dev/null; then
+                log_error "Cluster '$CLUSTER_NAME' does not exist"
+                exit 1
+            fi
+            k3d kubeconfig merge "$CLUSTER_NAME" --kubeconfig-switch-context 2>/dev/null
+            ;;
+        rancher-desktop)
+            kubectl config use-context rancher-desktop 2>/dev/null \
+                || { log_error "Rancher Desktop context not found"; exit 1; }
+            if ! kubectl cluster-info &>/dev/null; then
+                log_error "Cannot reach Rancher Desktop cluster"
+                exit 1
+            fi
+            ;;
+    esac
     phase_17_summary
 }
 
@@ -891,7 +1100,7 @@ status() {
 
 main() {
     echo -e "${BLUE}================================================================${NC}"
-    echo -e "${BLUE}  MBT Integration Test - k3d Infrastructure Setup${NC}"
+    echo -e "${BLUE}  MBT Integration Test - Infrastructure Setup (${K8S_PROVIDER})${NC}"
     echo -e "${BLUE}================================================================${NC}"
     echo ""
 
