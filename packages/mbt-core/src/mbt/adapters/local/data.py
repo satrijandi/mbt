@@ -94,7 +94,7 @@ class LocalDatasetHandle:
                 column_sql = "*"
             return con.execute(
                 f"SELECT {column_sql} FROM read_parquet(?)", [str(path)]
-            ).arrow()
+            ).to_arrow_table()
         finally:
             con.close()
 
@@ -120,7 +120,7 @@ class LocalDatasetHandle:
                 n_rows[split] = int(count)
             schema = con.execute(
                 "SELECT * FROM read_parquet(?) LIMIT 0", [str(self.split_path("train"))]
-            ).arrow().schema
+            ).to_arrow_table().schema
             columns = {field.name: str(field.type) for field in schema}
 
             label_balance: dict[str, float] | None = None
@@ -205,6 +205,17 @@ class LocalDataAdapter:
     # -- materialization (TSD §13.2, §10.4) ----------------------------------
 
     def build_dataset(self, spec: DatasetSpec, ctx: DataBuildContext) -> LocalDatasetHandle:
+        # The data must still match the manifest pin: a drifted source under a
+        # pinned manifest is an error, not a silent rebuild (TSD §10.4 step 3).
+        if ctx.node.snapshot_id is not None:
+            current = self.snapshot_id(ctx.source, deep=ctx.deep_snapshot)
+            if current != ctx.node.snapshot_id:
+                raise AdapterError(
+                    f"source data changed under the pinned manifest: snapshot "
+                    f"{current} != pinned {ctx.node.snapshot_id}",
+                    resource=ctx.node.unique_id,
+                    hint="recompile to pin the new snapshot, or restore the data",
+                )
         files = [str(f) for f in self._matching_files(ctx.source)]
         output_dir = ctx.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)

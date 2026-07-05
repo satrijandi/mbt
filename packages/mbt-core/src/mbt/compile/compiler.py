@@ -148,6 +148,7 @@ def compile_project(
             generated_at=anchor_iso,  # == anchor by design (FR-COMP-04)
             anchor=anchor_iso,
             vars=_visible_vars(parsed, profiles, cli_vars),
+            deep_snapshot=options.deep_snapshot,
             target_config=profiles.raw_target,
             env_digest=digest,
             git=GitInfo.model_validate(collect_git_info(parsed.project_dir)),

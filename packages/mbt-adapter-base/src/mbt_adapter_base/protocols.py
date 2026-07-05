@@ -154,6 +154,10 @@ class TrainingAdapter(Protocol):
         slices: list[str] | None = None,
     ) -> MetricResults: ...
 
+    def predict(self, model: TrainedModel, data: DatasetHandle, split: str) -> pa.Table:
+        """The split's table plus a ``prediction`` column (hook metrics, v1 scoring)."""
+        ...
+
     def load(self, ref: ArtifactRef, store: ArtifactStore) -> TrainedModel: ...
 
     def export(
@@ -265,6 +269,9 @@ class DataBuildContext(Protocol):
 
     @property
     def sample_fraction(self) -> float: ...
+
+    @property
+    def deep_snapshot(self) -> bool: ...
 
     @property
     def output_dir(self) -> Path: ...

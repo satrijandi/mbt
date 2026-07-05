@@ -140,6 +140,8 @@ class TrainingJob(_InterchangeModel):
     target_name: str
     node: ManifestNode
     dataset: DatasetLocator
+    #: The dataset node's resolved windows (implicit validation carve, TSD §13.5).
+    dataset_windows: dict[str, Any] = Field(default_factory=dict)
     data: AdapterRef
     tracking: AdapterRef | None = None
     metric_specs: list[MetricSpec] = Field(default_factory=list)
@@ -150,6 +152,8 @@ class TrainingJob(_InterchangeModel):
     artifact_store: str = ""
     required_env: list[str] = Field(default_factory=list)  # names only, never values
     tracking_meta: dict[str, str] = Field(default_factory=dict)  # git/manifest metadata tags
+    #: Resolved non-secret vars (tainted values are never serialized into jobs).
+    vars: dict[str, Any] = Field(default_factory=dict)
 
 
 class TuningResult(_InterchangeModel):

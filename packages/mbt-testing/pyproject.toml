@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-testing"
+version = "0.1.0"
+description = "Fake, contract-conformant mbt adapters for testing mbt projects and mbt itself"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "mbt-core>=0.1.0,<0.2",
+]
+
+[project.entry-points."mbt.adapters"]
+fake = "mbt_testing.plugin:PLUGIN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_testing"]

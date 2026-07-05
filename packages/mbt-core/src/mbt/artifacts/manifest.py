@@ -42,6 +42,8 @@ class ManifestMetadata(BaseModel):
     generated_at: str  # volatile; equals anchor for fresh compiles
     anchor: str  # volatile (ADR-12)
     vars: dict[str, Any] = Field(default_factory=dict)  # resolved, secrets excluded
+    #: Whether snapshots were pinned with content hashing (--deep-snapshot).
+    deep_snapshot: bool = False
     #: The selected target's config, UNRENDERED: env_var() expressions stay
     #: as written so secrets never enter the manifest (TSD §18, ADR-5).
     target_config: dict[str, Any] = Field(default_factory=dict)

@@ -15,6 +15,7 @@ members = [
     "mbt-lightgbm",
     "mbt-mlflow",
     "mbt-optuna",
+    "mbt-testing",
     "mbt-workspace",
     "mbt-xgboost",
 ]
@@ -1819,6 +1820,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "mbt-testing"
+version = "0.1.0"
+source = { editable = "packages/mbt-testing" }
+dependencies = [
+    { name = "mbt-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mbt-core", editable = "packages/mbt-core" }]
+
+[[package]]
 name = "mbt-workspace"
 version = "0.1.0"
 source = { virtual = "." }
@@ -1832,6 +1844,7 @@ dev = [
     { name = "mbt-lightgbm" },
     { name = "mbt-mlflow" },
     { name = "mbt-optuna" },
+    { name = "mbt-testing" },
     { name = "mbt-xgboost" },
     { name = "mkdocs-material" },
     { name = "mypy" },
@@ -1854,6 +1867,7 @@ dev = [
     { name = "mbt-lightgbm", editable = "packages/mbt-lightgbm" },
     { name = "mbt-mlflow", editable = "packages/mbt-mlflow" },
     { name = "mbt-optuna", editable = "packages/mbt-optuna" },
+    { name = "mbt-testing", editable = "packages/mbt-testing" },
     { name = "mbt-xgboost", editable = "packages/mbt-xgboost" },
     { name = "mkdocs-material", specifier = ">=9.5" },
     { name = "mypy", specifier = ">=1.10" },

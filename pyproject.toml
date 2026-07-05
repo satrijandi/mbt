@@ -13,6 +13,7 @@ members = ["packages/*"]
 [tool.uv.sources]
 mbt-adapter-base = { workspace = true }
 mbt-core = { workspace = true }
+mbt-testing = { workspace = true }
 mbt-xgboost = { workspace = true }
 mbt-mlflow = { workspace = true }
 mbt-optuna = { workspace = true }
@@ -22,6 +23,7 @@ mbt-lightgbm = { workspace = true }
 dev = [
     "mbt-core",
     "mbt-adapter-base[compliance,metrics]",
+    "mbt-testing",
     "mbt-xgboost",
     "mbt-mlflow",
     "mbt-optuna",

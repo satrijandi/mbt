@@ -1,0 +1,486 @@
+"""The training-job entrypoint: ``python -m mbt.execute.job <job.json>`` (TSD §10.3).
+
+Everything framework- or data-heavy happens here, inside a subprocess (or a
+remote job in v1): hooks, AUTO resolution, tuning, training, metric
+computation for challenger *and* champion, artifact export, tracking logging.
+No registry access, no gate decisions - core compares, jobs compute.
+
+The result is written to ``<job.json>.result.json``; stdout carries the
+JSON event stream the coordinator forwards.
+"""
+
+import json
+import os
+import sys
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import jinja2
+import pyarrow as pa
+
+from mbt.adapters.registry import get_registry
+from mbt.contracts import (
+    AUTO,
+    AdapterRef,
+    DatasetProfile,
+    HookContext,
+    JobResult,
+    MetricResults,
+    MetricSpec,
+    ModelSpec,
+    RunContext,
+    TrainingJob,
+    TuningResult,
+)
+from mbt.events import EventBus, JsonLinesSink, get_bus, set_bus
+from mbt.events.models import AutoResolved, LogMessage
+from mbt.exceptions import AdapterError, ConfigError, MbtError
+from mbt.execute.handles import TransformedDatasetHandle
+from mbt.quality.hooks import ModelHooks, load_hooks
+from mbt.runtime import normalized_adapter_config
+from mbt.secrets import taint
+from mbt.storage import artifact_store_for
+from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+#: Fraction of the train window carved as implicit validation (TSD §13.5).
+_IMPLICIT_VALIDATION_FRACTION = 0.2
+
+
+def _render_adapter_ref(ref: AdapterRef, job_vars: dict[str, Any]) -> AdapterRef:
+    """Re-render env_var()/var() in an unrendered adapter config (TSD §18)."""
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)  # noqa: S701
+
+    def env_var(name: str, default: str | None = None) -> str:
+        value = os.environ.get(name)
+        if value is None:
+            if default is None:
+                raise ConfigError(
+                    f"environment variable {name!r} required by the job is not set",
+                    hint="the job re-resolves secrets from its own environment (TSD §18)",
+                )
+            return default
+        return taint(value)
+
+    def var(name: str, default: Any = None) -> Any:
+        return job_vars.get(name, default)
+
+    def render(value: Any) -> Any:
+        if isinstance(value, str) and ("{{" in value or "{%" in value):
+            return env.from_string(value).render(env_var=env_var, var=var)
+        if isinstance(value, dict):
+            return {k: render(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [render(v) for v in value]
+        return value
+
+    return AdapterRef(adapter=ref.adapter, config=render(ref.config))
+
+
+@dataclass
+class _JobRuntime:
+    job: TrainingJob
+    spec: ModelSpec
+    adapter: Any
+    handle: TransformedDatasetHandle
+    base_profile: DatasetProfile
+    hooks: ModelHooks | None
+    builtin_specs: list[MetricSpec]
+    hook_specs: list[MetricSpec]
+    ctx: RunContext
+    store: Any
+
+
+def run_job(job: TrainingJob) -> JobResult:
+    """Execute one training/evaluation job; never raises (returns errors)."""
+    tracking = None
+    run_handle = None
+    try:
+        runtime = _prepare(job)
+        if job.tracking is not None and job.mode == "train":
+            tracking = _tracking_adapter(job)
+            run_handle = tracking.start_run(job.node, dict(job.tracking_meta))
+
+        if job.mode == "evaluate":
+            return _run_evaluate(runtime)
+
+        result = _run_train(runtime, tracking, run_handle)
+        if tracking is not None and run_handle is not None:
+            tracking.end_run(run_handle, "FINISHED")
+        return result
+    except MbtError as exc:
+        _best_effort_fail(tracking, run_handle)
+        return JobResult(status="error", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - the job boundary reports, never crashes
+        _best_effort_fail(tracking, run_handle)
+        tail = traceback.format_exc(limit=8)
+        return JobResult(status="error", error=f"{exc!r}\n{tail}")
+
+
+def _tracking_adapter(job: TrainingJob) -> Any:
+    assert job.tracking is not None
+    rendered = _render_adapter_ref(job.tracking, _job_vars(job))
+    config = normalized_adapter_config(rendered, Path(job.project_dir))
+    return get_registry().component("tracking", rendered.adapter, config)
+
+
+def _job_vars(job: TrainingJob) -> dict[str, Any]:
+    return dict(job.vars)
+
+
+def _prepare(job: TrainingJob) -> _JobRuntime:
+    registry = get_registry()
+    spec = ModelSpec.model_validate(job.node.config)
+
+    data_ref = _render_adapter_ref(job.data, _job_vars(job))
+    data_adapter = registry.component(
+        "data", data_ref.adapter, normalized_adapter_config(data_ref, Path(job.project_dir))
+    )
+    base_handle = data_adapter.from_locator(job.dataset)
+    base_profile = base_handle.profile()
+
+    plugin = registry.get(spec.adapter)
+    if plugin.training is None:
+        raise AdapterError(f"adapter {spec.adapter!r} provides no training adapter")
+    adapter = plugin.training({})
+
+    # Run-time task validation now that the dataset profile exists (TSD §5.6).
+    from mbt.config.tasks import get_task_schema
+
+    issues = get_task_schema(spec.task).validate_dataset(spec, base_profile)
+    errors = [i for i in issues if i.severity == "error"]
+    for issue in issues:
+        if issue.severity == "warning":
+            get_bus().emit(
+                LogMessage(level="warn", unique_id=job.node.unique_id, message=issue.message)
+            )
+    if errors:
+        raise ConfigError(
+            "; ".join(i.message for i in errors),
+            resource=job.node.unique_id,
+            hint=errors[0].hint,
+        )
+
+    hooks: ModelHooks | None = None
+    if job.node.hooks_path is not None:
+        hooks = load_hooks(Path(job.project_dir), job.node.hooks_path)
+
+    ctx = RunContext(
+        run_id=job.run_id,
+        unique_id=job.node.unique_id,
+        seed=spec.seed,
+        target_name=job.target_name,
+        project_dir=job.project_dir,
+        vars=_job_vars(job),
+        events=get_bus(),
+    )
+
+    def hook_ctx(split: str) -> HookContext:
+        return HookContext(spec=spec, profile=base_profile, split=split, logger=get_bus())
+
+    time_column = getattr(base_handle, "time_column", None)
+    handle = TransformedDatasetHandle(base_handle, spec, hooks, hook_ctx, time_column)
+
+    return _JobRuntime(
+        job=job,
+        spec=spec,
+        adapter=adapter,
+        handle=handle,
+        base_profile=base_profile,
+        hooks=hooks,
+        builtin_specs=[m for m in job.metric_specs if m.kind == "builtin"],
+        hook_specs=[m for m in job.metric_specs if m.kind == "hook"],
+        ctx=ctx,
+        store=artifact_store_for(job.artifact_store, run_prefix=_store_prefix(job)),
+    )
+
+
+def _store_prefix(job: TrainingJob) -> str:
+    return f"{job.node.name}/{job.run_id}"
+
+
+# -- metric computation ---------------------------------------------------------
+
+
+def _metrics_for(
+    runtime: _JobRuntime, model: Any, split: str, *, with_slices: bool
+) -> MetricResults:
+    """Builtin metrics via the adapter, hook metrics via predict + hooks."""
+    slices = runtime.spec.evaluation.slices if with_slices else []
+    results = runtime.adapter.evaluate(
+        model, runtime.handle, split, runtime.builtin_specs, slices=slices or None
+    )
+    if runtime.hook_specs:
+        if runtime.hooks is None or not runtime.hooks.has_custom_metrics:
+            raise ConfigError(
+                "hook metrics declared but hooks.py exposes no custom_metrics",
+                resource=runtime.job.node.unique_id,
+            )
+        predictions: pa.Table = runtime.adapter.predict(model, runtime.handle, split)
+        hook_ctx = HookContext(
+            spec=runtime.spec, profile=runtime.base_profile, split=split, logger=get_bus()
+        )
+        computed = runtime.hooks.custom_metrics(predictions, hook_ctx)
+        missing = [m.name for m in runtime.hook_specs if m.name not in computed]
+        if missing:
+            raise ConfigError(
+                f"hooks custom_metrics did not return declared metric(s): {', '.join(missing)}",
+                resource=runtime.job.node.unique_id,
+            )
+        merged = dict(results.metrics)
+        merged.update({m.name: computed[m.name] for m in runtime.hook_specs})
+        results = MetricResults(metrics=merged, slices=results.slices)
+    return results
+
+
+# -- tuning (TSD §13.5, ADR-8) ----------------------------------------------------
+
+
+def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
+    """A handle whose train/validation splits tuning may see; test never (ADR-8).
+
+    Returns None when the dataset already declares a validation split.
+    """
+    base = runtime.handle
+    if "validation" in base.splits():
+        return None
+
+    job = runtime.job
+    spec = runtime.spec
+    raw_train = base._base.read("train")  # noqa: SLF001 - carve needs pre-transform rows
+    time_column = getattr(base._base, "time_column", None)  # noqa: SLF001
+    windows = job.dataset_windows.get("windows", job.dataset_windows)
+
+    if time_column and "train" in windows:
+        from datetime import datetime, timedelta
+
+        start = datetime.fromisoformat(str(windows["train"][0]).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(windows["train"][1]).replace("Z", "+00:00"))
+        boundary = (
+            start + (end - start) * (1 - _IMPLICIT_VALIDATION_FRACTION)
+        ).replace(tzinfo=None)
+        column = raw_train.column(time_column).to_pylist()
+
+        def _naive(value: Any) -> Any:
+            if isinstance(value, datetime):
+                return value.replace(tzinfo=None)
+            if hasattr(value, "isoformat") and not isinstance(value, datetime):  # date
+                return datetime(value.year, value.month, value.day)
+            return value
+
+        fit_idx = [i for i, v in enumerate(column) if _naive(v) < boundary]
+        val_idx = [i for i, v in enumerate(column) if _naive(v) >= boundary]
+        _ = timedelta  # keep import local and explicit
+    else:
+        import numpy as np
+
+        rng = np.random.RandomState(spec.seed + 2)
+        permutation = rng.permutation(raw_train.num_rows)
+        cut = int(raw_train.num_rows * (1 - _IMPLICIT_VALIDATION_FRACTION))
+        fit_idx = sorted(int(i) for i in permutation[:cut])
+        val_idx = sorted(int(i) for i in permutation[cut:])
+
+    if not fit_idx or not val_idx:
+        raise ConfigError(
+            "implicit validation carve produced an empty split",
+            resource=job.node.unique_id,
+            hint="declare an explicit validation split in the dataset",
+        )
+    carved = InMemoryDatasetHandle(
+        {
+            "train": raw_train.take(fit_idx),
+            "validation": raw_train.take(val_idx),
+        },
+        snapshot_id=base.snapshot_id,
+        label_column=spec.target,
+        time_column=time_column,
+    )
+    hook_ctx = (
+        lambda split: HookContext(
+            spec=spec, profile=runtime.base_profile, split=split, logger=get_bus()
+        )
+    )
+    return TransformedDatasetHandle(carved, spec, runtime.hooks, hook_ctx, time_column)
+
+
+def _run_tuning(runtime: _JobRuntime, spec: ModelSpec) -> tuple[ModelSpec, TuningResult | None]:
+    tuning = spec.tuning
+    if tuning is None:
+        return spec, None
+    job = runtime.job
+    if job.tuning_engine is None:
+        raise ConfigError(
+            f"model declares tuning but no tuning engine was provided for "
+            f"{tuning.engine!r}",
+            resource=job.node.unique_id,
+        )
+    engine_ref = _render_adapter_ref(job.tuning_engine, _job_vars(job))
+    engine = get_registry().component("tuning", engine_ref.adapter, engine_ref.config)
+
+    tune_handle = _carve_validation(runtime) or runtime.handle
+    explicit_validation = "validation" in runtime.handle.splits()
+
+    objective_spec = next(
+        (m for m in [*runtime.builtin_specs, *runtime.hook_specs]
+         if m.name == tuning.objective.metric),
+        None,
+    )
+    if objective_spec is None:
+        raise ConfigError(
+            f"tuning objective {tuning.objective.metric!r} is not a resolved metric",
+            resource=job.node.unique_id,
+        )
+
+    tune_runtime = _JobRuntime(**{**runtime.__dict__, "handle": tune_handle})
+
+    def objective(trial_params: dict[str, Any]) -> float:
+        trial_spec = spec.model_copy(
+            update={"hyperparameters": {**spec.hyperparameters, **trial_params}}
+        )
+        model = runtime.adapter.train(trial_spec, tune_handle, runtime.ctx)
+        results = _metrics_for(tune_runtime, model, "validation", with_slices=False)
+        return results.metrics[tuning.objective.metric]
+
+    n_trials = tuning.n_trials
+    if job.tuning_cap is not None:
+        n_trials = min(n_trials, job.tuning_cap)
+        if n_trials < tuning.n_trials:
+            get_bus().emit(
+                LogMessage(
+                    unique_id=job.node.unique_id,
+                    message=(
+                        f"tuning capped at {n_trials} trial(s) by the target's "
+                        f"max_tuning_trials (requested {tuning.n_trials}) (FR-TUNE-04)"
+                    ),
+                )
+            )
+    result = engine.tune(tuning, objective, n_trials=n_trials, seed=spec.seed + 1)
+
+    # Final fit reabsorbs an *implicit* carve; an explicit validation split
+    # stays held out because the user declared it (TSD §10.5 step 6).
+    _ = explicit_validation
+    tuned = spec.model_copy(
+        update={"hyperparameters": {**spec.hyperparameters, **result.best_params}}
+    )
+    return tuned, result
+
+
+# -- main paths -------------------------------------------------------------------
+
+
+def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResult:
+    job = runtime.job
+    bus = get_bus()
+
+    # 1. AUTO resolution from the dataset profile (FR-RES-10)
+    spec = runtime.adapter.resolve_auto(runtime.spec, runtime.base_profile)
+    resolved_auto = {
+        key: spec.hyperparameters[key]
+        for key, value in runtime.spec.hyperparameters.items()
+        if value == AUTO
+    }
+    leftover = [k for k, v in spec.hyperparameters.items() if v == AUTO]
+    if leftover:
+        raise AdapterError(
+            f"adapter left AUTO sentinels unresolved: {', '.join(leftover)}",
+            resource=job.node.unique_id,
+        )
+    for key, value in resolved_auto.items():
+        bus.emit(AutoResolved(unique_id=job.node.unique_id, param=key, value=str(value)))
+
+    # 2. tuning (never sees the test split, ADR-8)
+    spec, tuning_result = _run_tuning(runtime, spec)
+
+    # 3. final fit on the declared train window
+    model = runtime.adapter.train(spec, runtime.handle, runtime.ctx)
+
+    # 4. evaluate challenger and (if provided) champion on the SAME test split
+    challenger = _metrics_for(runtime, model, "test", with_slices=True)
+    champion_metrics: MetricResults | None = None
+    if job.champion is not None:
+        champion_model = runtime.adapter.load(job.champion, runtime.store)
+        champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
+
+    # 5. export the artifact
+    artifact = runtime.adapter.export(model, "native", runtime.store)
+
+    # 6. tracking: params, metrics, artifacts, tuning history
+    tracking_run_id: str | None = None
+    if tracking is not None and run_handle is not None:
+        tracking_run_id = run_handle.run_id
+        params = {k: str(v) for k, v in spec.hyperparameters.items()}
+        params["seed"] = str(spec.seed)
+        tracking.log(
+            run_handle,
+            params=params,
+            metrics=dict(challenger.metrics),
+            artifacts=[artifact],
+        )
+        if tuning_result is not None:
+            tracking.log(
+                run_handle,
+                metrics={"tuning.best_value": tuning_result.best_value},
+                tags={
+                    "mbt.tuning.n_trials": str(tuning_result.n_trials),
+                    "mbt.tuning.best_params": json.dumps(tuning_result.best_params),
+                },
+            )
+
+    return JobResult(
+        status="success",
+        metrics=challenger,
+        champion_metrics=champion_metrics,
+        resolved_auto=resolved_auto,
+        tuning=tuning_result,
+        artifact=artifact,
+        tracking_run_id=tracking_run_id,
+    )
+
+
+def _run_evaluate(runtime: _JobRuntime) -> JobResult:
+    job = runtime.job
+    if job.artifact is None:
+        raise ConfigError(
+            "evaluate mode requires an artifact reference", resource=job.node.unique_id
+        )
+    model = runtime.adapter.load(job.artifact, runtime.store)
+    results = _metrics_for(runtime, model, "test", with_slices=True)
+    champion_metrics: MetricResults | None = None
+    if job.champion is not None:
+        champion_model = runtime.adapter.load(job.champion, runtime.store)
+        champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
+    return JobResult(
+        status="success",
+        metrics=results,
+        champion_metrics=champion_metrics,
+        artifact=job.artifact,
+    )
+
+
+def _best_effort_fail(tracking: Any, run_handle: Any) -> None:
+    if tracking is not None and run_handle is not None:
+        try:
+            tracking.end_run(run_handle, "FAILED")
+        except Exception:  # noqa: BLE001, S110 - already failing
+            pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = argv if argv is not None else sys.argv[1:]
+    if len(args) != 1:
+        sys.stderr.write("usage: python -m mbt.execute.job <job.json>\n")
+        return 2
+    job_path = Path(args[0])
+    set_bus(EventBus(sinks=[JsonLinesSink(sys.stdout)]))
+    job = TrainingJob.model_validate_json(job_path.read_text())
+    get_bus().run_id = job.run_id
+    result = run_job(job)
+    from mbt.adapters.local.compute import result_path_for
+
+    result_path_for(job_path).write_text(result.model_dump_json())
+    return 0 if result.status == "success" else 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

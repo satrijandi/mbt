@@ -7,7 +7,6 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from fake_adapters import FAKE_PLUGIN
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.secrets import clear_taints
@@ -42,9 +41,9 @@ def _clean_secrets() -> None:
 
 @pytest.fixture()
 def fake_registry() -> AdapterRegistry:
-    registry = AdapterRegistry()
-    registry.register(FAKE_PLUGIN)
-    return registry
+    # The 'fake' plugin comes from the mbt-testing package via entry points,
+    # so it is also discoverable inside training-job subprocesses.
+    return AdapterRegistry()
 
 
 def write(path: Path, content: str) -> Path:
@@ -126,14 +125,16 @@ def demo_project(tmp_path: Path) -> Path:
           outputs:
             dev:
               data: {adapter: local, config: {root: .}}
-              tracking: {adapter: fake_tracking}
-              registry: {adapter: fake_registry}
+              tracking: {adapter: fake, config: {root: ./target/fake_tracking}}
+              registry: {adapter: fake, config: {root: ./target/fake_registry}}
+              compute: {adapter: fake}
               artifact_store: file://./target/artifacts
               vars: {sample_fraction: 1.0}
             prod:
               data: {adapter: local, config: {root: .}}
-              tracking: {adapter: fake_tracking}
-              registry: {adapter: fake_registry}
+              tracking: {adapter: fake, config: {root: ./target/fake_tracking}}
+              registry: {adapter: fake, config: {root: ./target/fake_registry}}
+              compute: {adapter: fake}
               artifact_store: file://./target/artifacts
               threads: 4
               vars: {sample_fraction: 1.0}
