@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-optuna"
+version = "0.1.0"
+description = "Optuna tuning engine for mbt"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "mbt-adapter-base>=0.1.0,<0.2",
+    "optuna>=3.6",
+]
+
+[project.entry-points."mbt.adapters"]
+optuna = "mbt_optuna.plugin:PLUGIN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_optuna"]

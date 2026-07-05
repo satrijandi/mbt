@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-adapter-base"
+version = "0.1.0"
+description = "mbt adapter contracts, interchange types, and the adapter compliance suite"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "pydantic>=2.7",
+    "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+# Shared metric computation helpers for tabular training adapters.
+metrics = [
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+]
+# The adapter compliance test suite (pytest base classes).
+compliance = [
+    "pytest>=8.0",
+    "numpy>=1.26",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_adapter_base"]

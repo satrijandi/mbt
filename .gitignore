@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.python-version.local
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# mbt project artifacts (demo/e2e runs)
+target/
+mlruns/
+mlflow.db
+*.duckdb
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

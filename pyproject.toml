@@ -1,0 +1,109 @@
+[project]
+name = "mbt-workspace"
+version = "0.1.0"
+description = "Workspace root for the mbt monorepo (not published)"
+requires-python = ">=3.11"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+mbt-adapter-base = { workspace = true }
+mbt-core = { workspace = true }
+mbt-xgboost = { workspace = true }
+mbt-mlflow = { workspace = true }
+mbt-optuna = { workspace = true }
+mbt-lightgbm = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "mbt-core",
+    "mbt-adapter-base[compliance,metrics]",
+    "mbt-xgboost",
+    "mbt-mlflow",
+    "mbt-optuna",
+    "mbt-lightgbm",
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "hypothesis>=6.100",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "yamllint>=1.35",
+    "pre-commit>=3.7",
+    "jsonschema>=4.22",
+    "types-PyYAML",
+    "mkdocs-material>=9.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["packages/mbt-core/src", "packages/mbt-adapter-base/src"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle / pyflakes
+    "I",                # isort
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "C4",               # comprehensions
+    "SIM",              # simplify
+    "RUF",              # ruff-specific
+    "PL",               # pylint subset
+    "T20",              # no stray prints (CLI uses rich/typer echo)
+]
+ignore = [
+    "PLR0913",  # many arguments: adapter contracts are wide by design
+    "PLR2004",  # magic values in tests and thresholds
+    "PLR0912",  # complex branch logic in parser/scheduler is explicit by design
+    "PLR0915",
+    "PLR0911",
+    "SIM108",   # ternary is not always clearer
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["T20", "PLC1901"]
+"examples/**" = ["T20"]
+"scripts/**" = ["T20"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = [
+    "duckdb.*",
+    "networkx.*",
+    "pyarrow.*",
+    "xgboost.*",
+    "lightgbm.*",
+    "mlflow.*",
+    "optuna.*",
+    "sklearn.*",
+    "jsonschema.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/mbt-core/tests",
+    "packages/mbt-adapter-base/tests",
+    "packages/mbt-xgboost/tests",
+    "packages/mbt-mlflow/tests",
+    "packages/mbt-optuna/tests",
+    "packages/mbt-lightgbm/tests",
+    "tests",
+]
+addopts = "-q --strict-markers"
+markers = [
+    "e2e: end-to-end tests exercising the full CLI loop (slower)",
+    "perf: performance budget tests (NFR-03)",
+]
+timeout = 600

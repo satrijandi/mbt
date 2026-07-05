@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-xgboost"
+version = "0.1.0"
+description = "XGBoost training adapter for mbt"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
+    "xgboost>=2.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+onnx = ["onnxmltools>=1.12", "onnx>=1.15"]
+
+[project.entry-points."mbt.adapters"]
+xgboost = "mbt_xgboost.plugin:PLUGIN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_xgboost"]

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-lightgbm"
+version = "0.1.0"
+description = "LightGBM training adapter for mbt (the extensibility proof)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
+    "lightgbm>=4.0",
+    "numpy>=1.26",
+]
+
+[project.entry-points."mbt.adapters"]
+lightgbm = "mbt_lightgbm.plugin:PLUGIN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_lightgbm"]
