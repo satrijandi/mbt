@@ -45,6 +45,7 @@ from mbt.quality.python_tests import PythonTestFile, discover_python_tests
 from mbt.utils import did_you_mean
 
 _REF_RE = re.compile(r"^\s*ref\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\)\s*$")
+_SOURCE_RE = re.compile(r"^\s*source\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][^'\"]+['\"]\s*\)\s*$")
 
 #: Root-level resource files picked up by convention (plus configured paths).
 _ROOT_FILES = (
@@ -673,6 +674,7 @@ def _link_and_check(
                 resource=dataset.unique_id,
                 hint="datasets read from source() tables in v0",
             )
+        _check_dataset_source_syntax(dataset, report)
         dataset.depends_on = sorted(set(deps))
 
     for model in models.values():
@@ -709,6 +711,29 @@ def _link_and_check(
             else:
                 deps.append(resource.unique_id)
         exposure.depends_on = sorted(set(deps))
+
+
+def _check_dataset_source_syntax(dataset: ParsedResource, report: ParseReport) -> None:
+    """Dataset table references must be source() calls, not bare names."""
+    spec = dataset.spec
+    assert isinstance(spec, DatasetSpec)
+    entries: list[tuple[str, str]] = []
+    if spec.source is not None:
+        entries.append(("/source", spec.source))
+    if spec.inputs is not None:
+        entries.append(("/inputs/label", spec.inputs.label))
+        entries.extend(
+            (f"/inputs/features/{i}", value) for i, value in enumerate(spec.inputs.features)
+        )
+    for field_path, value in entries:
+        if not _SOURCE_RE.match(value):
+            report.error(
+                f"expected a source() reference, got {value!r}",
+                file=dataset.path,
+                resource=dataset.unique_id,
+                field_path=field_path,
+                hint="e.g. source('lakehouse', 'subscribers')",
+            )
 
 
 def _check_model_dataset_edge(

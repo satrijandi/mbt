@@ -52,6 +52,9 @@ sources:
 
 ## datasets/*.yml
 
+Data comes from exactly one of ``source`` (a single table) or ``inputs``
+(feature tables joined onto a label table):
+
 ```yaml
 datasets:
   - name: churn_training_set
@@ -83,6 +86,63 @@ sugar for `"-28d:now"`.
 
 **Random splits:** `strategy: random` uses fractions (`train: "0.8"`),
 requires `seed`, and supports `stratify_by: <column>`.
+
+### Multi-table datasets and sampling keys
+
+```yaml
+datasets:
+  - name: churn_training_set
+    inputs:
+      label: source('snowflake', 'churn_labels')      # the spine: defines examples
+      features:
+        - source('snowflake', 'customer_features')
+        - source('snowflake', 'usage_features')
+      join_key: [customer_id, snapshot_date]
+      join: left                                       # default; or inner
+    label:
+      column: churned_90d
+    sample_key: [customer_id]                          # stable row identity
+    split: {strategy: temporal, time_column: snapshot_date,
+            train: "-180d:-28d", test: "-28d:now"}
+```
+
+- Feature tables LEFT JOIN onto the label table by `join_key`; examples with
+  missing features arrive with NULLs (tree adapters handle them natively).
+  Column names must be unique across tables apart from the join key(s).
+- Every referenced table is a DAG edge; the dataset's pinned snapshot
+  combines all of them, so any input changing marks it `state:modified`.
+- `sample_key` (defaults to the join key) drives deterministic sampling and
+  seeded random splits: rows are kept when
+  `hash(key) % 1e6 < sample_fraction * 1e6`, pushed down into the source
+  query. Same fraction -> same rows; smaller fractions are subsets of
+  larger ones. Strongly recommended on wide tables.
+
+### Warehouse sources (Snowflake)
+
+```yaml
+# profiles.yml
+data:
+  adapter: snowflake
+  config:
+    account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+    user: "{{ env_var('SNOWFLAKE_USER') }}"
+    password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+    warehouse: ML_WH
+    database: ANALYTICS
+    schema: GOLD
+
+# sources.yml - warehouse tables use identifier:, not path:
+sources:
+  - name: snowflake
+    tables:
+      - name: churn_labels
+        identifier: GOLD.CHURN_LABELS
+```
+
+Snapshots pin `SYSTEM$LAST_CHANGE_COMMIT_TIME` per table at compile
+(`--deep-snapshot`: `HASH_AGG(*)` content fingerprints); rows stream back
+as Arrow batches into the standard local materialization, so training jobs
+never need warehouse credentials. See `packages/mbt-snowflake/README.md`.
 
 ## models/*.yml
 

@@ -103,6 +103,7 @@ determinism tiers per adapter otherwise).
 | `packages/mbt-xgboost` | XGBoost training adapter (exact determinism tier, ONNX extra) |
 | `packages/mbt-lightgbm` | LightGBM adapter - built against public contracts only (the extensibility proof) |
 | `packages/mbt-mlflow` | MLflow tracking + registry adapters |
+| `packages/mbt-snowflake` | Snowflake data adapter: warehouse-native datasets with push-down sampling |
 | `packages/mbt-optuna` | Optuna tuning engine (seeded TPE, per-target trial caps) |
 | `packages/mbt-testing` | Fake adapters for testing mbt projects without frameworks |
 | `examples/churn_demo` | The demo project used by golden and E2E tests |

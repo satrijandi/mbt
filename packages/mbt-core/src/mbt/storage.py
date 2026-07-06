@@ -61,7 +61,7 @@ def read_uri_text(uri_or_path: str) -> str:
     """Read text from file://, s3://, or a bare filesystem path (FR-STATE-01)."""
     if uri_or_path.startswith("s3://"):
         try:
-            import boto3  # type: ignore[import-not-found]
+            import boto3
         except ImportError as exc:  # pragma: no cover - env dependent
             raise StateError(
                 "reading s3:// URIs requires the s3 extra",

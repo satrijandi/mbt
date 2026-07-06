@@ -256,7 +256,15 @@ class DataBuildContext(Protocol):
     def node(self) -> ManifestNode: ...
 
     @property
-    def source(self) -> SourceTableLike: ...
+    def source(self) -> SourceTableLike:
+        """The spine table: the single source, or the label table for
+        multi-table ``inputs`` datasets."""
+        ...
+
+    @property
+    def source_tables(self) -> dict[str, SourceTableLike]:
+        """Every source table by unique_id (spine + feature tables)."""
+        ...
 
     @property
     def resolved_windows(self) -> dict[str, tuple[str, str]]: ...

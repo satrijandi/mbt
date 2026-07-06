@@ -16,6 +16,7 @@ mbt-core = { workspace = true }
 mbt-testing = { workspace = true }
 mbt-xgboost = { workspace = true }
 mbt-mlflow = { workspace = true }
+mbt-snowflake = { workspace = true }
 mbt-optuna = { workspace = true }
 mbt-lightgbm = { workspace = true }
 
@@ -26,6 +27,7 @@ dev = [
     "mbt-testing",
     "mbt-xgboost",
     "mbt-mlflow",
+    "mbt-snowflake",
     "mbt-optuna",
     "mbt-lightgbm",
     "pytest>=8.0",
@@ -78,7 +80,7 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 show_error_codes = true
-mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src"
+mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-snowflake/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -89,11 +91,19 @@ module = [
     "xgboost.*",
     "lightgbm.*",
     "mlflow.*",
+    "snowflake.*",
     "optuna.*",
     "sklearn.*",
     "jsonschema.*",
+    "boto3.*",
 ]
 ignore_missing_imports = true
+
+# pyarrow.parquet / pyarrow.compute are untyped upstream; the modules built
+# on them stay strict for everything else.
+[[tool.mypy.overrides]]
+module = ["mbt_adapter_base.materialization", "mbt_snowflake.adapter"]
+disable_error_code = ["no-untyped-call", "attr-defined"]
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -101,6 +111,7 @@ testpaths = [
     "packages/mbt-adapter-base/tests",
     "packages/mbt-xgboost/tests",
     "packages/mbt-mlflow/tests",
+    "packages/mbt-snowflake/tests",
     "packages/mbt-optuna/tests",
     "packages/mbt-lightgbm/tests",
     "tests",

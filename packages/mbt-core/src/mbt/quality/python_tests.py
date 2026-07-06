@@ -11,13 +11,15 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
 from mbt.contracts import DatasetSpec, TestResult
 from mbt.exceptions import MbtError
-from mbt.parsing.errors import ParseReport
+
+if TYPE_CHECKING:
+    from mbt.parsing.errors import ParseReport
 
 _SELECT_HEADER_RE = re.compile(r"^#\s*mbt:\s*select\s*=\s*(?P<selector>.+?)\s*$")
 
@@ -33,7 +35,7 @@ class PythonTestFile:
 
 
 def discover_python_tests(
-    project_dir: Path, test_paths: list[str], report: ParseReport
+    project_dir: Path, test_paths: list[str], report: "ParseReport"
 ) -> list[PythonTestFile]:
     """Find test files, their ``test_*`` functions, and binding selectors."""
     found: list[PythonTestFile] = []

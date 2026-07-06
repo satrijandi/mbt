@@ -35,6 +35,7 @@ from mbt.jinja.environment import ResolveContext, TargetContext
 from mbt.parsing.errors import ParseReport
 from mbt.parsing.project_parser import ParsedProject, ParsedResource, validate_hyperparameters
 from mbt.runtime import data_adapter as build_data_adapter
+from mbt_adapter_base.materialization import combine_snapshots
 
 
 @dataclass(frozen=True)
@@ -324,10 +325,9 @@ def _pin_snapshots(
 def _dataset_snapshot(
     res: ParsedResource, parsed: ParsedProject, snapshots: dict[str, str | None]
 ) -> str | None:
-    for dep in res.depends_on:
-        if dep in snapshots:
-            return snapshots[dep]
-    return None
+    """One pinned snapshot per dataset; multi-source datasets combine all of
+    their tables' snapshots so any input changing flips identity (ADR-4)."""
+    return combine_snapshots({dep: snapshots[dep] for dep in res.depends_on if dep in snapshots})
 
 
 # -- hashing ---------------------------------------------------------------------

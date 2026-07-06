@@ -109,11 +109,13 @@
           "is_active = true",
           "tenure_days >= 30"
         ],
+        "inputs": null,
         "label": {
           "column": "churned_90d",
           "definition": "cancelled within 90 days of snapshot_date"
         },
         "name": "churn_training_set",
+        "sample_key": null,
         "snapshot": null,
         "source": "source.churn_demo.lakehouse.subscribers",
         "split": {
@@ -130,13 +132,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:9cdadae9c08f64897c99ade18cad2a3b81cc19317f3704f433f56b1273bb442e",
+      "config_hash": "sha256:1fea49df44628d6b9039ae560683cc7a21505eaf434cad6f44a111963873b140",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:a49595f7aa9384daebda9d72494349f813ce1e11cb38f41088ab76c7a95357e4",
+      "input_hash": "sha256:8f049c9d81ea56c819f76249073fbfa746d34a653ab3e8121283f69cb855fa08",
       "name": "churn_training_set",
       "path": "datasets/churn_training_set.yml",
       "resolved": {
@@ -168,11 +170,13 @@
           "is_active = true",
           "plan_type != 'enterprise'"
         ],
+        "inputs": null,
         "label": {
           "column": "upgraded_90d",
           "definition": "upgraded their plan within 90 days of snapshot_date"
         },
         "name": "upsell_training_set",
+        "sample_key": null,
         "snapshot": null,
         "source": "source.churn_demo.lakehouse.subscribers",
         "split": {
@@ -189,13 +193,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:ce1e29f16834688d22d716f984614b97fec5bec34123280a6eecd6a22de3b71d",
+      "config_hash": "sha256:f3c7b33839e4fa75111f046f1649db0f097fd184ceefab6109501fdc9de1e7c5",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:e63cf80e8efcc7f6d3f94cf1780db9c22933d73058ae98c7a554a035ec6838e3",
+      "input_hash": "sha256:fb5dc631ea38e96053371ab5417397086aef79af8e746efd32683395d2cc39c3",
       "name": "upsell_training_set",
       "path": "datasets/upsell_training_set.yml",
       "resolved": {
@@ -286,7 +290,7 @@
       ],
       "hooks_hash": "sha256:feb62357eb85e0c30fcb8fe39603c0fe61272a8f103dc5a3eaf39dd35d1ceac4",
       "hooks_path": "models/churn_classifier.py",
-      "input_hash": "sha256:dc4784829ea5d5dccc6b8eb50950649b3eb624b978fb362964dab26ca0e80aa3",
+      "input_hash": "sha256:4ef77579c7da718b6408b98afc7820a07de77931dc5912e8bb1629be550977f2",
       "name": "churn_classifier",
       "path": "models/churn_classifier.yml",
       "resolved": {},
@@ -357,7 +361,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:83698cb95116d57562e514a88ab0b09e3f60725b052f956f3e9d210cee77a844",
+      "input_hash": "sha256:755ba5fbad0c5675ffaa3bb6c42a5e3595f305b327b3260c0beda203a49c0383",
       "name": "churn_classifier_deep",
       "path": "models/churn_classifier_deep.yml",
       "resolved": {},
@@ -432,7 +436,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:5d2b4a0983a83e0c644995c09ff758b45ae33e760d0d5cc5912d8b3be37c8e00",
+      "input_hash": "sha256:39f05729ace81d22134eb6f105aee3c59b226f2ec40e7f4612288aff46e26ebf",
       "name": "upsell_classifier",
       "path": "models/upsell_classifier.yml",
       "resolved": {},

@@ -22,6 +22,11 @@ from mbt_adapter_base.interchange import (
     TuningResult,
     ValidationIssue,
 )
+from mbt_adapter_base.materialization import (
+    MaterializedDatasetHandle,
+    combine_snapshots,
+    write_materialization_metadata,
+)
 from mbt_adapter_base.protocols import (
     AdapterPlugin,
     ArtifactStore,
@@ -40,6 +45,7 @@ from mbt_adapter_base.protocols import (
 from mbt_adapter_base.specs import (
     AdapterRef,
     CheckSpec,
+    DatasetInputs,
     DatasetSpec,
     EvaluationProtocol,
     EvaluationSpec,
@@ -79,6 +85,7 @@ __all__ = [
     "ComputeAdapter",
     "DataAdapter",
     "DatasetHandle",
+    "DatasetInputs",
     "DatasetLocator",
     "DatasetProfile",
     "DatasetSpec",
@@ -95,6 +102,7 @@ __all__ = [
     "LabelSpec",
     "ManifestNode",
     "Materialization",
+    "MaterializedDatasetHandle",
     "MetricResults",
     "MetricSpec",
     "ModelSpec",
@@ -121,4 +129,6 @@ __all__ = [
     "TuningResult",
     "TuningSpec",
     "ValidationIssue",
+    "combine_snapshots",
+    "write_materialization_metadata",
 ]

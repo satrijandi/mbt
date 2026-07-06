@@ -114,19 +114,77 @@ class SplitSpec(_SpecModel):
 CheckSpec = str | dict[str, dict[str, Any]]
 
 
+class DatasetInputs(_SpecModel):
+    """Multi-table dataset construction: feature table(s) + a label table.
+
+    The label table is the spine - it defines which examples exist. Each
+    feature table joins onto it via ``join_key`` (``left`` join by default,
+    so examples with missing features arrive with NULLs; tree adapters
+    handle those natively). Column names must be unique across tables apart
+    from the join key(s).
+    """
+
+    features: list[str]  # source() refs to feature tables
+    label: str  # source() ref to the label table (the spine)
+    join_key: str | list[str]
+    join: Literal["left", "inner"] = "left"
+
+    @property
+    def join_columns(self) -> list[str]:
+        return [self.join_key] if isinstance(self.join_key, str) else list(self.join_key)
+
+    @model_validator(mode="after")
+    def _shape(self) -> "DatasetInputs":
+        if not self.features:
+            raise ValueError("inputs.features must list at least one feature table")
+        if not self.join_columns or any(not c for c in self.join_columns):
+            raise ValueError("inputs.join_key must name at least one non-empty column")
+        return self
+
+
 class DatasetSpec(_SpecModel):
-    """Declarative training-set construction (TSD §5.5, FR-RES-02)."""
+    """Declarative training-set construction (TSD §5.5, FR-RES-02).
+
+    Data comes from exactly one of:
+
+    - ``source``: a single table holding features and the label, or
+    - ``inputs``: feature table(s) joined onto a label table by a join key.
+    """
 
     name: str = Field(pattern=NAME_PATTERN)
     description: str = ""
-    source: str  # "source('lakehouse', 'gold_subscribers')"
+    source: str | None = None  # "source('lakehouse', 'gold_subscribers')"
+    inputs: DatasetInputs | None = None  # multi-table form
     label: LabelSpec
     filters: list[str] = Field(default_factory=list)  # SQL WHERE fragments, ANDed
     split: SplitSpec
+    #: Stable row-identity column(s) used for deterministic hash sampling and
+    #: seeded random splits. Strongly recommended for wide tables: sampling
+    #: hashes only these columns instead of every column, and warehouse
+    #: adapters push the predicate down into the source query.
+    sample_key: str | list[str] | None = None
     checks: list[CheckSpec] = Field(default_factory=list)
     tests: list[str] = Field(default_factory=list)  # names of Python data tests that apply
     snapshot: str | None = None  # explicit pin; normally pinned at compile
     tags: list[str] = Field(default_factory=list)
+
+    @property
+    def sample_key_columns(self) -> list[str]:
+        """Sampling identity: explicit sample_key, else the join key, else []."""
+        if self.sample_key is not None:
+            return [self.sample_key] if isinstance(self.sample_key, str) else list(self.sample_key)
+        if self.inputs is not None:
+            return self.inputs.join_columns
+        return []
+
+    @model_validator(mode="after")
+    def _source_xor_inputs(self) -> "DatasetSpec":
+        if (self.source is None) == (self.inputs is None):
+            raise ValueError(
+                "a dataset needs exactly one of 'source' (single table) or "
+                "'inputs' (feature tables + label table with a join key)"
+            )
+        return self
 
 
 class FeatureSelection(_SpecModel):

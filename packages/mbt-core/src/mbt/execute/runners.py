@@ -142,7 +142,8 @@ class _BuildContext:
     """DataBuildContext implementation handed to DataAdapters."""
 
     node: ManifestNode
-    source: SourceTable
+    source: SourceTable  # the spine (single source, or the label table)
+    source_tables: dict[str, SourceTable]  # every source dep by unique_id
     resolved_windows: dict[str, tuple[str, str]]
     sample_fraction: float
     deep_snapshot: bool
@@ -218,11 +219,23 @@ class DatasetRunner:
                     snapshot_id=node.snapshot_id or "",
                 )
             )
-        source_uid = next((d for d in node.depends_on if d.startswith("source.")), None)
-        if source_uid is None or source_uid not in ctx.manifest.sources:
+        source_tables = {
+            dep: ctx.manifest.sources[dep].config
+            for dep in node.depends_on
+            if dep.startswith("source.") and dep in ctx.manifest.sources
+        }
+        if not source_tables:
             raise ConfigError(
                 f"dataset {node.name!r} has no source in the manifest",
                 resource=node.unique_id,
+            )
+        # The spine: the label table for multi-table inputs, else the source.
+        spine_uid = spec.inputs.label if spec.inputs is not None else spec.source
+        if spine_uid not in source_tables:
+            raise ConfigError(
+                f"dataset {node.name!r} spine source {spine_uid!r} missing from the manifest",
+                resource=node.unique_id,
+                hint="recompile: the manifest and spec disagree",
             )
         windows = {
             split: (bounds[0], bounds[1])
@@ -231,7 +244,8 @@ class DatasetRunner:
         sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
         build_ctx = _BuildContext(
             node=node,
-            source=ctx.manifest.sources[source_uid].config,
+            source=source_tables[spine_uid],
+            source_tables=source_tables,
             resolved_windows=windows,
             sample_fraction=sample_fraction,
             deep_snapshot=ctx.manifest.metadata.deep_snapshot,
