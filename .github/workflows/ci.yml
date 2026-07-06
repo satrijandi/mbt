@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-type:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Sync workspace
+        run: uv sync
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Format check
+        run: uv run ruff format --check .
+      - name: mypy --strict
+        run: uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src packages/mbt-xgboost/src packages/mbt-mlflow/src packages/mbt-optuna/src packages/mbt-lightgbm/src packages/mbt-testing/src
+      - name: yamllint
+        run: uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples
+      - name: No ML frameworks in mbt-core (NFR-04)
+        run: |
+          uv run python - <<'EOF'
+          import subprocess, sys
+          probe = (
+              "import sys\n"
+              "import mbt.cli.main, mbt.parsing, mbt.compile.compiler, mbt.execute.orchestrator\n"
+              "banned = [m for m in ('xgboost','lightgbm','sklearn','torch','mlflow','optuna')"
+              " if m in sys.modules]\n"
+              "assert not banned, f'ML frameworks imported by mbt-core: {banned}'\n"
+          )
+          subprocess.run([sys.executable, '-c', probe], check=True)
+          EOF
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Sync workspace
+        run: uv sync
+      - name: Unit + integration tests
+        run: uv run pytest -q -m "not e2e" --timeout 600
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Sync workspace
+        run: uv sync
+      - name: End-to-end (real XGBoost + MLflow sqlite, subprocess jobs)
+        run: uv run pytest -q -m e2e --timeout 900

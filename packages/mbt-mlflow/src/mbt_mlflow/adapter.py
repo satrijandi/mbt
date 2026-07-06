@@ -55,6 +55,14 @@ class _MlflowBase:
 class MlflowTracking(_MlflowBase):
     """TrackingAdapter over the MLflow client API (no fluent globals)."""
 
+    def prepare(self) -> None:
+        """Run store migrations once, before parallel jobs hit the backend.
+
+        Called by the mbt coordinator when present; prevents alembic
+        migration races on fresh sqlite databases.
+        """
+        self._experiment_id()
+
     def _experiment_id(self) -> str:
         client = self.client()
         experiment = client.get_experiment_by_name(self.experiment)
@@ -196,13 +204,20 @@ class MlflowRegistry(_MlflowBase):
         return self._to_model_version(mv)
 
     def transition(self, version: ModelVersion, stage: Stage) -> None:
+        import warnings
+
         client = self.client()
         if self.use_aliases:
             client.set_registered_model_alias(version.name, stage.value, version.version)
             return
-        client.transition_model_version_stage(
-            name=version.name,
-            version=version.version,
-            stage=_STAGE_MAP[stage],
-            archive_existing_versions=(stage is Stage.PRODUCTION),
-        )
+        with warnings.catch_warnings():
+            # Stages are deprecated upstream but remain the default mapping
+            # for canonical mbt stages; opt into aliases with
+            # `use_aliases: true` (TSD §13.3).
+            warnings.simplefilter("ignore", FutureWarning)
+            client.transition_model_version_stage(
+                name=version.name,
+                version=version.version,
+                stage=_STAGE_MAP[stage],
+                archive_existing_versions=(stage is Stage.PRODUCTION),
+            )

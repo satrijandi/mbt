@@ -1,0 +1,32 @@
+models:
+  - name: upsell_classifier
+    description: "90-day upsell propensity (independent DAG branch)"
+    task: binary_classification
+    adapter: xgboost
+    owner: monetization-ds@example.com
+    tags: [upsell, weekly]
+
+    dataset: ref('upsell_training_set')
+
+    target: upgraded_90d
+    features:
+      include: ["*"]
+      exclude: [user_id, churned_90d, plan_type]
+
+    hyperparameters:
+      max_depth: 3
+      learning_rate: 0.15
+      n_estimators: 80
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+
+    registration:
+      name: upsell_classifier
+      stage_on_pass: staging
+
+    seed: 7

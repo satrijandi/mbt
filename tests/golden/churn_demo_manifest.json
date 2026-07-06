@@ -1,0 +1,462 @@
+{
+  "adapter_versions": {
+    "local": {
+      "contract": "1.0",
+      "package": "mbt-core",
+      "version": "<version>"
+    },
+    "xgboost": {
+      "contract": "1.0",
+      "package": "mbt-xgboost",
+      "version": "<version>"
+    }
+  },
+  "exposures": {
+    "exposure.churn_demo.retention_campaign_job": {
+      "config": {
+        "depends_on": [
+          "ref('churn_classifier')"
+        ],
+        "description": "Nightly batch scoring feeding the retention campaign tool.",
+        "name": "retention_campaign_job",
+        "owner": "lifecycle-eng@example.com",
+        "type": "batch_job",
+        "url": "https://internal.example.com/jobs/retention-campaign"
+      },
+      "depends_on": [
+        "model.churn_demo.churn_classifier"
+      ],
+      "name": "retention_campaign_job",
+      "path": "exposures.yml",
+      "unique_id": "exposure.churn_demo.retention_campaign_job"
+    }
+  },
+  "metadata": {
+    "anchor": "2026-06-30T00:00:00Z",
+    "deep_snapshot": true,
+    "env_digest": "<env>",
+    "generated_at": "2026-06-30T00:00:00Z",
+    "git": {
+      "branch": null,
+      "commit": null,
+      "dirty": false
+    },
+    "manifest_schema_version": 1,
+    "mbt_version": "0.1.0",
+    "project_name": "churn_demo",
+    "target": "ci",
+    "target_config": {
+      "artifact_store": "file://./target/artifacts",
+      "compute": {
+        "adapter": "local"
+      },
+      "data": {
+        "adapter": "local",
+        "config": {
+          "root": "."
+        }
+      },
+      "registry": {
+        "adapter": "fake",
+        "config": {
+          "root": "./target/fake_registry"
+        }
+      },
+      "threads": 2,
+      "tracking": {
+        "adapter": "fake",
+        "config": {
+          "root": "./target/fake_tracking"
+        }
+      },
+      "vars": {
+        "max_tuning_trials": 3,
+        "sample_fraction": 1.0
+      }
+    },
+    "vars": {
+      "max_tuning_trials": 3,
+      "pr_auc_floor": 0.05,
+      "sample_fraction": 1.0
+    }
+  },
+  "metrics": {
+    "lift_at_decile": {
+      "greater_is_better": true,
+      "kind": "hook",
+      "name": "lift_at_decile",
+      "params": {}
+    }
+  },
+  "nodes": {
+    "dataset.churn_demo.churn_training_set": {
+      "adapter": null,
+      "config": {
+        "checks": [
+          "class_balance_report",
+          "no_future_columns",
+          {
+            "not_null": {
+              "columns": [
+                "churned_90d",
+                "snapshot_date"
+              ]
+            }
+          }
+        ],
+        "description": "Active subscribers labeled with 90-day churn.",
+        "filters": [
+          "is_active = true",
+          "tenure_days >= 30"
+        ],
+        "label": {
+          "column": "churned_90d",
+          "definition": "cancelled within 90 days of snapshot_date"
+        },
+        "name": "churn_training_set",
+        "snapshot": null,
+        "source": "source.churn_demo.lakehouse.subscribers",
+        "split": {
+          "seed": null,
+          "strategy": "temporal",
+          "stratify_by": null,
+          "test": "-28d:now",
+          "time_column": "snapshot_date",
+          "train": "-150d:-28d",
+          "validation": null
+        },
+        "tags": [
+          "churn"
+        ],
+        "tests": []
+      },
+      "config_hash": "sha256:9cdadae9c08f64897c99ade18cad2a3b81cc19317f3704f433f56b1273bb442e",
+      "depends_on": [
+        "source.churn_demo.lakehouse.subscribers"
+      ],
+      "hooks_hash": null,
+      "hooks_path": null,
+      "input_hash": "sha256:a49595f7aa9384daebda9d72494349f813ce1e11cb38f41088ab76c7a95357e4",
+      "name": "churn_training_set",
+      "path": "datasets/churn_training_set.yml",
+      "resolved": {
+        "windows": {
+          "test": [
+            "2026-06-02T00:00:00Z",
+            "2026-06-30T00:00:00Z"
+          ],
+          "train": [
+            "2026-01-31T00:00:00Z",
+            "2026-06-02T00:00:00Z"
+          ]
+        }
+      },
+      "resource_type": "dataset",
+      "seed": null,
+      "snapshot_id": "sha256:8f92f2b974e79bcf8c50e01fe40ea9f1b784fb00a9080a1386a8661b3abbf250",
+      "task": null,
+      "unique_id": "dataset.churn_demo.churn_training_set"
+    },
+    "dataset.churn_demo.upsell_training_set": {
+      "adapter": null,
+      "config": {
+        "checks": [
+          "class_balance_report"
+        ],
+        "description": "Non-enterprise subscribers labeled with 90-day plan upgrades.",
+        "filters": [
+          "is_active = true",
+          "plan_type != 'enterprise'"
+        ],
+        "label": {
+          "column": "upgraded_90d",
+          "definition": "upgraded their plan within 90 days of snapshot_date"
+        },
+        "name": "upsell_training_set",
+        "snapshot": null,
+        "source": "source.churn_demo.lakehouse.subscribers",
+        "split": {
+          "seed": null,
+          "strategy": "temporal",
+          "stratify_by": null,
+          "test": "-28d:now",
+          "time_column": "snapshot_date",
+          "train": "-150d:-28d",
+          "validation": null
+        },
+        "tags": [
+          "upsell"
+        ],
+        "tests": []
+      },
+      "config_hash": "sha256:ce1e29f16834688d22d716f984614b97fec5bec34123280a6eecd6a22de3b71d",
+      "depends_on": [
+        "source.churn_demo.lakehouse.subscribers"
+      ],
+      "hooks_hash": null,
+      "hooks_path": null,
+      "input_hash": "sha256:e63cf80e8efcc7f6d3f94cf1780db9c22933d73058ae98c7a554a035ec6838e3",
+      "name": "upsell_training_set",
+      "path": "datasets/upsell_training_set.yml",
+      "resolved": {
+        "windows": {
+          "test": [
+            "2026-06-02T00:00:00Z",
+            "2026-06-30T00:00:00Z"
+          ],
+          "train": [
+            "2026-01-31T00:00:00Z",
+            "2026-06-02T00:00:00Z"
+          ]
+        }
+      },
+      "resource_type": "dataset",
+      "seed": null,
+      "snapshot_id": "sha256:8f92f2b974e79bcf8c50e01fe40ea9f1b784fb00a9080a1386a8661b3abbf250",
+      "task": null,
+      "unique_id": "dataset.churn_demo.upsell_training_set"
+    },
+    "model.churn_demo.churn_classifier": {
+      "adapter": "xgboost",
+      "config": {
+        "adapter": "xgboost",
+        "dataset": "dataset.churn_demo.churn_training_set",
+        "description": "90-day churn prediction for active subscribers",
+        "evaluation": {
+          "gates": [
+            {
+              "compare_to": null,
+              "metric": "pr_auc",
+              "min_delta": 0.0,
+              "slice": null,
+              "threshold": 0.05
+            }
+          ],
+          "metrics": [
+            "pr_auc",
+            "roc_auc",
+            "logloss",
+            "lift_at_decile"
+          ],
+          "protocol": {
+            "split": "temporal",
+            "test_window": null
+          },
+          "slices": [
+            "plan_type"
+          ]
+        },
+        "features": {
+          "exclude": [
+            "user_id",
+            "upgraded_90d",
+            "plan_type"
+          ],
+          "include": [
+            "*"
+          ]
+        },
+        "hooks": null,
+        "hyperparameters": {
+          "learning_rate": 0.1,
+          "max_depth": 4,
+          "n_estimators": 120,
+          "scale_pos_weight": "__mbt_auto__"
+        },
+        "materialization": "model_artifact",
+        "name": "churn_classifier",
+        "owner": "growth-ds@example.com",
+        "registration": {
+          "name": "churn_classifier",
+          "registry": null,
+          "stage_on_pass": "staging"
+        },
+        "seed": 42,
+        "tags": [
+          "churn",
+          "weekly"
+        ],
+        "target": "churned_90d",
+        "task": "binary_classification",
+        "tuning": null
+      },
+      "config_hash": "sha256:039efe95750d0cb4ea72f4aa16503fe596131520010553a43297d2b6d012838b",
+      "depends_on": [
+        "dataset.churn_demo.churn_training_set"
+      ],
+      "hooks_hash": "sha256:1dbb7b0277d9141f8b027253f14f4e6abeaa9006637bc1e8d0c4cdcb98a3b151",
+      "hooks_path": "models/churn_classifier.py",
+      "input_hash": "sha256:07573b79755913dea6f36fa52aecda43f3f9be2041d9f164e1660e61ebaa4783",
+      "name": "churn_classifier",
+      "path": "models/churn_classifier.yml",
+      "resolved": {},
+      "resource_type": "model",
+      "seed": 42,
+      "snapshot_id": null,
+      "task": "binary_classification",
+      "unique_id": "model.churn_demo.churn_classifier"
+    },
+    "model.churn_demo.churn_classifier_deep": {
+      "adapter": "xgboost",
+      "config": {
+        "adapter": "xgboost",
+        "dataset": "dataset.churn_demo.churn_training_set",
+        "description": "Deeper challenger sharing the churn training set",
+        "evaluation": {
+          "gates": [
+            {
+              "compare_to": null,
+              "metric": "pr_auc",
+              "min_delta": 0.0,
+              "slice": null,
+              "threshold": 0.05
+            }
+          ],
+          "metrics": [
+            "pr_auc",
+            "roc_auc"
+          ],
+          "protocol": {
+            "split": "temporal",
+            "test_window": null
+          },
+          "slices": []
+        },
+        "features": {
+          "exclude": [
+            "user_id",
+            "upgraded_90d",
+            "plan_type"
+          ],
+          "include": [
+            "*"
+          ]
+        },
+        "hooks": null,
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "max_depth": 7,
+          "n_estimators": 200,
+          "scale_pos_weight": "__mbt_auto__"
+        },
+        "materialization": "model_artifact",
+        "name": "churn_classifier_deep",
+        "owner": "growth-ds@example.com",
+        "registration": null,
+        "seed": 43,
+        "tags": [
+          "churn"
+        ],
+        "target": "churned_90d",
+        "task": "binary_classification",
+        "tuning": null
+      },
+      "config_hash": "sha256:3a05f3e612baf9d6991fc7dea5b2ea84f9ea5b6a8ff1fe661fef85f6032a9ef2",
+      "depends_on": [
+        "dataset.churn_demo.churn_training_set"
+      ],
+      "hooks_hash": null,
+      "hooks_path": null,
+      "input_hash": "sha256:83698cb95116d57562e514a88ab0b09e3f60725b052f956f3e9d210cee77a844",
+      "name": "churn_classifier_deep",
+      "path": "models/churn_classifier_deep.yml",
+      "resolved": {},
+      "resource_type": "model",
+      "seed": 43,
+      "snapshot_id": null,
+      "task": "binary_classification",
+      "unique_id": "model.churn_demo.churn_classifier_deep"
+    },
+    "model.churn_demo.upsell_classifier": {
+      "adapter": "xgboost",
+      "config": {
+        "adapter": "xgboost",
+        "dataset": "dataset.churn_demo.upsell_training_set",
+        "description": "90-day upsell propensity (independent DAG branch)",
+        "evaluation": {
+          "gates": [
+            {
+              "compare_to": null,
+              "metric": "pr_auc",
+              "min_delta": 0.0,
+              "slice": null,
+              "threshold": 0.05
+            }
+          ],
+          "metrics": [
+            "pr_auc",
+            "roc_auc"
+          ],
+          "protocol": {
+            "split": "temporal",
+            "test_window": null
+          },
+          "slices": []
+        },
+        "features": {
+          "exclude": [
+            "user_id",
+            "churned_90d",
+            "plan_type"
+          ],
+          "include": [
+            "*"
+          ]
+        },
+        "hooks": null,
+        "hyperparameters": {
+          "learning_rate": 0.15,
+          "max_depth": 3,
+          "n_estimators": 80
+        },
+        "materialization": "model_artifact",
+        "name": "upsell_classifier",
+        "owner": "monetization-ds@example.com",
+        "registration": {
+          "name": "upsell_classifier",
+          "registry": null,
+          "stage_on_pass": "staging"
+        },
+        "seed": 7,
+        "tags": [
+          "upsell",
+          "weekly"
+        ],
+        "target": "upgraded_90d",
+        "task": "binary_classification",
+        "tuning": null
+      },
+      "config_hash": "sha256:c6d8b9b093f0e5018209408098b302ff1f498277e98748a2552abd50e2a0e189",
+      "depends_on": [
+        "dataset.churn_demo.upsell_training_set"
+      ],
+      "hooks_hash": null,
+      "hooks_path": null,
+      "input_hash": "sha256:5d2b4a0983a83e0c644995c09ff758b45ae33e760d0d5cc5912d8b3be37c8e00",
+      "name": "upsell_classifier",
+      "path": "models/upsell_classifier.yml",
+      "resolved": {},
+      "resource_type": "model",
+      "seed": 7,
+      "snapshot_id": null,
+      "task": "binary_classification",
+      "unique_id": "model.churn_demo.upsell_classifier"
+    }
+  },
+  "sources": {
+    "source.churn_demo.lakehouse.subscribers": {
+      "config": {
+        "description": "One row per subscriber per monthly snapshot.",
+        "format": "parquet",
+        "identifier": null,
+        "name": "subscribers",
+        "path": "data/subscribers/*.parquet"
+      },
+      "group": "lakehouse",
+      "name": "subscribers",
+      "path": "sources.yml",
+      "snapshot_id": "sha256:8f92f2b974e79bcf8c50e01fe40ea9f1b784fb00a9080a1386a8661b3abbf250",
+      "unique_id": "source.churn_demo.lakehouse.subscribers"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+datasets:
+  - name: upsell_training_set
+    description: Non-enterprise subscribers labeled with 90-day plan upgrades.
+    source: source('lakehouse', 'subscribers')
+    label:
+      column: upgraded_90d
+      definition: "upgraded their plan within 90 days of snapshot_date"
+    filters:
+      - "is_active = true"
+      - "plan_type != 'enterprise'"
+    split:
+      strategy: temporal
+      time_column: snapshot_date
+      train: "-150d:-28d"
+      test: "-28d:now"
+    checks: [class_balance_report]
+    tags: [upsell]

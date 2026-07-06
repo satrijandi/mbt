@@ -1,0 +1,29 @@
+models:
+  - name: churn_classifier_deep
+    description: "Deeper challenger sharing the churn training set"
+    task: binary_classification
+    adapter: xgboost
+    owner: growth-ds@example.com
+    tags: [churn]
+
+    dataset: ref('churn_training_set')
+
+    target: churned_90d
+    features:
+      include: ["*"]
+      exclude: [user_id, upgraded_90d, plan_type]
+
+    hyperparameters:
+      max_depth: 7
+      learning_rate: 0.05
+      n_estimators: 200
+      scale_pos_weight: "{{ auto }}"
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+
+    seed: 43

@@ -77,6 +77,11 @@ class ExecutionContext:
         )
         self._graph = self.manifest.graph()
         self._selectable = self.manifest.selectable_nodes()
+        # Warm backends that need one-time setup (e.g. MLflow sqlite
+        # migrations) before parallel jobs hit them concurrently.
+        tracking = self.tracking()
+        if hasattr(tracking, "prepare"):
+            tracking.prepare()
 
     @property
     def merged_vars(self) -> dict[str, Any]:

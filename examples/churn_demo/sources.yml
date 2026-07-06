@@ -1,0 +1,7 @@
+sources:
+  - name: lakehouse
+    description: Committed demo parquet standing in for a warehouse gold layer.
+    tables:
+      - name: subscribers
+        path: data/subscribers/*.parquet
+        description: One row per subscriber per monthly snapshot.

@@ -1,0 +1,34 @@
+models:
+  - name: churn_classifier
+    description: "90-day churn prediction for active subscribers"
+    task: binary_classification
+    adapter: xgboost
+    owner: growth-ds@example.com
+    tags: [churn, weekly]
+
+    dataset: ref('churn_training_set')
+
+    target: churned_90d
+    features:
+      include: ["*"]
+      exclude: [user_id, upgraded_90d, plan_type]   # id + sibling label are leakage
+
+    hyperparameters:
+      max_depth: 4
+      learning_rate: 0.1
+      n_estimators: 120
+      scale_pos_weight: "{{ auto }}"
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc, logloss, lift_at_decile]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+      slices: [plan_type]
+
+    registration:
+      name: churn_classifier
+      stage_on_pass: staging
+
+    seed: 42

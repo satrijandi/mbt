@@ -1,0 +1,47 @@
+site_name: mbt - Model Build Tool
+site_description: dbt for machine learning models
+repo_url: https://github.com/mbt-dev/mbt
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle: {icon: material/brightness-7, name: dark mode}
+    - scheme: slate
+      primary: indigo
+      toggle: {icon: material/brightness-4, name: light mode}
+  features:
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Concepts: concepts.md
+  - Spec reference: spec-reference.md
+  - CLI reference: cli-reference.md
+  - GitOps & CI: gitops.md
+  - Adapter authoring: adapter-authoring.md
+  - Roadmap: roadmap.md
+  - ADRs:
+      - adr/0001-arrow-interchange.md
+      - adr/0002-local-adapters-in-core.md
+      - adr/0003-coordinator-job-split.md
+      - adr/0004-two-hashes.md
+      - adr/0005-profiles-excluded-from-hashes.md
+      - adr/0006-gate-edits-retrain.md
+      - adr/0007-env-digest-not-modifying.md
+      - adr/0008-tuning-never-sees-test.md
+      - adr/0009-champion-reevaluated-in-job.md
+      - adr/0010-missing-vs-unloadable-champion.md
+      - adr/0011-snapshot-mtime-listing.md
+      - adr/0012-window-expressions-and-anchor.md
+      - adr/0013-upstream-datasets-auto-materialize.md
+      - adr/0014-plugin-import-hygiene.md
+      - adr/0015-contract-refinements.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - tables

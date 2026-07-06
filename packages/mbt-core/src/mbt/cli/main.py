@@ -3,15 +3,18 @@
 Every command is non-interactive-safe (FR-CLI-01); exit codes follow TSD §17
 (0 success, 1 hard error, 2 quality failure);
 ``--target/--vars/--select/--exclude/--threads/--state/--manifest`` behave
-identically wherever they appear (FR-CLI-04).
+identically wherever they appear (FR-CLI-04). Common flags are per-command,
+dbt-style: ``mbt build --target prod --vars '...'``.
 """
 
 import functools
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
+import click
 import typer
 import yaml
 from rich.table import Table
@@ -41,42 +44,76 @@ state_app = typer.Typer(help="Compare manifests (state:modified mechanics).")
 app.add_typer(docs_app, name="docs")
 app.add_typer(state_app, name="state")
 
-# -- global flags -----------------------------------------------------------------
+
+# -- common option aliases (FR-CLI-04) ------------------------------------------
+
+ProjectDirOpt = Annotated[
+    Path, typer.Option("--project-dir", help="Project root (default: cwd).")
+]
+ProfilesDirOpt = Annotated[
+    Path | None, typer.Option("--profiles-dir", help="Directory holding profiles.yml.")
+]
+TargetOpt = Annotated[
+    str | None, typer.Option("--target", "-t", help="Profile target (dev/prod/...).")
+]
+VarsOpt = Annotated[
+    str | None, typer.Option("--vars", help="YAML/JSON dict overriding vars.")
+]
+LogFormatOpt = Annotated[
+    str, typer.Option("--log-format", help="text | json (events, on stderr).")
+]
+QuietOpt = Annotated[bool, typer.Option("--quiet", "-q", help="Suppress event output.")]
+SelectOpt = Annotated[
+    list[str] | None, typer.Option("--select", "-s", help="Node selector(s); space = union.")
+]
+ExcludeOpt = Annotated[
+    list[str] | None, typer.Option("--exclude", help="Selector(s) to subtract.")
+]
+ThreadsOpt = Annotated[
+    int | None, typer.Option("--threads", help="Parallel DAG branches (default: target).")
+]
+StateOpt = Annotated[
+    str | None,
+    typer.Option("--state", help="Reference manifest path/URI for state: selectors."),
+]
+StateIncludeEnvOpt = Annotated[
+    bool,
+    typer.Option(
+        "--state-include-env",
+        help="Treat env_digest changes as modifying every node (ADR-7).",
+    ),
+]
+ManifestOpt = Annotated[
+    str | None,
+    typer.Option("--manifest", help="Execute a stored manifest verbatim (FR-RUN-11)."),
+]
+AnchorOpt = Annotated[
+    str | None, typer.Option("--anchor", help="Pin the time anchor (ISO timestamp).")
+]
+DeepSnapshotOpt = Annotated[
+    bool, typer.Option("--deep-snapshot", help="Content-hash snapshots (slow, exact).")
+]
+OutputOpt = Annotated[str, typer.Option("--output", "-o", help="Output format.")]
 
 
-@app.callback()
-def _global_flags(
-    ctx: typer.Context,
-    project_dir: Annotated[
-        Path, typer.Option("--project-dir", help="Project root (default: cwd).")
-    ] = Path("."),
-    profiles_dir: Annotated[
-        Path | None, typer.Option("--profiles-dir", help="Directory holding profiles.yml.")
-    ] = None,
-    target: Annotated[
-        str | None, typer.Option("--target", "-t", help="Profile target (dev/prod/...).")
-    ] = None,
-    vars_: Annotated[
-        str | None, typer.Option("--vars", help="YAML/JSON dict overriding vars.")
-    ] = None,
-    log_format: Annotated[
-        str, typer.Option("--log-format", help="text | json (one event per line).")
-    ] = "text",
-    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Suppress event output.")] = False,
-) -> None:
-    try:
-        cli = CLIContext(
-            project_dir=project_dir,
-            profiles_dir=profiles_dir,
-            target=target,
-            cli_vars=parse_vars(vars_),
-            log_format=log_format,
-            quiet=quiet,
-        )
-    except MbtError as exc:
-        raise fail(exc) from exc
-    setup_bus(cli)
-    ctx.obj = cli
+def make_ctx(
+    project_dir: Path,
+    profiles_dir: Path | None,
+    target: str | None,
+    vars_: str | None,
+    log_format: str,
+    quiet: bool,
+) -> CLIContext:
+    ctx = CLIContext(
+        project_dir=project_dir,
+        profiles_dir=profiles_dir,
+        target=target,
+        cli_vars=parse_vars(vars_),
+        log_format=log_format,
+        quiet=quiet,
+    )
+    setup_bus(ctx)
+    return ctx
 
 
 def guard(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -92,63 +129,40 @@ def guard(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-# -- shared option aliases ----------------------------------------------------------
-
-SelectOpt = Annotated[
-    list[str] | None, typer.Option("--select", "-s", help="Node selector(s); space = union.")
-]
-ExcludeOpt = Annotated[
-    list[str] | None, typer.Option("--exclude", help="Selector(s) to subtract.")
-]
-ThreadsOpt = Annotated[
-    int | None, typer.Option("--threads", help="Parallel DAG branches (default: target).")
-]
-StateOpt = Annotated[
-    str | None,
-    typer.Option("--state", help="Reference manifest path/URI for state: selectors."),
-]
-ManifestOpt = Annotated[
-    str | None,
-    typer.Option("--manifest", help="Execute a stored manifest verbatim (FR-RUN-11)."),
-]
-AnchorOpt = Annotated[
-    str | None, typer.Option("--anchor", help="Pin the time anchor (ISO timestamp).")
-]
-
-
-# -- project lifecycle ----------------------------------------------------------------
+# -- project lifecycle -------------------------------------------------------------
 
 
 @app.command()
 @guard
 def init(
-    ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Project name (lowercase snake_case).")],
+    project_dir: ProjectDirOpt = Path("."),
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Scaffold a golden-path project (FR-PROJ-01)."""
     from mbt.cli.scaffold import scaffold_project
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, None, None, None, log_format, quiet)
     destination = scaffold_project(name, cli.project_dir)
     out_console.print(f"Created [bold]{destination}[/bold]")
     out_console.print(
-        "Next steps:\n"
-        f"  cd {name}\n"
-        "  python scripts/generate_sample_data.py\n"
-        "  mbt build"
+        f"Next steps:\n  cd {name}\n  python scripts/generate_sample_data.py\n  mbt build"
     )
 
 
 @app.command()
 @guard
 def deps(
-    ctx: typer.Context,
+    project_dir: ProjectDirOpt = Path("."),
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print, do not install.")] = False,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Install adapter packages pinned in packages.yml (FR-PROJ-04)."""
     from mbt.deps import install_packages, load_packages
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, None, None, None, log_format, quiet)
     requirements = install_packages(load_packages(cli.project_dir), dry_run=dry_run)
     verb = "would install" if dry_run else "installed"
     out_console.print(f"{verb}: " + (", ".join(requirements) or "(nothing)"))
@@ -156,35 +170,38 @@ def deps(
 
 @app.command()
 @guard
-def clean(ctx: typer.Context) -> None:
+def clean(project_dir: ProjectDirOpt = Path(".")) -> None:
     """Delete target/ including the dataset cache (FR-RUN-09)."""
     import shutil
 
-    cli: CLIContext = ctx.obj
-    target = cli.project_dir / "target"
-    if target.is_dir():
-        shutil.rmtree(target)
-        out_console.print(f"removed {target}")
+    target_dir = project_dir / "target"
+    if target_dir.is_dir():
+        shutil.rmtree(target_dir)
+        out_console.print(f"removed {target_dir}")
     else:
-        out_console.print(f"nothing to clean at {target}")
+        out_console.print(f"nothing to clean at {target_dir}")
 
 
-# -- parse / compile -------------------------------------------------------------------
+# -- parse / compile ------------------------------------------------------------------
 
 
 @app.command()
 @guard
 def parse(
-    ctx: typer.Context,
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
     write_json_schema: Annotated[
-        bool,
-        typer.Option("--write-json-schema", help="Publish JSON Schemas for editors."),
+        bool, typer.Option("--write-json-schema", help="Publish JSON Schemas for editors.")
     ] = False,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Validate all configs and build the DAG; no execution (FR-PARSE-01)."""
     from mbt.parsing import parse_project
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     print_warnings(parsed)
     out_console.print(
@@ -202,18 +219,20 @@ def parse(
 @app.command()
 @guard
 def compile(  # noqa: A001 - dbt-style command name
-    ctx: typer.Context,
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
     anchor: AnchorOpt = None,
-    deep_snapshot: Annotated[
-        bool,
-        typer.Option("--deep-snapshot", help="Content-hash snapshots (slow, exact)."),
-    ] = False,
+    deep_snapshot: DeepSnapshotOpt = False,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Resolve Jinja + profiles + snapshots into target/manifest.json (FR-COMP-01)."""
     from mbt.compile.compiler import CompileOptions, compile_project
     from mbt.parsing import parse_project
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     print_warnings(parsed)
     profiles = cli.profiles(parsed)
@@ -228,50 +247,17 @@ def compile(  # noqa: A001 - dbt-style command name
     out_console.print(f"wrote {path}")
 
 
-# -- run / build / test ------------------------------------------------------------------
-
-
-def _execute_command(
-    ctx: typer.Context,
-    command: str,
-    select: list[str] | None,
-    exclude: list[str] | None,
-    threads: int | None,
-    fail_fast: bool,
-    state: str | None,
-    state_include_env: bool,
-    manifest: str | None,
-    anchor: str | None,
-    deep_snapshot: bool,
-) -> None:
-    from mbt.execute.orchestrator import run_command
-
-    cli: CLIContext = ctx.obj
-    results = run_command(
-        cli.invocation(
-            command,
-            select=select,
-            exclude=exclude,
-            threads=threads,
-            fail_fast=fail_fast,
-            state=state,
-            state_include_env=state_include_env,
-            manifest_path=manifest,
-            anchor=parse_anchor(anchor),
-            deep_snapshot=deep_snapshot,
-        )
-    )
-    render_results_table(results, cli)
-    code = results.exit_code()
-    if code:
-        raise typer.Exit(code)
+# -- run / build / test -----------------------------------------------------------------
 
 
 def _register_execution_command(command: str, help_text: str) -> None:
     @app.command(name=command, help=help_text)
     @guard
     def _cmd(
-        ctx: typer.Context,
+        project_dir: ProjectDirOpt = Path("."),
+        profiles_dir: ProfilesDirOpt = None,
+        target: TargetOpt = None,
+        vars_: VarsOpt = None,
         select: SelectOpt = None,
         exclude: ExcludeOpt = None,
         threads: ThreadsOpt = None,
@@ -279,39 +265,51 @@ def _register_execution_command(command: str, help_text: str) -> None:
             bool, typer.Option("--fail-fast", help="Stop everything on first failure.")
         ] = False,
         state: StateOpt = None,
-        state_include_env: Annotated[
-            bool,
-            typer.Option(
-                "--state-include-env",
-                help="Treat env_digest changes as modifying every node (ADR-7).",
-            ),
-        ] = False,
+        state_include_env: StateIncludeEnvOpt = False,
         manifest: ManifestOpt = None,
         anchor: AnchorOpt = None,
-        deep_snapshot: Annotated[bool, typer.Option("--deep-snapshot")] = False,
+        deep_snapshot: DeepSnapshotOpt = False,
+        log_format: LogFormatOpt = "text",
+        quiet: QuietOpt = False,
     ) -> None:
-        _execute_command(
-            ctx, command, select, exclude, threads, fail_fast, state,
-            state_include_env, manifest, anchor, deep_snapshot,
+        from mbt.execute.orchestrator import run_command
+
+        cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+        results = run_command(
+            cli.invocation(
+                command,
+                select=select,
+                exclude=exclude,
+                threads=threads,
+                fail_fast=fail_fast,
+                state=state,
+                state_include_env=state_include_env,
+                manifest_path=manifest,
+                anchor=parse_anchor(anchor),
+                deep_snapshot=deep_snapshot,
+            )
         )
+        render_results_table(results, cli)
+        code = results.exit_code()
+        if code:
+            raise typer.Exit(code)
 
 
-_register_execution_command(
-    "run", "Build datasets and train models in DAG order (FR-RUN-01)."
-)
+_register_execution_command("run", "Build datasets and train models in DAG order (FR-RUN-01).")
 _register_execution_command(
     "build", "run + test interleaved in DAG order - the CI workhorse (FR-RUN-01)."
 )
-_register_execution_command(
-    "test", "Data tests + model quality gates; never trains (FR-TEST-01)."
-)
+_register_execution_command("test", "Data tests + model quality gates; never trains (FR-TEST-01).")
 
 
 @app.command()
 @guard
 def evaluate(
-    ctx: typer.Context,
     model: Annotated[str, typer.Option("--model", help="Model resource name.")],
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
     version: Annotated[
         str | None, typer.Option("--version", help="Registry version (default: latest).")
     ] = None,
@@ -323,11 +321,13 @@ def evaluate(
     ] = False,
     manifest: ManifestOpt = None,
     anchor: AnchorOpt = None,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Re-evaluate a registered artifact on freshly built data (FR-RUN-07)."""
     from mbt.execute.orchestrator import run_evaluate
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     results = run_evaluate(
         cli.invocation("evaluate", manifest_path=manifest, anchor=parse_anchor(anchor)),
         model_name=model,
@@ -344,7 +344,10 @@ def evaluate(
 @app.command()
 @guard
 def promote(
-    ctx: typer.Context,
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
     model: Annotated[str | None, typer.Option("--model")] = None,
     to: Annotated[str | None, typer.Option("--to", help="Target stage.")] = None,
     version: Annotated[str | None, typer.Option("--version")] = None,
@@ -354,20 +357,23 @@ def promote(
     force: Annotated[
         bool, typer.Option("--force", help="Promote even without recorded gate passes.")
     ] = False,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Transition a registered version, verifying recorded gate passes (FR-REG-03)."""
+    from mbt.adapters.registry import get_registry
     from mbt.contracts import Stage
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
     from mbt.promote import load_promotions_file, promote_model
     from mbt.runtime import registry_adapter as build_registry_adapter
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
-    from mbt.adapters.registry import get_registry
-
-    registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
+    registry_adapter = build_registry_adapter(
+        profiles, cli.project_dir.resolve(), get_registry()
+    )
 
     if from_file is not None:
         entries = load_promotions_file(from_file)
@@ -387,38 +393,40 @@ def promote(
             hint="e.g. mbt promote --model churn_classifier --to production",
         )
     try:
-        stage = Stage(to)
+        stage_token = Stage(to)
     except ValueError as exc:
         raise ConfigError(
-            f"unknown stage {to!r}",
-            hint=f"stages: {', '.join(s.value for s in Stage)}",
+            f"unknown stage {to!r}", hint=f"stages: {', '.join(s.value for s in Stage)}"
         ) from exc
     outcome = promote_model(
-        registry_adapter, name=model, to_stage=stage, version=version, force=force
+        registry_adapter, name=model, to_stage=stage_token, version=version, force=force
     )
     out_console.print(
         f"promoted [bold]{outcome.name}[/bold] v{outcome.version} -> {outcome.to_stage.value}"
     )
 
 
-# -- inspection ---------------------------------------------------------------------------
+# -- inspection --------------------------------------------------------------------------
 
 
 @app.command()
 @guard
 def ls(
-    ctx: typer.Context,
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
     select: SelectOpt = None,
     exclude: ExcludeOpt = None,
-    output: Annotated[
-        str, typer.Option("--output", "-o", help="table | name | path | json")
-    ] = "table",
+    output: OutputOpt = "table",
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """List resources with selector support (FR-PARSE-05)."""
     from mbt.dag.selector import SelectableNode, select_nodes
     from mbt.parsing import parse_project
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     nodes: dict[str, SelectableNode] = {}
     paths: dict[str, str] = {}
@@ -440,10 +448,10 @@ def ls(
     selected = sorted(select_nodes(parsed.graph, nodes, select, exclude))
     if output == "name":
         for uid in selected:
-            out_console.print(nodes[uid].name)
+            typer.echo(nodes[uid].name)
     elif output == "path":
         for uid in selected:
-            out_console.print(paths[uid])
+            typer.echo(paths[uid])
     elif output == "json":
         payload = [
             {
@@ -463,47 +471,43 @@ def ls(
         table.add_column("tags")
         table.add_column("path")
         for uid in selected:
-            table.add_row(
-                uid, nodes[uid].resource_type, ", ".join(nodes[uid].tags), paths[uid]
-            )
+            table.add_row(uid, nodes[uid].resource_type, ", ".join(nodes[uid].tags), paths[uid])
         out_console.print(table)
 
 
 @app.command()
 @guard
 def show(
-    ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Resource name or unique_id.")],
-    output: Annotated[str, typer.Option("--output", "-o", help="yaml | json")] = "yaml",
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    output: OutputOpt = "yaml",
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Print one resource's compile-rendered config (FR-PARSE-05)."""
     from mbt.compile.compiler import compile_project
+    from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
     from mbt.utils import did_you_mean
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     manifest = compile_project(parsed, profiles, cli_vars=cli.cli_vars)
 
-    found = None
-    for uid, node in {**manifest.nodes}.items():
-        if uid == name or node.name == name:
-            found = node.model_dump(mode="json")
+    found: dict[str, Any] | None = None
+    pools: list[dict[str, Any]] = [manifest.nodes, manifest.sources, manifest.exposures]
+    for pool in pools:
+        for uid, resource in pool.items():
+            if uid == name or resource.name == name:
+                found = resource.model_dump(mode="json")
+                break
+        if found:
             break
     if found is None:
-        for uid, source in manifest.sources.items():
-            if uid == name or source.name == name:
-                found = source.model_dump(mode="json")
-                break
-    if found is None:
-        for uid, exposure in manifest.exposures.items():
-            if uid == name or exposure.name == name:
-                found = exposure.model_dump(mode="json")
-                break
-    if found is None:
-        from mbt.exceptions import ConfigError
-
         suggestion = did_you_mean(name, parsed.all_names())
         raise ConfigError(
             f"unknown resource {name!r}",
@@ -512,19 +516,24 @@ def show(
     if output == "json":
         typer.echo(json.dumps(found, indent=2))
     else:
-        out_console.print(yaml.safe_dump(found, sort_keys=False, default_flow_style=False))
+        typer.echo(yaml.safe_dump(found, sort_keys=False, default_flow_style=False))
 
 
 @state_app.command("diff")
 @guard
 def state_diff(
-    ctx: typer.Context,
     state: Annotated[
         str, typer.Option("--state", help="Reference manifest path/URI (required).")
     ],
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
     manifest: ManifestOpt = None,
-    output: Annotated[str, typer.Option("--output", "-o", help="table | json")] = "table",
+    output: OutputOpt = "table",
     anchor: AnchorOpt = None,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """What changed vs a previous manifest, with components (FR-STATE-02)."""
     from mbt.artifacts.manifest import read_manifest
@@ -532,7 +541,7 @@ def state_diff(
     from mbt.parsing import parse_project
     from mbt.state.diff import diff_manifests, load_state
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
     else:
@@ -559,9 +568,7 @@ def state_diff(
     out_console.print(table)
     if diff.env_changed:
         out_console.print(
-            "[yellow]environment digest CHANGED[/yellow] "
-            f"(current {diff.env_digest_current[:20]}..., "
-            f"reference {diff.env_digest_reference[:20]}...) - nodes are not marked "
+            "[yellow]environment digest CHANGED[/yellow] - nodes are not marked "
             "modified by this alone (ADR-7)"
         )
     if diff.is_empty:
@@ -573,7 +580,15 @@ def state_diff(
 
 @docs_app.command("generate")
 @guard
-def docs_generate(ctx: typer.Context, manifest: ManifestOpt = None) -> None:
+def docs_generate(
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    manifest: ManifestOpt = None,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
+) -> None:
     """Render model cards + lineage into target/docs (FR-DOCS-01)."""
     from mbt.artifacts.manifest import read_manifest
     from mbt.artifacts.run_results import RunResults
@@ -581,7 +596,7 @@ def docs_generate(ctx: typer.Context, manifest: ManifestOpt = None) -> None:
     from mbt.docsgen import generate_docs
     from mbt.parsing import parse_project
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
     else:
@@ -598,7 +613,7 @@ def docs_generate(ctx: typer.Context, manifest: ManifestOpt = None) -> None:
 @docs_app.command("serve")
 @guard
 def docs_serve(
-    ctx: typer.Context,
+    project_dir: ProjectDirOpt = Path("."),
     port: Annotated[int, typer.Option("--port", "-p")] = 8080,
 ) -> None:
     """Serve target/docs locally (FR-DOCS-02)."""
@@ -607,35 +622,37 @@ def docs_serve(
 
     from mbt.exceptions import ConfigError
 
-    cli: CLIContext = ctx.obj
-    docs_dir = cli.project_dir / "target" / "docs"
+    docs_dir = project_dir / "target" / "docs"
     if not (docs_dir / "index.html").is_file():
-        raise ConfigError(
-            f"no generated docs at {docs_dir}", hint="run 'mbt docs generate' first"
-        )
+        raise ConfigError(f"no generated docs at {docs_dir}", hint="run 'mbt docs generate' first")
     handler = ft.partial(http.server.SimpleHTTPRequestHandler, directory=str(docs_dir))
     out_console.print(f"serving {docs_dir} at http://127.0.0.1:{port} (Ctrl+C to stop)")
     http.server.ThreadingHTTPServer(("127.0.0.1", port), handler).serve_forever()
 
 
-# -- escape hatch -----------------------------------------------------------------------------
+# -- escape hatch ------------------------------------------------------------------------------
 
 
 @app.command("run-operation")
 @guard
 def run_operation(
-    ctx: typer.Context,
     macro: Annotated[str, typer.Argument(help="Macro name from macros/*.jinja.")],
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
     args: Annotated[
         str | None, typer.Option("--args", help="YAML/JSON dict of macro arguments.")
     ] = None,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
 ) -> None:
     """Render a macro with the full compile context (FR-RUN-08)."""
     from mbt.compile.compiler import _build_resolve_context  # noqa: PLC2701
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 
-    cli: CLIContext = ctx.obj
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     if macro not in parsed.renderer.macro_names:
@@ -653,11 +670,30 @@ def run_operation(
         resource=f"run-operation:{macro}",
         path=cli.project_dir,
     )
-    out_console.print(str(rendered["result"]))
+    typer.echo(str(rendered["result"]))
 
 
 def main() -> None:
-    app()
+    """Entry point with mbt exit-code semantics (TSD §17).
+
+    Click's usage errors default to exit code 2, which collides with mbt's
+    "quality failure" code; remap them to 1 (hard error).
+    """
+    try:
+        result = app(standalone_mode=False)
+        # click returns the code from ctx.exit()/typer.Exit in this mode.
+        sys.exit(result if isinstance(result, int) else 0)
+    except click.exceptions.Exit as exc:  # pragma: no cover - version-dependent
+        sys.exit(exc.exit_code)
+    except click.UsageError as exc:
+        exc.show(file=sys.stderr)
+        sys.exit(1)
+    except click.ClickException as exc:
+        exc.show(file=sys.stderr)
+        sys.exit(1)
+    except click.Abort:
+        err_console.print("aborted")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

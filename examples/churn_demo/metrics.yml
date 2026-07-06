@@ -1,0 +1,4 @@
+metrics:
+  - name: lift_at_decile
+    kind: hook
+    greater_is_better: true
