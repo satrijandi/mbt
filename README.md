@@ -60,7 +60,7 @@ to model building:
 | dbt | mbt |
 |---|---|
 | model = SQL + config | model = **declarative YAML** (+ optional `hooks.py`) |
-| adapters: Snowflake, BigQuery... | adapters: **XGBoost, LightGBM**, sklearn/PyTorch later |
+| adapters: Snowflake, BigQuery... | adapters: **XGBoost, LightGBM, H2O AutoML, SparkML**, sklearn/PyTorch later |
 | `dbt run` materializes tables | `mbt run` trains & registers **model artifacts** |
 | `dbt test` | `mbt test`: data checks + **metric gates vs the champion** |
 | `ref()` DAG of models | `ref()` DAG of **datasets -> models** |
@@ -104,6 +104,8 @@ determinism tiers per adapter otherwise).
 | `packages/mbt-lightgbm` | LightGBM adapter - built against public contracts only (the extensibility proof) |
 | `packages/mbt-mlflow` | MLflow tracking + registry adapters |
 | `packages/mbt-snowflake` | Snowflake data adapter: warehouse-native datasets with push-down sampling |
+| `packages/mbt-spark` | Spark adapters: lakehouse data, spark-submit compute, distributed SparkML training |
+| `packages/mbt-h2o` | H2O AutoML training adapter (MOJO artifacts; optional Sparkling Water backend) |
 | `packages/mbt-optuna` | Optuna tuning engine (seeded TPE, per-target trial caps) |
 | `packages/mbt-testing` | Fake adapters for testing mbt projects without frameworks |
 | `examples/churn_demo` | The demo project used by golden and E2E tests |

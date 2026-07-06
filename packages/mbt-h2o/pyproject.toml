@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-h2o"
+version = "0.1.0"
+description = "H2O AutoML training adapter for mbt (local backend + optional Sparkling Water)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
+    "h2o>=3.46",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# H2O distributed on Spark executors; version-locked to the Spark minor.
+sparkling = ["h2o-pysparkling-3.5>=3.46", "pyspark>=3.5,<3.6"]
+
+[project.entry-points."mbt.adapters"]
+h2o_automl = "mbt_h2o.plugin:PLUGIN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_h2o"]

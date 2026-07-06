@@ -17,6 +17,8 @@ mbt-testing = { workspace = true }
 mbt-xgboost = { workspace = true }
 mbt-mlflow = { workspace = true }
 mbt-snowflake = { workspace = true }
+mbt-h2o = { workspace = true }
+mbt-spark = { workspace = true }
 mbt-optuna = { workspace = true }
 mbt-lightgbm = { workspace = true }
 
@@ -28,6 +30,8 @@ dev = [
     "mbt-xgboost",
     "mbt-mlflow",
     "mbt-snowflake",
+    "mbt-h2o",
+    "mbt-spark",
     "mbt-optuna",
     "mbt-lightgbm",
     "pytest>=8.0",
@@ -80,7 +84,7 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 show_error_codes = true
-mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-snowflake/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src"
+mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-snowflake/src:packages/mbt-h2o/src:packages/mbt-spark/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -92,6 +96,9 @@ module = [
     "lightgbm.*",
     "mlflow.*",
     "snowflake.*",
+    "h2o.*",
+    "pyspark.*",
+    "pysparkling.*",
     "optuna.*",
     "sklearn.*",
     "jsonschema.*",
@@ -102,7 +109,14 @@ ignore_missing_imports = true
 # pyarrow.parquet / pyarrow.compute are untyped upstream; the modules built
 # on them stay strict for everything else.
 [[tool.mypy.overrides]]
-module = ["mbt_adapter_base.materialization", "mbt_snowflake.adapter"]
+module = [
+    "mbt_adapter_base.materialization",
+    "mbt_snowflake.adapter",
+    "mbt_h2o.adapter",
+    "mbt_spark.data",
+    "mbt_spark.training",
+    "mbt.execute.job",
+]
 disable_error_code = ["no-untyped-call", "attr-defined"]
 
 [tool.pytest.ini_options]
@@ -112,6 +126,8 @@ testpaths = [
     "packages/mbt-xgboost/tests",
     "packages/mbt-mlflow/tests",
     "packages/mbt-snowflake/tests",
+    "packages/mbt-h2o/tests",
+    "packages/mbt-spark/tests",
     "packages/mbt-optuna/tests",
     "packages/mbt-lightgbm/tests",
     "tests",

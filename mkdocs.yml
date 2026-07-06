@@ -41,6 +41,7 @@ nav:
       - adr/0014-plugin-import-hygiene.md
       - adr/0015-contract-refinements.md
       - adr/0016-multi-table-inputs-and-key-sampling.md
+      - adr/0017-jvm-adapters-and-path-data-access.md
 
 markdown_extensions:
   - admonition

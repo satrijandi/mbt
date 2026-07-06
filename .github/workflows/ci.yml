@@ -56,7 +56,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-java@v4   # H2O + Spark adapters need a JVM
+        with: {distribution: temurin, java-version: "17"}
       - name: Sync workspace
         run: uv sync
-      - name: End-to-end (real XGBoost + MLflow sqlite, subprocess jobs)
-        run: uv run pytest -q -m e2e --timeout 900
+      - name: End-to-end (XGBoost/LightGBM/H2O/Spark + MLflow sqlite)
+        run: uv run pytest -q -m e2e --timeout 1800

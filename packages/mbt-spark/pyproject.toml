@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-spark"
+version = "0.1.0"
+description = "Spark adapters for mbt: lakehouse data, cluster compute, SparkML training"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "mbt-adapter-base>=0.1.0,<0.2",
+    "mbt-core>=0.1.0,<0.2",  # compute adapter forwards job events through the bus
+    "pyspark>=3.5,<3.6",
+]
+
+[project.entry-points."mbt.adapters"]
+spark = "mbt_spark.plugin:PLUGIN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_spark"]

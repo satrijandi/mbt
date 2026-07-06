@@ -63,6 +63,7 @@ class XGBoostTrainingAdapter:
 
     name = "xgboost"
     contract_version = CONTRACT_VERSION
+    data_access = "arrow"
     supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
     determinism = DeterminismTier(kind="exact")
 

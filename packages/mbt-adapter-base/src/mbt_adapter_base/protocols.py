@@ -115,10 +115,25 @@ class TaskSchema(Protocol):
 
 
 class TrainingAdapter(Protocol):
-    """Executes training for the tasks it supports (TSD §12.2)."""
+    """Executes training for the tasks it supports (TSD §12.2).
+
+    ``data_access`` declares how the adapter reads splits:
+
+    - ``"arrow"`` (default): via ``DatasetHandle.read()`` as Arrow tables.
+    - ``"path"``: via the handle's on-disk parquet files - for JVM/cluster
+      frameworks (H2O, Spark) that ingest files natively. The training job
+      guarantees such adapters a ``MaterializedDatasetHandle`` whose
+      ``split_path(split)`` files already have hooks and feature selection
+      applied.
+    """
 
     @property
     def name(self) -> str: ...
+
+    @property
+    def data_access(self) -> str:
+        """ "arrow" | "path" (see class docstring)."""
+        ...
 
     @property
     def contract_version(self) -> str: ...

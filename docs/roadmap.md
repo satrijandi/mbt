@@ -10,9 +10,9 @@ state-aware retraining.
 
 ## v1 candidates (architecture already accommodates)
 
-- **Remote compute** - the serialized `TrainingJob` becomes a K8s Job or Ray
-  task; `submit`/`wait` already abstract remoteness, `DatasetLocator`
-  already abstracts data placement.
+- **Remote compute** - shipped for Spark (`mbt-spark` compute adapter:
+  spark-submit'd jobs); K8s/Ray reuse the same serialized `TrainingJob`
+  seam.
 - **sklearn / PyTorch adapters** - new packages against the same contract;
   PyTorch declares a tolerance determinism tier.
 - **Survival & ranking tasks** - adapters register task schemas via

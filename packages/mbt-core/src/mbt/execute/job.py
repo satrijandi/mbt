@@ -84,7 +84,8 @@ class _JobRuntime:
     job: TrainingJob
     spec: ModelSpec
     adapter: Any
-    handle: TransformedDatasetHandle
+    handle: Any  # what the adapter reads (transformed, or a path materialization)
+    transformed: TransformedDatasetHandle  # always the lazy transformed view
     base_profile: DatasetProfile
     hooks: ModelHooks | None
     builtin_specs: list[MetricSpec]
@@ -128,6 +129,40 @@ def _tracking_adapter(job: TrainingJob) -> Any:
 
 def _job_vars(job: TrainingJob) -> dict[str, Any]:
     return dict(job.vars)
+
+
+def _materialize_for_path_adapter(handle: Any, spec: ModelSpec) -> Any:
+    """Write a handle's transformed splits to parquet for adapters that
+    declare ``data_access == "path"`` (JVM/cluster frameworks ingest files
+    natively). Hooks and feature selection are already applied by the
+    transformed handle, so path adapters see exactly what arrow adapters see.
+    """
+    import tempfile
+
+    import pyarrow.parquet as pq
+
+    from mbt_adapter_base.materialization import (
+        MaterializedDatasetHandle,
+        write_materialization_metadata,
+    )
+
+    directory = Path(tempfile.mkdtemp(prefix="mbt-path-data-"))
+    counts: dict[str, int] = {}
+    for split in sorted(handle.splits()):
+        table = handle.read(split)
+        pq.write_table(table, directory / f"{split}.parquet")
+        counts[split] = table.num_rows
+    write_materialization_metadata(
+        directory,
+        snapshot_id=handle.snapshot_id,
+        dataset=spec.name,
+        label_column=spec.target,
+        time_column=None,  # split time columns never reach adapters
+        windows={},
+        sample_fraction=1.0,
+        row_counts=counts,
+    )
+    return MaterializedDatasetHandle(directory)
 
 
 def _prepare(job: TrainingJob) -> _JobRuntime:
@@ -181,13 +216,17 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
         return HookContext(spec=spec, profile=base_profile, split=split, logger=get_bus())
 
     time_column = getattr(base_handle, "time_column", None)
-    handle = TransformedDatasetHandle(base_handle, spec, hooks, hook_ctx, time_column)
+    transformed = TransformedDatasetHandle(base_handle, spec, hooks, hook_ctx, time_column)
+    handle: Any = transformed
+    if getattr(adapter, "data_access", "arrow") == "path":
+        handle = _materialize_for_path_adapter(transformed, spec)
 
     return _JobRuntime(
         job=job,
         spec=spec,
         adapter=adapter,
         handle=handle,
+        transformed=transformed,
         base_profile=base_profile,
         hooks=hooks,
         builtin_specs=[m for m in job.metric_specs if m.kind == "builtin"],
@@ -243,7 +282,7 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
 
     Returns None when the dataset already declares a validation split.
     """
-    base = runtime.handle
+    base = runtime.transformed
     if "validation" in base.splits():
         return None
 
@@ -322,8 +361,11 @@ def _run_tuning(
     engine_ref = _render_adapter_ref(job.tuning_engine, _job_vars(job))
     engine = get_registry().component("tuning", engine_ref.adapter, engine_ref.config)
 
-    tune_handle = _carve_validation(runtime) or runtime.handle
-    explicit_validation = "validation" in runtime.handle.splits()
+    carved = _carve_validation(runtime)
+    tune_handle: Any = carved or runtime.handle
+    if carved is not None and getattr(runtime.adapter, "data_access", "arrow") == "path":
+        tune_handle = _materialize_for_path_adapter(carved, spec)
+    explicit_validation = "validation" in runtime.transformed.splits()
 
     objective_spec = next(
         (
