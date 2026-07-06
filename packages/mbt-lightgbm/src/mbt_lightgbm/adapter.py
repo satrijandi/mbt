@@ -12,7 +12,7 @@ speed and trigger a nondeterminism warning (FR-RUN-06).
 import json
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pyarrow as pa
 from pydantic import BaseModel, ValidationError
@@ -33,7 +33,6 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.metrics import compute_binary_results
-
 from mbt_lightgbm.params import LightGBMBinaryParams
 
 if TYPE_CHECKING:
@@ -58,7 +57,7 @@ class LightGBMTrainingAdapter:
 
     name = "lightgbm"
     contract_version = CONTRACT_VERSION
-    supported_tasks = {TaskType.BINARY_CLASSIFICATION}
+    supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:

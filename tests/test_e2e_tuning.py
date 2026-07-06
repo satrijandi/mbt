@@ -33,9 +33,7 @@ def test_optuna_tuning_capped_with_nested_trials(demo_copy: Path) -> None:
         timeout=600,
     )
     payload = json.loads((demo_copy / "target" / "run_results.json").read_text())
-    result = {r["unique_id"]: r for r in payload["results"]}[
-        "model.churn_demo.upsell_classifier"
-    ]
+    result = {r["unique_id"]: r for r in payload["results"]}["model.churn_demo.upsell_classifier"]
     assert result["status"] == "success"
 
     from mlflow.tracking import MlflowClient

@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from mbt_adapter_base import ArtifactRef, ManifestNode, Stage
-
 from mbt_mlflow.adapter import MlflowRegistry, MlflowTracking
+
+from mbt_adapter_base import ArtifactRef, ManifestNode, Stage
 
 
 @pytest.fixture()
@@ -106,4 +106,4 @@ def test_plugin_import_hygiene() -> None:
         "import mbt_mlflow.plugin\n"
         "assert 'mlflow' not in sys.modules, 'mlflow imported at plugin load (ADR-14)'\n"
     )
-    subprocess.run([sys.executable, "-c", probe], check=True)  # noqa: S603
+    subprocess.run([sys.executable, "-c", probe], check=True)

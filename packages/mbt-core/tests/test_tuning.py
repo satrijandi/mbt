@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from conftest import TEST_ANCHOR
 from test_execution import MODEL, invoke
 
 from mbt.adapters.registry import AdapterRegistry
@@ -30,15 +29,11 @@ def test_tuning_respects_target_cap_and_is_seeded(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:
     _add_tuning(demo_project)
-    first = invoke(
-        demo_project, fake_registry, cli_vars={"max_tuning_trials": 3}
-    )
+    first = invoke(demo_project, fake_registry, cli_vars={"max_tuning_trials": 3})
     assert first.exit_code() == 0
     model_first = {r.unique_id: r for r in first.results}[MODEL]
 
-    second = invoke(
-        demo_project, fake_registry, cli_vars={"max_tuning_trials": 3}
-    )
+    second = invoke(demo_project, fake_registry, cli_vars={"max_tuning_trials": 3})
     model_second = {r.unique_id: r for r in second.results}[MODEL]
     # same seed -> same proposals -> identical best params and metrics
     assert model_first.metrics == model_second.metrics

@@ -67,9 +67,7 @@ class InMemoryDatasetHandle:
         if label and train is not None and label in train.column_names and train.num_rows:
             values = [str(v) for v in train.column(label).to_pylist()]
             total = len(values)
-            label_balance = {
-                cls: values.count(cls) / total for cls in sorted(set(values))
-            }
+            label_balance = {cls: values.count(cls) / total for cls in sorted(set(values))}
         time_range: tuple[str, str] | None = None
         if self._time_column and self._time_column in columns:
             lows, highs = [], []

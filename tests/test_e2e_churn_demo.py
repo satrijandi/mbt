@@ -66,9 +66,16 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
     manifest = demo_copy / "target" / "manifest.json"
     reference = demo_copy / "reference_manifest.json"
     reference.write_text(manifest.read_text())
-    proc = run_mbt(
-        ["build", "--anchor", DEMO_ANCHOR, "--select", "state:modified+",
-         "--state", str(reference)],
+    run_mbt(
+        [
+            "build",
+            "--anchor",
+            DEMO_ANCHOR,
+            "--select",
+            "state:modified+",
+            "--state",
+            str(reference),
+        ],
         demo_copy,
         timeout=600,
     )
@@ -80,8 +87,15 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
     model_yml = demo_copy / "models" / "churn_classifier.yml"
     model_yml.write_text(model_yml.read_text().replace("max_depth: 4", "max_depth: 5"))
     run_mbt(
-        ["build", "--anchor", DEMO_ANCHOR, "--select", "state:modified+",
-         "--state", str(reference)],
+        [
+            "build",
+            "--anchor",
+            DEMO_ANCHOR,
+            "--select",
+            "state:modified+",
+            "--state",
+            str(reference),
+        ],
         demo_copy,
         timeout=600,
     )
@@ -100,8 +114,16 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
 
     # ---- 6. evaluate the production champion on fresh data (FR-RUN-07) ----
     run_mbt(
-        ["evaluate", "--model", "churn_classifier", "--stage", "production",
-         "--gates", "--anchor", DEMO_ANCHOR],
+        [
+            "evaluate",
+            "--model",
+            "churn_classifier",
+            "--stage",
+            "production",
+            "--gates",
+            "--anchor",
+            DEMO_ANCHOR,
+        ],
         demo_copy,
         timeout=600,
     )
@@ -119,9 +141,7 @@ def test_failing_gate_blocks_registration_with_exit_2(demo_copy: Path) -> None:
     )
     results = _results(demo_copy)
     gate_failed = {uid for uid, r in results.items() if r["status"] == "gate_failed"}
-    assert MODELS <= gate_failed | {
-        uid for uid, r in results.items() if r["status"] == "success"
-    }
+    assert gate_failed | {uid for uid, r in results.items() if r["status"] == "success"} >= MODELS
     assert gate_failed, "at least one model must fail the 0.99 pr_auc gate"
     for uid in gate_failed:
         assert results[uid]["registration"] is None
@@ -129,14 +149,15 @@ def test_failing_gate_blocks_registration_with_exit_2(demo_copy: Path) -> None:
     from mlflow.tracking import MlflowClient
 
     client = MlflowClient(tracking_uri=f"sqlite:///{demo_copy}/mlflow.db")
-    for uid in gate_failed & {"model.churn_demo.churn_classifier"}:
+    if "model.churn_demo.churn_classifier" in gate_failed:
         assert not client.search_model_versions("name = 'churn_classifier'")
 
 
 def test_champion_challenger_against_production(demo_copy: Path) -> None:
     # bootstrap build + promote to production
-    run_mbt(["build", "--anchor", DEMO_ANCHOR, "--select", "churn_classifier"],
-            demo_copy, timeout=600)
+    run_mbt(
+        ["build", "--anchor", DEMO_ANCHOR, "--select", "churn_classifier"], demo_copy, timeout=600
+    )
     run_mbt(["promote", "--model", "churn_classifier", "--to", "production"], demo_copy)
 
     # switch the gate to champion comparison; identical spec -> delta 0 >= 0 passes
@@ -147,8 +168,9 @@ def test_champion_challenger_against_production(demo_copy: Path) -> None:
             "- metric: pr_auc\n          compare_to: production",
         )
     )
-    run_mbt(["build", "--anchor", DEMO_ANCHOR, "--select", "churn_classifier"],
-            demo_copy, timeout=600)
+    run_mbt(
+        ["build", "--anchor", DEMO_ANCHOR, "--select", "churn_classifier"], demo_copy, timeout=600
+    )
     result = _results(demo_copy)["model.churn_demo.churn_classifier"]
     gate = result["gates"][0]
     assert gate["kind"] == "champion"

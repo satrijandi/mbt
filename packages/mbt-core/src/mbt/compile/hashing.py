@@ -40,7 +40,7 @@ def input_hash(
     upstream_input_hashes: list[str],
 ) -> str:
     """Transitive identity: everything that affects the trained artifact."""
-    parts = [node_config_hash, snapshot_id or ""] + sorted(upstream_input_hashes)
+    parts = [node_config_hash, snapshot_id or "", *sorted(upstream_input_hashes)]
     return _sha256("|".join(parts).encode("utf-8"))
 
 
@@ -50,7 +50,7 @@ def env_digest(fingerprint_packages: list[str]) -> str:
     packages = set(fingerprint_packages)
     for dist in distributions():
         name = (dist.metadata["Name"] or "").lower()
-        if name == "mbt-core" or name == "mbt-adapter-base" or name.startswith("mbt-"):
+        if name in {"mbt-core", "mbt-adapter-base"} or name.startswith("mbt-"):
             packages.add(name)
     for package in sorted(packages):
         try:

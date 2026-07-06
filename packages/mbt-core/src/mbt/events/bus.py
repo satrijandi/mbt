@@ -43,5 +43,5 @@ def get_bus() -> EventBus:
 
 
 def set_bus(bus: EventBus) -> None:
-    global _bus
+    global _bus  # noqa: PLW0603 - one bus per process by design
     _bus = bus

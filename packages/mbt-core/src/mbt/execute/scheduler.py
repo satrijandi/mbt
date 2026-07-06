@@ -33,19 +33,17 @@ def execute_plan(
     stop_scheduling = False
 
     parents = {
-        uid: {p for p in graph.predecessors(uid) if p in execution_set}
-        for uid in execution_set
+        uid: {p for p in graph.predecessors(uid) if p in execution_set} for uid in execution_set
     }
     remaining = {uid: len(deps) for uid, deps in parents.items()}
     children = {
-        uid: {c for c in graph.successors(uid) if c in execution_set}
-        for uid in execution_set
+        uid: {c for c in graph.successors(uid) if c in execution_set} for uid in execution_set
     }
 
     def guarded_run(uid: str) -> NodeResult:
         try:
             return run_node(uid)
-        except Exception as exc:  # noqa: BLE001 - scheduler must never die mid-run
+        except Exception as exc:
             return NodeResult(unique_id=uid, status="error", message=str(exc))
 
     with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
@@ -79,9 +77,7 @@ def execute_plan(
                     if result.status in _FAILING_STATUSES:
                         for descendant in nx.descendants(graph, uid):
                             if descendant in execution_set:
-                                mark_skipped(
-                                    descendant, f"upstream {uid} {result.status}"
-                                )
+                                mark_skipped(descendant, f"upstream {uid} {result.status}")
                         if fail_fast:
                             stop_scheduling = True
                     for child in children[uid]:

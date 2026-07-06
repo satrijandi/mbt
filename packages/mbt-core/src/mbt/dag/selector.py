@@ -43,9 +43,7 @@ class SelectableNode:
     tags: tuple[str, ...] = ()
 
 
-_ATOM_RE = re.compile(
-    r"^(?:(?P<updepth>\d*)\+)?(?P<body>[^+]+?)(?:\+(?P<downdepth>\d*))?$"
-)
+_ATOM_RE = re.compile(r"^(?:(?P<updepth>\d*)\+)?(?P<body>[^+]+?)(?:\+(?P<downdepth>\d*))?$")
 _METHODS = ("tag", "state", "resource_type")
 _STATE_VALUES = ("new", "modified")
 
@@ -115,12 +113,20 @@ def _parse_atom(atom_text: str, full: str) -> Atom:
                 hint=f"state values: {', '.join(_STATE_VALUES)}",
             )
         return Atom(
-            body_method=method, body_value=value,
-            up=up, up_depth=up_depth, down=down, down_depth=down_depth,
+            body_method=method,
+            body_value=value,
+            up=up,
+            up_depth=up_depth,
+            down=down,
+            down_depth=down_depth,
         )
     return Atom(
-        body_method=None, body_value=body,
-        up=up, up_depth=up_depth, down=down, down_depth=down_depth,
+        body_method=None,
+        body_value=body,
+        up=up,
+        up_depth=up_depth,
+        down=down,
+        down_depth=down_depth,
     )
 
 

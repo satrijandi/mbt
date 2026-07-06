@@ -50,9 +50,7 @@ def test_switching_adapter_only_touches_the_spec(demo_copy: Path) -> None:
         timeout=600,
     )
     payload = json.loads((demo_copy / "target" / "run_results.json").read_text())
-    result = {r["unique_id"]: r for r in payload["results"]}[
-        "model.churn_demo.churn_classifier"
-    ]
+    result = {r["unique_id"]: r for r in payload["results"]}["model.churn_demo.churn_classifier"]
     assert result["status"] == "success"
     assert result["artifact"]["format"] == "lightgbm_json"
     assert result["resolved_auto"]["scale_pos_weight"] > 0

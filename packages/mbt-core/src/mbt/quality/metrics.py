@@ -5,9 +5,8 @@ task/adapter builtin > hook metric; unknown names are a parse error listing
 the candidates.
 """
 
-from mbt_adapter_base.metrics import parse_metric_sugar
-
 from mbt.contracts import MetricSpec, ModelSpec, TaskSchema
+from mbt_adapter_base.metrics import parse_metric_sugar
 
 #: Builtin metrics where lower is better; everything else defaults to higher.
 LOWER_IS_BETTER = frozenset({"logloss", "ece", "brier"})

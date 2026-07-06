@@ -89,7 +89,7 @@ def _render_profiles_text(
 
     def env_var(name: str, default: str | None = None) -> str:
         used_env.append(name)
-        value = os.environ.get(name, _missing)  # type: ignore[arg-type]
+        value = os.environ.get(name, _missing)
         if value is _missing:
             if default is None:
                 raise ConfigError(
@@ -113,7 +113,7 @@ def _render_profiles_text(
             )
         return default
 
-    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)  # noqa: S701
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
     try:
         return env.from_string(text).render(env_var=env_var, var=var), sorted(set(used_env))
     except ConfigError:

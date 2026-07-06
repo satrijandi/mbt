@@ -88,8 +88,13 @@ class AdapterRegistry:
                 f"adapter {plugin.name!r} pins contract {plugin.contract_version}, "
                 f"but this mbt-core supports {core_major}.{core_minor}",
                 hint=(
-                    f"upgrade {'mbt-core' if major > core_major or minor > core_minor else f'mbt-{plugin.name}'} "
-                    "so contract majors match and the adapter's minor is not newer"
+                    "upgrade "
+                    + (
+                        "mbt-core"
+                        if major > core_major or minor > core_minor
+                        else f"mbt-{plugin.name}"
+                    )
+                    + " so contract majors match and the adapter's minor is not newer"
                 ),
             )
 
@@ -145,7 +150,7 @@ _registry: AdapterRegistry | None = None
 
 
 def get_registry() -> AdapterRegistry:
-    global _registry
+    global _registry  # noqa: PLW0603 - process-wide plugin cache by design
     if _registry is None:
         _registry = AdapterRegistry()
     return _registry
@@ -153,5 +158,5 @@ def get_registry() -> AdapterRegistry:
 
 def set_registry(registry: AdapterRegistry | None) -> None:
     """Testing hook: replace or reset the process-wide registry."""
-    global _registry
+    global _registry  # noqa: PLW0603
     _registry = registry

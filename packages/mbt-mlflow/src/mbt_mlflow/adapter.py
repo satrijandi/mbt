@@ -99,9 +99,7 @@ class MlflowTracking(_MlflowBase):
                 if path.is_file():
                     client.log_artifact(run.run_id, str(path))
 
-    def log_trial(
-        self, run: RunHandle, index: int, params: dict[str, Any], value: float
-    ) -> None:
+    def log_trial(self, run: RunHandle, index: int, params: dict[str, Any], value: float) -> None:
         """Tuning trial history as nested runs (FR-TUNE-03)."""
         client = self.client()
         nested = client.create_run(
@@ -128,16 +126,14 @@ class MlflowRegistry(_MlflowBase):
     """RegistryAdapter over the MLflow model registry."""
 
     def _ensure_registered_model(self, name: str) -> None:
+        import contextlib
+
         from mlflow.exceptions import MlflowException
 
-        try:
+        with contextlib.suppress(MlflowException):  # already exists
             self.client().create_registered_model(name)
-        except MlflowException:
-            pass  # already exists
 
-    def register(
-        self, artifact: ArtifactRef, name: str, metadata: dict[str, str]
-    ) -> ModelVersion:
+    def register(self, artifact: ArtifactRef, name: str, metadata: dict[str, str]) -> ModelVersion:
         client = self.client()
         self._ensure_registered_model(name)
         tags = dict(metadata)
@@ -151,9 +147,7 @@ class MlflowRegistry(_MlflowBase):
             run_id=metadata.get("mbt.tracking_run_id") or None,
             tags=tags,
         )
-        return ModelVersion(
-            name=name, version=str(version.version), artifact=artifact, tags=tags
-        )
+        return ModelVersion(name=name, version=str(version.version), artifact=artifact, tags=tags)
 
     def _to_model_version(self, mv: Any) -> ModelVersion:
         tags = dict(mv.tags or {})

@@ -105,7 +105,7 @@ class SpecRenderer:
     """Renders spec mappings in capture or resolve phase, plus macros."""
 
     def __init__(self, macro_paths: list[Path] | None = None) -> None:
-        self._env = _NativeSandbox(undefined=jinja2.StrictUndefined, autoescape=False)  # noqa: S701
+        self._env = _NativeSandbox(undefined=jinja2.StrictUndefined, autoescape=False)
         self._macro_names: list[str] = []
         for macro_dir in macro_paths or []:
             if macro_dir.is_dir():
@@ -185,9 +185,7 @@ class SpecRenderer:
             "target": TargetContext(name=""),
             "auto": AUTO,
         }
-        result.rendered = self._walk(
-            mapping, context, resource=resource, path=path, phase="parse"
-        )
+        result.rendered = self._walk(mapping, context, resource=resource, path=path, phase="parse")
         return result
 
     # -- resolve phase -----------------------------------------------------
@@ -244,8 +242,7 @@ class SpecRenderer:
             }
         if isinstance(value, list):
             return [
-                self._walk(v, context, resource=resource, path=path, phase=phase)
-                for v in value
+                self._walk(v, context, resource=resource, path=path, phase=phase) for v in value
             ]
         if isinstance(value, str):
             template_text = _normalize_template(value)

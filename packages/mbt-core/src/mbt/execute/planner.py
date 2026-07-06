@@ -37,8 +37,9 @@ def plan_execution(
     selectable = manifest.selectable_nodes()
     selected = select_nodes(graph, selectable, select, exclude, state)
     selected = {
-        uid for uid in selected if manifest.nodes.get(uid) is not None
-        and manifest.nodes[uid].resource_type in _EXECUTABLE
+        uid
+        for uid in selected
+        if manifest.nodes.get(uid) is not None and manifest.nodes[uid].resource_type in _EXECUTABLE
     }
 
     execution_set = set(selected)

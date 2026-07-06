@@ -53,14 +53,15 @@ def _resolve_version(
     registry_adapter: Any, name: str, version: str | None, from_stage: Stage
 ) -> ModelVersion:
     if version is not None:
-        resolved = registry_adapter.get_version(name, version)
+        resolved: ModelVersion | None = registry_adapter.get_version(name, version)
         if resolved is None:
             raise StateError(
                 f"model {name!r} has no version {version!r}",
                 hint="list versions in your registry UI, or omit --version for the latest",
             )
         return resolved
-    resolved = registry_adapter.get_champion(name, from_stage)
+    champion: ModelVersion | None = registry_adapter.get_champion(name, from_stage)
+    resolved = champion
     if resolved is None:
         raise StateError(
             f"model {name!r} has no version in stage {from_stage.value!r} to promote",

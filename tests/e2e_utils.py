@@ -22,6 +22,7 @@ def run_mbt(
         text=True,
         timeout=timeout,
         stdin=subprocess.DEVNULL,
+        check=False,
     )
     assert proc.returncode == expect_exit, (
         f"mbt {' '.join(args)} exited {proc.returncode}, expected {expect_exit}\n"

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from conftest import write
+from core_helpers import write
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.exceptions import ConfigError
@@ -105,9 +105,7 @@ def test_cycle_is_reported_with_path(tmp_path: Path, fake_registry: AdapterRegis
     assert " -> ".join([]) == "" and "a" in str(excinfo.value)
 
 
-def test_model_to_model_ref_rejected(
-    demo_project: Path, fake_registry: AdapterRegistry
-) -> None:
+def test_model_to_model_ref_rejected(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     write(
         demo_project / "models/ensemble.yml",
         """

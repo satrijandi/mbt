@@ -46,6 +46,8 @@ from mbt.runtime import (
 )
 from mbt.runtime import (
     resolve_artifact_store_uri,
+)
+from mbt.runtime import (
     tracking_adapter as build_tracking_adapter,
 )
 from mbt.secrets import Secret
@@ -160,9 +162,7 @@ class DatasetRunner:
         bus = get_bus()
         index = ctx.next_index()
         bus.emit(
-            NodeStarted(
-                unique_id=uid, resource_type="dataset", index=index, total=ctx.total_nodes
-            )
+            NodeStarted(unique_id=uid, resource_type="dataset", index=index, total=ctx.total_nodes)
         )
         started = time.monotonic()
         try:
@@ -210,9 +210,7 @@ class DatasetRunner:
         key = materialization_key(node)
         output_dir = ctx.project_dir / "target" / "datasets" / node.name / key
         if (output_dir / "_SUCCESS").is_file():
-            get_bus().emit(
-                LogMessage(unique_id=node.unique_id, message=f"cache hit ({key})")
-            )
+            get_bus().emit(LogMessage(unique_id=node.unique_id, message=f"cache hit ({key})"))
             return ctx.data_adapter.from_locator(
                 DatasetLocator(
                     adapter=ctx.profiles.target.data.adapter,
@@ -266,9 +264,7 @@ class DatasetRunner:
             return True
         if test_file.selector is None:
             return not spec.tests
-        matched = evaluate_selector(
-            test_file.selector, self.ctx.graph(), self.ctx.selectable()
-        )
+        matched = evaluate_selector(test_file.selector, self.ctx.graph(), self.ctx.selectable())
         return uid in matched
 
 
@@ -284,9 +280,7 @@ class ModelRunner:
         bus = get_bus()
         index = ctx.next_index()
         bus.emit(
-            NodeStarted(
-                unique_id=uid, resource_type="model", index=index, total=ctx.total_nodes
-            )
+            NodeStarted(unique_id=uid, resource_type="model", index=index, total=ctx.total_nodes)
         )
         started = time.monotonic()
         try:
@@ -436,9 +430,7 @@ class ModelRunner:
             "mbt.artifact_content_hash": job_result.artifact.content_hash,
             "mbt.artifact_size_bytes": str(job_result.artifact.size_bytes),
         }
-        version = registry_adapter.register(
-            job_result.artifact, spec.registration.name, metadata
-        )
+        version = registry_adapter.register(job_result.artifact, spec.registration.name, metadata)
         registry_adapter.transition(version, spec.registration.stage_on_pass)
         get_bus().emit(
             ArtifactRegistered(
@@ -475,7 +467,7 @@ class ModelRunner:
             tracking = self.ctx.tracking()
             run = tracking.resume(job_result.tracking_run_id)
             tracking.log(run, tags=tags)
-        except Exception as exc:  # noqa: BLE001 - tags are best-effort metadata
+        except Exception as exc:
             get_bus().emit(
                 LogMessage(level="warn", message=f"could not attach tracking tags: {exc}")
             )
@@ -558,9 +550,7 @@ class ModelTestRunner:
         ctx = self.ctx
         spec = ModelSpec.model_validate(node.config)
         if not spec.evaluation.gates:
-            return NodeResult(
-                unique_id=uid, status="skipped", message="model declares no gates"
-            )
+            return NodeResult(unique_id=uid, status="skipped", message="model declares no gates")
         registry_name = spec.registration.name if spec.registration else spec.name
         stage = spec.registration.stage_on_pass if spec.registration else Stage.STAGING
         version = ctx.registry_adapter().get_champion(registry_name, stage)
@@ -587,9 +577,7 @@ class ModelTestRunner:
             return NodeResult(
                 unique_id=uid, status="error", message=job_result.error or "no metrics"
             )
-        gates = self._model_runner._gate_results(
-            spec, node, job_result, champion, metric_specs
-        )
+        gates = self._model_runner._gate_results(spec, node, job_result, champion, metric_specs)
         passed = all_gates_passed(gates)
         return NodeResult(
             unique_id=uid,

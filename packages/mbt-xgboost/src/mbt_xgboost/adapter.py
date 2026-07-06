@@ -11,7 +11,7 @@ encode via a hooks.py transform.
 
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pyarrow as pa
 from pydantic import BaseModel, ValidationError
@@ -32,7 +32,6 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.metrics import compute_binary_results
-
 from mbt_xgboost.params import XGBoostBinaryParams
 
 if TYPE_CHECKING:
@@ -64,7 +63,7 @@ class XGBoostTrainingAdapter:
 
     name = "xgboost"
     contract_version = CONTRACT_VERSION
-    supported_tasks = {TaskType.BINARY_CLASSIFICATION}
+    supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -156,7 +155,10 @@ class XGBoostTrainingAdapter:
         import xgboost as xgb
 
         columns = [table.column(name).to_numpy(zero_copy_only=False) for name in features]
-        x = np.column_stack(columns).astype(np.float32) if columns else np.empty((table.num_rows, 0))
+        if columns:
+            x = np.column_stack(columns).astype(np.float32)
+        else:
+            x = np.empty((table.num_rows, 0), dtype=np.float32)
         y = None
         if target is not None:
             y = table.column(target).to_numpy(zero_copy_only=False).astype(np.float32)
@@ -236,8 +238,10 @@ class XGBoostTrainingAdapter:
 
     def _export_onnx(self, model: XGBoostModel, store: ArtifactStore) -> ArtifactRef:
         try:
-            from onnxmltools import convert_xgboost
-            from onnxmltools.convert.common.data_types import FloatTensorType
+            from onnxmltools import convert_xgboost  # type: ignore[import-not-found]
+            from onnxmltools.convert.common.data_types import (  # type: ignore[import-not-found]
+                FloatTensorType,
+            )
         except ImportError as exc:  # pragma: no cover - extra not installed
             raise ValueError(
                 "ONNX export needs the onnx extra: pip install 'mbt-xgboost[onnx]'"
@@ -264,5 +268,5 @@ class XGBoostTrainingAdapter:
         return XGBoostModel(
             booster=booster,
             features=features,
-            target=attributes.get("mbt_target", ""),
+            target=attributes.get("mbt_target") or "",
         )

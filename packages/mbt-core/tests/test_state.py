@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from conftest import TEST_ANCHOR, write, write_subscriber_data
+from core_helpers import TEST_ANCHOR, write, write_subscriber_data
 from test_compile import DS, MODEL, compile_demo
 
 from mbt.adapters.registry import AdapterRegistry
@@ -19,9 +19,7 @@ def _select_modified(current, reference, selector: str = "state:modified") -> se
 
 def test_anchor_drift_selects_nothing(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     reference = compile_demo(demo_project, fake_registry)
-    drifted = compile_demo(
-        demo_project, fake_registry, anchor=TEST_ANCHOR + timedelta(days=14)
-    )
+    drifted = compile_demo(demo_project, fake_registry, anchor=TEST_ANCHOR + timedelta(days=14))
     assert _select_modified(drifted, reference) == set()
     diff = diff_manifests(drifted, reference)
     assert diff.is_empty and not diff.env_changed
@@ -101,9 +99,7 @@ def test_state_new_selects_only_added_nodes(
     )
     current = compile_demo(demo_project, fake_registry)
     index = ManifestStateIndex(current, reference)
-    new = select_nodes(
-        current.graph(), current.selectable_nodes(), ["state:new"], state=index
-    )
+    new = select_nodes(current.graph(), current.selectable_nodes(), ["state:new"], state=index)
     assert new == {"model.demo.second_model"}
     diff = diff_manifests(current, reference)
     assert [d.unique_id for d in diff.added] == ["model.demo.second_model"]
@@ -114,9 +110,7 @@ def test_state_selector_without_state_flag_is_an_error(
 ) -> None:
     manifest = compile_demo(demo_project, fake_registry)
     with pytest.raises(SelectorError, match="--state"):
-        select_nodes(
-            manifest.graph(), manifest.selectable_nodes(), ["state:modified"], state=None
-        )
+        select_nodes(manifest.graph(), manifest.selectable_nodes(), ["state:modified"], state=None)
 
 
 def test_state_modified_plus_includes_downstream(

@@ -22,9 +22,7 @@ def _model_kwargs(**overrides: object) -> dict[str, object]:
         "owner": "a@b.c",
         "dataset": "ref('d')",
         "target": "y",
-        "evaluation": EvaluationSpec(
-            protocol=EvaluationProtocol(), metrics=["pr_auc"]
-        ),
+        "evaluation": EvaluationSpec(protocol=EvaluationProtocol(), metrics=["pr_auc"]),
         "seed": 1,
     }
     base.update(overrides)
@@ -39,7 +37,7 @@ def test_seed_is_mandatory_with_no_default() -> None:
 
 
 def test_unknown_fields_rejected() -> None:
-    with pytest.raises(ValidationError, match="extra_forbidden|Extra inputs"):
+    with pytest.raises(ValidationError, match=r"extra_forbidden|Extra inputs"):
         ModelSpec.model_validate({**_model_kwargs(), "hyperparams": {}})
 
 
@@ -59,7 +57,7 @@ def test_gate_metric_must_be_declared() -> None:
         metrics=["pr_auc"],
         gates=[GateSpec(metric="roc_auc", threshold=0.5)],
     )
-    with pytest.raises(ValidationError, match="must appear in evaluation.metrics"):
+    with pytest.raises(ValidationError, match=r"must appear in evaluation\.metrics"):
         ModelSpec.model_validate(_model_kwargs(evaluation=evaluation))
 
 

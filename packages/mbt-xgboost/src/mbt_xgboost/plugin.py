@@ -5,7 +5,6 @@ enforces it (TSD §12.4).
 """
 
 from mbt_adapter_base import CONTRACT_VERSION, AdapterPlugin
-
 from mbt_xgboost.adapter import XGBoostTrainingAdapter
 
 PLUGIN = AdapterPlugin(

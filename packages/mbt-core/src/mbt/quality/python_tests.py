@@ -65,7 +65,9 @@ def discover_python_tests(
                     hint="data tests are functions like: def test_x(dataset, spec) -> TestResult",
                 )
                 continue
-            found.append(PythonTestFile(path=path, rel=rel, selector=selector, test_names=test_names))
+            found.append(
+                PythonTestFile(path=path, rel=rel, selector=selector, test_names=test_names)
+            )
     return found
 
 
@@ -99,7 +101,7 @@ def run_python_tests(
             func: Any = getattr(module, name)
             try:
                 outcome = func(dataset, spec)
-            except Exception as exc:  # noqa: BLE001 - a raising test is a failing test
+            except Exception as exc:
                 results.append(TestResult(name=name, passed=False, message=f"raised {exc!r}"))
                 continue
             if isinstance(outcome, TestResult):

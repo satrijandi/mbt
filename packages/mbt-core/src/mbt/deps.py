@@ -43,14 +43,12 @@ def load_packages(project_dir: Path) -> list[PackagePin]:
 
 def install_packages(pins: list[PackagePin], *, dry_run: bool = False) -> list[str]:
     """pip-install each pin into the active environment; returns requirement strings."""
-    requirements = [
-        f"{pin.package}{pin.version}" if pin.version else pin.package for pin in pins
-    ]
+    requirements = [f"{pin.package}{pin.version}" if pin.version else pin.package for pin in pins]
     if dry_run or not requirements:
         return requirements
     command = [sys.executable, "-m", "pip", "install", *requirements]
     get_bus().emit(LogMessage(message="installing: " + " ".join(requirements)))
-    proc = subprocess.run(command, capture_output=True, text=True, check=False)  # noqa: S603
+    proc = subprocess.run(command, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise ConfigError(
             f"pip install failed (exit {proc.returncode})",

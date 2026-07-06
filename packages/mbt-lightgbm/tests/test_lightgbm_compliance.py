@@ -6,17 +6,22 @@ anywhere in the package (verified by test_no_core_imports below).
 
 import subprocess
 import sys
-
-from mbt_adapter_base.compliance import TrainingAdapterCompliance
+from typing import ClassVar
 
 from mbt_lightgbm.adapter import LightGBMTrainingAdapter
+
+from mbt_adapter_base.compliance import TrainingAdapterCompliance
 
 
 class TestLightGBMCompliance(TrainingAdapterCompliance):
     adapter_factory = LightGBMTrainingAdapter
     plugin_module = "mbt_lightgbm.plugin"
     framework_modules = ("lightgbm",)
-    valid_hyperparameters = {"num_leaves": 15, "n_estimators": 30, "learning_rate": 0.2}
+    valid_hyperparameters: ClassVar[dict] = {
+        "num_leaves": 15,
+        "n_estimators": 30,
+        "learning_rate": 0.2,
+    }
     auto_hyperparameter = "scale_pos_weight"
 
 
@@ -29,7 +34,7 @@ def test_no_core_imports() -> None:
         "print(loaded)\n"
         "assert not loaded, f'mbt-core modules loaded: {loaded}'\n"
     )
-    subprocess.run([sys.executable, "-c", probe], check=True)  # noqa: S603
+    subprocess.run([sys.executable, "-c", probe], check=True)
 
 
 def test_threading_nondeterminism_warning() -> None:
@@ -49,6 +54,4 @@ def test_threading_nondeterminism_warning() -> None:
     adapter = LightGBMTrainingAdapter({})
     warnings = adapter.nondeterminism_warnings(spec)
     assert warnings and "num_threads" in warnings[0]  # S8-04
-    assert not adapter.nondeterminism_warnings(
-        spec.model_copy(update={"hyperparameters": {}})
-    )
+    assert not adapter.nondeterminism_warnings(spec.model_copy(update={"hyperparameters": {}}))

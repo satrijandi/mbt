@@ -13,4 +13,4 @@ from mbt_adapter_base.protocols import (
     SourceTableLike,
 )
 
-__all__ = [*_base_all, "DataBuildContext", "PythonDataTest", "SourceTableLike"]
+__all__ = [*_base_all, "DataBuildContext", "PythonDataTest", "SourceTableLike"]  # noqa: PLE0604

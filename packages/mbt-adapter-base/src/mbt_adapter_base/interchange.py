@@ -14,7 +14,7 @@ from mbt_adapter_base.specs import AdapterRef, MetricSpec
 from mbt_adapter_base.types import Stage
 
 if TYPE_CHECKING:
-    from mbt_adapter_base.protocols import DatasetHandle, EventSink
+    from mbt_adapter_base.protocols import EventSink
     from mbt_adapter_base.specs import ModelSpec
 
 

@@ -1,13 +1,12 @@
 """The binary_classification task schema (TSD §5.6)."""
 
-from mbt_adapter_base.metrics import BINARY_METRIC_BASES, is_builtin_binary_metric
-
 from mbt.contracts import (
     DatasetProfile,
     ModelSpec,
     TaskType,
     ValidationIssue,
 )
+from mbt_adapter_base.metrics import BINARY_METRIC_BASES, is_builtin_binary_metric
 
 _BINARY_LABEL_VALUES = {"0", "1", "0.0", "1.0", "false", "true"}
 
@@ -42,9 +41,7 @@ class BinaryClassificationSchema:
                 )
         return issues
 
-    def validate_dataset(
-        self, spec: ModelSpec, profile: DatasetProfile
-    ) -> list[ValidationIssue]:
+    def validate_dataset(self, spec: ModelSpec, profile: DatasetProfile) -> list[ValidationIssue]:
         """Run-time validation once the dataset profile exists."""
         issues: list[ValidationIssue] = []
         balance = profile.label_balance or {}

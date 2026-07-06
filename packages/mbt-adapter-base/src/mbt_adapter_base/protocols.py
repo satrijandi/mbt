@@ -109,9 +109,7 @@ class TaskSchema(Protocol):
         """Parse-time validation (metric names, protocol sanity)."""
         ...
 
-    def validate_dataset(
-        self, spec: "ModelSpec", profile: DatasetProfile
-    ) -> list[ValidationIssue]:
+    def validate_dataset(self, spec: "ModelSpec", profile: DatasetProfile) -> list[ValidationIssue]:
         """Run-time validation once the dataset profile exists."""
         ...
 
@@ -141,9 +139,7 @@ class TrainingAdapter(Protocol):
         """Replace AUTO sentinels with values derived from the profile."""
         ...
 
-    def train(
-        self, spec: "ModelSpec", data: DatasetHandle, ctx: RunContext
-    ) -> TrainedModel: ...
+    def train(self, spec: "ModelSpec", data: DatasetHandle, ctx: RunContext) -> TrainedModel: ...
 
     def evaluate(
         self,
@@ -160,9 +156,7 @@ class TrainingAdapter(Protocol):
 
     def load(self, ref: ArtifactRef, store: ArtifactStore) -> TrainedModel: ...
 
-    def export(
-        self, model: TrainedModel, format: str, store: ArtifactStore
-    ) -> ArtifactRef: ...
+    def export(self, model: TrainedModel, format: str, store: ArtifactStore) -> ArtifactRef: ...
 
     def nondeterminism_warnings(self, spec: "ModelSpec") -> list[str]:
         """Known nondeterminism sources in this spec (FR-RUN-06)."""
@@ -316,9 +310,9 @@ __all__ = [
     "RegistryAdapter",
     "SourceTableLike",
     "TaskSchema",
+    "TestResult",
     "TrackingAdapter",
     "TrainedModel",
     "TrainingAdapter",
     "TuningEngine",
-    "TestResult",
 ]

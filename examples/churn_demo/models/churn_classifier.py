@@ -7,7 +7,7 @@ def custom_metrics(predictions, ctx):
     labels = predictions.column(ctx.spec.target).to_pylist()
     if not scores:
         return {"lift_at_decile": 0.0}
-    paired = sorted(zip(scores, labels), key=lambda p: p[0], reverse=True)
+    paired = sorted(zip(scores, labels, strict=False), key=lambda p: p[0], reverse=True)
     top = paired[: max(1, len(paired) // 10)]
     top_rate = sum(label for _, label in top) / len(top)
     base_rate = sum(labels) / len(labels)

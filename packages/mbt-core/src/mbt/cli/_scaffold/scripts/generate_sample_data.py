@@ -18,7 +18,7 @@ def main(n_rows: int = 5000) -> None:
     base = now - timedelta(days=200)
     plans = ["basic", "pro", "enterprise"]
 
-    rows = {
+    rows: dict[str, list[object]] = {
         "user_id": [],
         "snapshot_date": [],
         "is_active": [],
@@ -47,7 +47,7 @@ def main(n_rows: int = 5000) -> None:
 
     out = Path(__file__).resolve().parent.parent / "data" / "subscribers"
     out.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.table(rows), out / "part-000.parquet")
+    pq.write_table(pa.table(rows), out / "part-000.parquet")  # type: ignore[no-untyped-call]
     print(f"wrote {n_rows} rows to {out / 'part-000.parquet'}")
 
 

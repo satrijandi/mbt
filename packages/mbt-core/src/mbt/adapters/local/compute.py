@@ -49,7 +49,7 @@ class LocalComputeAdapter:
         job_dir = Path(tempfile.mkdtemp(prefix="mbt-job-"))
         job_path = job_dir / "job.json"
         job_path.write_text(job.model_dump_json())
-        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        process = subprocess.Popen(
             [sys.executable, "-m", "mbt.execute.job", str(job_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -63,8 +63,8 @@ class LocalComputeAdapter:
     def wait(self, handle: LocalJobHandle) -> JobResult:
         bus = get_bus()
         assert handle.process.stdout is not None
-        for line in handle.process.stdout:
-            line = line.rstrip("\n")
+        for raw_line in handle.process.stdout:
+            line = raw_line.rstrip("\n")
             if not line:
                 continue
             bus.emit(_parse_job_line(line))

@@ -280,13 +280,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:039efe95750d0cb4ea72f4aa16503fe596131520010553a43297d2b6d012838b",
+      "config_hash": "sha256:d136c8e7463e1df263eb83864db5f4d9054cf932b85a72679527b889fdea5899",
       "depends_on": [
         "dataset.churn_demo.churn_training_set"
       ],
-      "hooks_hash": "sha256:1dbb7b0277d9141f8b027253f14f4e6abeaa9006637bc1e8d0c4cdcb98a3b151",
+      "hooks_hash": "sha256:feb62357eb85e0c30fcb8fe39603c0fe61272a8f103dc5a3eaf39dd35d1ceac4",
       "hooks_path": "models/churn_classifier.py",
-      "input_hash": "sha256:07573b79755913dea6f36fa52aecda43f3f9be2041d9f164e1660e61ebaa4783",
+      "input_hash": "sha256:dc4784829ea5d5dccc6b8eb50950649b3eb624b978fb362964dab26ca0e80aa3",
       "name": "churn_classifier",
       "path": "models/churn_classifier.yml",
       "resolved": {},

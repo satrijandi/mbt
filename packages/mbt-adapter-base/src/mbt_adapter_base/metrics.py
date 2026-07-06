@@ -90,9 +90,7 @@ def _recall_at_precision(
     return float(achievable.max()) if achievable.size else 0.0
 
 
-def _precision_at_recall(
-    y_true: "np.ndarray", y_score: "np.ndarray", min_recall: float
-) -> float:
+def _precision_at_recall(y_true: "np.ndarray", y_score: "np.ndarray", min_recall: float) -> float:
     from sklearn.metrics import precision_recall_curve
 
     precision, recall, _ = precision_recall_curve(y_true, y_score)
@@ -100,9 +98,7 @@ def _precision_at_recall(
     return float(achievable.max()) if achievable.size else 0.0
 
 
-def compute_binary_metric(
-    spec: MetricSpec, y_true: "np.ndarray", y_score: "np.ndarray"
-) -> float:
+def compute_binary_metric(spec: MetricSpec, y_true: "np.ndarray", y_score: "np.ndarray") -> float:
     """Compute one builtin binary-classification metric."""
     import numpy as np
     from sklearn.metrics import (
@@ -166,7 +162,6 @@ def compute_binary_results(
                 continue
             key = f"{column}={value}"
             slices[key] = {
-                s.name: compute_binary_metric(s, y_true[mask], y_score[mask])
-                for s in builtin
+                s.name: compute_binary_metric(s, y_true[mask], y_score[mask]) for s in builtin
             }
     return MetricResults(metrics=metrics, slices=slices)

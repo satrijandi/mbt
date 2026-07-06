@@ -4,7 +4,7 @@
 from mbt.contracts import TestResult
 
 
-def test_label_is_binary(dataset, spec):
+def test_label_is_binary(dataset, spec):  # type: ignore[no-untyped-def]
     values = set(dataset.column(spec.label.column).to_pylist())
     return TestResult(
         name="test_label_is_binary",
@@ -13,7 +13,7 @@ def test_label_is_binary(dataset, spec):
     )
 
 
-def test_minimum_rows(dataset, spec):
+def test_minimum_rows(dataset, spec):  # type: ignore[no-untyped-def]
     return TestResult(
         name="test_minimum_rows",
         passed=dataset.num_rows >= 100,

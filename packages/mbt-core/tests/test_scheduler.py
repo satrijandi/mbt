@@ -37,9 +37,7 @@ def test_topological_execution_and_results() -> None:
 
 
 def test_failure_skips_downstream_but_not_independent_branches() -> None:
-    graph = _graph(
-        [("ds", "m1"), ("m1", "m2"), ("ds2", "m3")], {"ds", "m1", "m2", "ds2", "m3"}
-    )
+    graph = _graph([("ds", "m1"), ("m1", "m2"), ("ds2", "m3")], {"ds", "m1", "m2", "ds2", "m3"})
 
     def run(uid: str) -> NodeResult:
         if uid == "m1":
@@ -78,7 +76,10 @@ def test_fail_fast_cancels_pending_work() -> None:
         return NodeResult(unique_id=uid, status="success")
 
     results = execute_plan(
-        _plan({"a", "b", "c", "d"}, ["a", "b", "c", "d"]), graph, run, threads=1,
+        _plan({"a", "b", "c", "d"}, ["a", "b", "c", "d"]),
+        graph,
+        run,
+        threads=1,
         fail_fast=True,
     )
     assert results["a"].status == "error"

@@ -6,6 +6,7 @@ finally reads contains exactly: selected features + target + declared slice
 columns; the split time column is always dropped from features (TSD §5.6).
 """
 
+from collections.abc import Callable
 from fnmatch import fnmatchcase
 
 import pyarrow as pa
@@ -36,9 +37,7 @@ def select_feature_columns(
         if c not in never and any(fnmatchcase(c, pattern) for pattern in spec.features.include)
     ]
     features = [
-        c
-        for c in included
-        if not any(fnmatchcase(c, pattern) for pattern in spec.features.exclude)
+        c for c in included if not any(fnmatchcase(c, pattern) for pattern in spec.features.exclude)
     ]
     if not features:
         raise ConfigError(
@@ -59,7 +58,7 @@ class TransformedDatasetHandle:
         base: DatasetHandle,
         spec: ModelSpec,
         hooks: ModelHooks | None,
-        hook_ctx_factory,
+        hook_ctx_factory: "Callable[[str], HookContext]",
         time_column: str | None,
     ) -> None:
         self._base = base

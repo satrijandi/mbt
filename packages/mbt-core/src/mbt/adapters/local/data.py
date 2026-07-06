@@ -114,13 +114,17 @@ class LocalDatasetHandle:
         try:
             n_rows: dict[str, int] = {}
             for split in sorted(self.splits()):
-                (count,) = con.execute(
+                row = con.execute(
                     "SELECT count(*) FROM read_parquet(?)", [str(self.split_path(split))]
                 ).fetchone()
-                n_rows[split] = int(count)
-            schema = con.execute(
-                "SELECT * FROM read_parquet(?) LIMIT 0", [str(self.split_path("train"))]
-            ).to_arrow_table().schema
+                n_rows[split] = int(row[0]) if row else 0
+            schema = (
+                con.execute(
+                    "SELECT * FROM read_parquet(?) LIMIT 0", [str(self.split_path("train"))]
+                )
+                .to_arrow_table()
+                .schema
+            )
             columns = {field.name: str(field.type) for field in schema}
 
             label_balance: dict[str, float] | None = None
@@ -139,13 +143,13 @@ class LocalDatasetHandle:
             time_column = self.time_column
             if time_column and time_column in columns:
                 paths = [str(self.split_path(s)) for s in sorted(self.splits())]
-                low, high = con.execute(
+                bounds = con.execute(
                     f"SELECT CAST(min({_quote(time_column)}) AS VARCHAR), "
                     f"CAST(max({_quote(time_column)}) AS VARCHAR) FROM read_parquet(?)",
                     [paths],
                 ).fetchone()
-                if low is not None:
-                    time_range = (str(low), str(high))
+                if bounds is not None and bounds[0] is not None:
+                    time_range = (str(bounds[0]), str(bounds[1]))
             return DatasetProfile(
                 n_rows=n_rows,
                 columns=columns,
@@ -284,12 +288,8 @@ class LocalDataAdapter:
 
     def _row_digest_sql(self, con: "duckdb.DuckDBPyConnection", file_list: str) -> str:
         """A stable per-row digest over all columns (deterministic sampling)."""
-        described = con.execute(
-            f"DESCRIBE SELECT * FROM read_parquet([{file_list}])"
-        ).fetchall()
-        parts = ", ".join(
-            f"COALESCE(CAST({_quote(row[0])} AS VARCHAR), '')" for row in described
-        )
+        described = con.execute(f"DESCRIBE SELECT * FROM read_parquet([{file_list}])").fetchall()
+        parts = ", ".join(f"COALESCE(CAST({_quote(row[0])} AS VARCHAR), '')" for row in described)
         return f"concat_ws('|', {parts})"
 
     def _write_temporal_splits(
@@ -310,10 +310,8 @@ class LocalDataAdapter:
                 f"COPY (SELECT * FROM mbt_base WHERE {time_sql} >= TIMESTAMP '{start_ts}' "
                 f"AND {time_sql} < TIMESTAMP '{end_ts}') TO '{out}' (FORMAT PARQUET)"
             )
-            (count,) = con.execute(
-                "SELECT count(*) FROM read_parquet(?)", [str(out)]
-            ).fetchone()
-            written[split] = int(count)
+            row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
+            written[split] = int(row[0]) if row else 0
         return written
 
     def _write_random_splits(
@@ -328,9 +326,7 @@ class LocalDataAdapter:
         fractions["test"] = float(spec.split.test)
 
         described = con.execute("DESCRIBE SELECT * FROM mbt_base").fetchall()
-        parts = ", ".join(
-            f"COALESCE(CAST({_quote(row[0])} AS VARCHAR), '')" for row in described
-        )
+        parts = ", ".join(f"COALESCE(CAST({_quote(row[0])} AS VARCHAR), '')" for row in described)
         digest = f"concat_ws('|', {parts})"
         seed = spec.split.seed or 0
         rank_key = f"md5_number(concat('{seed}|', {digest}))"
@@ -345,9 +341,7 @@ class LocalDataAdapter:
             bounds.append((split, low, low + fraction))
             low += fraction
 
-        con.execute(
-            f"CREATE TEMP VIEW mbt_ranked AS SELECT *, {rank} AS __mbt_rank FROM mbt_base"
-        )
+        con.execute(f"CREATE TEMP VIEW mbt_ranked AS SELECT *, {rank} AS __mbt_rank FROM mbt_base")
         written: dict[str, int] = {}
         for split, lo, hi in bounds:
             out = output_dir / f"{split}.parquet"
@@ -356,10 +350,8 @@ class LocalDataAdapter:
                 f"COPY (SELECT * EXCLUDE (__mbt_rank) FROM mbt_ranked "
                 f"WHERE __mbt_rank >= {lo} AND {upper}) TO '{out}' (FORMAT PARQUET)"
             )
-            (count,) = con.execute(
-                "SELECT count(*) FROM read_parquet(?)", [str(out)]
-            ).fetchone()
-            written[split] = int(count)
+            row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
+            written[split] = int(row[0]) if row else 0
         return written
 
     # -- reopening -----------------------------------------------------------

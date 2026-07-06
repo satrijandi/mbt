@@ -42,7 +42,8 @@ class XGBoostBinaryParams(BaseModel):
             "alpha": self.reg_alpha,
             "lambda": self.reg_lambda,
             "scale_pos_weight": (
-                self.scale_pos_weight if self.scale_pos_weight is not None
+                self.scale_pos_weight
+                if self.scale_pos_weight is not None
                 else positive_rate_default
             ),
             "tree_method": self.tree_method,

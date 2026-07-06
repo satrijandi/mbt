@@ -258,14 +258,10 @@ class ModelSpec(_SpecModel):
         declared = set(self.evaluation.metrics)
         for gate in self.evaluation.gates:
             if gate.metric not in declared:
-                raise ValueError(
-                    f"gate metric '{gate.metric}' must appear in evaluation.metrics"
-                )
+                raise ValueError(f"gate metric '{gate.metric}' must appear in evaluation.metrics")
         stages = {g.compare_to for g in self.evaluation.gates if g.compare_to is not None}
         if len(stages) > 1:
-            raise ValueError(
-                "all champion gates of one model must compare_to the same stage in v0"
-            )
+            raise ValueError("all champion gates of one model must compare_to the same stage in v0")
         if self.tuning is not None and self.tuning.objective.metric not in declared:
             raise ValueError(
                 f"tuning objective metric '{self.tuning.objective.metric}' "

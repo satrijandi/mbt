@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -175,7 +174,7 @@ class TrainingAdapterCompliance:
             "if m in sys.modules]\n"
             "print(json.dumps(loaded))\n"
         )
-        proc = subprocess.run(  # noqa: S603
+        proc = subprocess.run(
             [sys.executable, "-c", probe], capture_output=True, text=True, check=True
         )
         loaded = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -190,7 +189,7 @@ class TrainingAdapterCompliance:
         adapter = self.adapter()
         for task in adapter.supported_tasks:
             param_model = adapter.param_model(task)
-            with pytest.raises(Exception, match="(?i)extra|unknown|forbid|permitted"):
+            with pytest.raises(Exception, match=r"(?i)extra|unknown|forbid|permitted"):
                 param_model.model_validate(
                     {**self.valid_hyperparameters, "definitely_not_a_param": 1}
                 )
@@ -238,8 +237,7 @@ class TrainingAdapterCompliance:
         for metric, value in direct.metrics.items():
             tolerance = adapter.determinism.tolerance_for(metric)
             assert abs(value - reloaded.metrics[metric]) <= tolerance, (
-                f"{metric} changed across export -> load: {value} vs "
-                f"{reloaded.metrics[metric]}"
+                f"{metric} changed across export -> load: {value} vs {reloaded.metrics[metric]}"
             )
 
     def test_predict_appends_prediction_column(self) -> None:

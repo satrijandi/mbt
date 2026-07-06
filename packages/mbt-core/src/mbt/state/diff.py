@@ -27,9 +27,7 @@ class ManifestStateIndex:
     ) -> None:
         self._current = current
         self._reference = reference
-        self._env_changed = (
-            current.metadata.env_digest != reference.metadata.env_digest
-        )
+        self._env_changed = current.metadata.env_digest != reference.metadata.env_digest
         self._include_env = include_env
 
     @property

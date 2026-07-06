@@ -210,8 +210,7 @@ class StateDiffed(Event):
     def human(self) -> str:
         env = "; env digest CHANGED" if self.env_changed else ""
         return (
-            f"state diff: {self.added} added, {self.removed} removed, "
-            f"{self.modified} modified{env}"
+            f"state diff: {self.added} added, {self.removed} removed, {self.modified} modified{env}"
         )
 
 

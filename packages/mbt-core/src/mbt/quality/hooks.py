@@ -34,8 +34,7 @@ class ModelHooks:
         result = getattr(self._module, HOOK_TRANSFORM)(table, ctx)
         if not isinstance(result, pa.Table):
             raise AdapterError(
-                f"hooks {HOOK_TRANSFORM} must return a pyarrow.Table, "
-                f"got {type(result).__name__}",
+                f"hooks {HOOK_TRANSFORM} must return a pyarrow.Table, got {type(result).__name__}",
                 path=self.path,
             )
         return result
@@ -69,7 +68,5 @@ def load_hooks(project_dir: Path, hooks_path: str) -> ModelHooks:
         spec.loader.exec_module(module)
     except Exception as exc:
         sys.modules.pop(module_name, None)
-        raise AdapterError(
-            f"hooks module failed to import: {exc!r}", path=path
-        ) from exc
+        raise AdapterError(f"hooks module failed to import: {exc!r}", path=path) from exc
     return ModelHooks(module, path)

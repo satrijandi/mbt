@@ -3,11 +3,11 @@
 import json
 from pathlib import Path
 
-from conftest import TEST_ANCHOR, write
+from core_helpers import TEST_ANCHOR, write
+from mbt_testing import FakeRegistryAdapter
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.execute.orchestrator import InvocationOptions, run_command
-from mbt_testing import FakeRegistryAdapter
 
 DS = "dataset.demo.churn_training"
 MODEL = "model.demo.churn_model"
@@ -69,12 +69,14 @@ def test_failing_gate_blocks_registration_exit_2(
 def test_champion_challenger_gate(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     # 1) bootstrap: champion gate passes with a warning when none exists
     model_yml = demo_project / "models/churn_model.yml"
-    model_yml.write_text(
-        model_yml.read_text().replace(
-            'gates:\n        - metric: pr_auc\n          threshold: "{{ var(\'default_threshold\') }}"',
-            "gates:\n        - metric: pr_auc\n          compare_to: production\n          min_delta: 0.005",
-        )
+    old_gate = (
+        "gates:\n        - metric: pr_auc\n          threshold: \"{{ var('default_threshold') }}\""
     )
+    new_gate = (
+        "gates:\n        - metric: pr_auc\n"
+        "          compare_to: production\n          min_delta: 0.005"
+    )
+    model_yml.write_text(model_yml.read_text().replace(old_gate, new_gate))
     first = invoke(demo_project, fake_registry)
     assert first.exit_code() == 0
     gate = {r.unique_id: r for r in first.results}[MODEL].gates[0]
@@ -140,9 +142,7 @@ def test_dataset_check_failure_fails_downstream(
     assert by_id[MODEL].status == "skipped"
 
 
-def test_python_data_tests_run_in_build(
-    demo_project: Path, fake_registry: AdapterRegistry
-) -> None:
+def test_python_data_tests_run_in_build(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     write(
         demo_project / "tests/test_no_leakage.py",
         """

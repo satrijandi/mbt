@@ -149,9 +149,7 @@ def _warn_on_drift(
             parsed,
             profiles,
             registry=registry,
-            options=CompileOptions(
-                anchor=anchor, deep_snapshot=manifest.metadata.deep_snapshot
-            ),
+            options=CompileOptions(anchor=anchor, deep_snapshot=manifest.metadata.deep_snapshot),
             cli_vars=opts.cli_vars,
         )
     except MbtError:
@@ -181,15 +179,11 @@ def _warn_on_drift(
         )
 
 
-def build_state_index(
-    opts: InvocationOptions, manifest: Manifest
-) -> StateIndex | None:
+def build_state_index(opts: InvocationOptions, manifest: Manifest) -> StateIndex | None:
     if opts.state is None:
         return None
     reference = load_state(opts.state)
-    index = ManifestStateIndex(
-        manifest, reference, include_env=opts.state_include_env
-    )
+    index = ManifestStateIndex(manifest, reference, include_env=opts.state_include_env)
     if index.env_changed:
         get_bus().emit(
             LogMessage(
@@ -203,9 +197,7 @@ def build_state_index(
     return index
 
 
-def run_command(
-    opts: InvocationOptions, *, registry: AdapterRegistry | None = None
-) -> RunResults:
+def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = None) -> RunResults:
     """Execute run/build/test and write run_results.json (FR-RUN-04)."""
     started_monotonic = time.monotonic()
     started_at = datetime.now(tz=UTC).isoformat()
@@ -253,7 +245,7 @@ def run_command(
     )
     run_results.write(opts.project_dir / "target" / "run_results.json")
 
-    statuses = [r.status for r in ordered]
+    statuses: list[str] = [r.status for r in ordered]
     bus.emit(
         RunFinished(
             command=opts.command,
@@ -367,8 +359,10 @@ def run_evaluate(
         if version is not None:
             resolved_version = registry_adapter.get_version(registry_name, version)
         else:
-            stage_token = Stage(stage) if stage else (
-                spec.registration.stage_on_pass if spec.registration else Stage.STAGING
+            stage_token = (
+                Stage(stage)
+                if stage
+                else (spec.registration.stage_on_pass if spec.registration else Stage.STAGING)
             )
             resolved_version = registry_adapter.get_champion(registry_name, stage_token)
         if resolved_version is None or resolved_version.artifact is None:
@@ -376,12 +370,14 @@ def run_evaluate(
                 f"no registered version of {registry_name!r} to evaluate",
                 hint="pass --version N or --stage <stage>, or train the model first",
             )
-        metric_specs = model_runner._metric_specs(spec, node)  # noqa: SLF001
-        champion, _ = (
-            model_runner._champion(spec, node) if apply_gates else (None, None)  # noqa: SLF001
-        )
-        job = model_runner._assemble_job(  # noqa: SLF001
-            node, spec, metric_specs, champion, mode="evaluate",
+        metric_specs = model_runner._metric_specs(spec, node)
+        champion, _ = model_runner._champion(spec, node) if apply_gates else (None, None)
+        job = model_runner._assemble_job(
+            node,
+            spec,
+            metric_specs,
+            champion,
+            mode="evaluate",
             artifact=resolved_version.artifact,
         )
         job_result = ctx.compute.wait(ctx.compute.submit(job))
@@ -397,9 +393,7 @@ def run_evaluate(
             gates = []
             status = "success"
             if apply_gates and spec.evaluation.gates:
-                gates = model_runner._gate_results(  # noqa: SLF001
-                    spec, node, job_result, champion, metric_specs
-                )
+                gates = model_runner._gate_results(spec, node, job_result, champion, metric_specs)
                 from mbt.quality.gates import all_gates_passed
 
                 status = "success" if all_gates_passed(gates) else "gate_failed"

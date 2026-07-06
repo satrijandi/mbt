@@ -4,7 +4,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
-from conftest import TEST_ANCHOR, write, write_subscriber_data
+from core_helpers import TEST_ANCHOR, write, write_subscriber_data
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.artifacts.manifest import Manifest
@@ -69,9 +69,7 @@ def test_manifest_shape(demo_project: Path, fake_registry: AdapterRegistry) -> N
     assert manifest.metadata.env_digest.startswith("sha256:")
 
 
-def test_anchor_drift_changes_no_hashes(
-    demo_project: Path, fake_registry: AdapterRegistry
-) -> None:
+def test_anchor_drift_changes_no_hashes(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     a = compile_demo(demo_project, fake_registry)
     b = compile_demo(demo_project, fake_registry, anchor=TEST_ANCHOR + timedelta(days=7))
     for uid in a.nodes:
@@ -106,9 +104,7 @@ def test_dataset_filter_edit_flips_dataset_and_downstream_model(
     assert before.nodes[MODEL].input_hash != after.nodes[MODEL].input_hash  # transitive
 
 
-def test_target_switch_flips_nothing(
-    demo_project: Path, fake_registry: AdapterRegistry
-) -> None:
+def test_target_switch_flips_nothing(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     dev = compile_demo(demo_project, fake_registry, target="dev")
     prod = compile_demo(demo_project, fake_registry, target="prod")
     for uid in dev.nodes:

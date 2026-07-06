@@ -47,28 +47,20 @@ app.add_typer(state_app, name="state")
 
 # -- common option aliases (FR-CLI-04) ------------------------------------------
 
-ProjectDirOpt = Annotated[
-    Path, typer.Option("--project-dir", help="Project root (default: cwd).")
-]
+ProjectDirOpt = Annotated[Path, typer.Option("--project-dir", help="Project root (default: cwd).")]
 ProfilesDirOpt = Annotated[
     Path | None, typer.Option("--profiles-dir", help="Directory holding profiles.yml.")
 ]
 TargetOpt = Annotated[
     str | None, typer.Option("--target", "-t", help="Profile target (dev/prod/...).")
 ]
-VarsOpt = Annotated[
-    str | None, typer.Option("--vars", help="YAML/JSON dict overriding vars.")
-]
-LogFormatOpt = Annotated[
-    str, typer.Option("--log-format", help="text | json (events, on stderr).")
-]
+VarsOpt = Annotated[str | None, typer.Option("--vars", help="YAML/JSON dict overriding vars.")]
+LogFormatOpt = Annotated[str, typer.Option("--log-format", help="text | json (events, on stderr).")]
 QuietOpt = Annotated[bool, typer.Option("--quiet", "-q", help="Suppress event output.")]
 SelectOpt = Annotated[
     list[str] | None, typer.Option("--select", "-s", help="Node selector(s); space = union.")
 ]
-ExcludeOpt = Annotated[
-    list[str] | None, typer.Option("--exclude", help="Selector(s) to subtract.")
-]
+ExcludeOpt = Annotated[list[str] | None, typer.Option("--exclude", help="Selector(s) to subtract.")]
 ThreadsOpt = Annotated[
     int | None, typer.Option("--threads", help="Parallel DAG branches (default: target).")
 ]
@@ -218,7 +210,7 @@ def parse(
 
 @app.command()
 @guard
-def compile(  # noqa: A001 - dbt-style command name
+def compile(
     project_dir: ProjectDirOpt = Path("."),
     profiles_dir: ProfilesDirOpt = None,
     target: TargetOpt = None,
@@ -371,9 +363,7 @@ def promote(
     cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
-    registry_adapter = build_registry_adapter(
-        profiles, cli.project_dir.resolve(), get_registry()
-    )
+    registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
 
     if from_file is not None:
         entries = load_promotions_file(from_file)
@@ -502,7 +492,7 @@ def show(
     pools: list[dict[str, Any]] = [manifest.nodes, manifest.sources, manifest.exposures]
     for pool in pools:
         for uid, resource in pool.items():
-            if uid == name or resource.name == name:
+            if name in (uid, resource.name):
                 found = resource.model_dump(mode="json")
                 break
         if found:
@@ -522,9 +512,7 @@ def show(
 @state_app.command("diff")
 @guard
 def state_diff(
-    state: Annotated[
-        str, typer.Option("--state", help="Reference manifest path/URI (required).")
-    ],
+    state: Annotated[str, typer.Option("--state", help="Reference manifest path/URI (required).")],
     project_dir: ProjectDirOpt = Path("."),
     profiles_dir: ProfilesDirOpt = None,
     target: TargetOpt = None,
@@ -648,7 +636,7 @@ def run_operation(
     quiet: QuietOpt = False,
 ) -> None:
     """Render a macro with the full compile context (FR-RUN-08)."""
-    from mbt.compile.compiler import _build_resolve_context  # noqa: PLC2701
+    from mbt.compile.compiler import _build_resolve_context
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 

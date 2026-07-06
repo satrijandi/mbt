@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 from typing import Any
 
 import mbt
@@ -113,7 +112,7 @@ def compile_project(
             snapshot_id=pinned,
         )
     for uid, res in parsed.models.items():
-        spec, config, resolved = rendered_models[uid]
+        model_spec, config, resolved = rendered_models[uid]
         hooks_hash: str | None = None
         if res.hooks_path is not None:
             hooks_bytes = (parsed.project_dir / res.hooks_path).read_bytes()
@@ -126,9 +125,9 @@ def compile_project(
             depends_on=res.depends_on,
             config=config,
             resolved=resolved,
-            adapter=spec.adapter,
-            task=spec.task.value,
-            seed=spec.seed,
+            adapter=model_spec.adapter,
+            task=model_spec.task.value,
+            seed=model_spec.seed,
             hooks_path=res.hooks_path,
             hooks_hash=hooks_hash,
         )
@@ -196,9 +195,7 @@ def _build_resolve_context(
 ) -> ResolveContext:
     dataset_by_name = {r.name: r.unique_id for r in parsed.datasets.values()}
     model_by_name = {r.name: r.unique_id for r in parsed.models.values()}
-    source_by_pair = {
-        (e.group, e.table.name): e.unique_id for e in parsed.sources.values()
-    }
+    source_by_pair = {(e.group, e.table.name): e.unique_id for e in parsed.sources.values()}
 
     def ref_resolver(name: str) -> str:
         uid = dataset_by_name.get(name) or model_by_name.get(name)
@@ -277,8 +274,13 @@ def _resolve_model(
         ) from exc
     adapter = registry.training(spec.adapter)
     validate_hyperparameters(
-        adapter, spec.task, spec.hyperparameters,
-        resource=res.unique_id, rel=res.path, report=report, phase="compile",
+        adapter,
+        spec.task,
+        spec.hyperparameters,
+        resource=res.unique_id,
+        rel=res.path,
+        report=report,
+        phase="compile",
     )
     resolved: dict[str, Any] = {}
     if spec.evaluation.protocol.test_window is not None:
@@ -333,7 +335,7 @@ def _dataset_snapshot(
 
 def _hash_nodes(parsed: ParsedProject, nodes: dict[str, ManifestNode]) -> None:
     """config_hash per node, then input_hash in topological order (TSD §8.4)."""
-    for uid, node in nodes.items():
+    for node in nodes.values():
         hooks_bytes = None
         if node.hooks_path is not None:
             hooks_bytes = (parsed.project_dir / node.hooks_path).read_bytes()

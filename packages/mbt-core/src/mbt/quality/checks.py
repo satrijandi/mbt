@@ -43,10 +43,8 @@ def run_checks(
         runner = _CHECKS[name]
         try:
             results.append(runner(spec, handle, resolved_windows, params, resource))
-        except Exception as exc:  # noqa: BLE001 - a crashing check is a failing check
-            results.append(
-                TestResult(name=name, passed=False, message=f"check raised: {exc!r}")
-            )
+        except Exception as exc:
+            results.append(TestResult(name=name, passed=False, message=f"check raised: {exc!r}"))
     return results
 
 
@@ -98,9 +96,10 @@ def _check_not_null(
         problems = []
         for split in splits:
             for column in columns:
-                (nulls,) = con.execute(
+                row = con.execute(
                     f'SELECT count(*) FROM split_{split} WHERE "{column}" IS NULL'
                 ).fetchone()
+                nulls = int(row[0]) if row else 0
                 if nulls:
                     problems.append(f"{split}.{column}: {nulls} null(s)")
         return TestResult(name="not_null", passed=not problems, message="; ".join(problems))
@@ -134,9 +133,8 @@ def _check_no_future_columns(
         for field in table.schema:
             if not str(field.type).startswith(_TIMESTAMP_TYPES):
                 continue
-            (maximum,) = con.execute(
-                f'SELECT CAST(max("{field.name}") AS TIMESTAMP) FROM t'
-            ).fetchone()
+            row = con.execute(f'SELECT CAST(max("{field.name}") AS TIMESTAMP) FROM t').fetchone()
+            maximum = row[0] if row else None
             if maximum is not None and maximum > boundary_naive:
                 problems.append(
                     f"column {field.name!r} reaches {maximum.isoformat()} "
@@ -144,9 +142,7 @@ def _check_no_future_columns(
                 )
     finally:
         con.close()
-    return TestResult(
-        name="no_future_columns", passed=not problems, message="; ".join(problems)
-    )
+    return TestResult(name="no_future_columns", passed=not problems, message="; ".join(problems))
 
 
 def _check_label_leakage_scan(
@@ -172,9 +168,10 @@ def _check_label_leakage_scan(
                 or str(field.type) == "bool"
             ):
                 continue
-            (corr,) = con.execute(
+            row = con.execute(
                 f'SELECT corr(CAST("{field.name}" AS DOUBLE), CAST("{label}" AS DOUBLE)) FROM t'
             ).fetchone()
+            corr = row[0] if row else None
             if corr is not None and abs(corr) >= threshold:
                 problems.append(f"{field.name} (|corr|={abs(corr):.3f})")
     finally:

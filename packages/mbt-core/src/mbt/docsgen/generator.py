@@ -71,8 +71,7 @@ def _lineage_svg(manifest: Manifest) -> str:
     height = pad * 2 + max(len(v) for v in by_layer.values()) * (box_h + gap_y) - gap_y
 
     parts = [
-        f'<svg viewBox="0 0 {width} {height}" width="100%" '
-        f'xmlns="http://www.w3.org/2000/svg">',
+        f'<svg viewBox="0 0 {width} {height}" width="100%" xmlns="http://www.w3.org/2000/svg">',
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
         'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
         '<path d="M 0 0 L 10 5 L 0 10 z" fill="#cbd5e1"/></marker></defs>',
@@ -81,9 +80,7 @@ def _lineage_svg(manifest: Manifest) -> str:
         x1, y1 = positions[u][0] + box_w, positions[u][1] + box_h // 2
         x2, y2 = positions[v][0], positions[v][1] + box_h // 2
         mx = (x1 + x2) / 2
-        parts.append(
-            f'<path class="edge" d="M {x1} {y1} C {mx} {y1}, {mx} {y2}, {x2} {y2}"/>'
-        )
+        parts.append(f'<path class="edge" d="M {x1} {y1} C {mx} {y1}, {mx} {y2}, {x2} {y2}"/>')
     kinds = {uid: data.get("resource_type", "model") for uid, data in graph.nodes(data=True)}
     for uid, (x, y) in positions.items():
         kind = kinds.get(uid, "model")
@@ -157,9 +154,7 @@ def _gate_table(result: NodeResult | None) -> str:
     )
 
 
-def _model_card(
-    manifest: Manifest, uid: str, result: NodeResult | None
-) -> str:
+def _model_card(manifest: Manifest, uid: str, result: NodeResult | None) -> str:
     node = manifest.nodes[uid]
     config: dict[str, Any] = node.config
     dataset_uid = next((d for d in node.depends_on if d.startswith("dataset.")), None)
@@ -210,10 +205,15 @@ def _model_card(
       <tr><th>input_hash</th><td><code>{node.input_hash}</code></td></tr>
       <tr><th>seed</th><td><code>{node.seed}</code></td></tr>
       <tr><th>dataset</th><td><code>{html.escape(dataset_uid or "-")}</code></td></tr>
-      <tr><th>data snapshot</th><td><code>{html.escape(str(dataset.snapshot_id if dataset else "-"))}</code></td></tr>
+      <tr><th>data snapshot</th>
+      <td><code>{html.escape(str(dataset.snapshot_id if dataset else "-"))}</code></td></tr>
     </table>
     <h2>Data window</h2>
-    {f"<table><tr><th>split</th><th>start</th><th>end</th></tr>{window_rows}</table>" if window_rows else "<p class='muted'>random split</p>"}
+    {
+        (f"<table><tr><th>split</th><th>start</th><th>end</th></tr>{window_rows}</table>")
+        if window_rows
+        else "<p class='muted'>random split</p>"
+    }
     <h2>Features</h2>
     <p>include: <code>{html.escape(str(features.get("include", ["*"])))}</code><br>
        exclude: <code>{html.escape(str(features.get("exclude", [])))}</code></p>
@@ -252,9 +252,7 @@ def generate_docs(
             f"<td><code>{html.escape(str(node.config.get('owner', '')))}</code></td>"
             f"<td><span class='badge {badge}'>{html.escape(status)}</span></td></tr>"
         )
-        (output_dir / f"model_{node.name}.html").write_text(
-            _model_card(manifest, uid, result)
-        )
+        (output_dir / f"model_{node.name}.html").write_text(_model_card(manifest, uid, result))
 
     exposure_rows = "".join(
         f"<tr><td><code>{html.escape(e.name)}</code></td>"
@@ -279,9 +277,11 @@ def generate_docs(
     <h2>Exposures</h2>
     <table><tr><th>exposure</th><th>type</th><th>depends on</th><th>owner</th></tr>
     {exposure_rows or "<tr><td colspan='4' class='muted'>none</td></tr>"}</table>
-    <script type="application/json" id="lineage-data">{json.dumps(
-        {"nodes": sorted(manifest.nodes), "edges": [[u, v] for u, v in manifest.graph().edges]}
-    )}</script>
+    <script type="application/json" id="lineage-data">{
+        json.dumps(
+            {"nodes": sorted(manifest.nodes), "edges": [[u, v] for u, v in manifest.graph().edges]}
+        )
+    }</script>
     """
     index = output_dir / "index.html"
     index.write_text(_page(f"{meta.project_name} - mbt docs", index_body))

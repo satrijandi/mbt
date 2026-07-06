@@ -8,10 +8,33 @@ from mbt.config.profiles import ProfilesConfig
 from mbt.config.project import ProjectConfig
 from mbt.contracts import DatasetSpec, ExposureSpec, MetricSpec, ModelSpec, SourceGroup
 
+#: Matches "{{ ... }}" / "{% ... %}" values users write before rendering.
+_JINJA_STRING = {"type": "string", "pattern": "\\{\\{.*\\}\\}|\\{%.*%\\}"}
+_SCALAR_TYPES = ("number", "integer", "boolean")
+
+
+def _jinja_tolerant(schema: Any) -> Any:
+    """Editors validate *unrendered* YAML: any scalar may hold a Jinja
+    expression string, so widen scalar types with a Jinja alternative."""
+    if isinstance(schema, dict):
+        out = {k: _jinja_tolerant(v) for k, v in schema.items()}
+        if out.get("type") in _SCALAR_TYPES:
+            return {"anyOf": [out, _JINJA_STRING]}
+        return out
+    if isinstance(schema, list):
+        return [_jinja_tolerant(v) for v in schema]
+    return schema
+
 
 def _file_schema(key: str, item_schema: dict[str, Any], title: str) -> dict[str, Any]:
-    """Wrap a resource schema into the whole-file shape editors validate."""
-    return {
+    """Wrap a resource schema into the whole-file shape editors validate.
+
+    Pydantic emits ``$ref: '#/$defs/...'`` pointers relative to the document
+    root, so nested ``$defs`` must be hoisted when the schema is embedded.
+    """
+    item_schema = dict(_jinja_tolerant(item_schema))
+    defs = item_schema.pop("$defs", {})
+    schema: dict[str, Any] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": title,
         "type": "object",
@@ -22,6 +45,9 @@ def _file_schema(key: str, item_schema: dict[str, Any], title: str) -> dict[str,
         "required": [key],
         "additionalProperties": False,
     }
+    if defs:
+        schema["$defs"] = defs
+    return schema
 
 
 def write_json_schemas(output_dir: Path) -> list[Path]:

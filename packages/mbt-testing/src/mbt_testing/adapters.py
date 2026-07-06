@@ -12,7 +12,7 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict
@@ -64,7 +64,7 @@ class FakeTrainingAdapter:
 
     name = "fake"
     contract_version = CONTRACT_VERSION
-    supported_tasks = {TaskType.BINARY_CLASSIFICATION}
+    supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -222,9 +222,7 @@ class FakeRegistryAdapter:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(versions, indent=2, sort_keys=True))
 
-    def register(
-        self, artifact: ArtifactRef, name: str, metadata: dict[str, str]
-    ) -> ModelVersion:
+    def register(self, artifact: ArtifactRef, name: str, metadata: dict[str, str]) -> ModelVersion:
         with self._lock:
             versions = self._versions(name)
             version = str(len(versions) + 1)
@@ -243,7 +241,9 @@ class FakeRegistryAdapter:
             name=name,
             version=str(entry["version"]),
             stage=Stage(entry["stage"]) if entry.get("stage") else None,
-            artifact=ArtifactRef.model_validate(entry["artifact"]) if entry.get("artifact") else None,
+            artifact=(
+                ArtifactRef.model_validate(entry["artifact"]) if entry.get("artifact") else None
+            ),
             tags=dict(entry.get("tags", {})),
         )
 
@@ -303,9 +303,8 @@ class FakeTuningEngine:
                     import math
 
                     assert dim.low is not None and dim.high is not None
-                    params[name] = math.exp(
-                        rng.uniform(math.log(dim.low), math.log(dim.high))
-                    )
+                    low, high = math.log(dim.low), math.log(dim.high)
+                    params[name] = math.exp(rng.uniform(low, high))
                 else:  # uniform
                     assert dim.low is not None and dim.high is not None
                     params[name] = rng.uniform(dim.low, dim.high)

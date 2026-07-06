@@ -12,7 +12,7 @@ on:
         description: Registered model name
         required: true
       version:
-        description: Version to promote (default: latest in staging)
+        description: "Version to promote (default: latest in staging)"
         required: false
       to:
         description: Target stage

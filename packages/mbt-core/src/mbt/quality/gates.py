@@ -64,45 +64,42 @@ def evaluate_gates(
                 expected=gate.threshold,
                 actual=actual,
             )
-        else:  # champion gate
-            if champion is None:
-                # Bootstrap: no champion exists yet -> pass with a loud WARN
-                # (ADR-10). An unloadable champion never reaches this code -
-                # the job fails hard instead.
-                result = GateResult(
-                    metric=gate.metric,
-                    kind="champion",
-                    passed=True,
-                    actual=actual,
-                    champion_version=None,
-                    min_delta=gate.min_delta,
-                    message="no champion registered yet; gate passes (bootstrap)",
+        elif champion is None:
+            # Bootstrap: no champion exists yet -> pass with a loud WARN
+            # (ADR-10). An unloadable champion never reaches this code -
+            # the job fails hard instead.
+            result = GateResult(
+                metric=gate.metric,
+                kind="champion",
+                passed=True,
+                actual=actual,
+                champion_version=None,
+                min_delta=gate.min_delta,
+                message="no champion registered yet; gate passes (bootstrap)",
+            )
+            bus.emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=resource,
+                    message=(
+                        f"champion gate on {gate.metric!r}: no champion in "
+                        f"'{gate.compare_to}' yet - passing with a warning (FR-TEST-06)"
+                    ),
                 )
-                bus.emit(
-                    LogMessage(
-                        level="warn",
-                        unique_id=resource,
-                        message=(
-                            f"champion gate on {gate.metric!r}: no champion in "
-                            f"'{gate.compare_to}' yet - passing with a warning (FR-TEST-06)"
-                        ),
-                    )
-                )
-            else:
-                champion_value = _metric_value(
-                    champion, gate, who="the champion", resource=resource
-                )
-                delta = (actual - champion_value) if greater else (champion_value - actual)
-                result = GateResult(
-                    metric=gate.metric,
-                    kind="champion",
-                    passed=delta >= gate.min_delta,
-                    actual=actual,
-                    champion_version=champion_version,
-                    champion_value=champion_value,
-                    min_delta=gate.min_delta,
-                    actual_delta=round(delta, 12),
-                )
+            )
+        else:
+            champion_value = _metric_value(champion, gate, who="the champion", resource=resource)
+            delta = (actual - champion_value) if greater else (champion_value - actual)
+            result = GateResult(
+                metric=gate.metric,
+                kind="champion",
+                passed=delta >= gate.min_delta,
+                actual=actual,
+                champion_version=champion_version,
+                champion_value=champion_value,
+                min_delta=gate.min_delta,
+                actual_delta=round(delta, 12),
+            )
         results.append(result)
         bus.emit(
             GateEvaluated(

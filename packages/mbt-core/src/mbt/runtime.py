@@ -22,29 +22,19 @@ def normalized_adapter_config(
     return config
 
 
-def data_adapter(
-    profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry
-) -> Any:
+def data_adapter(profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry) -> Any:
     ref = profiles.target.data
     return registry.component("data", ref.adapter, normalized_adapter_config(ref, project_dir))
 
 
-def tracking_adapter(
-    profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry
-) -> Any:
+def tracking_adapter(profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry) -> Any:
     ref = profiles.target.tracking
-    return registry.component(
-        "tracking", ref.adapter, normalized_adapter_config(ref, project_dir)
-    )
+    return registry.component("tracking", ref.adapter, normalized_adapter_config(ref, project_dir))
 
 
-def registry_adapter(
-    profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry
-) -> Any:
+def registry_adapter(profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry) -> Any:
     ref = profiles.target.registry
-    return registry.component(
-        "registry", ref.adapter, normalized_adapter_config(ref, project_dir)
-    )
+    return registry.component("registry", ref.adapter, normalized_adapter_config(ref, project_dir))
 
 
 def compute_adapter(profiles: LoadedProfiles, registry: AdapterRegistry) -> Any:

@@ -47,11 +47,22 @@ from mbt.utils import did_you_mean
 _REF_RE = re.compile(r"^\s*ref\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\)\s*$")
 
 #: Root-level resource files picked up by convention (plus configured paths).
-_ROOT_FILES = ("sources.yml", "sources.yaml", "metrics.yml", "metrics.yaml",
-               "exposures.yml", "exposures.yaml")
+_ROOT_FILES = (
+    "sources.yml",
+    "sources.yaml",
+    "metrics.yml",
+    "metrics.yaml",
+    "exposures.yml",
+    "exposures.yaml",
+)
 
-_BUILTIN_CHECKS = {"no_future_columns", "label_leakage_scan", "class_balance_report",
-                   "schema", "not_null"}
+_BUILTIN_CHECKS = {
+    "no_future_columns",
+    "label_leakage_scan",
+    "class_balance_report",
+    "schema",
+    "not_null",
+}
 
 
 @dataclass(frozen=True)
@@ -110,7 +121,7 @@ class ParsedProject:
     def resource(self, name_or_uid: str) -> ParsedResource | SourceEntry | None:
         for pool in (self.datasets, self.models, self.exposures, self.sources):
             if name_or_uid in pool:
-                return pool[name_or_uid]  # type: ignore[return-value]
+                return pool[name_or_uid]
         for pool in (self.datasets, self.models, self.exposures):
             for res in pool.values():
                 if res.name == name_or_uid:
@@ -121,8 +132,10 @@ class ParsedProject:
         return None
 
     def all_names(self) -> list[str]:
-        names = [r.name for r in (*self.datasets.values(), *self.models.values(),
-                                  *self.exposures.values())]
+        names = [
+            r.name
+            for r in (*self.datasets.values(), *self.models.values(), *self.exposures.values())
+        ]
         names.extend(e.table.name for e in self.sources.values())
         return names
 
@@ -256,8 +269,12 @@ def _parse_sources(
     sources: dict[str, SourceEntry] = {}
     for rel, index, raw in entries:
         group = validate_resource(
-            SourceGroup, raw, rel=rel, resource_name=str(raw.get("name", f"#{index}")),
-            base_pointer=f"/sources/{index}", report=report,
+            SourceGroup,
+            raw,
+            rel=rel,
+            resource_name=str(raw.get("name", f"#{index}")),
+            base_pointer=f"/sources/{index}",
+            report=report,
         )
         if group is None:
             continue
@@ -266,7 +283,8 @@ def _parse_sources(
             if uid in sources:
                 report.error(
                     f"duplicate source table '{group.name}.{table.name}'",
-                    file=rel, resource=uid,
+                    file=rel,
+                    resource=uid,
                 )
                 continue
             sources[uid] = SourceEntry(unique_id=uid, group=group.name, table=table, path=rel)
@@ -279,8 +297,12 @@ def _parse_metrics(
     metrics: dict[str, MetricSpec] = {}
     for rel, index, raw in entries:
         spec = validate_resource(
-            MetricSpec, raw, rel=rel, resource_name=str(raw.get("name", f"#{index}")),
-            base_pointer=f"/metrics/{index}", report=report,
+            MetricSpec,
+            raw,
+            rel=rel,
+            resource_name=str(raw.get("name", f"#{index}")),
+            base_pointer=f"/metrics/{index}",
+            report=report,
         )
         if spec is None:
             continue
@@ -305,15 +327,22 @@ def _parse_datasets(
         uid = unique_id("dataset", project.name, name) if _valid_name(name) else name
         try:
             captured = renderer.capture(
-                raw, resource=uid, path=project_dir / rel,
-                cli_vars=cli_vars, project_vars=project.vars,
+                raw,
+                resource=uid,
+                path=project_dir / rel,
+                cli_vars=cli_vars,
+                project_vars=project.vars,
             )
         except ConfigError as exc:
             report.error(exc.message, file=rel, resource=uid, hint=exc.hint)
             continue
         spec = validate_resource(
-            DatasetSpec, captured.rendered, rel=rel, resource_name=name,
-            base_pointer=f"/datasets/{index}", report=report,
+            DatasetSpec,
+            captured.rendered,
+            rel=rel,
+            resource_name=name,
+            base_pointer=f"/datasets/{index}",
+            report=report,
         )
         if spec is None:
             continue
@@ -338,9 +367,7 @@ def _parse_datasets(
     return datasets
 
 
-def _validate_dataset_windows(
-    spec: DatasetSpec, rel: str, uid: str, report: ParseReport
-) -> None:
+def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
     if spec.split.strategy is not SplitStrategy.TEMPORAL:
         return
     for split_field in ("train", "test", "validation"):
@@ -351,8 +378,11 @@ def _validate_dataset_windows(
             parse_window(expression)
         except ConfigError as exc:
             report.error(
-                exc.message, file=rel, resource=uid,
-                field_path=f"/split/{split_field}", hint=exc.hint,
+                exc.message,
+                file=rel,
+                resource=uid,
+                field_path=f"/split/{split_field}",
+                hint=exc.hint,
             )
 
 
@@ -363,8 +393,11 @@ def _validate_checks(spec: DatasetSpec, rel: str, uid: str, report: ParseReport)
             suggestion = did_you_mean(str(check_name), sorted(_BUILTIN_CHECKS))
             report.error(
                 f"unknown dataset check {check_name!r}",
-                file=rel, resource=uid, field_path=f"/checks/{i}",
-                hint=f"did you mean {suggestion!r}?" if suggestion
+                file=rel,
+                resource=uid,
+                field_path=f"/checks/{i}",
+                hint=f"did you mean {suggestion!r}?"
+                if suggestion
                 else f"built-in checks: {', '.join(sorted(_BUILTIN_CHECKS))}",
             )
 
@@ -389,15 +422,22 @@ def _parse_models(
         uid = unique_id("model", project.name, name) if _valid_name(name) else name
         try:
             captured = renderer.capture(
-                raw, resource=uid, path=project_dir / rel,
-                cli_vars=cli_vars, project_vars=project.vars,
+                raw,
+                resource=uid,
+                path=project_dir / rel,
+                cli_vars=cli_vars,
+                project_vars=project.vars,
             )
         except ConfigError as exc:
             report.error(exc.message, file=rel, resource=uid, hint=exc.hint)
             continue
         spec = validate_resource(
-            ModelSpec, captured.rendered, rel=rel, resource_name=name,
-            base_pointer=f"/models/{index}", report=report,
+            ModelSpec,
+            captured.rendered,
+            rel=rel,
+            resource_name=name,
+            base_pointer=f"/models/{index}",
+            report=report,
         )
         if spec is None:
             continue
@@ -431,7 +471,9 @@ def _detect_hooks(
         if not hooks_file.is_file():
             report.error(
                 f"hooks file {spec.hooks!r} does not exist",
-                file=rel, resource=uid, field_path="/hooks",
+                file=rel,
+                resource=uid,
+                field_path="/hooks",
                 hint="the path is relative to the project directory",
             )
             return None
@@ -454,7 +496,9 @@ def _check_adapter(
     if plugin.training is None:
         report.error(
             f"adapter {spec.adapter!r} provides no training adapter",
-            file=rel, resource=uid, field_path="/adapter",
+            file=rel,
+            resource=uid,
+            field_path="/adapter",
         )
         return
     adapter = plugin.training({})
@@ -462,13 +506,20 @@ def _check_adapter(
         supported = ", ".join(sorted(t.value for t in adapter.supported_tasks))
         report.error(
             f"adapter {spec.adapter!r} does not support task {spec.task.value!r}",
-            file=rel, resource=uid, field_path="/task",
+            file=rel,
+            resource=uid,
+            field_path="/task",
             hint=f"supported tasks: {supported}",
         )
         return
     validate_hyperparameters(
-        adapter, spec.task, spec.hyperparameters,
-        resource=uid, rel=rel, report=report, phase="parse",
+        adapter,
+        spec.task,
+        spec.hyperparameters,
+        resource=uid,
+        rel=rel,
+        report=report,
+        phase="parse",
     )
     for issue in adapter.validate(spec):
         add = report.error if issue.severity == "error" else report.warning
@@ -515,8 +566,11 @@ def validate_hyperparameters(
             report.error(
                 f"unknown hyperparameter {key!r} for adapter "
                 f"{adapter.name!r} / task {task.value!r}",
-                file=rel, resource=resource, field_path=f"/hyperparameters/{key}",
-                hint=f"did you mean {suggestion!r}?" if suggestion
+                file=rel,
+                resource=resource,
+                field_path=f"/hyperparameters/{key}",
+                hint=f"did you mean {suggestion!r}?"
+                if suggestion
                 else f"valid: {', '.join(sorted(known))}",
             )
         elif not _is_deferred_value(value):
@@ -524,8 +578,12 @@ def validate_hyperparameters(
     if not static:
         return
     validate_resource(
-        param_model, static, rel=rel, resource_name=resource,
-        base_pointer="/hyperparameters", report=report,
+        param_model,
+        static,
+        rel=rel,
+        resource_name=resource,
+        base_pointer="/hyperparameters",
+        report=report,
     )
 
 
@@ -539,8 +597,12 @@ def _parse_exposures(
     for rel, index, raw in entries:
         name = str(raw.get("name", f"#{index}"))
         spec = validate_resource(
-            ExposureSpec, raw, rel=rel, resource_name=name,
-            base_pointer=f"/exposures/{index}", report=report,
+            ExposureSpec,
+            raw,
+            rel=rel,
+            resource_name=name,
+            base_pointer=f"/exposures/{index}",
+            report=report,
         )
         if spec is None:
             continue
@@ -556,11 +618,18 @@ def _parse_exposures(
             else:
                 report.error(
                     f"exposure depends_on entries must be ref() calls, got {dep!r}",
-                    file=rel, resource=uid, field_path="/depends_on",
+                    file=rel,
+                    resource=uid,
+                    field_path="/depends_on",
                 )
         exposures[uid] = ParsedResource(
-            unique_id=uid, resource_type="exposure", name=spec.name,
-            path=rel, spec=spec, raw=raw, refs=refs,
+            unique_id=uid,
+            resource_type="exposure",
+            name=spec.name,
+            path=rel,
+            spec=spec,
+            raw=raw,
+            refs=refs,
         )
     return exposures
 
@@ -590,7 +659,9 @@ def _link_and_check(
                 known = sorted(f"{e.group}.{e.table.name}" for e in sources.values())
                 report.error(
                     f"unknown source ('{group}', '{table}')",
-                    file=dataset.path, resource=dataset.unique_id, field_path="/source",
+                    file=dataset.path,
+                    resource=dataset.unique_id,
+                    field_path="/source",
                     hint=f"declared sources: {', '.join(known) or '(none)'}",
                 )
             else:
@@ -598,7 +669,8 @@ def _link_and_check(
         for ref_name in dataset.refs:
             report.error(
                 f"datasets cannot ref() other resources, got ref('{ref_name}')",
-                file=dataset.path, resource=dataset.unique_id,
+                file=dataset.path,
+                resource=dataset.unique_id,
                 hint="datasets read from source() tables in v0",
             )
         dataset.depends_on = sorted(set(deps))
@@ -614,7 +686,8 @@ def _link_and_check(
         for group, table in model.sources:
             report.error(
                 f"models cannot use source() directly, got ('{group}', '{table}')",
-                file=model.path, resource=model.unique_id,
+                file=model.path,
+                resource=model.unique_id,
                 hint="reference data through a dataset resource",
             )
         model.depends_on = sorted(set(deps))
@@ -629,7 +702,9 @@ def _link_and_check(
             if resource is None:
                 report.error(
                     f"exposure references unknown resource ref('{ref_name}')",
-                    file=exposure.path, resource=exposure.unique_id, field_path="/depends_on",
+                    file=exposure.path,
+                    resource=exposure.unique_id,
+                    field_path="/depends_on",
                 )
             else:
                 deps.append(resource.unique_id)
@@ -647,7 +722,9 @@ def _check_model_dataset_edge(
     if match is None:
         report.error(
             f"model 'dataset' must be a ref() call, got {spec.dataset!r}",
-            file=model.path, resource=model.unique_id, field_path="/dataset",
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/dataset",
             hint="e.g. dataset: ref('churn_training_set')",
         )
         return None
@@ -655,7 +732,9 @@ def _check_model_dataset_edge(
     if ref_name in model_by_name:
         report.error(
             "model -> model references are not supported in v0",
-            file=model.path, resource=model.unique_id, field_path="/dataset",
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/dataset",
             hint="ensembles/stacking arrive in v1 (FR-V1-05)",
         )
         return None
@@ -664,7 +743,9 @@ def _check_model_dataset_edge(
         suggestion = did_you_mean(ref_name, sorted(dataset_by_name))
         report.error(
             f"model references unknown dataset ref('{ref_name}')",
-            file=model.path, resource=model.unique_id, field_path="/dataset",
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/dataset",
             hint=f"did you mean {suggestion!r}?" if suggestion else None,
         )
         return None
@@ -673,7 +754,8 @@ def _check_model_dataset_edge(
         if extra != ref_name:
             report.error(
                 f"unexpected ref('{extra}') in model spec",
-                file=model.path, resource=model.unique_id,
+                file=model.path,
+                resource=model.unique_id,
                 hint="v0 models may only ref() their dataset",
             )
     return dataset_res
@@ -688,14 +770,18 @@ def _check_model_vs_dataset(
         report.error(
             f"model target {spec.target!r} must equal the dataset's label column "
             f"{ds_spec.label.column!r}",
-            file=model.path, resource=model.unique_id, field_path="/target",
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/target",
             hint="mismatches are an error, not a silent override (TSD §5.6)",
         )
     if spec.evaluation.protocol.split is not ds_spec.split.strategy:
         report.error(
             f"evaluation.protocol.split ({spec.evaluation.protocol.split.value}) must match "
             f"the dataset's split.strategy ({ds_spec.split.strategy.value}) (FR-RES-09)",
-            file=model.path, resource=model.unique_id, field_path="/evaluation/protocol/split",
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/evaluation/protocol/split",
             hint="the redundancy is deliberate: it keeps the model spec self-describing",
         )
         return
@@ -705,7 +791,8 @@ def _check_model_vs_dataset(
     if ds_spec.split.strategy is not SplitStrategy.TEMPORAL:
         report.error(
             "evaluation.protocol.test_window requires a temporal split",
-            file=model.path, resource=model.unique_id,
+            file=model.path,
+            resource=model.unique_id,
             field_path="/evaluation/protocol/test_window",
         )
         return
@@ -714,15 +801,19 @@ def _check_model_vs_dataset(
         outer = parse_window(ds_spec.split.test)
     except ConfigError as exc:
         report.error(
-            exc.message, file=model.path, resource=model.unique_id,
-            field_path="/evaluation/protocol/test_window", hint=exc.hint,
+            exc.message,
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/evaluation/protocol/test_window",
+            hint=exc.hint,
         )
         return
     if not is_subrange(inner, outer, VALIDATION_ANCHOR):
         report.error(
             f"test_window {test_window!r} must resolve to a sub-range of the dataset's "
             f"test window {ds_spec.split.test!r}",
-            file=model.path, resource=model.unique_id,
+            file=model.path,
+            resource=model.unique_id,
             field_path="/evaluation/protocol/test_window",
         )
 
@@ -753,14 +844,19 @@ def _check_tuning_engine(
         plugin = registry.get(spec.tuning.engine)
     except ConfigError as exc:
         report.error(
-            exc.message, file=model.path, resource=model.unique_id,
-            field_path="/tuning/engine", hint=exc.hint,
+            exc.message,
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/tuning/engine",
+            hint=exc.hint,
         )
         return
     if plugin.tuning is None:
         report.error(
             f"adapter {spec.tuning.engine!r} provides no tuning engine",
-            file=model.path, resource=model.unique_id, field_path="/tuning/engine",
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/tuning/engine",
         )
 
 
@@ -774,7 +870,7 @@ def _build_project_graph(
     exposures: dict[str, ParsedResource],
     report: ParseReport,
 ) -> nx.DiGraph:
-    node_types: dict[str, str] = {uid: "source" for uid in sources}
+    node_types: dict[str, str] = dict.fromkeys(sources, "source")
     edges: dict[str, list[str]] = {}
     for pool in (datasets, models, exposures):
         for uid, resource in pool.items():
@@ -801,6 +897,8 @@ def _check_test_bindings(
             if test_name not in all_test_names:
                 report.error(
                     f"dataset lists unknown data test {test_name!r}",
-                    file=dataset.path, resource=dataset.unique_id, field_path="/tests",
+                    file=dataset.path,
+                    resource=dataset.unique_id,
+                    field_path="/tests",
                     hint=f"discovered tests: {', '.join(sorted(all_test_names)) or '(none)'}",
                 )

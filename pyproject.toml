@@ -64,6 +64,8 @@ ignore = [
     "PLR0915",
     "PLR0911",
     "SIM108",   # ternary is not always clearer
+    "PLC0415",  # lazy imports are load-bearing: plugin import hygiene (ADR-14),
+                # framework-free parse path, and CLI startup time
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -109,3 +111,6 @@ markers = [
     "perf: performance budget tests (NFR-03)",
 ]
 timeout = 600
+
+[tool.ruff.lint.extend-per-file-ignores]
+"packages/mbt-core/src/mbt/cli/_scaffold/**" = ["ALL"]

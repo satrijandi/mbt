@@ -1,12 +1,12 @@
 """Adapter-local unit tests beyond the compliance suite (TSD §13.1)."""
 
 import pytest
+from mbt_xgboost.adapter import XGBoostTrainingAdapter
+from mbt_xgboost.params import XGBoostBinaryParams
+
 from mbt_adapter_base import AUTO, TaskType
 from mbt_adapter_base.compliance import tiny_binary_dataset
 from mbt_adapter_base.compliance.suite import _BINARY_METRICS
-
-from mbt_xgboost.adapter import XGBoostTrainingAdapter
-from mbt_xgboost.params import XGBoostBinaryParams
 
 
 def _spec(**overrides):
@@ -42,12 +42,13 @@ def test_auto_scale_pos_weight_from_profile() -> None:
 
 def test_non_numeric_feature_raises_actionable_error() -> None:
     import pyarrow as pa
+
     from mbt_adapter_base.datasets import InMemoryDatasetHandle
 
     table = pa.table({"f": [1.0, 2.0], "s": ["a", "b"], "label": [0, 1]})
     data = InMemoryDatasetHandle({"train": table, "test": table}, label_column="label")
     adapter = XGBoostTrainingAdapter({})
-    with pytest.raises(ValueError, match="non-numeric.*s.*hooks"):
+    with pytest.raises(ValueError, match=r"non-numeric.*s.*hooks"):
         adapter.train(_spec(hyperparameters={"n_estimators": 5}), data, _ctx())
 
 
@@ -58,16 +59,21 @@ def _ctx():
         def emit(self, event: object) -> None: ...
 
     return RunContext(
-        run_id="t", unique_id="m", seed=5, target_name="dev",
-        project_dir=".", vars={}, events=_Null(),
+        run_id="t",
+        unique_id="m",
+        seed=5,
+        target_name="dev",
+        project_dir=".",
+        vars={},
+        events=_Null(),
     )
 
 
 def test_nondeterminism_warnings_for_non_hist_and_cuda() -> None:
     adapter = XGBoostTrainingAdapter({})
-    assert adapter.nondeterminism_warnings(
-        _spec(hyperparameters={"tree_method": "approx"})
-    ), "non-hist tree_method must warn (FR-RUN-06)"
+    assert adapter.nondeterminism_warnings(_spec(hyperparameters={"tree_method": "approx"})), (
+        "non-hist tree_method must warn (FR-RUN-06)"
+    )
     assert adapter.nondeterminism_warnings(_spec(hyperparameters={"device": "cuda"}))
     assert not adapter.nondeterminism_warnings(_spec(hyperparameters={"max_depth": 3}))
 

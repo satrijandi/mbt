@@ -9,6 +9,7 @@ The result is written to ``<job.json>.result.json``; stdout carries the
 JSON event stream the coordinator forwards.
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -50,7 +51,7 @@ _IMPLICIT_VALIDATION_FRACTION = 0.2
 
 def _render_adapter_ref(ref: AdapterRef, job_vars: dict[str, Any]) -> AdapterRef:
     """Re-render env_var()/var() in an unrendered adapter config (TSD §18)."""
-    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)  # noqa: S701
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
 
     def env_var(name: str, default: str | None = None) -> str:
         value = os.environ.get(name)
@@ -112,7 +113,7 @@ def run_job(job: TrainingJob) -> JobResult:
     except MbtError as exc:
         _best_effort_fail(tracking, run_handle)
         return JobResult(status="error", error=str(exc))
-    except Exception as exc:  # noqa: BLE001 - the job boundary reports, never crashes
+    except Exception as exc:
         _best_effort_fail(tracking, run_handle)
         tail = traceback.format_exc(limit=8)
         return JobResult(status="error", error=f"{exc!r}\n{tail}")
@@ -208,7 +209,7 @@ def _metrics_for(
 ) -> MetricResults:
     """Builtin metrics via the adapter, hook metrics via predict + hooks."""
     slices = runtime.spec.evaluation.slices if with_slices else []
-    results = runtime.adapter.evaluate(
+    results: MetricResults = runtime.adapter.evaluate(
         model, runtime.handle, split, runtime.builtin_specs, slices=slices or None
     )
     if runtime.hook_specs:
@@ -248,8 +249,8 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
 
     job = runtime.job
     spec = runtime.spec
-    raw_train = base._base.read("train")  # noqa: SLF001 - carve needs pre-transform rows
-    time_column = getattr(base._base, "time_column", None)  # noqa: SLF001
+    raw_train = base._base.read("train")
+    time_column = getattr(base._base, "time_column", None)
     windows = job.dataset_windows.get("windows", job.dataset_windows)
 
     if time_column and "train" in windows:
@@ -257,9 +258,9 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
 
         start = datetime.fromisoformat(str(windows["train"][0]).replace("Z", "+00:00"))
         end = datetime.fromisoformat(str(windows["train"][1]).replace("Z", "+00:00"))
-        boundary = (
-            start + (end - start) * (1 - _IMPLICIT_VALIDATION_FRACTION)
-        ).replace(tzinfo=None)
+        boundary = (start + (end - start) * (1 - _IMPLICIT_VALIDATION_FRACTION)).replace(
+            tzinfo=None
+        )
         column = raw_train.column(time_column).to_pylist()
 
         def _naive(value: Any) -> Any:
@@ -296,11 +297,10 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
         label_column=spec.target,
         time_column=time_column,
     )
-    hook_ctx = (
-        lambda split: HookContext(
-            spec=spec, profile=runtime.base_profile, split=split, logger=get_bus()
-        )
-    )
+
+    def hook_ctx(split: str) -> HookContext:
+        return HookContext(spec=spec, profile=runtime.base_profile, split=split, logger=get_bus())
+
     return TransformedDatasetHandle(carved, spec, runtime.hooks, hook_ctx, time_column)
 
 
@@ -316,8 +316,7 @@ def _run_tuning(
     job = runtime.job
     if job.tuning_engine is None:
         raise ConfigError(
-            f"model declares tuning but no tuning engine was provided for "
-            f"{tuning.engine!r}",
+            f"model declares tuning but no tuning engine was provided for {tuning.engine!r}",
             resource=job.node.unique_id,
         )
     engine_ref = _render_adapter_ref(job.tuning_engine, _job_vars(job))
@@ -327,8 +326,11 @@ def _run_tuning(
     explicit_validation = "validation" in runtime.handle.splits()
 
     objective_spec = next(
-        (m for m in [*runtime.builtin_specs, *runtime.hook_specs]
-         if m.name == tuning.objective.metric),
+        (
+            m
+            for m in [*runtime.builtin_specs, *runtime.hook_specs]
+            if m.name == tuning.objective.metric
+        ),
         None,
     )
     if objective_spec is None:
@@ -346,7 +348,7 @@ def _run_tuning(
         )
         model = runtime.adapter.train(trial_spec, tune_handle, runtime.ctx)
         results = _metrics_for(tune_runtime, model, "validation", with_slices=False)
-        value = results.metrics[tuning.objective.metric]
+        value = float(results.metrics[tuning.objective.metric])
         index = trial_counter["index"]
         trial_counter["index"] += 1
         # Trial history as nested tracking runs where the adapter supports it
@@ -473,10 +475,8 @@ def _run_evaluate(runtime: _JobRuntime) -> JobResult:
 
 def _best_effort_fail(tracking: Any, run_handle: Any) -> None:
     if tracking is not None and run_handle is not None:
-        try:
+        with contextlib.suppress(Exception):
             tracking.end_run(run_handle, "FAILED")
-        except Exception:  # noqa: BLE001, S110 - already failing
-            pass
 
 
 def main(argv: list[str] | None = None) -> int:

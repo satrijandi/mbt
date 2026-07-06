@@ -23,6 +23,7 @@ nav:
   - GitOps & CI: gitops.md
   - Adapter authoring: adapter-authoring.md
   - Roadmap: roadmap.md
+  - v0.1 status: v0.1-status.md
   - ADRs:
       - adr/0001-arrow-interchange.md
       - adr/0002-local-adapters-in-core.md
