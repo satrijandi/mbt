@@ -1,0 +1,40 @@
+# mbt reference promotion workflow (FR-REG-03, FR-STATE-04): pure GitOps via
+# a reviewed promotions.yml change, or a manually approved dispatch.
+name: mbt promote
+
+on:
+  push:
+    branches: [main]
+    paths: [promotions.yml]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Registered model name
+        required: true
+      version:
+        description: Version to promote (default: latest in staging)
+        required: false
+      to:
+        description: Target stage
+        required: true
+        default: production
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production   # require reviewers in repo settings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project
+        run: pip install mbt-core mbt-xgboost mbt-mlflow
+      - name: Promote (GitOps file)
+        if: github.event_name == 'push'
+        run: mbt promote --from-file promotions.yml
+      - name: Promote (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: >
+          mbt promote --model "${{ inputs.model }}" --to "${{ inputs.to }}"
+          ${{ inputs.version && format('--version {0}', inputs.version) || '' }}

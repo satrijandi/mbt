@@ -1,0 +1,24 @@
+# Environments for __PROJECT_NAME__. Keep this file OUT of git when it holds
+# secrets; resolve them via env_var('NAME') Jinja calls - never write values here.
+__PROJECT_NAME__:
+  target: dev
+  outputs:
+    dev:
+      data: {adapter: local, config: {root: .}}
+      tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      compute: {adapter: local}
+      artifact_store: file://./target/artifacts
+      vars:
+        sample_fraction: 1.0
+        max_tuning_trials: 5
+    prod:
+      data: {adapter: local, config: {root: "{{ env_var('MBT_DATA_ROOT', '.') }}"}}
+      tracking: {adapter: mlflow, config: {uri: "{{ env_var('MLFLOW_TRACKING_URI', 'sqlite:///mlflow.db') }}"}}
+      registry: {adapter: mlflow, config: {uri: "{{ env_var('MLFLOW_TRACKING_URI', 'sqlite:///mlflow.db') }}"}}
+      compute: {adapter: local}
+      artifact_store: file://./target/artifacts
+      threads: 4
+      vars:
+        sample_fraction: 1.0
+        max_tuning_trials: 50

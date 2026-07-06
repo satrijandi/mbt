@@ -1,0 +1,4 @@
+# Model specs are reviewed by the owning team (FR-PROJ-01).
+/models/    @your-org/ds-team
+/datasets/  @your-org/ds-team
+/promotions.yml @your-org/mlops-team

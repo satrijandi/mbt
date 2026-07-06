@@ -1,0 +1,7 @@
+# Reviewed promotions (GitOps): merging a change here triggers promote.yml.
+# Example:
+#   promotions:
+#     - model: churn_classifier
+#       version: "3"
+#       to: production
+promotions: []

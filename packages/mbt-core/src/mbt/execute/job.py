@@ -304,7 +304,12 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
     return TransformedDatasetHandle(carved, spec, runtime.hooks, hook_ctx, time_column)
 
 
-def _run_tuning(runtime: _JobRuntime, spec: ModelSpec) -> tuple[ModelSpec, TuningResult | None]:
+def _run_tuning(
+    runtime: _JobRuntime,
+    spec: ModelSpec,
+    tracking: Any = None,
+    run_handle: Any = None,
+) -> tuple[ModelSpec, TuningResult | None]:
     tuning = spec.tuning
     if tuning is None:
         return spec, None
@@ -333,6 +338,7 @@ def _run_tuning(runtime: _JobRuntime, spec: ModelSpec) -> tuple[ModelSpec, Tunin
         )
 
     tune_runtime = _JobRuntime(**{**runtime.__dict__, "handle": tune_handle})
+    trial_counter = {"index": 0}
 
     def objective(trial_params: dict[str, Any]) -> float:
         trial_spec = spec.model_copy(
@@ -340,7 +346,14 @@ def _run_tuning(runtime: _JobRuntime, spec: ModelSpec) -> tuple[ModelSpec, Tunin
         )
         model = runtime.adapter.train(trial_spec, tune_handle, runtime.ctx)
         results = _metrics_for(tune_runtime, model, "validation", with_slices=False)
-        return results.metrics[tuning.objective.metric]
+        value = results.metrics[tuning.objective.metric]
+        index = trial_counter["index"]
+        trial_counter["index"] += 1
+        # Trial history as nested tracking runs where the adapter supports it
+        # (FR-TUNE-03); optional so simple trackers keep working.
+        if tracking is not None and run_handle is not None and hasattr(tracking, "log_trial"):
+            tracking.log_trial(run_handle, index, trial_params, value)
+        return value
 
     n_trials = tuning.n_trials
     if job.tuning_cap is not None:
@@ -390,7 +403,7 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         bus.emit(AutoResolved(unique_id=job.node.unique_id, param=key, value=str(value)))
 
     # 2. tuning (never sees the test split, ADR-8)
-    spec, tuning_result = _run_tuning(runtime, spec)
+    spec, tuning_result = _run_tuning(runtime, spec, tracking, run_handle)
 
     # 3. final fit on the declared train window
     model = runtime.adapter.train(spec, runtime.handle, runtime.ctx)

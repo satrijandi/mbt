@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=./target/json-schemas/mbt_project.schema.json
+name: __PROJECT_NAME__
+version: "0.1.0"
+
+# Vars usable in specs via {{ var('...') }}; targets may override them.
+vars:
+  pr_auc_floor: 0.05
+
+model_defaults:
+  adapter: xgboost

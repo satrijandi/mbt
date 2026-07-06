@@ -1,0 +1,13 @@
+# mbt artifacts
+target/
+mlruns/
+mlflow.db
+data/
+
+# local environment config (may hold secrets; lives in ~/.mbt by default)
+profiles.yml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/

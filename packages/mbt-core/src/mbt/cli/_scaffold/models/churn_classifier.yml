@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=../target/json-schemas/models.schema.json
+models:
+  - name: churn_classifier
+    description: "90-day churn prediction for active subscribers"
+    task: binary_classification
+    adapter: xgboost
+    owner: you@example.com
+    tags: [churn, weekly]
+
+    dataset: ref('churn_training_set')
+
+    target: churned_90d
+    features:
+      include: ["*"]
+      exclude: [user_id]          # explicit leakage guards
+
+    hyperparameters:
+      max_depth: 4
+      learning_rate: 0.1
+      n_estimators: 100
+      scale_pos_weight: "{{ auto }}"   # adapter computes from class balance
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc, logloss]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+      slices: [plan_type]
+
+    registration:
+      name: churn_classifier
+      stage_on_pass: staging       # humans/CD promote to production
+
+    seed: 42

@@ -1,0 +1,45 @@
+# mbt reference prod build (FR-STATE-04): on merge to main, build the
+# modified subgraph against prod and publish the manifest as latest.
+name: mbt prod build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  MBT_STATE_URI: state/prod/latest.json
+
+jobs:
+  prod-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project
+        run: |
+          pip install mbt-core mbt-xgboost mbt-mlflow
+          python scripts/generate_sample_data.py
+      - name: Build (prod target)
+        run: |
+          if [ -f "$MBT_STATE_URI" ]; then
+            mbt build --target prod --select state:modified+ --state "$MBT_STATE_URI"
+          else
+            mbt build --target prod
+          fi
+      - name: Publish manifest as latest (FR-STATE-03)
+        # Real setups: aws s3 cp target/manifest.json \
+        #   s3://<bucket>/mbt/<project>/prod/manifests/${GITHUB_SHA}.json (+ latest.json)
+        run: |
+          mkdir -p state/prod
+          cp target/manifest.json "state/prod/${GITHUB_SHA}.json"
+          cp target/manifest.json state/prod/latest.json
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mbt-manifest-${{ github.sha }}
+          path: target/manifest.json

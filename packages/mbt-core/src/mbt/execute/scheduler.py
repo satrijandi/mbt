@@ -53,14 +53,16 @@ def execute_plan(
 
         def submit_ready() -> None:
             nonlocal stop_scheduling
+            running = {futures[f] for f in futures}
             for uid in sorted(execution_set):
-                if stop_scheduling:
+                if stop_scheduling or len(futures) >= max(1, threads):
+                    # Keep at most `threads` outstanding so --fail-fast can
+                    # actually cancel work that has not been handed out yet.
                     break
-                if uid in results or remaining[uid] > 0:
-                    continue
-                if uid in {futures[f] for f in futures}:
+                if uid in results or remaining[uid] > 0 or uid in running:
                     continue
                 futures[pool.submit(guarded_run, uid)] = uid
+                running.add(uid)
 
         def mark_skipped(uid: str, reason: str) -> None:
             if uid not in results:

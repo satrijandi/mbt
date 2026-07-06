@@ -4,6 +4,7 @@ import sys
 from typing import Protocol, TextIO
 
 from rich.console import Console
+from rich.markup import escape
 
 from mbt.events.models import Event
 from mbt.secrets import redact
@@ -39,7 +40,7 @@ class ConsoleSink:
             return
         style = _LEVEL_STYLES.get(event.level, "")
         stamp = event.ts.strftime("%H:%M:%S")
-        text = redact(event.human())
+        text = escape(redact(event.human()))
         prefix = {"warn": "WARN ", "error": "ERROR "}.get(event.level, "")
         self.console.print(f"[dim]{stamp}[/dim]  {prefix}{text}", style=style, markup=True)
 

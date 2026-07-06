@@ -1,0 +1,23 @@
+# mbt scheduled retraining (FR-STATE-06): CI cron + tag selection.
+# No orchestrator concept needed - freshness arrives as new snapshots.
+name: mbt weekly retrain
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"  # Mondays 05:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project
+        run: |
+          pip install mbt-core mbt-xgboost mbt-mlflow
+          python scripts/generate_sample_data.py
+      - name: Retrain weekly models (prod target)
+        run: mbt build --target prod --select tag:weekly

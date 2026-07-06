@@ -1,0 +1,6 @@
+# Adapter packages this project depends on; install with `mbt deps`.
+packages:
+  - package: mbt-xgboost
+    version: "~=0.1"
+  - package: mbt-mlflow
+    version: "~=0.1"

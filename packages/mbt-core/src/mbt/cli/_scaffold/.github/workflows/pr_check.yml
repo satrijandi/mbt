@@ -1,0 +1,61 @@
+# mbt reference PR check (FR-STATE-04/05): parse -> compile -> state diff ->
+# build the modified subgraph on the dev target -> post a PR comment.
+name: mbt PR check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  # Where prod builds publish their manifests (FR-STATE-03). Point this at
+  # s3://<bucket>/mbt/<project>/prod/manifests/latest.json in real setups.
+  MBT_STATE_URI: state/prod/latest.json
+
+jobs:
+  pr-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project
+        run: |
+          pip install mbt-core mbt-xgboost mbt-mlflow
+          python scripts/generate_sample_data.py
+      - name: Parse and compile
+        run: |
+          mbt parse
+          mbt compile --target dev
+      - name: Restore prod state manifest
+        id: state
+        run: |
+          if [ -f "$MBT_STATE_URI" ]; then
+            echo "have_state=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_state=false" >> "$GITHUB_OUTPUT"
+            echo "No prod manifest yet; building everything (bootstrap)."
+          fi
+      - name: State diff
+        if: steps.state.outputs.have_state == 'true'
+        run: |
+          mbt state diff --state "$MBT_STATE_URI" --output json > target/state_diff.json
+          cat target/state_diff.json
+      - name: Build modified subgraph (dev target)
+        run: |
+          if [ "${{ steps.state.outputs.have_state }}" = "true" ]; then
+            mbt build --target dev --select state:modified+ --state "$MBT_STATE_URI"
+          else
+            mbt build --target dev
+          fi
+      - name: Post PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const script = require('./scripts/pr_comment.js')
+            await script({github, context, core})

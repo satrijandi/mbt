@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=./target/json-schemas/sources.schema.json
+sources:
+  - name: lakehouse
+    description: Local parquet stand-in for your warehouse gold layer.
+    tables:
+      - name: subscribers
+        path: data/subscribers/*.parquet
+        description: One row per subscriber per monthly snapshot.
