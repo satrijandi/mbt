@@ -2,7 +2,9 @@ name: churn_demo
 version: "0.1.0"
 
 vars:
-  pr_auc_floor: 0.05
+  # Meaningfully above the ~0.20 random-baseline PR-AUC of a ~20% positive
+  # rate: a gate below the base rate never gates.
+  pr_auc_floor: 0.3
 
 model_defaults:
   adapter: xgboost

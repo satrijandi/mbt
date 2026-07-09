@@ -73,6 +73,8 @@ class StateDiff:
     env_changed: bool = False
     env_digest_current: str = ""
     env_digest_reference: str = ""
+    env_freeze_digest_current: str = ""
+    env_freeze_digest_reference: str = ""
 
     @property
     def is_empty(self) -> bool:
@@ -87,6 +89,8 @@ class StateDiff:
                 "changed": self.env_changed,
                 "current": self.env_digest_current,
                 "reference": self.env_digest_reference,
+                "freeze_current": self.env_freeze_digest_current,
+                "freeze_reference": self.env_freeze_digest_reference,
             },
         }
 
@@ -115,9 +119,13 @@ def _components(current: Any, reference: Any) -> tuple[str, ...]:
 
 def diff_manifests(current: Manifest, reference: Manifest) -> StateDiff:
     diff = StateDiff(
+        # ADR-7: the "modifying" env signal stays keyed to the targeted
+        # env_digest; the freeze digest is reported for visibility only.
         env_changed=current.metadata.env_digest != reference.metadata.env_digest,
         env_digest_current=current.metadata.env_digest,
         env_digest_reference=reference.metadata.env_digest,
+        env_freeze_digest_current=current.metadata.env_freeze_digest,
+        env_freeze_digest_reference=reference.metadata.env_freeze_digest,
     )
     for uid in sorted(current.nodes):
         if uid not in reference.nodes:

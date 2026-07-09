@@ -1,12 +1,12 @@
 {
   "adapter_versions": {
     "local": {
-      "contract": "1.0",
+      "contract": "1.1",
       "package": "mbt-core",
       "version": "<version>"
     },
     "xgboost": {
-      "contract": "1.0",
+      "contract": "1.1",
       "package": "mbt-xgboost",
       "version": "<version>"
     }
@@ -15,16 +15,16 @@
     "exposure.churn_demo.retention_campaign_job": {
       "config": {
         "depends_on": [
-          "ref('churn_classifier')"
+          "ref('retention_scoring')"
         ],
-        "description": "Nightly batch scoring feeding the retention campaign tool.",
+        "description": "Consumes the retention_scoring predictions for campaign targeting.",
         "name": "retention_campaign_job",
         "owner": "lifecycle-eng@example.com",
         "type": "batch_job",
         "url": "https://internal.example.com/jobs/retention-campaign"
       },
       "depends_on": [
-        "model.churn_demo.churn_classifier"
+        "scoring.churn_demo.retention_scoring"
       ],
       "name": "retention_campaign_job",
       "path": "exposures.yml",
@@ -35,13 +35,14 @@
     "anchor": "2026-06-30T00:00:00Z",
     "deep_snapshot": true,
     "env_digest": "<env>",
+    "env_freeze_digest": "<env>",
     "generated_at": "2026-06-30T00:00:00Z",
     "git": {
       "branch": null,
       "commit": null,
       "dirty": false
     },
-    "manifest_schema_version": 1,
+    "manifest_schema_version": 2,
     "mbt_version": "0.1.0",
     "project_name": "churn_demo",
     "target": "ci",
@@ -76,15 +77,15 @@
     },
     "vars": {
       "max_tuning_trials": 3,
-      "pr_auc_floor": 0.05,
+      "pr_auc_floor": 0.3,
       "sample_fraction": 1.0
     }
   },
   "metrics": {
-    "lift_at_decile": {
+    "campaign_capture_100": {
       "greater_is_better": true,
       "kind": "hook",
-      "name": "lift_at_decile",
+      "name": "campaign_capture_100",
       "params": {}
     }
   },
@@ -100,6 +101,13 @@
               "columns": [
                 "churned_90d",
                 "snapshot_date"
+              ]
+            }
+          },
+          {
+            "label_leakage_scan": {
+              "exclude": [
+                "account_status"
               ]
             }
           }
@@ -132,13 +140,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:1fea49df44628d6b9039ae560683cc7a21505eaf434cad6f44a111963873b140",
+      "config_hash": "sha256:cd68993c0d353b0b3069cccaeb5149c88b43ef968ce4288d08c17a2a114c1222",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:8f049c9d81ea56c819f76249073fbfa746d34a653ab3e8121283f69cb855fa08",
+      "input_hash": "sha256:c2eca9c9869703032094883bf99522520ec5fe743b6e4e71377ff14d10c78346",
       "name": "churn_training_set",
       "path": "datasets/churn_training_set.yml",
       "resolved": {
@@ -155,7 +163,7 @@
       },
       "resource_type": "dataset",
       "seed": null,
-      "snapshot_id": "sha256:8f92f2b974e79bcf8c50e01fe40ea9f1b784fb00a9080a1386a8661b3abbf250",
+      "snapshot_id": "sha256:e04e9134477a3dfe89630a106711afd7e3b4429e887999628d6259564b302d30",
       "task": null,
       "unique_id": "dataset.churn_demo.churn_training_set"
     },
@@ -199,7 +207,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:fb5dc631ea38e96053371ab5417397086aef79af8e746efd32683395d2cc39c3",
+      "input_hash": "sha256:70457639ac0a662bf4a0e2aa0e564ec9614104d2c73e1cbb2925c91329c8e206",
       "name": "upsell_training_set",
       "path": "datasets/upsell_training_set.yml",
       "resolved": {
@@ -216,7 +224,7 @@
       },
       "resource_type": "dataset",
       "seed": null,
-      "snapshot_id": "sha256:8f92f2b974e79bcf8c50e01fe40ea9f1b784fb00a9080a1386a8661b3abbf250",
+      "snapshot_id": "sha256:e04e9134477a3dfe89630a106711afd7e3b4429e887999628d6259564b302d30",
       "task": null,
       "unique_id": "dataset.churn_demo.upsell_training_set"
     },
@@ -229,18 +237,24 @@
         "evaluation": {
           "gates": [
             {
+              "bootstrap_resamples": 1000,
               "compare_to": null,
+              "confidence": 0.95,
               "metric": "pr_auc",
               "min_delta": 0.0,
               "slice": null,
-              "threshold": 0.05
+              "threshold": 0.3
             }
           ],
           "metrics": [
             "pr_auc",
             "roc_auc",
             "logloss",
-            "lift_at_decile"
+            "brier",
+            "ece",
+            "threshold_at_precision_0.35",
+            "lift_at_0.1",
+            "campaign_capture_100"
           ],
           "protocol": {
             "split": "temporal",
@@ -254,7 +268,8 @@
           "exclude": [
             "user_id",
             "upgraded_90d",
-            "plan_type"
+            "plan_type",
+            "account_status"
           ],
           "include": [
             "*"
@@ -284,13 +299,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:d136c8e7463e1df263eb83864db5f4d9054cf932b85a72679527b889fdea5899",
+      "config_hash": "sha256:f9e991cd5f8ddfc78fc0220e0e978d7dd9a50f0918d52f29291141939aac9258",
       "depends_on": [
         "dataset.churn_demo.churn_training_set"
       ],
-      "hooks_hash": "sha256:feb62357eb85e0c30fcb8fe39603c0fe61272a8f103dc5a3eaf39dd35d1ceac4",
+      "hooks_hash": "sha256:b69c77c89439a1112e3432f4e582a64be217e42fa4afa8c5f173495bf55954e4",
       "hooks_path": "models/churn_classifier.py",
-      "input_hash": "sha256:4ef77579c7da718b6408b98afc7820a07de77931dc5912e8bb1629be550977f2",
+      "input_hash": "sha256:1f191e957ba04f87bd1d7369ce1b3289e176ae5c3f205fb58bfb51465b67f6ee",
       "name": "churn_classifier",
       "path": "models/churn_classifier.yml",
       "resolved": {},
@@ -309,11 +324,13 @@
         "evaluation": {
           "gates": [
             {
+              "bootstrap_resamples": 1000,
               "compare_to": null,
+              "confidence": 0.95,
               "metric": "pr_auc",
               "min_delta": 0.0,
               "slice": null,
-              "threshold": 0.05
+              "threshold": 0.3
             }
           ],
           "metrics": [
@@ -330,7 +347,8 @@
           "exclude": [
             "user_id",
             "upgraded_90d",
-            "plan_type"
+            "plan_type",
+            "account_status"
           ],
           "include": [
             "*"
@@ -355,13 +373,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:3a05f3e612baf9d6991fc7dea5b2ea84f9ea5b6a8ff1fe661fef85f6032a9ef2",
+      "config_hash": "sha256:6962dad756ea4204ee090a22e17c0dbe74e15a1d3dbeb7e4c64727a5cd30000c",
       "depends_on": [
         "dataset.churn_demo.churn_training_set"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:755ba5fbad0c5675ffaa3bb6c42a5e3595f305b327b3260c0beda203a49c0383",
+      "input_hash": "sha256:5ff4d11de61777d9020790124e20d270adad6b237513c1dc2b465687357589c9",
       "name": "churn_classifier_deep",
       "path": "models/churn_classifier_deep.yml",
       "resolved": {},
@@ -380,11 +398,13 @@
         "evaluation": {
           "gates": [
             {
+              "bootstrap_resamples": 1000,
               "compare_to": null,
+              "confidence": 0.95,
               "metric": "pr_auc",
               "min_delta": 0.0,
               "slice": null,
-              "threshold": 0.05
+              "threshold": 0.3
             }
           ],
           "metrics": [
@@ -401,7 +421,7 @@
           "exclude": [
             "user_id",
             "churned_90d",
-            "plan_type"
+            "account_status"
           ],
           "include": [
             "*"
@@ -430,13 +450,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:c6d8b9b093f0e5018209408098b302ff1f498277e98748a2552abd50e2a0e189",
+      "config_hash": "sha256:5edff4298e0e3e0dde7fb5fefd71351f412dd477cba1b4ff18a39d1986256620",
       "depends_on": [
         "dataset.churn_demo.upsell_training_set"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:39f05729ace81d22134eb6f105aee3c59b226f2ec40e7f4612288aff46e26ebf",
+      "input_hash": "sha256:187608fe825f8d3c3223d4de5c5122a31bd3ed5262f39adf7ad807059a37b7bf",
       "name": "upsell_classifier",
       "path": "models/upsell_classifier.yml",
       "resolved": {},
@@ -445,9 +465,136 @@
       "snapshot_id": null,
       "task": "binary_classification",
       "unique_id": "model.churn_demo.upsell_classifier"
+    },
+    "scoring.churn_demo.retention_scoring": {
+      "adapter": null,
+      "config": {
+        "checks": [
+          {
+            "not_null": {
+              "columns": [
+                "user_id",
+                "snapshot_date"
+              ]
+            }
+          }
+        ],
+        "description": "Nightly churn scores feeding the retention campaign tool.",
+        "ground_truth": {
+          "gates": [
+            {
+              "metric": "pr_auc",
+              "threshold": 0.3
+            }
+          ],
+          "join_key": "user_id",
+          "label": {
+            "column": "churned_90d",
+            "definition": "",
+            "source": "source.churn_demo.lakehouse.churn_outcomes"
+          },
+          "maturity": "14d",
+          "metrics": [
+            "pr_auc",
+            "roc_auc"
+          ]
+        },
+        "input": {
+          "filters": [
+            "is_active = true",
+            "tenure_days >= 30"
+          ],
+          "inputs": null,
+          "sample_key": null,
+          "source": "source.churn_demo.lakehouse.scoring_batch",
+          "time_column": "snapshot_date",
+          "window": "-7d:now"
+        },
+        "model": "model.churn_demo.churn_classifier",
+        "monitors": {
+          "feature_shift": {
+            "exclude": [],
+            "include": [
+              "*"
+            ],
+            "method": "psi",
+            "threshold": 0.25
+          },
+          "prediction_shift": {
+            "method": "psi",
+            "threshold": 0.25
+          }
+        },
+        "name": "retention_scoring",
+        "output": {
+          "columns": [
+            "user_id",
+            "snapshot_date"
+          ],
+          "format": "parquet",
+          "path": "predictions/retention_scores"
+        },
+        "owner": "lifecycle-eng@example.com",
+        "stage": "production",
+        "tags": [
+          "daily"
+        ]
+      },
+      "config_hash": "sha256:10aae432e5c2e584c3c7e05d7499d21992896ecf5b44b799aae973edab51c901",
+      "depends_on": [
+        "model.churn_demo.churn_classifier",
+        "source.churn_demo.lakehouse.churn_outcomes",
+        "source.churn_demo.lakehouse.scoring_batch"
+      ],
+      "hooks_hash": null,
+      "hooks_path": null,
+      "input_hash": "sha256:7eed9ef25b4f3fb4de536ddc2a01b289d5ff3e2ba80e1b09f5efe8d207157925",
+      "name": "retention_scoring",
+      "path": "scoring/retention_scoring.yml",
+      "resolved": {
+        "windows": {
+          "score": [
+            "2026-06-23T00:00:00Z",
+            "2026-06-30T00:00:00Z"
+          ]
+        }
+      },
+      "resource_type": "scoring",
+      "seed": null,
+      "snapshot_id": "sha256:504fbab12213b97f6c1f494b1912d68625836b96c8aa9a7a6ef8a96d82a5e864",
+      "task": null,
+      "unique_id": "scoring.churn_demo.retention_scoring"
     }
   },
   "sources": {
+    "source.churn_demo.lakehouse.churn_outcomes": {
+      "config": {
+        "description": "Realized churn outcomes, arriving ~90 days after scoring.",
+        "format": "parquet",
+        "identifier": null,
+        "name": "churn_outcomes",
+        "path": "data/churn_outcomes/*.parquet"
+      },
+      "group": "lakehouse",
+      "name": "churn_outcomes",
+      "path": "sources.yml",
+      "snapshot_id": "sha256:aa2742b67d9c8e04bb68046f8e051d163388143cf3c2e434e902552e13c4348b",
+      "unique_id": "source.churn_demo.lakehouse.churn_outcomes"
+    },
+    "source.churn_demo.lakehouse.scoring_batch": {
+      "config": {
+        "description": "Fresh unlabeled subscribers to score (last week before the anchor).",
+        "format": "parquet",
+        "identifier": null,
+        "name": "scoring_batch",
+        "path": "data/scoring_batch/*.parquet"
+      },
+      "group": "lakehouse",
+      "name": "scoring_batch",
+      "path": "sources.yml",
+      "snapshot_id": "sha256:504fbab12213b97f6c1f494b1912d68625836b96c8aa9a7a6ef8a96d82a5e864",
+      "unique_id": "source.churn_demo.lakehouse.scoring_batch"
+    },
     "source.churn_demo.lakehouse.subscribers": {
       "config": {
         "description": "One row per subscriber per monthly snapshot.",
@@ -459,7 +606,7 @@
       "group": "lakehouse",
       "name": "subscribers",
       "path": "sources.yml",
-      "snapshot_id": "sha256:8f92f2b974e79bcf8c50e01fe40ea9f1b784fb00a9080a1386a8661b3abbf250",
+      "snapshot_id": "sha256:e04e9134477a3dfe89630a106711afd7e3b4429e887999628d6259564b302d30",
       "unique_id": "source.churn_demo.lakehouse.subscribers"
     }
   }

@@ -12,6 +12,10 @@ Passing this suite is the ship bar for a training adapter. Usage::
 Requires the ``mbt-adapter-base[compliance]`` extra (pytest + numpy).
 """
 
-from mbt_adapter_base.compliance.suite import TrainingAdapterCompliance, tiny_binary_dataset
+from mbt_adapter_base.compliance.suite import (
+    PredictionStoreCompliance,
+    TrainingAdapterCompliance,
+    tiny_binary_dataset,
+)
 
-__all__ = ["TrainingAdapterCompliance", "tiny_binary_dataset"]
+__all__ = ["PredictionStoreCompliance", "TrainingAdapterCompliance", "tiny_binary_dataset"]

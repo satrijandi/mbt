@@ -40,15 +40,20 @@ def test_auto_scale_pos_weight_from_profile() -> None:
     assert value == pytest.approx(expected, rel=1e-4)
 
 
-def test_non_numeric_feature_raises_actionable_error() -> None:
+def test_unsupported_feature_type_raises_actionable_error() -> None:
+    """Strings are categoricals now; other non-numeric types still error."""
+    from datetime import datetime
+
     import pyarrow as pa
 
     from mbt_adapter_base.datasets import InMemoryDatasetHandle
 
-    table = pa.table({"f": [1.0, 2.0], "s": ["a", "b"], "label": [0, 1]})
+    table = pa.table(
+        {"f": [1.0, 2.0], "ts": [datetime(2026, 1, 1), datetime(2026, 1, 2)], "label": [0, 1]}
+    )
     data = InMemoryDatasetHandle({"train": table, "test": table}, label_column="label")
     adapter = XGBoostTrainingAdapter({})
-    with pytest.raises(ValueError, match=r"non-numeric.*s.*hooks"):
+    with pytest.raises(ValueError, match=r"unsupported feature column type.*ts.*hooks"):
         adapter.train(_spec(hyperparameters={"n_estimators": 5}), data, _ctx())
 
 

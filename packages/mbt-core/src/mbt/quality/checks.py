@@ -4,13 +4,14 @@ Checks run in the coordinator against the materialized dataset, right after
 a dataset build. Failures set node status ``test_failed`` (exit code 2).
 """
 
+import math
 from datetime import datetime
 from typing import Any, Protocol
 
 import duckdb
 import pyarrow as pa
 
-from mbt.contracts import CheckSpec, DatasetSpec, TestResult
+from mbt.contracts import CheckSpec, DatasetSpec, ScoringSpec, TestResult
 from mbt.events import get_bus
 from mbt.events.models import LogMessage
 
@@ -37,9 +38,45 @@ def run_checks(
     *,
     resource: str,
 ) -> list[TestResult]:
+    checks: list[CheckSpec] = list(spec.checks)
+    declared = {_normalize(check)[0] for check in checks}
+    if "label_leakage_scan" not in declared:
+        # Leakage guards are on by default: every dataset build scans for
+        # label-associated features; declare the check to tune thresholds,
+        # exclude reviewed columns, or opt out (`enabled: false`).
+        checks.append("label_leakage_scan")
+    return _run_named_checks(checks, spec, handle, resolved_windows, resource)
+
+
+def run_scoring_checks(
+    spec: ScoringSpec,
+    handle: _CheckableHandle,
+    resolved_windows: dict[str, Any],
+    *,
+    resource: str,
+) -> list[TestResult]:
+    """Label-free checks on a scoring input (ADR-20).
+
+    No ``label_leakage_scan`` auto-append: there is no label to leak. The
+    parser restricts scoring checks to the label-free subset and requires
+    explicit columns for ``not_null``.
+    """
+    return _run_named_checks(list(spec.checks), spec, handle, resolved_windows, resource)
+
+
+def _run_named_checks(
+    checks: list[CheckSpec],
+    spec: Any,
+    handle: _CheckableHandle,
+    resolved_windows: dict[str, Any],
+    resource: str,
+) -> list[TestResult]:
     results: list[TestResult] = []
-    for check in spec.checks:
+    for check in checks:
         name, params = _normalize(check)
+        if not params.get("enabled", True):
+            results.append(TestResult(name=name, passed=True, message="check disabled"))
+            continue
         runner = _CHECKS[name]
         try:
             results.append(runner(spec, handle, resolved_windows, params, resource))
@@ -57,7 +94,7 @@ def _connect_splits(handle: _CheckableHandle) -> tuple["duckdb.DuckDBPyConnectio
 
 
 def _check_schema(
-    spec: DatasetSpec,
+    spec: Any,
     handle: _CheckableHandle,
     windows: dict[str, Any],
     params: dict[str, Any],
@@ -65,7 +102,8 @@ def _check_schema(
 ) -> TestResult:
     """Declared columns exist (and match declared arrow types when given)."""
     columns = params.get("columns", {})
-    table = handle.read("train")
+    split = "train" if "train" in handle.splits() else min(sorted(handle.splits()))
+    table = handle.read(split)
     actual = {field.name: str(field.type) for field in table.schema}
     problems: list[str] = []
     if isinstance(columns, list):
@@ -84,7 +122,7 @@ def _check_schema(
 
 
 def _check_not_null(
-    spec: DatasetSpec,
+    spec: Any,
     handle: _CheckableHandle,
     windows: dict[str, Any],
     params: dict[str, Any],
@@ -108,85 +146,154 @@ def _check_not_null(
 
 
 def _check_no_future_columns(
-    spec: DatasetSpec,
+    spec: Any,
     handle: _CheckableHandle,
     windows: dict[str, Any],
     params: dict[str, Any],
     resource: str,
 ) -> TestResult:
-    """No timestamp column may exceed the split boundary (leakage guard)."""
+    """No timestamp column may exceed its own split's window end.
+
+    Checking each split against its OWN boundary catches train/test overlap
+    (a train row carrying a timestamp inside the test window is temporal
+    leakage), not just absolutely-future values beyond the newest window.
+    """
     resolved = windows.get("windows", windows) or {}
-    ends = [bounds[1] for bounds in resolved.values() if isinstance(bounds, (list, tuple))]
-    if not ends:
+    boundaries = {
+        split: datetime.fromisoformat(str(bounds[1]).replace("Z", "+00:00")).replace(tzinfo=None)
+        for split, bounds in resolved.items()
+        if isinstance(bounds, (list, tuple))
+    }
+    if not boundaries:
         return TestResult(
             name="no_future_columns",
             passed=True,
             message="no temporal windows to check against",
         )
-    boundary = max(datetime.fromisoformat(str(e).replace("Z", "+00:00")) for e in ends)
-    boundary_naive = boundary.replace(tzinfo=None)
-    table = handle.read("train")
     problems = []
     con = duckdb.connect()
     try:
-        con.register("t", table)
-        for field in table.schema:
-            if not str(field.type).startswith(_TIMESTAMP_TYPES):
+        for split, boundary in sorted(boundaries.items()):
+            if split not in handle.splits():
                 continue
-            row = con.execute(f'SELECT CAST(max("{field.name}") AS TIMESTAMP) FROM t').fetchone()
-            maximum = row[0] if row else None
-            if maximum is not None and maximum > boundary_naive:
-                problems.append(
-                    f"column {field.name!r} reaches {maximum.isoformat()} "
-                    f"beyond the split boundary {boundary_naive.isoformat()}"
-                )
+            table = handle.read(split)
+            con.register(f"t_{split}", table)
+            for field in table.schema:
+                if not str(field.type).startswith(_TIMESTAMP_TYPES):
+                    continue
+                row = con.execute(
+                    f'SELECT CAST(max("{field.name}") AS TIMESTAMP) FROM t_{split}'
+                ).fetchone()
+                maximum = row[0] if row else None
+                if maximum is not None and maximum > boundary:
+                    problems.append(
+                        f"{split}.{field.name} reaches {maximum.isoformat()} beyond the "
+                        f"{split} window end {boundary.isoformat()} (temporal leakage)"
+                    )
     finally:
         con.close()
     return TestResult(name="no_future_columns", passed=not problems, message="; ".join(problems))
 
 
+def _cramers_v(con: "duckdb.DuckDBPyConnection", column: str, label: str) -> float | None:
+    """Cramér's V of a categorical column against the label, from the
+    contingency table (pure arithmetic; mbt-core carries no scipy).
+
+    For two binary variables V equals |phi| - the Pearson correlation of the
+    indicators - so the numeric scan's thresholds transfer unchanged.
+    Returns None for degenerate columns (fewer than two levels or classes)
+    and for quasi-identifiers (more than half the rows unique), whose V
+    saturates spuriously without indicating leakage.
+    """
+    rows = con.execute(
+        f'SELECT CAST("{column}" AS VARCHAR), CAST("{label}" AS VARCHAR), COUNT(*) FROM t '
+        f'WHERE "{column}" IS NOT NULL AND "{label}" IS NOT NULL GROUP BY 1, 2'
+    ).fetchall()
+    counts = {(str(level), str(cls)): int(n) for level, cls, n in rows}
+    levels = sorted({key[0] for key in counts})
+    classes = sorted({key[1] for key in counts})
+    total = sum(counts.values())
+    if len(levels) < 2 or len(classes) < 2 or total == 0:
+        return None
+    if len(levels) > total * 0.5:
+        return None  # quasi-identifier, not a categorical feature
+    level_totals = {lv: sum(counts.get((lv, c), 0) for c in classes) for lv in levels}
+    class_totals = {c: sum(counts.get((lv, c), 0) for lv in levels) for c in classes}
+    chi2 = 0.0
+    for lv in levels:
+        for c in classes:
+            expected = level_totals[lv] * class_totals[c] / total
+            chi2 += (counts.get((lv, c), 0) - expected) ** 2 / expected
+    return math.sqrt(chi2 / (total * (min(len(levels), len(classes)) - 1)))
+
+
 def _check_label_leakage_scan(
-    spec: DatasetSpec,
+    spec: Any,
     handle: _CheckableHandle,
     windows: dict[str, Any],
     params: dict[str, Any],
     resource: str,
 ) -> TestResult:
-    """Flag numeric features suspiciously associated with the label."""
+    """Flag features suspiciously associated with the label.
+
+    Numeric columns are screened with ``|corr|``, categorical (string)
+    columns with Cramér's V - the same 0-1 scale, so one two-tier bar covers
+    both: ``>= max_abs_correlation`` (default 0.95) fails the build; the
+    warn band ``[warn_abs_correlation, max)`` (default 0.85) logs a warning
+    and is recorded without failing. ``exclude`` skips reviewed columns.
+    Runs on every dataset build unless opted out (``enabled``).
+    """
     threshold = float(params.get("max_abs_correlation", 0.95))
+    warn_threshold = float(params.get("warn_abs_correlation", 0.85))
+    excluded = set(params.get("exclude") or [])
     label = spec.label.column
     table = handle.read("train")
     con = duckdb.connect()
     try:
         con.register("t", table)
-        problems = []
+        problems: list[str] = []
+        suspects: list[str] = []
         for field in table.schema:
-            if field.name == label:
+            if field.name == label or field.name in excluded:
                 continue
-            if not (
-                str(field.type).startswith(("int", "uint", "float", "double", "decimal"))
-                or str(field.type) == "bool"
+            type_name = str(field.type)
+            association: float | None
+            if type_name.startswith(("int", "uint", "float", "double", "decimal")) or (
+                type_name == "bool"
             ):
+                row = con.execute(
+                    f'SELECT corr(CAST("{field.name}" AS DOUBLE), CAST("{label}" AS DOUBLE)) FROM t'
+                ).fetchone()
+                corr = row[0] if row else None
+                association = None if corr is None else abs(corr)
+                stat = "|corr|"
+            elif type_name in ("string", "large_string") or type_name.startswith("dictionary"):
+                association = _cramers_v(con, field.name, label)
+                stat = "V"
+            else:
                 continue
-            row = con.execute(
-                f'SELECT corr(CAST("{field.name}" AS DOUBLE), CAST("{label}" AS DOUBLE)) FROM t'
-            ).fetchone()
-            corr = row[0] if row else None
-            if corr is not None and abs(corr) >= threshold:
-                problems.append(f"{field.name} (|corr|={abs(corr):.3f})")
+            if association is None:
+                continue
+            if association >= threshold:
+                problems.append(f"{field.name} ({stat}={association:.3f})")
+            elif association >= warn_threshold:
+                suspects.append(f"{field.name} ({stat}={association:.3f})")
     finally:
         con.close()
-    return TestResult(
-        name="label_leakage_scan",
-        passed=not problems,
-        message=("suspiciously label-associated features: " + ", ".join(problems))
-        if problems
-        else "",
-    )
+    parts: list[str] = []
+    if problems:
+        parts.append("suspiciously label-associated features: " + ", ".join(problems))
+    if suspects:
+        warn = "features in the warn band: " + ", ".join(suspects)
+        parts.append(warn)
+        get_bus().emit(
+            LogMessage(level="warn", unique_id=resource, message=f"label_leakage_scan: {warn}")
+        )
+    return TestResult(name="label_leakage_scan", passed=not problems, message="; ".join(parts))
 
 
 def _check_class_balance_report(
-    spec: DatasetSpec,
+    spec: Any,
     handle: _CheckableHandle,
     windows: dict[str, Any],
     params: dict[str, Any],

@@ -15,7 +15,9 @@ PROJECT_FILE = "mbt_project.yml"
 class ProjectConfig(BaseModel):
     """The project-level configuration."""
 
-    model_config = ConfigDict(extra="forbid")
+    # protected_namespaces=(): model_defaults/model_paths are spec vocabulary,
+    # not pydantic's model_* namespace (warns on pydantic < 2.10).
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     version: str
@@ -24,6 +26,7 @@ class ProjectConfig(BaseModel):
     vars: dict[str, Any] = Field(default_factory=dict)
     model_paths: list[str] = Field(default_factory=lambda: ["models"])
     dataset_paths: list[str] = Field(default_factory=lambda: ["datasets"])
+    scoring_paths: list[str] = Field(default_factory=lambda: ["scoring"])
     test_paths: list[str] = Field(default_factory=lambda: ["tests"])
     macro_paths: list[str] = Field(default_factory=lambda: ["macros"])
 

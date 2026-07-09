@@ -9,8 +9,9 @@ Budget: well under an hour; the training itself takes seconds.
 pip install mbt-core mbt-xgboost mbt-mlflow
 ```
 
-Python 3.11+ required. This brings the CLI (`mbt`), the XGBoost training
-adapter, and MLflow tracking/registry adapters.
+Python 3.11+ required (3.11 through 3.14 are tested in CI). This brings the
+CLI (`mbt`), the XGBoost training adapter, and MLflow tracking/registry
+adapters.
 
 ## 2. Scaffold a project
 
@@ -21,7 +22,8 @@ cd my_models
 
 You get a working golden-path project: an example source, dataset, and model
 spec, `profiles.yml` (also installed to `~/.mbt/`), pre-commit config,
-reference CI workflows, and CODEOWNERS on `models/`.
+a pinned CI install set (`requirements.txt`), reference CI workflows, and
+CODEOWNERS on `models/`.
 
 ## 3. Get data
 
@@ -29,7 +31,10 @@ reference CI workflows, and CODEOWNERS on `models/`.
 python scripts/generate_sample_data.py
 ```
 
-This writes deterministic sample subscriber data to `data/subscribers/`.
+This writes deterministic sample data: the training subscribers
+(`data/subscribers/`) plus a fresh scoring batch and matured outcomes
+(`data/scoring_batch/`, `data/churn_outcomes/`) that the score and monitor
+steps below consume.
 For real projects, point `sources.yml` at your own Parquet:
 
 ```yaml
@@ -66,7 +71,8 @@ What happens, in order:
    anchor; data snapshots pin; every node gets a config hash and a
    transitive input hash; `target/manifest.json` is written.
 2. **datasets** - DuckDB materializes train/test splits per the declared
-   windows; built-in checks (`not_null`, `no_future_columns`, ...) and your
+   windows; built-in checks (`not_null`, `no_future_columns`,
+   `label_leakage_scan` - the leakage scan runs by default) and your
    Python data tests run.
 3. **models** - each model trains in an isolated subprocess job:
    `{{ auto }}` hyperparameters resolve from the dataset profile, metrics
@@ -102,6 +108,19 @@ mbt promote --model churn_classifier --to production
 Refuses unless gates were recorded as passed at registration. In CI, wire
 this to a reviewed `promotions.yml` change (see [GitOps & CI](gitops.md)).
 
+## 9. Score and monitor
+
+```bash
+mbt score      # batch-score scoring/churn_scoring.yml with the production champion
+mbt monitor    # once outcomes mature: realized metrics for stored predictions
+```
+
+The scaffolded `scoring/churn_scoring.yml` is a whole serving pipeline in
+one config: input batch, prediction sink, distribution-shift monitors
+against the champion's training-time baseline, and delayed ground-truth
+evaluation (see [Concepts](concepts.md#batch-scoring-and-monitoring)).
+A shift breach or failed realized-metric gate exits 2, like any gate.
+
 ## Day-to-day loops
 
 ```bash
@@ -109,5 +128,7 @@ mbt build --select churn_classifier            # one model + its data
 mbt build --select tag:weekly                  # scheduled retraining set
 mbt build --select state:modified+ --state s3://bucket/mbt/prod/manifests/latest.json
 mbt test                                        # checks + gates, never trains
-mbt evaluate --model churn_classifier --stage production --gates   # drift check
+mbt evaluate --model churn_classifier --stage production --gates   # champion decay check on fresh data
+mbt score --select tag:daily                    # scheduled batch scoring set
+mbt monitor                                     # evaluate matured predictions
 ```

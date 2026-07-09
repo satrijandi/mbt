@@ -19,12 +19,14 @@ import pytest
 from mbt_snowflake.adapter import SnowflakeAdapterError, SnowflakeDataAdapter
 from mbt_snowflake.sql import (
     SnowflakeSQLError,
+    base_relation,
+    key_hash_expr,
     qualify_table,
     sampling_predicate,
     split_queries,
 )
 
-from mbt_adapter_base import DatasetSpec, ManifestNode
+from mbt_adapter_base import DatasetLocator, DatasetSpec, ManifestNode
 from mbt_adapter_base.materialization import combine_snapshots
 
 ANCHOR = datetime(2026, 7, 1)
@@ -95,7 +97,10 @@ class StubConnection:
                 con.register(view, table)
                 sql = sql.replace(ref, view)
             sql = sql.replace("AS TIMESTAMP_NTZ)", "AS TIMESTAMP)")
-            return con.execute(sql).to_arrow_table()
+            # con.sql(...).to_arrow_table() (the Relation API) exists at the
+            # duckdb>=1.0 floor and is not deprecated; Connection.fetch_arrow_table
+            # warns on current duckdb.
+            return con.sql(sql).to_arrow_table()
         finally:
             con.close()
 
@@ -377,3 +382,214 @@ def test_plugin_import_hygiene() -> None:
         "assert not loaded, f'snowflake modules imported at plugin load: {loaded}'\n"
     )
     subprocess.run([sys.executable, "-c", probe], check=True)
+
+
+def test_plugin_descriptor_wires_the_data_adapter() -> None:
+    from mbt_snowflake.plugin import PLUGIN
+
+    from mbt_adapter_base import CONTRACT_VERSION
+
+    assert PLUGIN.name == "snowflake"
+    assert PLUGIN.contract_version == CONTRACT_VERSION
+    assert PLUGIN.data is SnowflakeDataAdapter
+    assert PLUGIN.fingerprint_packages == ["snowflake-connector-python"]
+
+
+# -- SQL identifier and split edge cases -----------------------------------------------
+
+
+def test_qualify_schema_qualified_table_needs_a_database() -> None:
+    with pytest.raises(SnowflakeSQLError, match="needs a database"):
+        qualify_table("S2.T", None, "S")
+
+
+def test_key_hash_requires_a_non_empty_key() -> None:
+    with pytest.raises(SnowflakeSQLError, match="non-empty key"):
+        key_hash_expr([])
+
+
+def test_base_relation_single_source_is_the_table_ref() -> None:
+    spec = _spec(inputs=None, source=LABEL_UID, sample_key=["customer_id"])
+    assert base_relation(spec, {LABEL_UID: "ANALYTICS.GOLD.CHURN_LABELS"}) == (
+        "ANALYTICS.GOLD.CHURN_LABELS"
+    )
+
+
+def test_random_split_carves_a_validation_bucket() -> None:
+    spec = _spec(
+        inputs=None,
+        source=LABEL_UID,
+        sample_key=["customer_id"],
+        split={
+            "strategy": "random",
+            "train": "0.6",
+            "validation": "0.2",
+            "test": "0.2",
+            "seed": 7,
+        },
+    )
+    queries = split_queries(spec, "T", [], {})
+    assert set(queries) == {"train", "validation", "test"}
+    assert ">= 600000" in queries["validation"] and "< 800000" in queries["validation"]
+    assert ">= 800000" in queries["test"] and "< 1000000" in queries["test"]
+
+
+# -- connection construction --------------------------------------------------------
+
+
+def test_connect_without_account_is_actionable() -> None:
+    with pytest.raises(SnowflakeAdapterError, match="needs at least 'account'"):
+        SnowflakeDataAdapter({"user": "u"})._connect()
+
+
+def test_connect_passes_config_through_and_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    import snowflake.connector
+
+    session = object()
+    calls: list[dict[str, Any]] = []
+
+    def fake_connect(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return session
+
+    monkeypatch.setattr(snowflake.connector, "connect", fake_connect)
+    adapter = SnowflakeDataAdapter(
+        {"account": "acct", "user": "u", "role": "R", "connect_args": {"login_timeout": 5}}
+    )
+    assert adapter._connect() is session
+    assert adapter._connect() is session  # cached: no second connect
+    assert calls == [{"account": "acct", "user": "u", "role": "R", "login_timeout": 5}]
+
+
+def test_connect_failure_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import snowflake.connector
+
+    def fake_connect(**kwargs: Any) -> object:
+        raise RuntimeError("250001: could not authenticate")
+
+    monkeypatch.setattr(snowflake.connector, "connect", fake_connect)
+    adapter = SnowflakeDataAdapter({"account": "acct", "user": "u"})
+    with pytest.raises(SnowflakeAdapterError, match="could not connect to Snowflake"):
+        adapter._connect()
+
+
+# -- snapshot and build error paths ---------------------------------------------------
+
+
+def test_invalid_source_identifier_wraps_the_sql_error() -> None:
+    adapter = SnowflakeDataAdapter({"database": "DB", "schema": "S"})
+    with pytest.raises(SnowflakeAdapterError, match="invalid table identifier"):
+        adapter._table_ref(FakeSourceTable(name="t", identifier="bad-name!"))
+
+
+def test_missing_snapshot_token_is_actionable() -> None:
+    stub = StubConnection(tables=_make_tables(), tokens={"CHURN_LABELS": None})  # type: ignore[dict-item]
+    adapter = _adapter(stub)
+    with pytest.raises(SnowflakeAdapterError, match="could not read a snapshot token"):
+        adapter.snapshot_id(_sources()[LABEL_UID])
+
+
+def test_verify_snapshot_skipped_without_a_pin(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    spec = _spec()
+    adapter._verify_snapshot(_ctx(tmp_path, spec, adapter, snapshot=None))
+    assert stub.executed == []  # no pin -> no snapshot queries
+
+
+def test_build_dataset_clears_stale_outputs(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    spec = _spec()
+    ctx = _ctx(tmp_path, spec, adapter)
+    ctx.output_dir.mkdir(parents=True)
+    stale = ctx.output_dir / "leftover.parquet"
+    stale.write_bytes(b"stale")
+    handle = adapter.build_dataset(spec, ctx)
+    assert not stale.exists()
+    assert handle.splits() == {"train", "test"}
+
+
+def test_sample_fraction_out_of_range_is_actionable(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    spec = _spec()
+    with pytest.raises(SnowflakeAdapterError, match=r"sample_fraction must be in \(0, 1\]"):
+        adapter.build_dataset(spec, _ctx(tmp_path, spec, adapter, sample_fraction=1.5))
+
+
+def test_build_dataset_wraps_split_sql_errors(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    spec = _spec(
+        inputs=None,
+        source=LABEL_UID,
+        sample_key=None,
+        split={"strategy": "random", "train": "0.8", "test": "0.2", "seed": 7},
+    )
+    with pytest.raises(SnowflakeAdapterError, match="random split on Snowflake needs"):
+        adapter.build_dataset(spec, _ctx(tmp_path, spec, adapter))
+
+
+class _NoBatchCursor(StubCursor):
+    def fetch_arrow_batches(self):  # zero result batches
+        return iter(())
+
+
+class _NoBatchConnection(StubConnection):
+    def cursor(self) -> StubCursor:
+        return _NoBatchCursor(self)
+
+
+def test_zero_row_split_names_the_split(tmp_path: Path) -> None:
+    stub = _NoBatchConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    spec = _spec()
+    ctx = _ctx(tmp_path, spec, adapter, snapshot=None)
+    with pytest.raises(SnowflakeAdapterError, match="materialized 0 rows"):
+        adapter.build_dataset(spec, ctx)
+    # zero batches still emit an (empty) file so the error names the split
+    assert (ctx.output_dir / "train.parquet").is_file()
+
+
+@dataclass
+class _FailingConnection:
+    exc: Exception
+
+    def cursor(self) -> "_FailingCursor":
+        return _FailingCursor(self.exc)
+
+
+@dataclass
+class _FailingCursor:
+    exc: Exception
+
+    def execute(self, sql: str) -> None:
+        raise self.exc
+
+    def close(self) -> None:
+        pass
+
+
+def test_stream_query_reraises_adapter_errors_unwrapped(tmp_path: Path) -> None:
+    already = SnowflakeAdapterError("already actionable")
+    adapter = SnowflakeDataAdapter({})
+    adapter._connection = _FailingConnection(already)  # type: ignore[assignment]
+    with pytest.raises(SnowflakeAdapterError) as excinfo:
+        adapter._stream_query_to_parquet("SELECT 1", tmp_path / "out.parquet")
+    assert excinfo.value is already  # not double-wrapped
+
+
+def test_stream_query_wraps_connector_errors_with_the_query(tmp_path: Path) -> None:
+    adapter = SnowflakeDataAdapter({})
+    adapter._connection = _FailingConnection(RuntimeError("002003: object does not exist"))  # type: ignore[assignment]
+    with pytest.raises(SnowflakeAdapterError, match=r"Snowflake query failed.*\n.*query: SELECT 1"):
+        adapter._stream_query_to_parquet("SELECT 1", tmp_path / "out.parquet")
+
+
+def test_from_locator_wraps_missing_materializations(tmp_path: Path) -> None:
+    locator = DatasetLocator(
+        adapter="snowflake", uri=f"file://{tmp_path}/nowhere", snapshot_id="sha256:x"
+    )
+    with pytest.raises(SnowflakeAdapterError, match="no complete dataset materialization"):
+        SnowflakeDataAdapter({}).from_locator(locator)

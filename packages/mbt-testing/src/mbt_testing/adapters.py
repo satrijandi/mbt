@@ -7,6 +7,7 @@ assertions work across the coordinator/job process boundary.
 """
 
 import json
+import math
 import random
 import tempfile
 import threading
@@ -55,8 +56,9 @@ class FakeParams(BaseModel):
 
 
 class FakeModel:
-    def __init__(self, value: float) -> None:
+    def __init__(self, value: float, target: str | None = None) -> None:
         self.value = value
+        self.target = target
 
 
 class FakeTrainingAdapter:
@@ -98,7 +100,20 @@ class FakeTrainingAdapter:
         data.read("train")  # honor the contract: training reads the data
         # A tiny deterministic dependence on params so tuning has a landscape.
         value = params.fake_metric_value + params.max_depth * 1e-4
-        return FakeModel(value=round(value, 6))
+        return FakeModel(value=round(value, 6), target=spec.target)
+
+    def train_with_report(
+        self, spec: ModelSpec, data: DatasetHandle, ctx: RunContext, report: Any
+    ) -> FakeModel:
+        """Optional tuning contract, scriptable: reports a deterministic ramp
+        toward the trial's final value over 10 steps (higher-is-better), so
+        pruner behavior is testable without any ML framework. A raising
+        report propagates, exactly like the real adapters' callbacks."""
+        params = self._params(spec)
+        final = params.fake_metric_value + params.max_depth * 1e-4
+        for step in range(10):
+            report(step, round(final * (step + 1) / 10, 6))
+        return self.train(spec, data, ctx)
 
     def evaluate(
         self,
@@ -119,18 +134,38 @@ class FakeTrainingAdapter:
         return MetricResults(metrics=values, slices=slice_results)
 
     def predict(self, model: FakeModel, data: DatasetHandle, split: str) -> pa.Table:
+        """Deterministic scores whose ranking quality rises with ``model.value``,
+        so per-example deltas (the ADR-18 paired bootstrap) agree in direction
+        with the ``fake_metric_value`` deltas evaluate() reports. Per-row noise
+        is a stable integer hash shared across models: paired by construction.
+        """
         table = data.read(split)
-        scores = [model.value] * table.num_rows
+        labels: list[float] | None = None
+        if model.target is not None and model.target in table.column_names:
+            labels = [float(v) for v in table.column(model.target).to_pylist()]
+        scores: list[float] = []
+        for i in range(table.num_rows):
+            if labels is None:
+                scores.append(model.value)
+                continue
+            noise = 2.0 * (((i * 2654435761) % 4096) / 4096.0) - 1.0  # U(-1, 1), stable
+            separation = max(model.value - 0.5, 0.0) * 4.0
+            latent = separation * (2.0 * labels[i] - 1.0) + 2.0 * noise
+            scores.append(1.0 / (1.0 + math.exp(-latent)))
         return table.append_column("prediction", pa.array(scores, type=pa.float64()))
+
+    def feature_importance(self, model: FakeModel) -> dict[str, float]:
+        """Deterministic stand-in so run_results/model-card plumbing is testable."""
+        return {"fake_signal": 0.75, "fake_noise": 0.25}
 
     def load(self, ref: ArtifactRef, store: ArtifactStore) -> FakeModel:
         payload = json.loads(store.fetch(ref).read_text())
-        return FakeModel(value=payload["value"])
+        return FakeModel(value=payload["value"], target=payload.get("target"))
 
     def export(self, model: FakeModel, format: str, store: ArtifactStore) -> ArtifactRef:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "fake_model.json"
-            path.write_text(json.dumps({"value": model.value}))
+            path.write_text(json.dumps({"value": model.value, "target": model.target}))
             return store.put_file(path, "fake_model.json", format="fake_json")
 
     def nondeterminism_warnings(self, spec: ModelSpec) -> list[str]:

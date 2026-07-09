@@ -3,6 +3,10 @@ target/
 mlruns/
 mlflow.db
 data/
+predictions/
+
+# fetched prod-state baseline (lives on the mbt-state branch)
+state/
 
 # local environment config (may hold secrets; lives in ~/.mbt by default)
 profiles.yml

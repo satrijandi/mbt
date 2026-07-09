@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mbt_adapter_base.specs import AdapterRef, MetricSpec
+from mbt_adapter_base.specs import AdapterRef, MetricSpec, ScoringOutputSpec
 from mbt_adapter_base.types import Stage
 
 if TYPE_CHECKING:
@@ -61,6 +61,21 @@ class MetricResults(_InterchangeModel):
     slices: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
+class BootstrapDelta(_InterchangeModel):
+    """Paired-bootstrap uncertainty for one champion-gate delta (ADR-18).
+
+    ``lower`` is the one-sided lower confidence bound of the
+    challenger-champion delta on the pinned test split; the gate criterion
+    is ``lower >= min_delta``. ``n_resamples`` counts the valid
+    (non-degenerate) resamples; 0 means ``lower`` fell back to ``point``.
+    """
+
+    point: float
+    lower: float
+    confidence: float
+    n_resamples: int
+
+
 class DatasetProfile(_InterchangeModel):
     """Cheap dataset statistics used for validation and AUTO resolution."""
 
@@ -96,8 +111,49 @@ class RunHandle(_InterchangeModel):
     url: str | None = None
 
 
+class PredictionRunInfo(_InterchangeModel):
+    """Sidecar metadata for one prediction run in a prediction store (ADR-21).
+
+    ``run_key`` is the idempotency key: re-running the same manifest against
+    the same champion overwrites the same run; new data, a new window, or a
+    new champion version partitions fresh.
+    """
+
+    run_key: str
+    uri: str
+    scored_at: str  # ISO; the scoring run's manifest anchor
+    run_id: str
+    model_name: str
+    model_version: str
+    row_count: int
+    meta: dict[str, str] = Field(default_factory=dict)  # config_hash, input_hash, ...
+
+
+class ShiftStat(_InterchangeModel):
+    """One computed distribution-shift statistic (ADR-20)."""
+
+    method: Literal["psi", "ks"]
+    value: float
+    n_current: int
+    n_baseline: int
+
+
+class MonitorStats(_InterchangeModel):
+    """Shift statistics computed by a scoring job; core applies thresholds.
+
+    ``baseline_missing`` is set when the champion carries no baseline
+    artifact (registered before baselines existed); monitors then pass with
+    a loud warning (ADR-10 spirit).
+    """
+
+    feature_shift: dict[str, ShiftStat] = Field(default_factory=dict)
+    prediction_shift: ShiftStat | None = None
+    baseline_missing: bool = False
+    skipped_features: list[str] = Field(default_factory=list)
+
+
 class ManifestNode(_InterchangeModel):
-    """One compiled DAG node (dataset or model) as pinned in the manifest.
+    """One compiled DAG node (dataset, model, or scoring) as pinned in the manifest.
 
     ``config`` is the fully rendered spec (window *expressions* intact,
     AUTO sentinels intact); ``resolved`` holds anchor-dependent values that
@@ -105,7 +161,7 @@ class ManifestNode(_InterchangeModel):
     """
 
     unique_id: str
-    resource_type: Literal["dataset", "model"]
+    resource_type: Literal["dataset", "model", "scoring"]
     name: str
     path: str  # spec file, relative to the project root
     depends_on: list[str] = Field(default_factory=list)
@@ -134,11 +190,13 @@ class TrainingJob(_InterchangeModel):
     the resolved metric specs so adapters compute exactly what core compares.
     """
 
-    mode: Literal["train", "evaluate"] = "train"
+    mode: Literal["train", "evaluate", "score"] = "train"
     run_id: str
     project_dir: str
     target_name: str
     node: ManifestNode
+    #: Score mode: the referenced model's manifest node (hooks path, ModelSpec).
+    model_node: ManifestNode | None = None
     dataset: DatasetLocator
     #: The dataset node's resolved windows (implicit validation carve, TSD §13.5).
     dataset_windows: dict[str, Any] = Field(default_factory=dict)
@@ -154,6 +212,12 @@ class TrainingJob(_InterchangeModel):
     tracking_meta: dict[str, str] = Field(default_factory=dict)  # git/manifest metadata tags
     #: Resolved non-secret vars (tainted values are never serialized into jobs).
     vars: dict[str, Any] = Field(default_factory=dict)
+    #: Score mode only (ADR-20/21): prediction sink, champion baseline,
+    #: resolved champion version, and the prediction-run idempotency key.
+    output: ScoringOutputSpec | None = None
+    baseline: ArtifactRef | None = None
+    model_version: str | None = None
+    run_key: str | None = None
 
 
 class TuningResult(_InterchangeModel):
@@ -162,6 +226,8 @@ class TuningResult(_InterchangeModel):
     best_params: dict[str, Any]
     best_value: float
     n_trials: int
+    #: Trials stopped early by a pruner (subset of n_trials); 0 without one.
+    n_pruned: int = 0
 
 
 class JobResult(_InterchangeModel):
@@ -170,9 +236,19 @@ class JobResult(_InterchangeModel):
     status: Literal["success", "error"]
     metrics: MetricResults | None = None
     champion_metrics: MetricResults | None = None
+    #: Paired-bootstrap delta bounds per champion-gate metric (ADR-18).
+    champion_delta_bounds: dict[str, BootstrapDelta] = Field(default_factory=dict)
+    #: Normalized per-feature importance from the adapter, when it exposes
+    #: ``feature_importance`` (FR-DOCS-02); empty otherwise.
+    feature_importance: dict[str, float] = Field(default_factory=dict)
     resolved_auto: dict[str, Any] = Field(default_factory=dict)
     tuning: TuningResult | None = None
     artifact: ArtifactRef | None = None
+    #: Train mode: the monitoring baseline exported next to the artifact (ADR-21).
+    baseline: ArtifactRef | None = None
+    #: Score mode: computed shift statistics and the written prediction run.
+    monitor_stats: MonitorStats | None = None
+    predictions: PredictionRunInfo | None = None
     tracking_run_id: str | None = None
     error: str | None = None
 
@@ -208,5 +284,14 @@ class HookContext:
     logger: "EventSink"
 
 
-#: Signature of the per-trial objective a TuningEngine drives.
+#: Per-iteration progress report during a tuning trial: ``report(step, value)``
+#: with a HIGHER-IS-BETTER validation value (engines flip the sign for
+#: minimize objectives). The callback may raise to abort the trial (pruning);
+#: adapters must let that exception propagate out of their training loop.
+TrialReportFn = Callable[[int, float], None]
+
+#: Signature of the per-trial objective a TuningEngine drives. When the
+#: tuning spec declares a pruner, engines call ``objective(params,
+#: report=...)``; objectives accept the keyword and forward it to training
+#: adapters that expose ``train_with_report`` (optional, hasattr-based).
 TuningObjectiveFn = Callable[[dict[str, Any]], float]

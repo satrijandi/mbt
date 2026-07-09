@@ -67,6 +67,13 @@ def test_manifest_shape(demo_project: Path, fake_registry: AdapterRegistry) -> N
     assert manifest.metadata.anchor == "2026-07-01T00:00:00Z"
     assert manifest.metadata.generated_at == manifest.metadata.anchor
     assert manifest.metadata.env_digest.startswith("sha256:")
+    # the freeze digest pins the FULL installed set, deterministically (ADR-19)
+    assert manifest.metadata.env_freeze_digest.startswith("sha256:")
+    assert manifest.metadata.env_freeze_digest != manifest.metadata.env_digest
+
+    from mbt.compile.hashing import env_freeze_digest
+
+    assert env_freeze_digest() == manifest.metadata.env_freeze_digest
 
 
 def test_anchor_drift_changes_no_hashes(demo_project: Path, fake_registry: AdapterRegistry) -> None:

@@ -1,0 +1,36 @@
+# mbt scheduled batch scoring (ADR-20): CI cron + tag selection.
+# Champions are resolved from the registry at run time, so promotions take
+# effect on the next scheduled run without a spec edit.
+name: mbt daily scoring
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # daily 06:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project
+        run: |
+          pip install -r requirements.txt
+          python scripts/generate_sample_data.py
+      - name: Score daily pipelines (prod target)
+        run: mbt score --target prod --select tag:daily --deep-snapshot
+      - name: Alert on failure
+        # Exit 2 = shift-monitor breach or input-check failure; exit 1 = hard
+        # error. Either way a silent failure hides broken serving, so set the
+        # MBT_ALERT_WEBHOOK secret (Slack/Teams/PagerDuty webhook).
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.MBT_ALERT_WEBHOOK }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "MBT_ALERT_WEBHOOK not set; skipping alert"; exit 0; }
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\":\"mbt scheduled scoring failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            "$WEBHOOK"

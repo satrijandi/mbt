@@ -10,7 +10,7 @@ Requires the ``mbt-adapter-base[metrics]`` extra at call time.
 
 from typing import TYPE_CHECKING, Any
 
-from mbt_adapter_base.interchange import MetricResults
+from mbt_adapter_base.interchange import BootstrapDelta, MetricResults
 from mbt_adapter_base.specs import MetricSpec
 
 if TYPE_CHECKING:
@@ -28,20 +28,28 @@ BINARY_METRIC_BASES = frozenset(
         "ece",
         "recall_at_precision",
         "precision_at_recall",
+        "threshold_at_precision",
+        "threshold_at_recall",
+        "lift",
+        "gain",
     }
 )
 
 
 def parse_metric_sugar(name: str) -> tuple[str, dict[str, Any]] | None:
-    """Parse sugar like ``recall_at_precision_0.9`` into (base, params).
+    """Parse sugar like ``recall_at_precision_0.9`` or ``lift_at_0.1`` into
+    (base, params).
 
     Returns None when the name is not a parameterized builtin (TSD §5.7).
     """
-    for base, param in (
-        ("recall_at_precision", "precision"),
-        ("precision_at_recall", "recall"),
+    for prefix, base, param in (
+        ("recall_at_precision_", "recall_at_precision", "precision"),
+        ("precision_at_recall_", "precision_at_recall", "recall"),
+        ("threshold_at_precision_", "threshold_at_precision", "precision"),
+        ("threshold_at_recall_", "threshold_at_recall", "recall"),
+        ("lift_at_", "lift", "fraction"),
+        ("gain_at_", "gain", "fraction"),
     ):
-        prefix = base + "_"
         if name.startswith(prefix):
             try:
                 value = float(name.removeprefix(prefix))
@@ -98,6 +106,65 @@ def _precision_at_recall(y_true: "np.ndarray", y_score: "np.ndarray", min_recall
     return float(achievable.max()) if achievable.size else 0.0
 
 
+def _threshold_at_precision(
+    y_true: "np.ndarray", y_score: "np.ndarray", min_precision: float
+) -> float:
+    """The deployable operating point for a precision target: the smallest
+    score threshold whose precision meets it (maximal coverage at the
+    required precision). Returns 1.0 when unattainable or degenerate -
+    "predict nothing" is the only rule that honors the target."""
+    from sklearn.metrics import precision_recall_curve
+
+    if float(y_true.sum()) == 0.0:
+        return 1.0
+    precision, _, thresholds = precision_recall_curve(y_true, y_score)
+    # precision[i] pairs with thresholds[i]; the final curve point has none
+    achievable = thresholds[precision[:-1] >= min_precision]
+    return float(achievable.min()) if achievable.size else 1.0
+
+
+def _threshold_at_recall(y_true: "np.ndarray", y_score: "np.ndarray", min_recall: float) -> float:
+    """The operating point for a coverage target: the largest score threshold
+    whose recall meets it (best precision at the required recall). Returns
+    0.0 when degenerate - "predict everything" is the only safe rule."""
+    from sklearn.metrics import precision_recall_curve
+
+    if float(y_true.sum()) == 0.0:
+        return 0.0
+    _, recall, thresholds = precision_recall_curve(y_true, y_score)
+    achievable = thresholds[recall[:-1] >= min_recall]
+    return float(achievable.max()) if achievable.size else 0.0
+
+
+def _top_fraction_indices(y_score: "np.ndarray", fraction: float) -> "np.ndarray":
+    """Row indices of the top-scoring ``fraction``; stable sort so ties break
+    by row order, deterministically."""
+    import numpy as np
+
+    k = max(1, round(len(y_score) * fraction))
+    order: np.ndarray = np.argsort(-y_score, kind="stable")
+    return order[:k]
+
+
+def _lift(y_true: "np.ndarray", y_score: "np.ndarray", fraction: float) -> float:
+    """Positive rate in the top ``fraction`` over the overall positive rate."""
+    base_rate = float(y_true.mean()) if len(y_true) else 0.0
+    if base_rate == 0.0:
+        return 0.0
+    top = _top_fraction_indices(y_score, fraction)
+    return float(y_true[top].mean() / base_rate)
+
+
+def _gain(y_true: "np.ndarray", y_score: "np.ndarray", fraction: float) -> float:
+    """Fraction of all positives captured in the top ``fraction`` (cumulative
+    gain, the y-axis of a gain chart)."""
+    total = float(y_true.sum()) if len(y_true) else 0.0
+    if total == 0.0:
+        return 0.0
+    top = _top_fraction_indices(y_score, fraction)
+    return float(y_true[top].sum() / total)
+
+
 def compute_binary_metric(spec: MetricSpec, y_true: "np.ndarray", y_score: "np.ndarray") -> float:
     """Compute one builtin binary-classification metric."""
     import numpy as np
@@ -134,6 +201,14 @@ def compute_binary_metric(spec: MetricSpec, y_true: "np.ndarray", y_score: "np.n
         return _recall_at_precision(y_true, y_score, float(params["precision"]))
     if base == "precision_at_recall":
         return _precision_at_recall(y_true, y_score, float(params["recall"]))
+    if base == "threshold_at_precision":
+        return _threshold_at_precision(y_true, y_score, float(params["precision"]))
+    if base == "threshold_at_recall":
+        return _threshold_at_recall(y_true, y_score, float(params["recall"]))
+    if base == "lift":
+        return _lift(y_true, y_score, float(params.get("fraction", 0.1)))
+    if base == "gain":
+        return _gain(y_true, y_score, float(params.get("fraction", 0.1)))
     raise ValueError(f"unhandled builtin binary metric: {base!r}")  # pragma: no cover
 
 
@@ -165,3 +240,47 @@ def compute_binary_results(
                 s.name: compute_binary_metric(s, y_true[mask], y_score[mask]) for s in builtin
             }
     return MetricResults(metrics=metrics, slices=slices)
+
+
+def paired_bootstrap_delta(
+    spec: MetricSpec,
+    y_true: "np.ndarray",
+    challenger_scores: "np.ndarray",
+    champion_scores: "np.ndarray",
+    *,
+    greater_is_better: bool,
+    confidence: float,
+    n_resamples: int,
+    seed: int,
+) -> BootstrapDelta:
+    """Paired bootstrap of a challenger-champion metric delta (ADR-18).
+
+    Every resample draws rows with replacement ONCE and scores both models
+    on those same rows, so sampling noise cancels and the delta distribution
+    reflects only the model difference. Returns the one-sided lower bound at
+    ``confidence``; the champion-gate criterion is ``lower >= min_delta``.
+
+    Resamples that degenerate to a single class are skipped (ranking metrics
+    are undefined there); if every resample degenerates, ``lower`` falls back
+    to the point delta and ``n_resamples`` reports 0.
+    """
+    import numpy as np
+
+    def _delta(indices: "np.ndarray") -> float:
+        challenger = compute_binary_metric(spec, y_true[indices], challenger_scores[indices])
+        champion = compute_binary_metric(spec, y_true[indices], champion_scores[indices])
+        return (challenger - champion) if greater_is_better else (champion - challenger)
+
+    n = len(y_true)
+    point = _delta(np.arange(n))
+    rng = np.random.default_rng(seed)
+    deltas: list[float] = []
+    for _ in range(n_resamples):
+        indices = rng.integers(0, n, size=n)
+        if np.unique(y_true[indices]).size < 2:
+            continue
+        deltas.append(_delta(indices))
+    if not deltas:
+        return BootstrapDelta(point=point, lower=point, confidence=confidence, n_resamples=0)
+    lower = float(np.quantile(np.asarray(deltas), 1.0 - confidence))
+    return BootstrapDelta(point=point, lower=lower, confidence=confidence, n_resamples=len(deltas))

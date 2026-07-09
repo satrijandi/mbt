@@ -12,14 +12,28 @@ snapshot ↔ model version.
    `mbt build --target dev --select state:modified+ --state ...` →
    post/update the PR comment (metrics vs champion, gate table, retrained
    nodes, cost estimate) from `run_results.json` + `state_diff.json`.
+   Every compiling step passes `--deep-snapshot`: CI checkouts are fresh,
+   so the default mtime snapshots would flag every dataset on every run
+   and the economy loop would silently become a full retrain (ADR-11).
+   Use one token scheme on both sides of every comparison.
 2. **Prod build** (`prod_build.yml`, on merge): build `state:modified+`
-   against prod; on success publish the manifest as the new `latest.json`.
+   against prod; on success publish the manifest as the new baseline on
+   the `mbt-state` branch (`scripts/publish_state.sh`).
 3. **Promotion** (`promote.yml`): a reviewed `promotions.yml` change (pure
    GitOps) or a manually approved `workflow_dispatch` runs
    `mbt promote`, which refuses versions without recorded gate passes.
 4. **Scheduled retraining** (`scheduled_retrain.yml`): CI cron +
    `mbt build --select tag:weekly` - freshness arrives as new snapshots;
    no orchestrator concept needed.
+5. **Scheduled scoring** (`scheduled_score.yml`): CI cron +
+   `mbt score --target prod --select tag:daily` - each pipeline loads its
+   model's current production champion from the registry, so promotions
+   take effect on the next run; a shift-monitor breach or input-check
+   failure exits 2 and fires the alert webhook (ADR-20).
+6. **Ground-truth monitoring** (`scheduled_monitor.yml`): CI cron +
+   `mbt monitor --target prod` - evaluates realized metrics for prediction
+   runs whose labels have matured, exactly once per run (ledger markers in
+   the prediction store, ADR-21); a realized-metric gate failure exits 2.
 
 ## Manifest storage convention
 
@@ -32,6 +46,36 @@ The prod build uploads its manifest on success; PR checks pass
 `--state s3://.../latest.json`. Teams without S3 use CI artifact storage
 with the same layout - `--state` accepts any readable path or URI, and an
 unreadable reference is a hard error, never a silent full retrain.
+
+Model artifacts follow the same split: point `artifact_store` at
+`s3://<bucket>/mbt/<project>/artifacts` (needs `mbt-core[s3]`) for any
+multi-runner or production topology. Retention: prune local stores with
+`mbt clean --artifacts-older-than 30d` (stage champions and the latest
+run's artifacts always survive, so champion re-evaluation cannot break);
+give S3 stores a bucket lifecycle rule instead.
+
+## Operations: alerting and durable state
+
+Out of the box the prod baseline lives on a dedicated **`mbt-state`
+branch**: after a successful prod build, `scripts/publish_state.sh`
+appends a commit holding `manifest.json` (git plumbing only - it never
+touches the working tree or the current branch) and pushes it; PR checks
+and later prod builds restore it with `scripts/fetch_state.sh`, which
+exits with a distinct code when no baseline exists yet so the first-ever
+run falls back to a full build. So the `state:modified` economy loop
+works from the first merge with no extra infrastructure, survives branch
+protection on `main` (nothing is ever pushed there), and the branch
+history is an audit trail of every published baseline. When state moves
+to object storage, swap both script calls for the `aws s3 cp` layout
+above. The scheduled retrain, scoring, monitor, and prod build workflows
+alert on failure through the `MBT_ALERT_WEBHOOK` secret (any
+Slack/Teams-style JSON webhook); unset, the step logs and skips - a
+scheduled retrain that fails silently violates continuous training, and a
+scoring or monitor run that fails silently hides broken serving.
+When a run fails or retrains more than you expected, the
+[troubleshooting runbook](troubleshooting.md) maps each deliberate
+failure mode (snapshot drift, env mismatch, unloadable champion,
+gate-edit retrains) to its cause and fix.
 
 ## Why retraining stays cheap
 
@@ -49,3 +93,9 @@ Adapter or Python upgrades change the manifest's `env_digest`. By default
 this does **not** mark nodes modified (an adapter bump would retrain
 everything); `mbt state diff` reports it prominently and
 `--state-include-env` opts in when you *want* the full retrain.
+
+The manifest also records `env_freeze_digest`, a hash of every installed
+package, so transitive drift (numpy, scipy) is visible even when the
+fingerprinted packages match (ADR-19). Executing a stored manifest verifies
+both: an `env_digest` mismatch is a hard error (`--allow-env-mismatch`
+downgrades it), a freeze-only mismatch warns.

@@ -23,6 +23,7 @@ from mbt_adapter_base import (
     EvaluationSpec,
     MetricSpec,
     ModelSpec,
+    PredictionRunInfo,
     RunContext,
     TaskType,
 )
@@ -249,7 +250,89 @@ class TrainingAdapterCompliance:
         assert "prediction" in predictions.column_names
         assert predictions.num_rows == data.read("test").num_rows
 
+    def test_predict_scores_unlabeled_split(self) -> None:
+        """``predict`` must work without the target column (batch scoring, ADR-20)."""
+        adapter = self.adapter()
+        data = self.dataset()
+        spec = self.model_spec(TaskType.BINARY_CLASSIFICATION)
+        model = adapter.train(spec, data, self.run_context())
+        unlabeled = data.read("test").drop_columns(["label"])
+        scoring = InMemoryDatasetHandle({"score": unlabeled}, snapshot_id="sha256:compliance-score")
+        predictions = adapter.predict(model, scoring, "score")
+        assert "prediction" in predictions.column_names
+        assert predictions.num_rows == unlabeled.num_rows
+
     def test_model_actually_learns(self) -> None:
         """A signal-bearing dataset must beat coin-flip ROC AUC comfortably."""
         metrics = self._train_and_evaluate()
         assert metrics["roc_auc"] > 0.7, f"roc_auc {metrics['roc_auc']} suggests no learning"
+
+
+def _tiny_predictions(n_rows: int, offset: int = 0) -> pa.Table:
+    return pa.table(
+        {
+            "user_id": list(range(offset, offset + n_rows)),
+            "prediction": [(i % 10) / 10.0 for i in range(n_rows)],
+        }
+    )
+
+
+def _run_info(run_key: str, scored_at: str) -> PredictionRunInfo:
+    return PredictionRunInfo(
+        run_key=run_key,
+        uri="",
+        scored_at=scored_at,
+        run_id=f"compliance-{run_key}",
+        model_name="compliance_model",
+        model_version="1",
+        row_count=0,
+    )
+
+
+class PredictionStoreCompliance:
+    """Subclass per DataAdapter with prediction support (contract 1.1, ADR-21).
+
+    Override ``make_store`` to hand back a fresh, empty ``PredictionStore``
+    rooted under ``root``.
+    """
+
+    def make_store(self, root: Path) -> Any:
+        raise NotImplementedError
+
+    def test_write_run_is_idempotent_by_run_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(Path(tmp))
+            store.write_run(_tiny_predictions(3), _run_info("k1", "2026-01-01T00:00:00Z"))
+            info = store.write_run(_tiny_predictions(2), _run_info("k1", "2026-01-02T00:00:00Z"))
+            assert info.row_count == 2
+            assert info.uri
+            runs = store.list_runs()
+            assert [r.run_key for r in runs] == ["k1"]
+            assert store.read("k1").num_rows == 2
+
+    def test_list_runs_ordered_by_scored_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(Path(tmp))
+            store.write_run(_tiny_predictions(1), _run_info("later", "2026-02-01T00:00:00Z"))
+            store.write_run(_tiny_predictions(1), _run_info("earlier", "2026-01-01T00:00:00Z"))
+            assert [r.run_key for r in store.list_runs()] == ["earlier", "later"]
+
+    def test_read_projects_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(Path(tmp))
+            store.write_run(_tiny_predictions(4), _run_info("k1", "2026-01-01T00:00:00Z"))
+            table = store.read("k1", columns=["prediction"])
+            assert table.column_names == ["prediction"]
+            assert table.num_rows == 4
+
+    def test_marker_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(Path(tmp))
+            store.write_run(_tiny_predictions(2), _run_info("k1", "2026-01-01T00:00:00Z"))
+            assert store.read_marker("k1", "ground_truth") is None
+            payload = {"evaluated_at": "2026-01-20T00:00:00Z", "metrics": {"roc_auc": 0.9}}
+            store.write_marker("k1", "ground_truth", payload)
+            assert store.read_marker("k1", "ground_truth") == payload
+            # A rewrite of the run clears its markers (fresh run, fresh ledger).
+            store.write_run(_tiny_predictions(2), _run_info("k1", "2026-01-03T00:00:00Z"))
+            assert store.read_marker("k1", "ground_truth") is None

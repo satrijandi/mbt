@@ -24,6 +24,7 @@ from mbt.contracts import (
     ExposureSpec,
     MetricSpec,
     ModelSpec,
+    ScoringSpec,
     SourceGroup,
     SourceTable,
     SplitStrategy,
@@ -40,7 +41,7 @@ from mbt.parsing.loader import (
     load_yaml_mapping,
     validate_resource,
 )
-from mbt.quality.metrics import resolve_model_metrics
+from mbt.quality.metrics import resolve_metric, resolve_model_metrics
 from mbt.quality.python_tests import PythonTestFile, discover_python_tests
 from mbt.utils import did_you_mean
 
@@ -65,6 +66,10 @@ _BUILTIN_CHECKS = {
     "not_null",
 }
 
+#: Checks valid on a scoring input: no label exists, so label-dependent
+#: checks are rejected (ADR-20).
+_SCORING_CHECKS = {"schema", "not_null", "no_future_columns"}
+
 
 @dataclass(frozen=True)
 class SourceEntry:
@@ -81,7 +86,7 @@ class ParsedResource:
     """A validated resource plus everything parsing learned about it."""
 
     unique_id: str
-    resource_type: str  # "dataset" | "model" | "exposure"
+    resource_type: str  # "dataset" | "model" | "scoring" | "exposure"
     name: str
     path: str  # spec file, relative to project dir
     spec: BaseModel
@@ -90,7 +95,8 @@ class ParsedResource:
     sources: list[tuple[str, str]] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)  # resolved unique_ids
     hooks_path: str | None = None  # models only, relative to project dir
-    metric_specs: list[MetricSpec] = field(default_factory=list)  # models only
+    #: Models: resolved evaluation metrics. Scoring: resolved ground-truth metrics.
+    metric_specs: list[MetricSpec] = field(default_factory=list)
 
     @property
     def tags(self) -> list[str]:
@@ -106,6 +112,7 @@ class ParsedProject:
     sources: dict[str, SourceEntry]
     datasets: dict[str, ParsedResource]
     models: dict[str, ParsedResource]
+    scoring: dict[str, ParsedResource]
     exposures: dict[str, ParsedResource]
     metrics: dict[str, MetricSpec]  # by metric name
     graph: nx.DiGraph
@@ -116,14 +123,14 @@ class ParsedProject:
 
     @property
     def nodes(self) -> dict[str, ParsedResource]:
-        """Executable DAG nodes: datasets and models."""
-        return {**self.datasets, **self.models}
+        """Compiled DAG nodes: datasets, models, and scoring pipelines."""
+        return {**self.datasets, **self.models, **self.scoring}
 
     def resource(self, name_or_uid: str) -> ParsedResource | SourceEntry | None:
-        for pool in (self.datasets, self.models, self.exposures, self.sources):
+        for pool in (self.datasets, self.models, self.scoring, self.exposures, self.sources):
             if name_or_uid in pool:
                 return pool[name_or_uid]
-        for pool in (self.datasets, self.models, self.exposures):
+        for pool in (self.datasets, self.models, self.scoring, self.exposures):
             for res in pool.values():
                 if res.name == name_or_uid:
                     return res
@@ -135,7 +142,12 @@ class ParsedProject:
     def all_names(self) -> list[str]:
         names = [
             r.name
-            for r in (*self.datasets.values(), *self.models.values(), *self.exposures.values())
+            for r in (
+                *self.datasets.values(),
+                *self.models.values(),
+                *self.scoring.values(),
+                *self.exposures.values(),
+            )
         ]
         names.extend(e.table.name for e in self.sources.values())
         return names
@@ -183,6 +195,9 @@ def parse_project(
     models = _parse_models(
         raw_resources.get("model", []), project, renderer, registry, report, project_dir, cli_vars
     )
+    scoring = _parse_scoring(
+        raw_resources.get("scoring", []), project, renderer, report, project_dir, cli_vars
+    )
     exposures = _parse_exposures(raw_resources.get("exposure", []), project, renderer, report)
 
     _link_and_check(
@@ -190,13 +205,14 @@ def parse_project(
         sources=sources,
         datasets=datasets,
         models=models,
+        scoring=scoring,
         exposures=exposures,
         metrics=metrics,
         registry=registry,
         report=report,
     )
 
-    graph = _build_project_graph(sources, datasets, models, exposures, report)
+    graph = _build_project_graph(sources, datasets, models, scoring, exposures, report)
     python_tests = discover_python_tests(project_dir, project.test_paths, report)
     _check_test_bindings(datasets, python_tests, report)
 
@@ -209,6 +225,7 @@ def parse_project(
         sources=sources,
         datasets=datasets,
         models=models,
+        scoring=scoring,
         exposures=exposures,
         metrics=metrics,
         graph=graph,
@@ -231,7 +248,7 @@ def _discover_and_load(
         candidate = project_dir / name
         if candidate.is_file():
             files.append(candidate)
-    for path_list in (project.dataset_paths, project.model_paths):
+    for path_list in (project.dataset_paths, project.model_paths, project.scoring_paths):
         for dir_name in path_list:
             resource_dir = project_dir / dir_name
             if resource_dir.is_dir():
@@ -354,6 +371,7 @@ def _parse_datasets(
 
         _validate_dataset_windows(spec, rel, uid, report)
         _validate_checks(spec, rel, uid, report)
+        _validate_split_protocol(spec, rel, uid, report)
 
         datasets[uid] = ParsedResource(
             unique_id=uid,
@@ -385,6 +403,34 @@ def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: Par
                 field_path=f"/split/{split_field}",
                 hint=exc.hint,
             )
+
+
+def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
+    """Warn on random-split configurations that invite leakage (FR-RES-09).
+
+    Warnings, not errors: a random split over truly exchangeable rows is
+    legitimate; these flag the configurations that usually are not.
+    """
+    if spec.split.strategy is not SplitStrategy.RANDOM:
+        return
+    if spec.split.time_column is not None:
+        report.warning(
+            "random split on a dataset with a time column invites temporal "
+            "leakage: rows from after the test period can train the model",
+            file=rel,
+            resource=uid,
+            field_path="/split/strategy",
+            hint="use 'strategy: temporal', or drop 'time_column' if it is not event time",
+        )
+    if not spec.sample_key_columns:
+        report.warning(
+            "random split without 'sample_key': rows are split independently, "
+            "so repeated entities can straddle train and test",
+            file=rel,
+            resource=uid,
+            field_path="/split",
+            hint="set 'sample_key' to the entity id to keep an entity's rows together",
+        )
 
 
 def _validate_checks(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
@@ -635,6 +681,122 @@ def _parse_exposures(
     return exposures
 
 
+def _parse_scoring(
+    entries: list[tuple[str, int, dict[str, Any]]],
+    project: ProjectConfig,
+    renderer: SpecRenderer,
+    report: ParseReport,
+    project_dir: Path,
+    cli_vars: dict[str, Any],
+) -> dict[str, ParsedResource]:
+    scoring: dict[str, ParsedResource] = {}
+    for rel, index, raw in entries:
+        name = str(raw.get("name", f"#{index}"))
+        uid = unique_id("scoring", project.name, name) if _valid_name(name) else name
+        try:
+            captured = renderer.capture(
+                raw,
+                resource=uid,
+                path=project_dir / rel,
+                cli_vars=cli_vars,
+                project_vars=project.vars,
+            )
+        except ConfigError as exc:
+            report.error(exc.message, file=rel, resource=uid, hint=exc.hint)
+            continue
+        spec = validate_resource(
+            ScoringSpec,
+            captured.rendered,
+            rel=rel,
+            resource_name=name,
+            base_pointer=f"/scoring/{index}",
+            report=report,
+        )
+        if spec is None:
+            continue
+        uid = unique_id("scoring", project.name, spec.name)
+        if uid in scoring:
+            report.error(f"duplicate scoring pipeline {spec.name!r}", file=rel, resource=uid)
+            continue
+
+        _validate_scoring_windows(spec, rel, uid, report)
+        _validate_scoring_checks(spec, rel, uid, report)
+
+        scoring[uid] = ParsedResource(
+            unique_id=uid,
+            resource_type="scoring",
+            name=spec.name,
+            path=rel,
+            spec=spec,
+            raw=raw,
+            refs=captured.refs,
+            sources=captured.sources,
+        )
+    return scoring
+
+
+def _validate_scoring_windows(spec: ScoringSpec, rel: str, uid: str, report: ParseReport) -> None:
+    if spec.input.window is not None:
+        try:
+            parse_window(spec.input.window)
+        except ConfigError as exc:
+            report.error(
+                exc.message, file=rel, resource=uid, field_path="/input/window", hint=exc.hint
+            )
+    if spec.ground_truth is None:
+        return
+    maturity = spec.ground_truth.maturity
+    problem: str | None = None
+    if ":" in maturity:
+        problem = f"ground_truth.maturity must be a bare duration, got {maturity!r}"
+    else:
+        try:
+            window = parse_window(maturity)
+            if window.start.kind != "duration" or window.start.delta is None:
+                problem = (  # pragma: no cover - bare parse_window output is always a duration
+                    f"ground_truth.maturity must be a duration, got {maturity!r}"
+                )
+        except ConfigError as exc:
+            problem = exc.message
+    if problem is not None:
+        report.error(
+            problem,
+            file=rel,
+            resource=uid,
+            field_path="/ground_truth/maturity",
+            hint="examples: 14d, 2w, 72h",
+        )
+
+
+def _validate_scoring_checks(spec: ScoringSpec, rel: str, uid: str, report: ParseReport) -> None:
+    """Scoring inputs are unlabeled: only label-free checks apply (ADR-20)."""
+    for i, check in enumerate(spec.checks):
+        check_name = check if isinstance(check, str) else next(iter(check), "")
+        if check_name not in _SCORING_CHECKS:
+            suggestion = did_you_mean(str(check_name), sorted(_SCORING_CHECKS))
+            report.error(
+                f"check {check_name!r} is not available on scoring inputs",
+                file=rel,
+                resource=uid,
+                field_path=f"/checks/{i}",
+                hint=f"did you mean {suggestion!r}?"
+                if suggestion
+                else f"scoring checks: {', '.join(sorted(_SCORING_CHECKS))}",
+            )
+            continue
+        if check_name == "not_null":
+            params = check.get("not_null", {}) if isinstance(check, dict) else {}
+            if not params.get("columns"):
+                report.error(
+                    "not_null on a scoring input requires explicit 'columns' "
+                    "(there is no label column to default to)",
+                    file=rel,
+                    resource=uid,
+                    field_path=f"/checks/{i}",
+                    hint="e.g. not_null: {columns: [user_id]}",
+                )
+
+
 # -- cross-resource checks -----------------------------------------------------
 
 
@@ -644,6 +806,7 @@ def _link_and_check(
     sources: dict[str, SourceEntry],
     datasets: dict[str, ParsedResource],
     models: dict[str, ParsedResource],
+    scoring: dict[str, ParsedResource],
     exposures: dict[str, ParsedResource],
     metrics: dict[str, MetricSpec],
     registry: AdapterRegistry,
@@ -651,6 +814,7 @@ def _link_and_check(
 ) -> None:
     dataset_by_name = {r.name: r for r in datasets.values()}
     model_by_name = {r.name: r for r in models.values()}
+    scoring_by_name = {r.name: r for r in scoring.values()}
 
     for dataset in datasets.values():
         deps: list[str] = []
@@ -697,10 +861,39 @@ def _link_and_check(
         _resolve_model_metric_specs(spec, model, metrics, report)
         _check_tuning_engine(spec, model, registry, report)
 
+    for sc in scoring.values():
+        sc_spec = sc.spec
+        assert isinstance(sc_spec, ScoringSpec)
+        deps = []
+        model_res = _check_scoring_model_edge(
+            sc_spec, sc, model_by_name, dataset_by_name, scoring_by_name, report
+        )
+        if model_res is not None:
+            deps.append(model_res.unique_id)
+            _resolve_scoring_metric_specs(sc_spec, sc, model_res, metrics, report)
+        for group, table in sc.sources:
+            source_uid = source_unique_id(project.name, group, table)
+            if source_uid not in sources:
+                known = sorted(f"{e.group}.{e.table.name}" for e in sources.values())
+                report.error(
+                    f"unknown source ('{group}', '{table}')",
+                    file=sc.path,
+                    resource=sc.unique_id,
+                    hint=f"declared sources: {', '.join(known) or '(none)'}",
+                )
+            else:
+                deps.append(source_uid)
+        _check_scoring_source_syntax(sc, report)
+        sc.depends_on = sorted(set(deps))
+
     for exposure in exposures.values():
         deps = []
         for ref_name in exposure.refs:
-            resource = model_by_name.get(ref_name) or dataset_by_name.get(ref_name)
+            resource = (
+                model_by_name.get(ref_name)
+                or dataset_by_name.get(ref_name)
+                or scoring_by_name.get(ref_name)
+            )
             if resource is None:
                 report.error(
                     f"exposure references unknown resource ref('{ref_name}')",
@@ -843,6 +1036,121 @@ def _check_model_vs_dataset(
         )
 
 
+def _check_scoring_model_edge(
+    spec: ScoringSpec,
+    sc: ParsedResource,
+    model_by_name: dict[str, ParsedResource],
+    dataset_by_name: dict[str, ParsedResource],
+    scoring_by_name: dict[str, ParsedResource],
+    report: ParseReport,
+) -> ParsedResource | None:
+    match = _REF_RE.match(spec.model)
+    if match is None:
+        report.error(
+            f"scoring 'model' must be a ref() call, got {spec.model!r}",
+            file=sc.path,
+            resource=sc.unique_id,
+            field_path="/model",
+            hint="e.g. model: ref('churn_classifier')",
+        )
+        return None
+    ref_name = match.group("name")
+    if ref_name in dataset_by_name or ref_name in scoring_by_name:
+        report.error(
+            f"scoring 'model' must reference a model, got ref('{ref_name}')",
+            file=sc.path,
+            resource=sc.unique_id,
+            field_path="/model",
+        )
+        return None
+    model_res = model_by_name.get(ref_name)
+    if model_res is None:
+        suggestion = did_you_mean(ref_name, sorted(model_by_name))
+        report.error(
+            f"scoring references unknown model ref('{ref_name}')",
+            file=sc.path,
+            resource=sc.unique_id,
+            field_path="/model",
+            hint=f"did you mean {suggestion!r}?" if suggestion else None,
+        )
+        return None
+    for extra in sc.refs:
+        if extra != ref_name:
+            report.error(
+                f"unexpected ref('{extra}') in scoring spec",
+                file=sc.path,
+                resource=sc.unique_id,
+                hint="a scoring pipeline may only ref() its model",
+            )
+    return model_res
+
+
+def _resolve_scoring_metric_specs(
+    spec: ScoringSpec,
+    sc: ParsedResource,
+    model_res: ParsedResource,
+    metrics: dict[str, MetricSpec],
+    report: ParseReport,
+) -> None:
+    """Ground-truth metrics must be builtins for the model's task (ADR-21).
+
+    Hook metrics need a training adapter inside a job; ``mbt monitor`` runs
+    coordinator-side against realized labels, so only builtins qualify.
+    """
+    if spec.ground_truth is None:
+        return
+    model_spec = model_res.spec
+    assert isinstance(model_spec, ModelSpec)
+    try:
+        task_schema = get_task_schema(model_spec.task)
+    except ConfigError:
+        return  # already reported against the model
+    resolved: list[MetricSpec] = []
+    for name in spec.ground_truth.metrics:
+        outcome = resolve_metric(name, metrics, task_schema, has_hooks=False)
+        if isinstance(outcome, str):
+            report.error(
+                outcome, file=sc.path, resource=sc.unique_id, field_path="/ground_truth/metrics"
+            )
+        elif outcome.kind != "builtin":
+            report.error(
+                f"ground-truth metric {name!r} must be a builtin; hook metrics "
+                "are computed by training jobs, not by 'mbt monitor'",
+                file=sc.path,
+                resource=sc.unique_id,
+                field_path="/ground_truth/metrics",
+            )
+        else:
+            resolved.append(outcome)
+    sc.metric_specs = resolved
+
+
+def _check_scoring_source_syntax(sc: ParsedResource, report: ParseReport) -> None:
+    """Scoring table references must be source() calls, not bare names."""
+    spec = sc.spec
+    assert isinstance(spec, ScoringSpec)
+    entries: list[tuple[str, str]] = []
+    if spec.input.source is not None:
+        entries.append(("/input/source", spec.input.source))
+    if spec.input.inputs is not None:
+        entries.append(("/input/inputs/spine", spec.input.inputs.spine))
+        entries.extend(
+            (f"/input/inputs/features/{i}", value)
+            for i, value in enumerate(spec.input.inputs.features)
+        )
+    if spec.ground_truth is not None:
+        entries.append(("/ground_truth/label/source", spec.ground_truth.label.source))
+    for field_path, value in entries:
+        if not _SOURCE_RE.match(value):
+            report.error(
+                f"expected a source() reference, got {value!r}",
+                file=sc.path,
+                resource=sc.unique_id,
+                field_path=field_path,
+                hint="e.g. source('lakehouse', 'scoring_batch')",
+            )
+
+
 def _resolve_model_metric_specs(
     spec: ModelSpec, model: ParsedResource, metrics: dict[str, MetricSpec], report: ParseReport
 ) -> None:
@@ -892,12 +1200,13 @@ def _build_project_graph(
     sources: dict[str, SourceEntry],
     datasets: dict[str, ParsedResource],
     models: dict[str, ParsedResource],
+    scoring: dict[str, ParsedResource],
     exposures: dict[str, ParsedResource],
     report: ParseReport,
 ) -> nx.DiGraph:
     node_types: dict[str, str] = dict.fromkeys(sources, "source")
     edges: dict[str, list[str]] = {}
-    for pool in (datasets, models, exposures):
+    for pool in (datasets, models, scoring, exposures):
         for uid, resource in pool.items():
             node_types[uid] = resource.resource_type
             edges[uid] = resource.depends_on

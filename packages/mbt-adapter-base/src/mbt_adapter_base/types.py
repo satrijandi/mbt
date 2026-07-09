@@ -5,7 +5,7 @@ from enum import StrEnum
 #: Version of the adapter contract defined by this package (TSD §12, §19).
 #: Plugins declare the contract version they were built against; core accepts
 #: the same major with a minor less than or equal to its own.
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "1.1"
 
 #: What ``{{ auto }}`` renders to in a spec. Hyperparameter values equal to
 #: this sentinel skip static validation and are resolved by the adapter's

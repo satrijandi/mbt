@@ -28,9 +28,11 @@ macro_paths: [macros]
     dev:
       data:     {adapter: local,  config: {root: .}}
       tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      # the registry maps mbt stages to registered-model aliases by default;
+      # set use_aliases: false for MLflow servers without alias support (<2.9)
       registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
       compute:  {adapter: local}                    # optional, default local
-      artifact_store: file://./target/artifacts     # file:// (s3:// in v1)
+      artifact_store: file://./target/artifacts     # or s3://bucket/prefix (s3 extra)
       threads: 4                                    # optional, default 1
       vars: {sample_fraction: 0.1, max_tuning_trials: 5}
 ```
@@ -70,11 +72,23 @@ datasets:
       test: "-28d:now"
       validation: "-42d:-28d"       # optional; else carved when tuning needs it
     checks:                         # run at every dataset build
+      # every timestamp column must stay within its split's OWN window:
+      # catches train rows reaching into the test period (temporal
+      # leakage), not just absolutely-future values
       - no_future_columns
-      - label_leakage_scan
       - class_balance_report        # report-only
       - schema: {columns: {churned_90d: int64}}
       - not_null: {columns: [churned_90d]}
+      # label_leakage_scan runs by default, declared or not. Numeric columns
+      # are screened with |corr|, string/categorical columns with Cramér's V
+      # (same 0-1 scale; single-level and unique-per-row ID columns are
+      # skipped): >= 0.95 fails the build, the 0.85-0.95 warn band is logged
+      # without failing. Declare it only to tune or opt out:
+      - label_leakage_scan:
+          max_abs_correlation: 0.95   # fail bar (|corr| and Cramér's V)
+          warn_abs_correlation: 0.85  # warn band floor
+          exclude: [reviewed_column]  # skip audited columns
+          # enabled: false            # opt out (recorded, never silent)
     tests: [test_label_is_binary]   # bind Python data tests by name (optional)
     snapshot: "sha256:..."          # explicit pin (optional; normally compile pins)
     tags: [churn]
@@ -85,7 +99,13 @@ datasets:
 sugar for `"-28d:now"`.
 
 **Random splits:** `strategy: random` uses fractions (`train: "0.8"`),
-requires `seed`, and supports `stratify_by: <column>`.
+requires `seed`, and supports `stratify_by: <column>`. Two guardrail
+warnings fire at parse time: combining a random split with a `time_column`
+(temporal leakage: rows from after the test period can train the model),
+and a random split without `sample_key` (rows split independently, so
+repeated entities can straddle train and test). `sample_key` is the
+grouped-split control: set it to the entity id and hash-based ranking
+keeps all of an entity's rows on one side of the split.
 
 ### Multi-table datasets and sampling keys
 
@@ -159,6 +179,8 @@ models:
     features:
       include: ["*"]                # globs over post-hook columns
       exclude: [user_id, email]     # target + time column always excluded
+      # numeric columns pass through; string columns train as native
+      # categoricals in the tree adapters (unseen levels become missing)
     hyperparameters:                # validated by the adapter's param model
       max_depth: 6
       scale_pos_weight: "{{ auto }}"
@@ -169,12 +191,24 @@ models:
         max_depth: {type: int, low: 3, high: 10}
         learning_rate: {type: loguniform, low: 0.005, high: 0.3}
       objective: {metric: pr_auc, direction: maximize}
+      # optional: stop unpromising trials early. "median" prunes a trial when
+      # its per-round validation value falls below the median of prior trials
+      # at the same step; needs an adapter that reports progress (xgboost and
+      # lightgbm do), otherwise trials run to completion with a warning.
+      # Pruned counts land in the mbt.tuning.n_pruned tracking tag.
+      pruner: median
     evaluation:
       protocol: {split: temporal, test_window: "14d"}  # must match the dataset
       metrics: [pr_auc, roc_auc, ece, recall_at_precision_0.9]
       gates:
         - {metric: pr_auc, threshold: 0.42}
-        - {metric: pr_auc, compare_to: production, min_delta: 0.005}
+        # champion gates pass when the paired-bootstrap lower bound of the
+        # delta clears min_delta (ADR-18); confidence: null opts out
+        - {metric: pr_auc, compare_to: production, min_delta: 0.005,
+           confidence: 0.95, bootstrap_resamples: 1000}
+        # slice gates target one declared slice value; champion slice gates
+        # compare point deltas (no bootstrap bound)
+        - {metric: pr_auc, threshold: 0.35, slice: plan_type=premium}
       slices: [plan_type, region]   # per-slice reporting
     registration:
       name: churn_classifier
@@ -186,13 +220,86 @@ models:
 
 Builtin binary-classification metrics: `roc_auc`, `pr_auc`, `logloss`,
 `brier`, `accuracy`, `ece`, and parameterized `recall_at_precision_*` /
-`precision_at_recall_*`. Lower-is-better defaults: `logloss`, `ece`, `brier`.
+`precision_at_recall_*` / `lift_at_*` / `gain_at_*` (top-scoring fraction:
+`lift_at_0.1` is decile lift, `gain_at_0.25` the share of all positives
+captured in the top quartile; ties break by row order, deterministically).
+Operating points: `threshold_at_precision_*` reports the smallest score
+cutoff meeting the precision target (maximal coverage), and
+`threshold_at_recall_*` the largest cutoff meeting the recall target (best
+precision) - the deployable decision rule interventions consume; an
+unattainable precision target reports the 1.0 sentinel ("predict nothing").
+Lower-is-better defaults: `logloss`, `ece`, `brier`.
+
+## scoring/*.yml
+
+One config is one batch scoring (serving) pipeline, executed by `mbt score`
+(ADR-20/21).
+The referenced model's registered champion for `stage` is resolved from the
+registry at run time; promotions take effect on the next run without a spec
+edit.
+
+```yaml
+scoring:
+  - name: retention_scoring
+    description: Nightly churn scores for the retention campaign tool.
+    owner: lifecycle-eng@company.com    # required
+    tags: [daily]
+    model: ref('churn_classifier')      # the DAG edge; exactly one model
+    stage: production                   # which champion alias to load (default)
+
+    input:                              # unlabeled, unsplit by design
+      source: source('lakehouse', 'scoring_batch')
+      # or multi-table, like dataset inputs but with a spine instead of a label:
+      # inputs: {spine: source(...), features: [source(...)], join_key: user_id}
+      filters: ["is_active = true"]     # SQL WHERE fragments, ANDed
+      time_column: snapshot_date        # optional
+      window: "-7d:now"                 # optional; resolved against the anchor
+      sample_key: user_id               # optional, as on datasets
+
+    checks:                             # label-free subset only
+      - schema: {columns: [user_id]}
+      - not_null: {columns: [user_id]}  # explicit columns required (no label)
+      - no_future_columns
+
+    monitors:                           # distribution shift vs the champion's
+      feature_shift:                    # training-time baseline (ADR-21)
+        method: psi                     # psi (default) | ks
+        threshold: 0.25                 # per feature; breach = exit 2
+        include: ["*"]                  # globs over the model's features
+        exclude: []
+      prediction_shift:
+        method: psi
+        threshold: 0.25                 # score distribution vs test-split baseline
+
+    ground_truth:                       # delayed evaluation via `mbt monitor`
+      label:
+        source: source('lakehouse', 'churn_outcomes')
+        column: churned_90d
+      join_key: user_id                 # joins outcomes to stored predictions
+      maturity: "14d"                   # bare duration; evaluate once this old
+      metrics: [pr_auc, roc_auc]        # builtin only (no training job runs)
+      gates:
+        - {metric: pr_auc, threshold: 0.3}   # realized-metric floor
+
+    output:
+      format: parquet
+      path: predictions/retention_scores    # adapter-interpreted
+      columns: [user_id, snapshot_date]     # passthrough identity columns
+```
+
+Predictions carry the passthrough columns (the union of `output.columns`,
+the ground-truth join key, and `time_column`; at least one is required) plus
+a `prediction` column, one directory per run keyed for idempotent re-runs,
+with a JSON sidecar recording the champion version and identity hashes.
+Input sources and the window expression enter the node's identity exactly
+like datasets (`state:modified` means "inputs or model chain changed"); the
+ground-truth label table is lineage only, so arriving labels never re-score.
 
 ## metrics.yml, exposures.yml
 
 ```yaml
 metrics:
-  - name: lift_at_decile
+  - name: campaign_capture_100      # a metric the builtins cannot express
     kind: hook                      # computed by hooks.custom_metrics
     greater_is_better: true
 
@@ -215,7 +322,7 @@ def transform_features(table: pa.Table, ctx) -> pa.Table:
 
 def custom_metrics(predictions: pa.Table, ctx) -> dict[str, float]:
     """predictions = the split's table + a 'prediction' column."""
-    return {"lift_at_decile": ...}
+    return {"campaign_capture_100": ...}
 ```
 
 ## Python data tests (tests/*.py)

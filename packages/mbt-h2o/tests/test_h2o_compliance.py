@@ -91,8 +91,13 @@ def test_sparkling_backend_without_extra_is_actionable() -> None:
         def emit(self, event: object) -> None: ...
 
     ctx = RunContext(
-        run_id="t", unique_id="m", seed=1, target_name="dev",
-        project_dir=".", vars={"h2o_backend": "sparkling"}, events=_Null(),
+        run_id="t",
+        unique_id="m",
+        seed=1,
+        target_name="dev",
+        project_dir=".",
+        vars={"h2o_backend": "sparkling"},
+        events=_Null(),
     )
     adapter = H2OAutoMLAdapter({})
     try:

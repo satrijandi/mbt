@@ -32,14 +32,23 @@ def plan_execution(
     select: list[str] | None,
     exclude: list[str] | None,
     state: StateIndex | None = None,
+    *,
+    executable: tuple[str, ...] = _EXECUTABLE,
 ) -> ExecutionPlan:
+    """Plan one command's execution set.
+
+    ``executable`` is the command's node universe: run/build/test execute
+    datasets + models; ``mbt score`` executes scoring nodes only (their
+    input materializes inside the runner, and the model comes from the
+    registry, so nothing auto-joins the plan).
+    """
     graph = manifest.graph()
     selectable = manifest.selectable_nodes()
     selected = select_nodes(graph, selectable, select, exclude, state)
     selected = {
         uid
         for uid in selected
-        if manifest.nodes.get(uid) is not None and manifest.nodes[uid].resource_type in _EXECUTABLE
+        if manifest.nodes.get(uid) is not None and manifest.nodes[uid].resource_type in executable
     }
 
     execution_set = set(selected)

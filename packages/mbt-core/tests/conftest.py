@@ -86,6 +86,9 @@ def demo_project(tmp_path: Path) -> Path:
             seed: 42
         """,
     )
+    # Roots are absolutized into tmp_path: relative fake-adapter roots and
+    # file:// stores resolve against the process cwd (the repo root under
+    # pytest), which littered ./target (FEEDBACK 2.6).
     write(
         tmp_path / "profiles.yml",
         """
@@ -107,7 +110,7 @@ def demo_project(tmp_path: Path) -> Path:
               artifact_store: file://./target/artifacts
               threads: 4
               vars: {sample_fraction: 1.0}
-        """,
+        """.replace("./target", f"{tmp_path}/target"),
     )
     write_subscriber_data(tmp_path)
     return tmp_path

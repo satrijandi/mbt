@@ -12,7 +12,9 @@ license = "Apache-2.0"
 dependencies = [
     "mbt-adapter-base>=0.1.0,<0.2",
     "mbt-core>=0.1.0,<0.2",  # compute adapter forwards job events through the bus
-    "pyspark>=3.5,<3.6",
+    # Both majors are e2e-tested; the ceiling tracks what CI has validated.
+    # The Spark-3.5 pin for Sparkling Water lives in mbt-h2o[sparkling] (ADR-17).
+    "pyspark>=3.5,<4.2",
 ]
 
 [project.entry-points."mbt.adapters"]

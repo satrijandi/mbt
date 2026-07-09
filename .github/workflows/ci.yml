@@ -13,6 +13,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+          enable-cache: true
       - name: Sync workspace
         run: uv sync
       - name: Ruff
@@ -20,9 +21,13 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
       - name: mypy --strict
-        run: uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src packages/mbt-xgboost/src packages/mbt-mlflow/src packages/mbt-optuna/src packages/mbt-lightgbm/src packages/mbt-testing/src
+        run: >-
+          uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src
+          packages/mbt-xgboost/src packages/mbt-mlflow/src
+          packages/mbt-optuna/src packages/mbt-lightgbm/src
+          packages/mbt-testing/src
       - name: yamllint
-        run: uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples
+        run: 'uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples'
       - name: No ML frameworks in mbt-core (NFR-04)
         run: |
           uv run python - <<'EOF'
@@ -39,26 +44,98 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every Python that requires-python (>=3.11) advertises is tested.
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
+          enable-cache: true
       - name: Sync workspace
         run: uv sync
-      - name: Unit + integration tests
-        run: uv run pytest -q -m "not e2e" --timeout 600
+      - name: Unit + integration tests (with coverage)
+        # Coordinator-process coverage; job subprocesses are not traced.
+        run: uv run pytest -q -m "not e2e" --timeout 600 --cov --cov-report=term
 
-  e2e:
+  floors:
+    # Declared lower bounds are only honest if something installs them:
+    # resolve every direct dependency at its floor (transitives resolve
+    # normally) and run the fast suite against that environment.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+          enable-cache: true
+      - name: Sync workspace at dependency floors
+        run: uv sync --resolution lowest-direct
+      - name: Unit + integration tests against floors
+        run: uv run pytest -q -m "not e2e" --timeout 600
+
+  e2e:
+    # The JVM tier (Spark 4.x per the locked resolution, H2O) runs once on
+    # the floor interpreter: it proves the adapter seams, while Python-version
+    # coverage is the test job's matrix. Sparkling Water stays pinned to
+    # Spark 3.5 in its own resolution fork (ADR-17).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
       - uses: actions/setup-java@v4   # H2O + Spark adapters need a JVM
         with: {distribution: temurin, java-version: "17"}
       - name: Sync workspace
         run: uv sync
       - name: End-to-end (XGBoost/LightGBM/H2O/Spark + MLflow sqlite)
         run: uv run pytest -q -m e2e --timeout 1800
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Sync workspace
+        run: uv sync
+      - name: pip-audit (known-vulnerability scan of the locked environment)
+        run: uv run pip-audit --skip-editable
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Sync workspace
+        run: uv sync
+      - name: Build docs site (strict - broken nav/links fail the build)
+        run: uv run mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v3
+        with: {path: site/}
+
+  docs-publish:
+    # Publish the strict-built site to GitHub Pages on main. One-time repo
+    # setup: Settings -> Pages -> Source: GitHub Actions.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: docs
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

@@ -2,7 +2,8 @@
 
 Values entering through ``env_var()`` are wrapped in :class:`Secret` and
 registered as tainted. Every serialization path (events, run results,
-manifests) passes its text through :func:`redact` as defense in depth; the
+manifests, the generated docs site, and CLI output - error messages and
+``mbt show``) passes its text through :func:`redact` as defense in depth; the
 manifest additionally stores profile configs *unrendered* so secrets never
 reach it in the first place.
 """

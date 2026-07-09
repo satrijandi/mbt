@@ -25,13 +25,17 @@ from mbt.adapters.registry import get_registry
 from mbt.contracts import (
     AUTO,
     AdapterRef,
+    BootstrapDelta,
     DatasetProfile,
     HookContext,
     JobResult,
     MetricResults,
     MetricSpec,
     ModelSpec,
+    MonitorStats,
+    PredictionRunInfo,
     RunContext,
+    ScoringSpec,
     TrainingJob,
     TuningResult,
 )
@@ -95,10 +99,12 @@ class _JobRuntime:
 
 
 def run_job(job: TrainingJob) -> JobResult:
-    """Execute one training/evaluation job; never raises (returns errors)."""
+    """Execute one training/evaluation/scoring job; never raises (returns errors)."""
     tracking = None
     run_handle = None
     try:
+        if job.mode == "score":
+            return _run_score(job)
         runtime = _prepare(job)
         if job.tracking is not None and job.mode == "train":
             tracking = _tracking_adapter(job)
@@ -274,6 +280,86 @@ def _metrics_for(
     return results
 
 
+def _export_baseline(runtime: _JobRuntime, model: Any) -> Any:
+    """Build + export the monitoring baseline next to the model artifact (ADR-21).
+
+    Post-hook train-split feature distributions plus the test-split score
+    distribution: everything scoring-time shift monitors compare against.
+    Built unconditionally on every training job - it is cheap (quantiles),
+    and champions registered without one cannot be monitored later.
+    """
+    import tempfile
+
+    from mbt_adapter_base.monitoring import build_baseline, write_baseline
+
+    train = runtime.transformed.read("train")
+    feature_columns = runtime.transformed.feature_columns or []
+    predictions: pa.Table = runtime.adapter.predict(model, runtime.handle, "test")
+    scores = predictions.column("prediction").to_numpy(zero_copy_only=False)
+    baseline = build_baseline(train, feature_columns, scores, model_name=runtime.spec.name)
+    path = Path(tempfile.mkdtemp(prefix="mbt-baseline-")) / "baseline.json"
+    write_baseline(baseline, path)
+    return runtime.store.put_file(path, "baseline.json", format="json")
+
+
+def _feature_importance(runtime: _JobRuntime, model: Any) -> dict[str, float]:
+    """Per-feature importance when the adapter exposes it (FR-DOCS-02).
+
+    Optional per adapter, like ``log_trial`` on trackers: absence simply
+    leaves model cards without an importance table.
+    """
+    if not hasattr(runtime.adapter, "feature_importance"):
+        return {}
+    return dict(runtime.adapter.feature_importance(model))
+
+
+def _champion_delta_bounds(
+    runtime: _JobRuntime, challenger: Any, champion: Any
+) -> dict[str, BootstrapDelta]:
+    """Paired-bootstrap lower bounds for champion-gate deltas (ADR-18).
+
+    Whole-split builtin-metric gates only: slice and hook-metric gates keep
+    point comparisons. Both models score the same resampled rows of the
+    pinned test split, so only the model difference remains in the deltas.
+    """
+    from mbt.quality.metrics import metric_direction
+    from mbt_adapter_base.metrics import paired_bootstrap_delta
+
+    spec = runtime.spec
+    builtin_by_name = {m.name: m for m in runtime.builtin_specs}
+    gates = [
+        gate
+        for gate in spec.evaluation.gates
+        if gate.compare_to is not None
+        and gate.confidence is not None
+        and gate.slice is None
+        and gate.metric in builtin_by_name
+    ]
+    if not gates:
+        return {}
+    challenger_table = runtime.adapter.predict(challenger, runtime.handle, "test")
+    champion_table = runtime.adapter.predict(champion, runtime.handle, "test")
+    y_true = challenger_table.column(spec.target).to_numpy(zero_copy_only=False).astype("float64")
+    challenger_scores = challenger_table.column("prediction").to_numpy(zero_copy_only=False)
+    champion_scores = champion_table.column("prediction").to_numpy(zero_copy_only=False)
+    bounds: dict[str, BootstrapDelta] = {}
+    for gate in gates:
+        confidence = gate.confidence
+        if confidence is None:  # narrowed out above; keeps mypy strict happy
+            continue  # pragma: no cover - gates are pre-filtered to confidence is not None
+        bounds[gate.metric] = paired_bootstrap_delta(
+            builtin_by_name[gate.metric],
+            y_true,
+            challenger_scores,
+            champion_scores,
+            greater_is_better=metric_direction(gate.metric, runtime.job.metric_specs),
+            confidence=confidence,
+            n_resamples=gate.bootstrap_resamples,
+            seed=spec.seed + 3,  # seed: train, +1: tuning, +2: validation carve, +3: bootstrap
+        )
+    return bounds
+
+
 # -- tuning (TSD §13.5, ADR-8) ----------------------------------------------------
 
 
@@ -307,7 +393,7 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
                 return value.replace(tzinfo=None)
             if hasattr(value, "isoformat") and not isinstance(value, datetime):  # date
                 return datetime(value.year, value.month, value.day)
-            return value
+            return value  # pragma: no cover - split time columns are temporal by construction
 
         fit_idx = [i for i, v in enumerate(column) if _naive(v) < boundary]
         val_idx = [i for i, v in enumerate(column) if _naive(v) >= boundary]
@@ -384,11 +470,30 @@ def _run_tuning(
     tune_runtime = _JobRuntime(**{**runtime.__dict__, "handle": tune_handle})
     trial_counter = {"index": 0}
 
-    def objective(trial_params: dict[str, Any]) -> float:
+    adapter_reports = hasattr(runtime.adapter, "train_with_report")
+    if tuning.pruner is not None and not adapter_reports:
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                unique_id=job.node.unique_id,
+                message=(
+                    f"tuning.pruner {tuning.pruner!r} is set but adapter "
+                    f"{spec.adapter!r} does not report training progress "
+                    "(no train_with_report); trials run to completion"
+                ),
+            )
+        )
+
+    def objective(trial_params: dict[str, Any], report: Any = None) -> float:
         trial_spec = spec.model_copy(
             update={"hyperparameters": {**spec.hyperparameters, **trial_params}}
         )
-        model = runtime.adapter.train(trial_spec, tune_handle, runtime.ctx)
+        if report is not None and adapter_reports:
+            # A pruning report may raise out of the training loop; the engine
+            # owns that exception and marks the trial pruned.
+            model = runtime.adapter.train_with_report(trial_spec, tune_handle, runtime.ctx, report)
+        else:
+            model = runtime.adapter.train(trial_spec, tune_handle, runtime.ctx)
         results = _metrics_for(tune_runtime, model, "validation", with_slices=False)
         value = float(results.metrics[tuning.objective.metric])
         index = trial_counter["index"]
@@ -455,12 +560,16 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
     # 4. evaluate challenger and (if provided) champion on the SAME test split
     challenger = _metrics_for(runtime, model, "test", with_slices=True)
     champion_metrics: MetricResults | None = None
+    delta_bounds: dict[str, BootstrapDelta] = {}
     if job.champion is not None:
         champion_model = runtime.adapter.load(job.champion, runtime.store)
         champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
+        delta_bounds = _champion_delta_bounds(runtime, model, champion_model)
 
-    # 5. export the artifact
+    # 5. export the artifact, plus the monitoring baseline (ADR-21)
     artifact = runtime.adapter.export(model, "native", runtime.store)
+    baseline = _export_baseline(runtime, model)
+    importance = _feature_importance(runtime, model)
 
     # 6. tracking: params, metrics, artifacts, tuning history
     tracking_run_id: str | None = None
@@ -480,6 +589,7 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
                 metrics={"tuning.best_value": tuning_result.best_value},
                 tags={
                     "mbt.tuning.n_trials": str(tuning_result.n_trials),
+                    "mbt.tuning.n_pruned": str(tuning_result.n_pruned),
                     "mbt.tuning.best_params": json.dumps(tuning_result.best_params),
                 },
             )
@@ -488,9 +598,154 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         status="success",
         metrics=challenger,
         champion_metrics=champion_metrics,
+        champion_delta_bounds=delta_bounds,
+        feature_importance=importance,
         resolved_auto=resolved_auto,
         tuning=tuning_result,
         artifact=artifact,
+        baseline=baseline,
+        tracking_run_id=tracking_run_id,
+    )
+
+
+def _run_score(job: TrainingJob) -> JobResult:
+    """Score one batch with a registered champion (mode="score", ADR-20/21).
+
+    The coordinator resolved the champion, baseline, and run_key; this job
+    loads the artifact, applies the model's hooks + feature selection to the
+    unlabeled input, predicts, computes shift statistics, and writes the
+    prediction run. Core applies the monitor thresholds afterwards.
+    """
+    registry = get_registry()
+    if job.model_node is None or job.output is None or job.run_key is None:
+        raise ConfigError(
+            "score mode requires model_node, output, and run_key",
+            resource=job.node.unique_id,
+        )
+    if job.artifact is None:
+        raise ConfigError(
+            "score mode requires the champion artifact reference", resource=job.node.unique_id
+        )
+    scoring_spec = ScoringSpec.model_validate(job.node.config)
+    model_spec = ModelSpec.model_validate(job.model_node.config)
+
+    data_ref = _render_adapter_ref(job.data, _job_vars(job))
+    data_adapter = registry.component(
+        "data", data_ref.adapter, normalized_adapter_config(data_ref, Path(job.project_dir))
+    )
+    base_handle = data_adapter.from_locator(job.dataset)
+    base_profile = base_handle.profile()
+
+    plugin = registry.get(model_spec.adapter)
+    if plugin.training is None:
+        raise AdapterError(f"adapter {model_spec.adapter!r} provides no training adapter")
+    adapter = plugin.training({})
+
+    hooks: ModelHooks | None = None
+    if job.model_node.hooks_path is not None:
+        hooks = load_hooks(Path(job.project_dir), job.model_node.hooks_path)
+
+    def hook_ctx(split: str) -> HookContext:
+        return HookContext(spec=model_spec, profile=base_profile, split=split, logger=get_bus())
+
+    time_column = getattr(base_handle, "time_column", None)
+    transformed = TransformedDatasetHandle(
+        base_handle, model_spec, hooks, hook_ctx, time_column, require_target=False
+    )
+    handle: Any = transformed
+    if getattr(adapter, "data_access", "arrow") == "path":
+        handle = _materialize_for_path_adapter(transformed, model_spec)
+
+    raw = base_handle.read("score")
+    passthrough = scoring_spec.passthrough_columns
+    missing = [c for c in passthrough if c not in raw.column_names]
+    if missing:
+        raise ConfigError(
+            f"passthrough column(s) missing from the scoring input: {', '.join(missing)}",
+            resource=job.node.unique_id,
+            hint="output.columns, ground_truth.join_key, and input.time_column "
+            "must exist in the input table",
+        )
+
+    store = artifact_store_for(job.artifact_store, run_prefix=_store_prefix(job))
+    model = adapter.load(job.artifact, store)
+
+    if raw.num_rows > 0:
+        predictions: pa.Table = adapter.predict(model, handle, "score")
+        if predictions.num_rows != raw.num_rows:
+            raise AdapterError(
+                f"hooks changed the scoring input's row count "
+                f"({raw.num_rows} rows in, {predictions.num_rows} predictions out)",
+                resource=job.node.unique_id,
+                hint="transform_features must be row-stable (no filtering or "
+                "reordering) for scoring (ADR-20)",
+            )
+        prediction_column = predictions.column("prediction")
+    else:
+        prediction_column = pa.chunked_array([pa.array([], type=pa.float64())])
+    output_table = raw.select(passthrough).append_column("prediction", prediction_column)
+
+    stats: MonitorStats | None = None
+    if scoring_spec.monitors is not None:
+        if job.baseline is None:
+            stats = MonitorStats(baseline_missing=True)
+        elif raw.num_rows == 0:
+            stats = MonitorStats()  # nothing to compare; the 0-row WARN already fired
+        else:
+            from mbt_adapter_base.monitoring import compute_monitor_stats, read_baseline
+
+            baseline = read_baseline(store.fetch(job.baseline))
+            scores = prediction_column.to_numpy(zero_copy_only=False)
+            stats = compute_monitor_stats(
+                baseline, transformed.read("score"), scores, scoring_spec.monitors
+            )
+
+    prediction_store = data_adapter.open_predictions(job.output)
+    persisted: PredictionRunInfo = prediction_store.write_run(
+        output_table,
+        PredictionRunInfo(
+            run_key=job.run_key,
+            uri="",
+            scored_at=job.tracking_meta.get("mbt.anchor", ""),
+            run_id=job.run_id,
+            model_name=model_spec.registration.name if model_spec.registration else model_spec.name,
+            model_version=job.model_version or "",
+            row_count=0,  # set by the store
+            meta={
+                "config_hash": job.node.config_hash,
+                "input_hash": job.node.input_hash,
+                "snapshot_id": job.node.snapshot_id or "",
+            },
+        ),
+    )
+
+    tracking_run_id: str | None = None
+    if job.tracking is not None:
+        tracking = _tracking_adapter(job)
+        run_handle = tracking.start_run(job.node, dict(job.tracking_meta))
+        tracking_run_id = run_handle.run_id
+        metrics: dict[str, float] = {"predictions.rows": float(persisted.row_count)}
+        if stats is not None:
+            if stats.prediction_shift is not None:
+                metrics["monitor.prediction_shift"] = stats.prediction_shift.value
+            if stats.feature_shift:
+                metrics["monitor.feature_shift.max"] = max(
+                    s.value for s in stats.feature_shift.values()
+                )
+        tracking.log(
+            run_handle,
+            metrics=metrics,
+            tags={
+                "mbt.model_version": job.model_version or "",
+                "mbt.run_key": persisted.run_key,
+            },
+        )
+        tracking.end_run(run_handle, "FINISHED")
+
+    return JobResult(
+        status="success",
+        predictions=persisted,
+        monitor_stats=stats,
         tracking_run_id=tracking_run_id,
     )
 
@@ -504,13 +759,17 @@ def _run_evaluate(runtime: _JobRuntime) -> JobResult:
     model = runtime.adapter.load(job.artifact, runtime.store)
     results = _metrics_for(runtime, model, "test", with_slices=True)
     champion_metrics: MetricResults | None = None
+    delta_bounds: dict[str, BootstrapDelta] = {}
     if job.champion is not None:
         champion_model = runtime.adapter.load(job.champion, runtime.store)
         champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
+        delta_bounds = _champion_delta_bounds(runtime, model, champion_model)
     return JobResult(
         status="success",
         metrics=results,
         champion_metrics=champion_metrics,
+        champion_delta_bounds=delta_bounds,
+        feature_importance=_feature_importance(runtime, model),
         artifact=job.artifact,
     )
 

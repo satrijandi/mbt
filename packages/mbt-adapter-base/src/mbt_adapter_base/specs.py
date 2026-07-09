@@ -201,7 +201,11 @@ class GateSpec(_SpecModel):
     threshold: float | None = None  # absolute gate
     compare_to: Stage | None = None  # champion gate vs registry stage
     min_delta: float = 0.0  # only meaningful with compare_to
-    slice: str | None = None  # per-slice gate (behavior: Could, v0 reports only)
+    slice: str | None = None  # per-slice gate, "column=value" (FR-TEST-04)
+    #: Champion gates: one-sided confidence for the paired-bootstrap lower
+    #: bound of the delta (ADR-18); ``null`` opts back into point estimates.
+    confidence: float | None = 0.95
+    bootstrap_resamples: int = 1000
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> "GateSpec":
@@ -209,6 +213,17 @@ class GateSpec(_SpecModel):
             raise ValueError("a gate must set exactly one of 'threshold' or 'compare_to'")
         if self.min_delta != 0.0 and self.compare_to is None:
             raise ValueError("'min_delta' is only meaningful with 'compare_to'")
+        if self.compare_to is None:
+            # Value-based (not fields_set) so dump/re-parse roundtrips, same
+            # as the min_delta check above.
+            if self.confidence != 0.95:
+                raise ValueError("'confidence' is only meaningful with 'compare_to'")
+            if self.bootstrap_resamples != 1000:
+                raise ValueError("'bootstrap_resamples' is only meaningful with 'compare_to'")
+        if self.confidence is not None and not 0.5 < self.confidence < 1.0:
+            raise ValueError("'confidence' must be in (0.5, 1.0), e.g. 0.95")
+        if self.bootstrap_resamples < 100:
+            raise ValueError("'bootstrap_resamples' must be at least 100")
         return self
 
 
@@ -275,6 +290,11 @@ class TuningSpec(_SpecModel):
     n_trials: int = Field(gt=0)
     search_space: dict[str, SearchDimension]
     objective: TuningObjective
+    #: Optional early stopping of unpromising trials: "median" prunes when a
+    #: trial's intermediate validation value falls below the median of prior
+    #: trials at the same step. Needs a training adapter that reports
+    #: progress; otherwise trials run to completion (with a warning).
+    pruner: Literal["median"] | None = None
 
     @model_validator(mode="after")
     def _space_nonempty(self) -> "TuningSpec":
@@ -314,9 +334,21 @@ class ModelSpec(_SpecModel):
     @model_validator(mode="after")
     def _gate_and_objective_metrics_declared(self) -> "ModelSpec":
         declared = set(self.evaluation.metrics)
+        declared_slices = set(self.evaluation.slices)
         for gate in self.evaluation.gates:
             if gate.metric not in declared:
                 raise ValueError(f"gate metric '{gate.metric}' must appear in evaluation.metrics")
+            if gate.slice is not None:
+                column, _, value = gate.slice.partition("=")
+                if not column or not value:
+                    raise ValueError(
+                        f"gate slice '{gate.slice}' must be 'column=value', "
+                        "e.g. 'plan_type=premium'"
+                    )
+                if column not in declared_slices:
+                    raise ValueError(
+                        f"gate slice column '{column}' must appear in evaluation.slices"
+                    )
         stages = {g.compare_to for g in self.evaluation.gates if g.compare_to is not None}
         if len(stages) > 1:
             raise ValueError("all champion gates of one model must compare_to the same stage in v0")
@@ -346,3 +378,198 @@ class ExposureSpec(_SpecModel):
     owner: str
     url: str | None = None
     description: str = ""
+
+
+class ScoringInputs(_SpecModel):
+    """Multi-table scoring input: a spine table plus feature tables.
+
+    The spine defines which rows are scored; feature tables join onto it
+    exactly like ``DatasetInputs`` feature tables join onto the label table.
+    There is no label anywhere - scoring inputs are unlabeled by design.
+    """
+
+    spine: str  # source() ref that defines which rows are scored
+    features: list[str]  # source() refs joined onto the spine
+    join_key: str | list[str]
+    join: Literal["left", "inner"] = "left"
+
+    @property
+    def join_columns(self) -> list[str]:
+        return [self.join_key] if isinstance(self.join_key, str) else list(self.join_key)
+
+    @model_validator(mode="after")
+    def _shape(self) -> "ScoringInputs":
+        if not self.features:
+            raise ValueError("inputs.features must list at least one feature table")
+        if not self.join_columns or any(not c for c in self.join_columns):
+            raise ValueError("inputs.join_key must name at least one non-empty column")
+        return self
+
+
+class ScoringInputSpec(_SpecModel):
+    """The unlabeled, unsplit batch a scoring pipeline reads (ADR-20).
+
+    Data comes from exactly one of ``source`` (single table) or ``inputs``
+    (spine + feature tables). The optional ``window`` is a window expression
+    over ``time_column``, resolved against the manifest anchor like dataset
+    split windows (ADR-12), so re-scoring is snapshot-driven, never
+    clock-driven.
+    """
+
+    source: str | None = None  # "source('lakehouse', 'scoring_batch')"
+    inputs: ScoringInputs | None = None
+    filters: list[str] = Field(default_factory=list)  # SQL WHERE fragments, ANDed
+    time_column: str | None = None
+    window: str | None = None  # window expression, e.g. "-7d:now"
+    sample_key: str | list[str] | None = None
+
+    @property
+    def sample_key_columns(self) -> list[str]:
+        if self.sample_key is not None:
+            return [self.sample_key] if isinstance(self.sample_key, str) else list(self.sample_key)
+        if self.inputs is not None:
+            return self.inputs.join_columns
+        return []
+
+    @model_validator(mode="after")
+    def _shape(self) -> "ScoringInputSpec":
+        if (self.source is None) == (self.inputs is None):
+            raise ValueError(
+                "a scoring input needs exactly one of 'source' (single table) or "
+                "'inputs' (spine + feature tables with a join key)"
+            )
+        if self.window is not None and self.time_column is None:
+            raise ValueError("'window' requires 'time_column'")
+        return self
+
+
+class FeatureShiftSpec(_SpecModel):
+    """Feature distribution-shift monitor vs the training baseline (ADR-20)."""
+
+    method: Literal["psi", "ks"] = "psi"
+    threshold: float = Field(gt=0)  # per-feature; e.g. 0.2 for psi, 0.15 for ks
+    include: list[str] = Field(default_factory=lambda: ["*"])
+    exclude: list[str] = Field(default_factory=list)
+
+
+class PredictionShiftSpec(_SpecModel):
+    """Score distribution-shift monitor vs the test-split baseline (ADR-20)."""
+
+    method: Literal["psi", "ks"] = "psi"
+    threshold: float = Field(gt=0)
+
+
+class MonitorsSpec(_SpecModel):
+    """Distribution-shift monitors evaluated on every scoring run."""
+
+    feature_shift: FeatureShiftSpec | None = None
+    prediction_shift: PredictionShiftSpec | None = None
+
+
+class GroundTruthLabelSpec(_SpecModel):
+    """Where matured labels arrive and what they mean."""
+
+    source: str  # source() ref to the matured-label table
+    column: str
+    definition: str = ""
+
+
+class MonitorGateSpec(_SpecModel):
+    """A realized-metric threshold for ground-truth evaluation.
+
+    Threshold-only by design: a champion comparison is meaningless here
+    because the champion IS the model that produced the predictions.
+    """
+
+    metric: str
+    threshold: float
+
+
+class GroundTruthSpec(_SpecModel):
+    """Delayed ground-truth evaluation config, run by ``mbt monitor`` (ADR-21).
+
+    ``maturity`` is a bare duration (``"14d"``): a prediction run is evaluated
+    once ``scored_at + maturity`` lies at or before the monitor run's anchor.
+    Metrics must be builtin - hook metrics need a training job.
+    """
+
+    label: GroundTruthLabelSpec
+    join_key: str | list[str]
+    maturity: str  # bare duration, e.g. "14d"
+    metrics: list[str]
+    gates: list[MonitorGateSpec] = Field(default_factory=list)
+
+    @property
+    def join_columns(self) -> list[str]:
+        return [self.join_key] if isinstance(self.join_key, str) else list(self.join_key)
+
+    @model_validator(mode="after")
+    def _shape(self) -> "GroundTruthSpec":
+        if not self.metrics:
+            raise ValueError("ground_truth.metrics must list at least one metric")
+        if not self.join_columns or any(not c for c in self.join_columns):
+            raise ValueError("ground_truth.join_key must name at least one non-empty column")
+        declared = set(self.metrics)
+        for gate in self.gates:
+            if gate.metric not in declared:
+                raise ValueError(
+                    f"ground_truth gate metric '{gate.metric}' must appear in ground_truth.metrics"
+                )
+        return self
+
+
+class ScoringOutputSpec(_SpecModel):
+    """Where predictions land (ADR-21). ``path`` is adapter-interpreted."""
+
+    format: Literal["parquet"] = "parquet"
+    path: str
+    #: Extra passthrough columns copied from the RAW input into the output
+    #: (identity/audit columns; ground-truth join keys are always included).
+    columns: list[str] = Field(default_factory=list)
+
+
+class ScoringSpec(_SpecModel):
+    """One batch scoring (serving) pipeline: champion + input + sink (ADR-20).
+
+    The referenced model's registered champion for ``stage`` is resolved at
+    run time, so promotions take effect on the next scheduled run without a
+    spec edit. Monitors compare the batch against the champion's
+    training-time baseline; ``ground_truth`` adds delayed realized-metric
+    evaluation via ``mbt monitor``.
+    """
+
+    name: str = Field(pattern=NAME_PATTERN)
+    description: str = ""
+    owner: str  # email; required, like models
+    tags: list[str] = Field(default_factory=list)
+    model: str  # "ref('churn_classifier')" - the DAG edge
+    stage: Stage = Stage.PRODUCTION  # which champion alias to load
+    input: ScoringInputSpec
+    checks: list[CheckSpec] = Field(default_factory=list)
+    monitors: MonitorsSpec | None = None
+    ground_truth: GroundTruthSpec | None = None
+    output: ScoringOutputSpec
+
+    @property
+    def passthrough_columns(self) -> list[str]:
+        """Identity columns copied from the raw input into the output.
+
+        Union of ``output.columns``, the ground-truth join key(s), and
+        ``input.time_column``, in that order, deduplicated.
+        """
+        columns = list(self.output.columns)
+        if self.ground_truth is not None:
+            columns.extend(self.ground_truth.join_columns)
+        if self.input.time_column is not None:
+            columns.append(self.input.time_column)
+        deduped: dict[str, None] = dict.fromkeys(columns)
+        return list(deduped)
+
+    @model_validator(mode="after")
+    def _passthrough_nonempty(self) -> "ScoringSpec":
+        if not self.passthrough_columns:
+            raise ValueError(
+                "predictions need at least one identity column: set output.columns, "
+                "a ground_truth.join_key, or input.time_column"
+            )
+        return self

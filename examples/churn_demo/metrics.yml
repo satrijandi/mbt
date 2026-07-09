@@ -1,4 +1,6 @@
 metrics:
-  - name: lift_at_decile
+  # lift/gain are builtins (lift_at_0.1, gain_at_0.25, ...); hooks are for
+  # metrics the builtins cannot express, like this fixed-budget capture rate.
+  - name: campaign_capture_100
     kind: hook
     greater_is_better: true

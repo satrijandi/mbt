@@ -75,10 +75,8 @@ class CompileCompleted(Event):
     elapsed_s: float = 0.0
 
     def human(self) -> str:
-        return (
-            f"Compiled {self.nodes} nodes in {self.elapsed_s:.2f}s "
-            f"(anchor {self.anchor}) -> {self.manifest_path}"
-        )
+        base = f"Compiled {self.nodes} nodes in {self.elapsed_s:.2f}s (anchor {self.anchor})"
+        return f"{base} -> {self.manifest_path}" if self.manifest_path else base
 
 
 class RunStarted(Event):

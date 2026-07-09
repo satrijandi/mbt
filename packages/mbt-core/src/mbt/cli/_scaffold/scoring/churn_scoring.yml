@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=../target/json-schemas/scoring.schema.json
+scoring:
+  - name: churn_scoring
+    description: Nightly churn scores feeding the retention campaign tool.
+    owner: you@example.com
+    tags: [daily]
+
+    model: ref('churn_classifier')
+    stage: production              # champion resolved from the registry at run time
+
+    input:
+      source: source('lakehouse', 'scoring_batch')
+      # Score the SAME population the model trained on: matching the training
+      # set's filters keeps the champion off inputs it never saw (and keeps
+      # the shift monitors honest - an unfiltered batch would "shift" simply
+      # because the baseline was filtered).
+      filters:
+        - "is_active = true"
+        - "tenure_days >= 30"
+      time_column: snapshot_date
+      window: "-7d:now"            # resolved against the run's anchor
+
+    checks:
+      - not_null:
+          columns: [user_id]
+
+    # Distribution "shift" monitors vs the champion's training-time baseline
+    # (data-snapshot "drift" is a different concept: see docs). A breach
+    # fails the run with exit code 2 and triggers the CI alert webhook.
+    monitors:
+      feature_shift:
+        threshold: 0.25            # PSI per feature
+      prediction_shift:
+        threshold: 0.25            # PSI of the score distribution
+
+    # Delayed realized-metric evaluation: `mbt monitor` (own schedule) joins
+    # outcomes to predictions once they are `maturity` old.
+    ground_truth:
+      label:
+        source: source('lakehouse', 'churn_outcomes')
+        column: churned_90d
+      join_key: user_id
+      maturity: "14d"
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+
+    output:
+      path: predictions/churn_scores
+      columns: [user_id, snapshot_date]

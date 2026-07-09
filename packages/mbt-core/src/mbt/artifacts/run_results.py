@@ -11,7 +11,7 @@ from mbt.secrets import redact
 
 RUN_RESULTS_SCHEMA_VERSION = 1
 
-NodeStatus = Literal["success", "error", "skipped", "gate_failed", "test_failed"]
+NodeStatus = Literal["success", "error", "skipped", "gate_failed", "test_failed", "monitor_failed"]
 
 
 class GateResult(BaseModel):
@@ -19,6 +19,7 @@ class GateResult(BaseModel):
 
     metric: str
     kind: Literal["threshold", "champion"]
+    slice: str | None = None  # "column=value" for per-slice gates
     passed: bool
     expected: float | None = None  # threshold gates
     actual: float | None = None
@@ -26,6 +27,8 @@ class GateResult(BaseModel):
     champion_value: float | None = None
     min_delta: float | None = None
     actual_delta: float | None = None
+    delta_lower: float | None = None  # paired-bootstrap lower bound (ADR-18)
+    confidence: float | None = None
     message: str | None = None
 
 
@@ -36,6 +39,22 @@ class RegistrationResult(BaseModel):
     name: str
     version: str
     stage: str
+
+
+class MonitorResult(BaseModel):
+    """One monitor comparison on a scoring node (ADR-20/21)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    monitor: Literal["feature_shift", "prediction_shift", "ground_truth"]
+    #: What was compared: a feature name, or a prediction run_key.
+    subject: str | None = None
+    #: The shift method (psi/ks) or the realized metric name.
+    measure: str
+    value: float | None = None
+    threshold: float
+    passed: bool
+    message: str | None = None
 
 
 class TestResultEntry(BaseModel):
@@ -56,10 +75,12 @@ class NodeResult(BaseModel):
     slices: dict[str, dict[str, float]] = Field(default_factory=dict)
     gates: list[GateResult] = Field(default_factory=list)
     tests: list[TestResultEntry] = Field(default_factory=list)
+    monitors: list[MonitorResult] = Field(default_factory=list)  # scoring nodes (ADR-20)
     artifact: ArtifactRef | None = None
     registration: RegistrationResult | None = None
     tracking_run_id: str | None = None
     resolved_auto: dict[str, Any] = Field(default_factory=dict)
+    feature_importance: dict[str, float] = Field(default_factory=dict)  # FR-DOCS-02
     message: str | None = None
 
 
@@ -89,7 +110,7 @@ class RunResults(BaseModel):
         statuses = {r.status for r in self.results}
         if "error" in statuses:
             return 1
-        if statuses & {"gate_failed", "test_failed"}:
+        if statuses & {"gate_failed", "test_failed", "monitor_failed"}:
             return 2
         return 0
 

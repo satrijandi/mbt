@@ -26,6 +26,7 @@ from mbt_adapter_base.interchange import (
     ManifestNode,
     MetricResults,
     ModelVersion,
+    PredictionRunInfo,
     RunContext,
     RunHandle,
     TestResult,
@@ -37,7 +38,14 @@ from mbt_adapter_base.interchange import (
 from mbt_adapter_base.types import Stage, TaskType
 
 if TYPE_CHECKING:
-    from mbt_adapter_base.specs import DatasetSpec, MetricSpec, ModelSpec, TuningSpec
+    from mbt_adapter_base.specs import (
+        DatasetSpec,
+        MetricSpec,
+        ModelSpec,
+        ScoringInputSpec,
+        ScoringOutputSpec,
+        TuningSpec,
+    )
 
 
 class EventSink(Protocol):
@@ -178,8 +186,38 @@ class TrainingAdapter(Protocol):
         ...
 
 
+class PredictionStore(Protocol):
+    """One scoring pipeline's prediction sink (contract 1.1, ADR-21).
+
+    Owns writing, scanning, and the ground-truth evaluation ledger, so core
+    never hard-codes a storage layout. ``write_run`` is idempotent by
+    ``run_key``: an existing run with the same key is replaced atomically.
+    """
+
+    def write_run(self, table: pa.Table, info: PredictionRunInfo) -> PredictionRunInfo:
+        """Write one prediction run; returns the info as persisted."""
+        ...
+
+    def list_runs(self) -> list[PredictionRunInfo]:
+        """All complete runs, ordered by ``scored_at`` ascending."""
+        ...
+
+    def read(self, run_key: str, columns: list[str] | None = None) -> pa.Table: ...
+
+    def read_marker(self, run_key: str, name: str) -> dict[str, Any] | None:
+        """A named ledger marker for a run, or None if absent."""
+        ...
+
+    def write_marker(self, run_key: str, name: str, payload: dict[str, Any]) -> None: ...
+
+
 class DataAdapter(Protocol):
-    """Builds and reopens datasets (TSD §12.2)."""
+    """Builds and reopens datasets (TSD §12.2).
+
+    ``build_scoring_input`` and ``open_predictions`` are contract 1.1
+    additions (ADR-20/21); core probes for them with ``hasattr`` and fails
+    with a clear error before any job runs when an adapter predates them.
+    """
 
     @property
     def name(self) -> str: ...
@@ -189,6 +227,14 @@ class DataAdapter(Protocol):
     def build_dataset(self, spec: "DatasetSpec", ctx: "DataBuildContext") -> DatasetHandle: ...
 
     def from_locator(self, locator: DatasetLocator) -> DatasetHandle: ...
+
+    def build_scoring_input(
+        self, spec: "ScoringInputSpec", ctx: "DataBuildContext"
+    ) -> DatasetHandle:
+        """Materialize one unlabeled batch as a single ``score`` split."""
+        ...
+
+    def open_predictions(self, output: "ScoringOutputSpec") -> PredictionStore: ...
 
 
 class TrackingAdapter(Protocol):
@@ -329,6 +375,7 @@ __all__ = [
     "DatasetHandle",
     "EventSink",
     "JobHandle",
+    "PredictionStore",
     "PythonDataTest",
     "RegistryAdapter",
     "SourceTableLike",

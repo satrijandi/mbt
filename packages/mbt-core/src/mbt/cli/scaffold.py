@@ -4,9 +4,13 @@ import re
 from importlib.resources import files
 from pathlib import Path
 
+import mbt
 from mbt.exceptions import ConfigError
 
 _TOKEN = "__PROJECT_NAME__"
+#: Stamped into the template's requirements pins so a scaffolded project
+#: reproduces the exact toolchain version that generated it (NFR-01).
+_VERSION_TOKEN = "__MBT_VERSION__"
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 #: Template files renamed on write (dotfiles cannot ship as package data
@@ -46,7 +50,8 @@ def scaffold_project(name: str, parent_dir: Path, *, home: Path | None = None) -
         parts[-1] = _RENAMES.get(parts[-1], parts[-1])
         target = destination.joinpath(*parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content.replace(_TOKEN, name))
+        rendered = content.replace(_TOKEN, name).replace(_VERSION_TOKEN, mbt.__version__)
+        target.write_text(rendered)
 
     _install_home_profiles(name, destination, home=home)
     return destination

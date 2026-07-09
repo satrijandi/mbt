@@ -22,6 +22,50 @@ def test_valid_project_parses(demo_project: Path, fake_registry: AdapterRegistry
     assert parsed.models["model.demo.churn_model"].metric_specs
 
 
+def test_random_split_protocol_warnings(demo_project: Path, fake_registry: AdapterRegistry) -> None:
+    """Random splits warn on temporal-leakage and entity-straddle risks
+    (FR-RES-09); both warnings are addressable and then disappear."""
+    write(
+        demo_project / "datasets/random_split.yml",
+        """
+        datasets:
+          - name: exchangeable_rows
+            source: source('lakehouse', 'subscribers')
+            label:
+              column: churned
+            split:
+              strategy: random
+              time_column: snapshot_date
+              train: "0.8"
+              test: "0.2"
+              seed: 7
+        """,
+    )
+    parsed = parse_project(demo_project, registry=fake_registry)
+    messages = [issue.message for issue in parsed.report.warnings]
+    assert any("temporal leakage" in m for m in messages)
+    assert any("sample_key" in m for m in messages)
+
+    write(
+        demo_project / "datasets/random_split.yml",
+        """
+        datasets:
+          - name: exchangeable_rows
+            source: source('lakehouse', 'subscribers')
+            label:
+              column: churned
+            split:
+              strategy: random
+              train: "0.8"
+              test: "0.2"
+              seed: 7
+            sample_key: user_id
+        """,
+    )
+    parsed = parse_project(demo_project, registry=fake_registry)
+    assert not parsed.report.warnings
+
+
 def test_all_errors_collected_in_one_pass(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:

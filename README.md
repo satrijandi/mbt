@@ -42,12 +42,19 @@ mbt init my_models && cd my_models
 python scripts/generate_sample_data.py   # or point sources.yml at your parquet
 mbt build                                # datasets -> training -> tests -> gates -> registry
 mbt docs generate && mbt docs serve      # model cards + lineage
+mbt promote --model churn_classifier --to production
+mbt score                                # batch-score with the champion + shift monitors
+mbt monitor                              # realized metrics once outcomes mature
 ```
 
 `mbt build` compiles your specs into a pinned manifest, materializes datasets
 with DuckDB, trains each model in an isolated job, evaluates gates against
 the registry champion, and registers passing artifacts in MLflow - all from
 YAML you can review in a PR.
+
+For the full team walkthrough - a data scientist and an MLOps engineer
+working through specs, gates, promotion, scoring, monitoring, and the
+production wiring step by step - see [docs/tutorial.md](docs/tutorial.md).
 
 ## Why
 
@@ -121,12 +128,34 @@ uv run ruff check . && uv run mypy packages/mbt-core/src
 uv run pre-commit install                 # hooks: ruff, yamllint, mypy
 ```
 
+CI tests what the metadata claims: the fast suite runs on every CPython the
+packages advertise (`requires-python = ">=3.11"`, matrix over 3.11-3.14), and
+a `floors` job re-resolves every direct dependency at its declared lower bound
+(`uv sync --resolution lowest-direct`) and runs the suite against that, so a
+floor nobody actually supports fails CI instead of a user install.
+
+Tests write only under pytest tmp dirs; a session guard in the root
+`conftest.py` fails any run that leaves new entries in the repo root
+(`./target`, `./mlruns`, stray dbs), so working-tree litter cannot creep
+back in.
+
+Dependency currency is automated via [Renovate](https://docs.renovatebot.com/)
+(`renovate.json`): pre-commit hook revs, GitHub Actions, and Python pins get
+update PRs, with the ruff hook grouped with the locked ruff so the two cannot
+drift apart. Enable it by installing the Renovate GitHub App on the repo.
+
 Design decisions live in [`docs/adr/`](docs/adr/); the docs site sources are
-under [`docs/`](docs/) (`uv run mkdocs serve`).
+under [`docs/`](docs/) (`uv run mkdocs serve`). CI builds the site strict on
+every PR and publishes it to GitHub Pages on main (one-time repo setup:
+Settings -> Pages -> Source: GitHub Actions). Security scanning runs in CI
+as pip-audit (locked dependencies) plus CodeQL (static analysis of package
+sources).
 
 ## Status
 
-v0.1: the full PR -> CI -> registry -> promotion loop works end-to-end for
-binary classification on local Parquet with XGBoost/LightGBM + MLflow.
+v0.1: the full PR -> CI -> registry -> promotion -> batch scoring loop works
+end-to-end for binary classification on local Parquet with XGBoost/LightGBM +
+MLflow, including shift monitoring against training-time baselines and
+delayed ground-truth evaluation (ADR-20/21).
 See `docs/roadmap.md` for what lands in v1 (remote compute, sklearn/PyTorch,
-Feast, ensembles, batch scoring).
+Feast, ensembles, warehouse prediction sinks).

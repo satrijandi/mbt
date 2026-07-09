@@ -60,18 +60,24 @@ empty) config dict. Required surface (see `mbt_adapter_base.protocols`):
 | `resolve_auto(spec, profile)` | replace `AUTO` sentinels from the dataset profile; must be idempotent |
 | `train(spec, data, ctx)` | return an opaque trained-model object; seed with `ctx.seed` |
 | `evaluate(model, data, split, metrics, slices=None)` | compute the requested `MetricSpec`s; return `MetricResults` |
-| `predict(model, data, split)` | the split's table + a `prediction` column |
+| `predict(model, data, split)` | the split's table + a `prediction` column; must work WITHOUT the target column (batch scoring feeds unlabeled `score` splits, ADR-20) |
 | `export(model, format, store)` | write via `store.put_file(...)`; return the `ArtifactRef` |
 | `load(ref, store)` | reconstruct the model from an artifact (champion evaluation, `mbt evaluate`) |
 | `nondeterminism_warnings(spec)` | strings describing settings that break your determinism tier |
+| `feature_importance(model)` | optional: normalized per-feature fractions; rendered in model cards and `run_results.json` (FR-DOCS-02) |
+| `train_with_report(spec, data, ctx, report)` | optional: train while calling `report(step, value)` per iteration with a HIGHER-IS-BETTER validation value (e.g. AUC on the `validation` split); lets tuning pruners stop weak trials early. The callback may raise - let that exception propagate out of your training loop |
 
 ### What your `train`/`evaluate` tables contain
 
 selected features + the target column + declared slice columns. The split
 time column never reaches you. Derive features as
-`columns - {spec.target} - set(spec.evaluation.slices)`. Reject non-numeric
-features with an actionable error (users exclude them or encode via hooks) -
-do not encode silently.
+`columns - {spec.target} - set(spec.evaluation.slices)` - the shared
+`mbt_adapter_base.encoding` helpers do this and split off string columns as
+categoricals. If your framework supports categoricals natively, train them
+that way with deterministic (sorted) train-time levels persisted in the
+artifact, and map unseen levels to missing - see `mbt-xgboost` and
+`mbt-lightgbm`. Reject other non-numeric types (timestamps, nested) with an
+actionable error - do not encode silently.
 
 ### Determinism
 
@@ -106,12 +112,21 @@ class TestMyFrameworkCompliance(TrainingAdapterCompliance):
 The suite asserts: contract metadata, plugin import hygiene, unknown-param
 rejection, seed determinism within your declared tier, `resolve_auto`
 idempotence with no leftover sentinels, train → export → load → evaluate
-round-trip stability, `predict` shape, and that the model actually learns
-on a signal-bearing dataset.
+round-trip stability, `predict` shape (with and without the target column),
+and that the model actually learns on a signal-bearing dataset.
+
+DataAdapters that implement batch scoring (contract 1.1: `build_scoring_input`
++ `open_predictions`) subclass `PredictionStoreCompliance` too - it asserts
+idempotent `write_run` by run key, `scored_at` ordering, column projection,
+and the marker-ledger roundtrip (ADR-21). Reuse
+`mbt_adapter_base.predictions.LocalPredictionStore` for file-based layouts.
 
 ## 5. Contract versioning
 
 `mbt-adapter-base` is SemVer'd independently. Pin `contract_version` to the
 version you built against; core accepts the same major with a minor ≤ its
 own and refuses otherwise with an upgrade hint. Deprecations warn for one
-minor and are removed the next major.
+minor and are removed the next major. Contract 1.1 added the scoring surface
+(`DataAdapter.build_scoring_input`, `DataAdapter.open_predictions`); core
+probes for it with `hasattr`, so 1.0 data adapters keep training and fail
+only `mbt score`, with a clear message.

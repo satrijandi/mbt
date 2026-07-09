@@ -48,17 +48,47 @@ class OptunaTuningEngine:
         import optuna
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
+        pruner = None
+        if spec.pruner == "median":
+            # Deterministic given the trial history; knobs come from the
+            # engine's profile config, not the spec (they are ops tuning,
+            # not model identity).
+            pruner = optuna.pruners.MedianPruner(
+                n_startup_trials=int(self.config.get("n_startup_trials", 5)),
+                n_warmup_steps=int(self.config.get("n_warmup_steps", 5)),
+            )
         study = optuna.create_study(
             direction=spec.objective.direction,
             sampler=optuna.samplers.TPESampler(seed=seed),
+            pruner=pruner,
         )
+        maximize = spec.objective.direction == "maximize"
 
         def run_trial(trial: "optuna.Trial") -> float:
-            return objective(self._suggest(trial, spec))
+            params = self._suggest(trial, spec)
+            if pruner is None:
+                return objective(params)
+
+            def report(step: int, value: float) -> None:
+                # The contract value is higher-is-better; the pruner compares
+                # in study direction, so flip for minimize objectives.
+                trial.report(value if maximize else -value, step)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            return objective(params, report=report)  # type: ignore[call-arg]
 
         study.optimize(run_trial, n_trials=n_trials)
+        pruned = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.PRUNED)
+        complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        if not complete:
+            raise ValueError(
+                "tuning finished with no completed trials (all pruned or failed); "
+                "raise n_startup_trials or drop the pruner"
+            )
         return TuningResult(
             best_params=dict(study.best_params),
             best_value=float(study.best_value),
             n_trials=len(study.trials),
+            n_pruned=pruned,
         )

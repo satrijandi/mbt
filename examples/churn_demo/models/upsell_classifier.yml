@@ -11,7 +11,9 @@ models:
     target: upgraded_90d
     features:
       include: ["*"]
-      exclude: [user_id, churned_90d, plan_type]
+      # id + sibling label are leakage; plan_type trains natively as a
+      # categorical feature (it genuinely drives upsell propensity)
+      exclude: [user_id, churned_90d, account_status]   # ids, sibling label, post-outcome status
 
     hyperparameters:
       max_depth: 3

@@ -15,6 +15,7 @@ falls back to hashing every column - correct, but slow on wide tables.
 
 import glob as globlib
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,9 +26,12 @@ from mbt.contracts import (
     DataBuildContext,
     DatasetLocator,
     DatasetSpec,
+    ScoringInputSpec,
+    ScoringOutputSpec,
     SourceTableLike,
     SplitStrategy,
 )
+from mbt.events.models import LogMessage
 from mbt.exceptions import AdapterError
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
@@ -36,6 +40,7 @@ from mbt_adapter_base.materialization import (
     combine_snapshots,
     write_materialization_metadata,
 )
+from mbt_adapter_base.predictions import LocalPredictionStore
 
 
 def _uri_to_path(uri: str) -> Path:
@@ -57,6 +62,40 @@ class LocalDatasetHandle(MaterializedDatasetHandle):
 
     def __init__(self, directory: Path) -> None:
         super().__init__(directory, adapter="local")
+
+
+@dataclass(frozen=True)
+class _RelationSpec:
+    """The FROM-clause shape shared by datasets and scoring inputs."""
+
+    spine: str  # uid of the single source, or of the spine/label table
+    features: list[str]  # feature table uids; empty for single-source
+    join_columns: list[str]
+    join: str  # "left" | "inner"
+
+
+def _dataset_relation(spec: DatasetSpec) -> _RelationSpec:
+    if spec.inputs is None:
+        assert spec.source is not None
+        return _RelationSpec(spine=spec.source, features=[], join_columns=[], join="left")
+    return _RelationSpec(
+        spine=spec.inputs.label,
+        features=list(spec.inputs.features),
+        join_columns=spec.inputs.join_columns,
+        join=spec.inputs.join,
+    )
+
+
+def _scoring_relation(spec: ScoringInputSpec) -> _RelationSpec:
+    if spec.inputs is None:
+        assert spec.source is not None
+        return _RelationSpec(spine=spec.source, features=[], join_columns=[], join="left")
+    return _RelationSpec(
+        spine=spec.inputs.spine,
+        features=list(spec.inputs.features),
+        join_columns=spec.inputs.join_columns,
+        join=spec.inputs.join,
+    )
 
 
 class LocalDataAdapter:
@@ -129,7 +168,9 @@ class LocalDataAdapter:
 
         con = duckdb.connect()
         try:
-            self._create_base_view(con, spec, ctx)
+            self._create_base_view(
+                con, _dataset_relation(spec), ctx, spec.filters, spec.sample_key_columns
+            )
             if spec.split.strategy is SplitStrategy.TEMPORAL:
                 written = self._write_temporal_splits(con, spec, ctx, output_dir)
             else:
@@ -178,27 +219,25 @@ class LocalDataAdapter:
         files = ", ".join(_sql_str(str(f)) for f in self._matching_files(table))
         return f"read_parquet([{files}])"
 
-    def _base_relation(self, spec: DatasetSpec, ctx: DataBuildContext) -> str:
-        """FROM clause: the single source, or label spine + feature joins."""
-        if spec.inputs is None:
-            assert spec.source is not None
-            return self._table_relation(ctx, spec.source)
-        using = ", ".join(_quote(c) for c in spec.inputs.join_columns)
-        join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
-        sql = f"{self._table_relation(ctx, spec.inputs.label)} AS mbt_label"
-        for i, feature_uid in enumerate(spec.inputs.features):
+    def _base_relation(self, rel: _RelationSpec, ctx: DataBuildContext) -> str:
+        """FROM clause: the single source, or spine + feature joins."""
+        if not rel.features:
+            return self._table_relation(ctx, rel.spine)
+        using = ", ".join(_quote(c) for c in rel.join_columns)
+        join_kind = "LEFT JOIN" if rel.join == "left" else "JOIN"
+        sql = f"{self._table_relation(ctx, rel.spine)} AS mbt_spine"
+        for i, feature_uid in enumerate(rel.features):
             sql += (
                 f" {join_kind} {self._table_relation(ctx, feature_uid)} AS mbt_f{i} USING ({using})"
             )
         return sql
 
     def _digest_columns(
-        self, con: "duckdb.DuckDBPyConnection", spec: DatasetSpec, relation: str
+        self, con: "duckdb.DuckDBPyConnection", sample_keys: list[str], relation: str
     ) -> list[str]:
         """Columns hashed for sampling/splitting: the declared key, else all."""
-        keys = spec.sample_key_columns
-        if keys:
-            return keys
+        if sample_keys:
+            return sample_keys
         described = con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
         return [row[0] for row in described]
 
@@ -208,10 +247,15 @@ class LocalDataAdapter:
         return f"md5_number(concat_ws('|', {prefix}{parts}))"
 
     def _create_base_view(
-        self, con: "duckdb.DuckDBPyConnection", spec: DatasetSpec, ctx: DataBuildContext
+        self,
+        con: "duckdb.DuckDBPyConnection",
+        rel: _RelationSpec,
+        ctx: DataBuildContext,
+        filters: list[str],
+        sample_keys: list[str],
     ) -> None:
-        relation = self._base_relation(spec, ctx)
-        where: list[str] = [f"({f})" for f in spec.filters]
+        relation = self._base_relation(rel, ctx)
+        where: list[str] = [f"({f})" for f in filters]
         sample_fraction = ctx.sample_fraction
         if not 0.0 < sample_fraction <= 1.0:
             raise AdapterError(
@@ -219,7 +263,7 @@ class LocalDataAdapter:
                 hint="set the 'sample_fraction' var in the target's vars",
             )
         if sample_fraction < 1.0:
-            digest = self._digest_sql(self._digest_columns(con, spec, relation))
+            digest = self._digest_sql(self._digest_columns(con, sample_keys, relation))
             threshold = int(sample_fraction * SAMPLE_MODULUS)
             where.append(f"({digest} % {SAMPLE_MODULUS}) < {threshold}")
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
@@ -259,7 +303,7 @@ class LocalDataAdapter:
         fractions["test"] = float(spec.split.test)
 
         seed = spec.split.seed or 0
-        columns = self._digest_columns(con, spec, "mbt_base")
+        columns = self._digest_columns(con, spec.sample_key_columns, "mbt_base")
         rank_key = self._digest_sql(columns, salt=str(seed))
         partition = (
             f"PARTITION BY {_quote(spec.split.stratify_by)} " if spec.split.stratify_by else ""
@@ -284,6 +328,71 @@ class LocalDataAdapter:
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
             written[split] = int(row[0]) if row else 0
         return written
+
+    # -- scoring (contract 1.1, ADR-20/21) -------------------------------------
+
+    def build_scoring_input(
+        self, spec: ScoringInputSpec, ctx: DataBuildContext
+    ) -> LocalDatasetHandle:
+        """Materialize one unlabeled batch as a single ``score`` split.
+
+        Zero rows is a warning, not an error: an empty nightly batch is
+        legitimate (unlike an empty training split).
+        """
+        self._verify_snapshot(ctx)
+        output_dir = ctx.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for stale in output_dir.glob("*"):
+            stale.unlink()
+
+        con = duckdb.connect()
+        try:
+            self._create_base_view(
+                con, _scoring_relation(spec), ctx, spec.filters, spec.sample_key_columns
+            )
+            where = ""
+            if spec.time_column is not None and "score" in ctx.resolved_windows:
+                start, end = ctx.resolved_windows["score"]
+                time_sql = f"CAST({_quote(spec.time_column)} AS TIMESTAMP)"
+                where = (
+                    f" WHERE {time_sql} >= TIMESTAMP '{_iso_to_sql_ts(start)}' "
+                    f"AND {time_sql} < TIMESTAMP '{_iso_to_sql_ts(end)}'"
+                )
+            out = output_dir / "score.parquet"
+            con.execute(f"COPY (SELECT * FROM mbt_base{where}) TO '{out}' (FORMAT PARQUET)")
+            row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
+            count = int(row[0]) if row else 0
+        except duckdb.Error as exc:
+            raise AdapterError(
+                f"scoring input build failed in DuckDB: {exc}",
+                resource=ctx.node.unique_id,
+                hint="check the input's filters, join keys, and window configuration",
+            ) from exc
+        finally:
+            con.close()
+
+        if count == 0:
+            ctx.events.emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=ctx.node.unique_id,
+                    message="scoring input materialized 0 rows; nothing to score",
+                )
+            )
+        write_materialization_metadata(
+            output_dir,
+            snapshot_id=ctx.node.snapshot_id,
+            dataset=ctx.node.name,
+            label_column="",  # unlabeled by design (ADR-20)
+            time_column=spec.time_column,
+            windows=ctx.resolved_windows,
+            sample_fraction=ctx.sample_fraction,
+            row_counts={"score": count},
+        )
+        return LocalDatasetHandle(output_dir)
+
+    def open_predictions(self, output: ScoringOutputSpec) -> LocalPredictionStore:
+        return LocalPredictionStore(self.root / output.path)
 
     # -- reopening -----------------------------------------------------------
 

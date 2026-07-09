@@ -16,6 +16,7 @@ TUNING_BLOCK = """
         max_depth: {type: int, low: 2, high: 6}
         learning_rate: {type: loguniform, low: 0.02, high: 0.3}
       objective: {metric: pr_auc, direction: maximize}
+      pruner: median
 """
 
 
@@ -41,6 +42,9 @@ def test_optuna_tuning_capped_with_nested_trials(demo_copy: Path) -> None:
     client = MlflowClient(tracking_uri=f"sqlite:///{demo_copy}/mlflow.db")
     parent = client.get_run(result["tracking_run_id"])
     assert parent.data.tags["mbt.tuning.n_trials"] == "3"  # capped (FR-TUNE-04)
+    # pruner active through the real xgboost report path; below the pruner's
+    # startup-trial count nothing prunes, deterministically
+    assert parent.data.tags["mbt.tuning.n_pruned"] == "0"
     best_params = json.loads(parent.data.tags["mbt.tuning.best_params"])
     assert set(best_params) == {"max_depth", "learning_rate"}
     # winning params override the spec's static values in the final fit

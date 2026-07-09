@@ -11,7 +11,7 @@ models:
     target: churned_90d
     features:
       include: ["*"]
-      exclude: [user_id, upgraded_90d, plan_type]
+      exclude: [user_id, upgraded_90d, plan_type, account_status]
 
     hyperparameters:
       max_depth: 7

@@ -1,0 +1,35 @@
+# mbt scheduled ground-truth monitoring (ADR-21): evaluate matured
+# predictions against arrived labels; each prediction run is evaluated
+# exactly once (ledger markers in the prediction store).
+name: mbt weekly ground-truth monitor
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"  # Mondays 07:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project
+        run: |
+          pip install -r requirements.txt
+          python scripts/generate_sample_data.py
+      - name: Evaluate matured predictions (prod target)
+        run: mbt monitor --target prod --deep-snapshot
+      - name: Alert on failure
+        # Exit 2 = a realized-metric gate failed: the model is underperforming
+        # in production. Set the MBT_ALERT_WEBHOOK secret to hear about it.
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.MBT_ALERT_WEBHOOK }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "MBT_ALERT_WEBHOOK not set; skipping alert"; exit 0; }
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\":\"mbt ground-truth monitor failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            "$WEBHOOK"

@@ -5,3 +5,9 @@ sources:
       - name: subscribers
         path: data/subscribers/*.parquet
         description: One row per subscriber per monthly snapshot.
+      - name: scoring_batch
+        path: data/scoring_batch/*.parquet
+        description: Fresh unlabeled subscribers to score (last week before the anchor).
+      - name: churn_outcomes
+        path: data/churn_outcomes/*.parquet
+        description: Realized churn outcomes, arriving ~90 days after scoring.

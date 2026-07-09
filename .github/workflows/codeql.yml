@@ -1,0 +1,37 @@
+# Static security analysis (CodeQL) alongside the dependency scan
+# (pip-audit in ci.yml). Requires code scanning to be available on the
+# hosting repo (public repos, or GitHub Advanced Security on private ones).
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1"  # weekly, off the :00 stampede
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # Source only: generated scaffolds are user-project templates and
+          # the docs build is not shipped code.
+          config: |
+            paths:
+              - packages
+            paths-ignore:
+              - packages/mbt-core/src/mbt/cli/_scaffold
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

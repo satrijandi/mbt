@@ -51,6 +51,44 @@ def test_gate_requires_exactly_one_kind() -> None:
     assert GateSpec(metric="pr_auc", compare_to="production", min_delta=0.005).min_delta == 0.005
 
 
+def test_gate_bootstrap_fields_validated() -> None:
+    # bootstrap fields are champion-gate-only (ADR-18)
+    with pytest.raises(ValidationError, match="confidence"):
+        GateSpec(metric="pr_auc", threshold=0.4, confidence=0.9)
+    with pytest.raises(ValidationError, match="bootstrap_resamples"):
+        GateSpec(metric="pr_auc", threshold=0.4, bootstrap_resamples=500)
+    with pytest.raises(ValidationError, match="confidence"):
+        GateSpec(metric="pr_auc", compare_to="production", confidence=1.5)
+    with pytest.raises(ValidationError, match="at least 100"):
+        GateSpec(metric="pr_auc", compare_to="production", bootstrap_resamples=10)
+
+    gate = GateSpec(metric="pr_auc", compare_to="production")
+    assert gate.confidence == 0.95 and gate.bootstrap_resamples == 1000
+    opted_out = GateSpec(metric="pr_auc", compare_to="production", confidence=None)
+    assert opted_out.confidence is None
+
+
+def test_slice_gate_column_must_be_declared_and_well_formed() -> None:
+    def evaluation(slice_key: str, slices: list[str]) -> EvaluationSpec:
+        return EvaluationSpec(
+            protocol=EvaluationProtocol(),
+            metrics=["pr_auc"],
+            gates=[GateSpec(metric="pr_auc", threshold=0.4, slice=slice_key)],
+            slices=slices,
+        )
+
+    spec = ModelSpec.model_validate(
+        _model_kwargs(evaluation=evaluation("plan_type=pro", ["plan_type"]))
+    )
+    assert spec.evaluation.gates[0].slice == "plan_type=pro"
+
+    with pytest.raises(ValidationError, match=r"must appear in evaluation\.slices"):
+        ModelSpec.model_validate(_model_kwargs(evaluation=evaluation("region=emea", ["plan_type"])))
+
+    with pytest.raises(ValidationError, match="column=value"):
+        ModelSpec.model_validate(_model_kwargs(evaluation=evaluation("plan_type", ["plan_type"])))
+
+
 def test_gate_metric_must_be_declared() -> None:
     evaluation = EvaluationSpec(
         protocol=EvaluationProtocol(),

@@ -1,0 +1,9 @@
+# Pinned install set for the reference CI workflows (.github/workflows/*.yml).
+# A floating training environment invalidates the manifest's env digest, so CI
+# always installs from this file, never from bare package names.
+# For a fully transitively pinned, hash-verified lock, run:
+#   uv pip compile --generate-hashes requirements.in -o requirements.txt
+# and commit the result.
+mbt-core==__MBT_VERSION__
+mbt-xgboost==__MBT_VERSION__
+mbt-mlflow==__MBT_VERSION__

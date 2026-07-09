@@ -25,6 +25,7 @@ def normalize(payload: dict[str, Any]) -> dict[str, Any]:
     """Blank machine/checkout-dependent fields; keep everything semantic."""
     metadata = payload["metadata"]
     metadata["env_digest"] = "<env>"
+    metadata["env_freeze_digest"] = "<env>"
     metadata["git"] = {"branch": None, "commit": None, "dirty": False}
     for version in payload.get("adapter_versions", {}).values():
         version["version"] = "<version>"

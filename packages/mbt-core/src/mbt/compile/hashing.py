@@ -60,6 +60,21 @@ def env_digest(fingerprint_packages: list[str]) -> str:
     return _sha256("\n".join(lines).encode("utf-8"))
 
 
+def env_freeze_digest() -> str:
+    """Digest of every installed distribution, pip-freeze-like (FR-COMP-03).
+
+    ``env_digest`` is the targeted signal (Python, mbt packages, adapter
+    fingerprint packages); this digest pins the whole resolved environment
+    so transitive drift - a numpy or scipy bump that changes model numerics
+    without touching any fingerprinted package - is visible in the manifest
+    and checkable at ``--manifest`` execution time (ADR-19).
+    """
+    lines = sorted(
+        f"{(dist.metadata['Name'] or '').lower()}=={dist.version}" for dist in distributions()
+    )
+    return _sha256("\n".join(lines).encode("utf-8"))
+
+
 def manifest_hash(manifest_payload: dict[str, Any]) -> str:
     """Hash of the canonical manifest with volatile metadata blanked (TSD §8.5)."""
     payload = dict(manifest_payload)

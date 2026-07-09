@@ -3,10 +3,12 @@
 import json
 from pathlib import Path
 
+import pytest
 from core_helpers import TEST_ANCHOR, write
 from mbt_testing import FakeRegistryAdapter
 
 from mbt.adapters.registry import AdapterRegistry
+from mbt.exceptions import StateError
 from mbt.execute.orchestrator import InvocationOptions, run_command
 
 DS = "dataset.demo.churn_training"
@@ -36,6 +38,8 @@ def test_run_trains_and_registers(demo_project: Path, fake_registry: AdapterRegi
     assert model.registration.stage == "staging"
     assert model.artifact is not None and model.artifact.uri.startswith("file://")
     assert model.tracking_run_id
+    # adapter-provided importance reaches run_results (FR-DOCS-02)
+    assert model.feature_importance == {"fake_signal": 0.75, "fake_noise": 0.25}
 
     # tracking run persisted with mbt identity tags
     tracking_file = demo_project / "target/fake_tracking" / f"{model.tracking_run_id}.json"
@@ -48,6 +52,69 @@ def test_run_trains_and_registers(demo_project: Path, fake_registry: AdapterRegi
     stored = json.loads((demo_project / "target/run_results.json").read_text())
     assert stored["metadata"]["command"] == "run"
     assert {r["unique_id"] for r in stored["results"]} == {DS, MODEL}
+
+
+def test_manifest_execution_verifies_environment(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """--manifest verifies env digests before executing (ADR-19)."""
+    invoke(demo_project, fake_registry)
+    manifest_file = demo_project / "target" / "manifest.json"
+    payload = json.loads(manifest_file.read_text())
+    assert payload["metadata"]["env_freeze_digest"].startswith("sha256:")
+
+    # same environment: verbatim re-execution just works (no false positive)
+    ok = invoke(demo_project, fake_registry, manifest_path=str(manifest_file))
+    assert ok.exit_code() == 0
+
+    # env_digest mismatch: hard error unless explicitly allowed
+    tampered = {**payload, "metadata": {**payload["metadata"], "env_digest": "sha256:" + "0" * 64}}
+    manifest_file.write_text(json.dumps(tampered))
+    with pytest.raises(StateError, match="env_digest"):
+        invoke(demo_project, fake_registry, manifest_path=str(manifest_file))
+    allowed = invoke(
+        demo_project, fake_registry, manifest_path=str(manifest_file), allow_env_mismatch=True
+    )
+    assert allowed.exit_code() == 0
+
+    # freeze-only mismatch (transitive drift): warns but proceeds
+    tampered = {
+        **payload,
+        "metadata": {**payload["metadata"], "env_freeze_digest": "sha256:" + "1" * 64},
+    }
+    manifest_file.write_text(json.dumps(tampered))
+    assert invoke(demo_project, fake_registry, manifest_path=str(manifest_file)).exit_code() == 0
+
+    # manifests without the field (schema N-1) skip the freeze check
+    tampered = {**payload, "metadata": {**payload["metadata"], "env_freeze_digest": ""}}
+    manifest_file.write_text(json.dumps(tampered))
+    assert invoke(demo_project, fake_registry, manifest_path=str(manifest_file)).exit_code() == 0
+
+
+def test_slice_gates_evaluate_and_block(demo_project: Path, fake_registry: AdapterRegistry) -> None:
+    """Slice gates are evaluated for real and block registration (FR-TEST-04);
+    they are not report-only."""
+    model_yml = demo_project / "models/churn_model.yml"
+    old_gate = (
+        "gates:\n        - metric: pr_auc\n          threshold: \"{{ var('default_threshold') }}\""
+    )
+    new_gate = (
+        "slices: [plan_type]\n"
+        "      gates:\n"
+        "        - metric: pr_auc\n          threshold: 0.99\n          slice: plan_type=pro"
+    )
+    model_yml.write_text(model_yml.read_text().replace(old_gate, new_gate))
+    blocked = invoke(demo_project, fake_registry)
+    assert blocked.exit_code() == 2
+    model = {r.unique_id: r for r in blocked.results}[MODEL]
+    assert model.status == "gate_failed"
+    gate = model.gates[0]
+    assert not gate.passed and gate.slice == "plan_type=pro"
+
+    model_yml.write_text(model_yml.read_text().replace("threshold: 0.99", "threshold: 0.5"))
+    passed = invoke(demo_project, fake_registry)
+    assert passed.exit_code() == 0
+    assert {r.unique_id: r for r in passed.results}[MODEL].gates[0].passed
 
 
 def test_failing_gate_blocks_registration_exit_2(
@@ -139,6 +206,85 @@ def test_dataset_check_failure_fails_downstream(
     assert results.exit_code() == 2
     by_id = {r.unique_id: r for r in results.results}
     assert by_id[DS].status == "test_failed"
+    assert by_id[MODEL].status == "skipped"
+
+
+def test_leakage_scan_runs_undeclared_and_blocks_the_build(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """label_leakage_scan is on by default: a leaky column fails the dataset
+    build with no check declared (the fixture declares only
+    class_balance_report)."""
+    import pyarrow.parquet as pq
+
+    data_file = demo_project / "data" / "subscribers" / "part-000.parquet"
+    table = pq.read_table(data_file)
+    leaky = table.append_column("days_since_cancellation", table.column("churned").cast("float64"))
+    pq.write_table(leaky, data_file)
+
+    results = invoke(demo_project, fake_registry, command="build")
+    assert results.exit_code() == 2
+    by_id = {r.unique_id: r for r in results.results}
+    assert by_id[DS].status == "test_failed"
+    assert by_id[MODEL].status == "skipped"
+
+
+def test_leakage_scan_catches_categorical_leak_in_build(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A STRING column that encodes the label is caught by the undeclared
+    scan too (Cramér's V side; the scan was numeric-only per FEEDBACK 3.6)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    data_file = demo_project / "data" / "subscribers" / "part-000.parquet"
+    table = pq.read_table(data_file)
+    status = pa.array(["churned" if bool(v.as_py()) else "active" for v in table.column("churned")])
+    pq.write_table(table.append_column("subscription_status", status), data_file)
+
+    results = invoke(demo_project, fake_registry, command="build")
+    assert results.exit_code() == 2
+    by_id = {r.unique_id: r for r in results.results}
+    assert by_id[DS].status == "test_failed"
+    scan = next(t for t in by_id[DS].tests if t.name == "label_leakage_scan")
+    assert "subscription_status (V=1.000)" in scan.message
+    assert by_id[MODEL].status == "skipped"
+
+
+def test_no_future_columns_blocks_train_test_overlap_in_build(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A timestamp column whose train-split values reach into the test window
+    blocks the build: per-split window checking (section 3.6; the check
+    previously caught only absolute-future values)."""
+    from datetime import timedelta
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    data_file = demo_project / "data" / "subscribers" / "part-000.parquet"
+    table = pq.read_table(data_file)
+    # events 30 days after each snapshot: late-train rows land in the test window
+    events = pa.array(
+        [v.as_py() + timedelta(days=30) for v in table.column("snapshot_date")],
+        type=pa.timestamp("us"),
+    )
+    pq.write_table(table.append_column("last_event_at", events), data_file)
+
+    dataset_yml = demo_project / "datasets/churn_training.yml"
+    dataset_yml.write_text(
+        dataset_yml.read_text().replace(
+            "checks: [class_balance_report]",
+            "checks: [class_balance_report, no_future_columns]",
+        )
+    )
+
+    results = invoke(demo_project, fake_registry, command="build")
+    assert results.exit_code() == 2
+    by_id = {r.unique_id: r for r in results.results}
+    assert by_id[DS].status == "test_failed"
+    check = next(t for t in by_id[DS].tests if t.name == "no_future_columns")
+    assert "train.last_event_at" in check.message and "temporal leakage" in check.message
     assert by_id[MODEL].status == "skipped"
 
 

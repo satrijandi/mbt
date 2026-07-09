@@ -1,10 +1,10 @@
 """Stable unique_id construction (TSD §4).
 
-``<resource_type>.<project_name>.<name>`` for datasets/models/exposures;
-sources add their group: ``source.<project>.<group>.<table>``.
+``<resource_type>.<project_name>.<name>`` for datasets/models/scoring/
+exposures; sources add their group: ``source.<project>.<group>.<table>``.
 """
 
-RESOURCE_TYPES = ("source", "dataset", "model", "metric", "exposure")
+RESOURCE_TYPES = ("source", "dataset", "model", "metric", "exposure", "scoring")
 
 
 def unique_id(resource_type: str, project: str, name: str) -> str:

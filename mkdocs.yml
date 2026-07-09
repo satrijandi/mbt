@@ -17,10 +17,12 @@ theme:
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
+  - Tutorial: tutorial.md
   - Concepts: concepts.md
   - Spec reference: spec-reference.md
   - CLI reference: cli-reference.md
   - GitOps & CI: gitops.md
+  - Troubleshooting: troubleshooting.md
   - Adapter authoring: adapter-authoring.md
   - Roadmap: roadmap.md
   - v0.1 status: v0.1-status.md
@@ -42,6 +44,10 @@ nav:
       - adr/0015-contract-refinements.md
       - adr/0016-multi-table-inputs-and-key-sampling.md
       - adr/0017-jvm-adapters-and-path-data-access.md
+      - adr/0018-paired-bootstrap-champion-gates.md
+      - adr/0019-env-freeze-digest-and-manifest-verification.md
+      - adr/0020-scoring-resource-and-runtime-champion.md
+      - adr/0021-prediction-store-and-ground-truth-ledger.md
 
 markdown_extensions:
   - admonition

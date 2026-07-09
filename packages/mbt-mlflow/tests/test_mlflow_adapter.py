@@ -11,7 +11,10 @@ from mbt_adapter_base import ArtifactRef, ManifestNode, Stage
 
 
 @pytest.fixture()
-def uri(tmp_path: Path) -> str:
+def uri(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    # mlflow drops its default artifact root (./mlruns) relative to the cwd;
+    # chdir keeps it inside tmp instead of littering the repo root.
+    monkeypatch.chdir(tmp_path)
     return f"sqlite:///{tmp_path}/mlflow.db"
 
 
@@ -70,8 +73,12 @@ def test_nested_tuning_trials(uri: str) -> None:
     assert {r.data.metrics["objective"] for r in children} == {0.39, 0.42}
 
 
-def test_registry_stages_and_champion(uri: str, tmp_path: Path) -> None:
+def test_registry_champion_flow_defaults_to_aliases(uri: str, tmp_path: Path) -> None:
+    """The default flow uses registered-model aliases (stages are deprecated
+    upstream and removed in MLflow 4); mbt's one-stage-per-version semantics
+    must hold on the alias backend."""
     registry = MlflowRegistry({"uri": uri})
+    assert registry.use_aliases
     artifact = _artifact(tmp_path)
     metadata = {"mbt.gates_passed": "true", "mbt.tracking_run_id": ""}
     v1 = registry.register(artifact, "m", metadata)
@@ -85,6 +92,7 @@ def test_registry_stages_and_champion(uri: str, tmp_path: Path) -> None:
     assert champion.artifact.uri == artifact.uri  # reconstructed from tags
     assert champion.tags["mbt.gates_passed"] == "true"
 
+    # promoting vacates the staging slot: canonical aliases are exclusive
     registry.transition(v1, Stage.PRODUCTION)
     assert registry.get_champion("m", Stage.PRODUCTION).version == "1"
     assert registry.get_champion("m", Stage.STAGING) is None
@@ -92,12 +100,36 @@ def test_registry_stages_and_champion(uri: str, tmp_path: Path) -> None:
     assert registry.get_version("m", "99") is None
 
 
-def test_registry_aliases_mode(uri: str, tmp_path: Path) -> None:
-    registry = MlflowRegistry({"uri": uri, "use_aliases": True})
+def test_registry_alias_exclusivity_and_stage_derivation(uri: str, tmp_path: Path) -> None:
+    registry = MlflowRegistry({"uri": uri})
     v1 = registry.register(_artifact(tmp_path), "m", {})
+    registry.transition(v1, Stage.STAGING)
     registry.transition(v1, Stage.PRODUCTION)
-    champion = registry.get_champion("m", Stage.PRODUCTION)
+
+    from mlflow.tracking import MlflowClient
+
+    mv = MlflowClient(tracking_uri=uri, registry_uri=uri).get_model_version("m", "1")
+    assert set(mv.aliases) == {"production"}  # staging alias dropped on promote
+
+    resolved = registry.get_version("m", "1")
+    assert resolved is not None and resolved.stage is Stage.PRODUCTION  # from the alias
+
+
+def test_registry_legacy_stage_mode(uri: str, tmp_path: Path) -> None:
+    """``use_aliases: false`` keeps the stage API for MLflow < 2.9 servers."""
+    registry = MlflowRegistry({"uri": uri, "use_aliases": False})
+    artifact = _artifact(tmp_path)
+    v1 = registry.register(artifact, "m", {"mbt.gates_passed": "true"})
+
+    assert registry.get_champion("m", Stage.STAGING) is None
+    registry.transition(v1, Stage.STAGING)
+    champion = registry.get_champion("m", Stage.STAGING)
     assert champion is not None and champion.version == "1"
+    assert champion.stage is Stage.STAGING
+
+    registry.transition(v1, Stage.PRODUCTION)
+    assert registry.get_champion("m", Stage.PRODUCTION).version == "1"
+    assert registry.get_champion("m", Stage.STAGING) is None
 
 
 def test_plugin_import_hygiene() -> None:

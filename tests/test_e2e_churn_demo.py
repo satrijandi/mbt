@@ -39,7 +39,14 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
     assert churn["registration"]["version"] == "1"
     assert churn["registration"]["stage"] == "staging"
     assert churn["resolved_auto"]["scale_pos_weight"] > 0
-    assert churn["metrics"]["lift_at_decile"] > 1.0  # hook metric computed
+    assert churn["metrics"]["lift_at_0.1"] > 1.0  # builtin lift beats random
+    assert churn["metrics"]["campaign_capture_100"] > 0  # hook metric computed
+    assert churn["metrics"]["pr_auc"] > 0.3  # the gate floor actually gates
+    # calibration is exercised, and the operating point is a usable cutoff:
+    # applying it must be possible (0 < t < 1), i.e. 35% precision is reachable
+    assert 0.0 < churn["metrics"]["brier"] < 0.25
+    assert 0.0 <= churn["metrics"]["ece"] < 0.5
+    assert 0.0 < churn["metrics"]["threshold_at_precision_0.35"] < 1.0
     assert "plan_type=pro" in churn["slices"]  # slice reporting
     baseline_metrics = {uid: results[uid]["metrics"] for uid in MODELS}
 
@@ -108,9 +115,9 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
 
     # ---- 5. promotion verifies recorded gate passes (FR-REG-03) ----
     run_mbt(["promote", "--model", "churn_classifier", "--to", "production"], demo_copy)
-    versions = client.search_model_versions("name = 'churn_classifier'")
-    stages = {v.version: v.current_stage for v in versions}
-    assert "Production" in stages.values()
+    # stages map to registered-model aliases by default (stage API deprecated)
+    promoted = client.get_model_version_by_alias("churn_classifier", "production")
+    assert promoted is not None and promoted.version is not None
 
     # ---- 6. evaluate the production champion on fresh data (FR-RUN-07) ----
     run_mbt(
@@ -130,6 +137,35 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
     evaluated = _results(demo_copy)["model.churn_demo.churn_classifier"]
     assert evaluated["status"] == "success"
     assert evaluated["gates"] and evaluated["gates"][0]["passed"]
+
+    # ---- 7. batch scoring with the production champion (ADR-20) ----
+    run_mbt(["score", "--anchor", DEMO_ANCHOR], demo_copy, timeout=600)
+    scored = _results(demo_copy)["scoring.churn_demo.retention_scoring"]
+    assert scored["status"] == "success"
+    assert scored["metrics"]["rows_scored"] > 500  # ~800 minus filters
+    assert scored["monitors"] and all(m["passed"] for m in scored["monitors"])
+    assert {m["monitor"] for m in scored["monitors"]} >= {"feature_shift", "prediction_shift"}
+    run_dirs = sorted(
+        p.parent for p in (demo_copy / "predictions" / "retention_scores").glob("*/_SUCCESS")
+    )
+    assert len(run_dirs) == 1
+    info = json.loads((run_dirs[0] / "predictions.json").read_text())
+    assert info["model_version"] == str(promoted.version)  # the promoted champion scored
+    assert info["row_count"] == int(scored["metrics"]["rows_scored"])
+
+    # ---- 8. matured ground truth evaluated exactly once (ADR-21) ----
+    matured_anchor = "2026-07-20T00:00:00Z"  # scored_at + 14d maturity has passed
+    run_mbt(["monitor", "--anchor", matured_anchor], demo_copy, timeout=600)
+    monitored = _results(demo_copy)["scoring.churn_demo.retention_scoring"]
+    assert monitored["status"] == "success"
+    assert "evaluated 1 of 1" in monitored["message"]
+    assert monitored["metrics"]["pr_auc"] > 0.3  # realized gate holds on fresh outcomes
+    marker = json.loads((run_dirs[0] / "ground_truth.marker.json").read_text())
+    assert marker["gates_passed"] is True and marker["matched_rows"] > 500
+
+    run_mbt(["monitor", "--anchor", matured_anchor], demo_copy, timeout=600)
+    again = _results(demo_copy)["scoring.churn_demo.retention_scoring"]
+    assert again["message"] == "0 matured prediction runs to evaluate"  # ledger idempotency
 
 
 def test_failing_gate_blocks_registration_with_exit_2(demo_copy: Path) -> None:

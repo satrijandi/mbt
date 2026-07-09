@@ -133,7 +133,10 @@ class MaterializedDatasetHandle:
         for split in sorted(self.splits()):
             n_rows[split] = pq.ParquetFile(self.split_path(split)).metadata.num_rows
 
-        schema = pq.read_schema(self.split_path("train"))
+        # Schema from the train split when present; scoring materializations
+        # hold a single "score" split (ADR-20).
+        schema_split = "train" if "train" in n_rows else min(sorted(n_rows))
+        schema = pq.read_schema(self.split_path(schema_split))
         columns = {field.name: str(field.type) for field in schema}
 
         label_balance: dict[str, float] | None = None

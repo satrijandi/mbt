@@ -17,7 +17,18 @@ jobs:
           python-version: "3.11"
       - name: Install project
         run: |
-          pip install mbt-core mbt-xgboost mbt-mlflow
+          pip install -r requirements.txt
           python scripts/generate_sample_data.py
       - name: Retrain weekly models (prod target)
         run: mbt build --target prod --select tag:weekly
+      - name: Alert on failure
+        # A silently failed scheduled retrain violates continuous training;
+        # set the MBT_ALERT_WEBHOOK secret (Slack/Teams/PagerDuty webhook).
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.MBT_ALERT_WEBHOOK }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "MBT_ALERT_WEBHOOK not set; skipping alert"; exit 0; }
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\":\"mbt scheduled retrain failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            "$WEBHOOK"

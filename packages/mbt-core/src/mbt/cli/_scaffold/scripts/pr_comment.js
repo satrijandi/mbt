@@ -37,7 +37,8 @@ function buildBody() {
 
   const nodes = results.results || [];
   const trained = nodes.filter((r) => r.unique_id.startsWith('model.'));
-  const failed = nodes.filter((r) => ['error', 'gate_failed', 'test_failed'].includes(r.status));
+  const failed = nodes.filter((r) =>
+    ['error', 'gate_failed', 'test_failed', 'monitor_failed'].includes(r.status));
 
   body += `**Target:** \`${results.metadata.target}\` · **Command:** \`${results.metadata.command}\``;
   if (results.metadata.selector) body += ` · **Selector:** \`${results.metadata.selector}\``;

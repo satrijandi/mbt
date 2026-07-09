@@ -1,5 +1,6 @@
 """Tuning semantics with the fake engine (S8-03, ADR-8, FR-TUNE-01..04)."""
 
+import json
 from pathlib import Path
 
 from test_execution import MODEL, invoke
@@ -17,11 +18,10 @@ TUNING_BLOCK = """
 """
 
 
-def _add_tuning(demo_project: Path) -> None:
+def _add_tuning(demo_project: Path, extra: str = "") -> None:
     model_yml = demo_project / "models/churn_model.yml"
-    text = model_yml.read_text().replace(
-        "    evaluation:", TUNING_BLOCK.rstrip() + "\n    evaluation:"
-    )
+    block = TUNING_BLOCK.rstrip() + extra
+    text = model_yml.read_text().replace("    evaluation:", block + "\n    evaluation:")
     model_yml.write_text(text)
 
 
@@ -81,3 +81,20 @@ def test_tuning_never_reads_the_test_split(
     assert splits_evaluated.count("validation") == 4  # one per trial
     assert splits_evaluated.count("test") == 1  # final evaluation only
     assert splits_evaluated.index("test") == len(splits_evaluated) - 1
+
+
+def test_pruner_spec_plumbs_through_the_job(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """`tuning.pruner` parses, survives the job, and lands in tracking tags;
+    the fake engine never prunes, so the count is exactly 0 (the real
+    pruning behavior is covered by the optuna engine tests)."""
+    _add_tuning(demo_project, extra="\n      pruner: median")
+    results = invoke(demo_project, fake_registry, cli_vars={"max_tuning_trials": 3})
+    assert results.exit_code() == 0
+    model = {r.unique_id: r for r in results.results}[MODEL]
+    payload = json.loads(
+        (demo_project / "target/fake_tracking" / f"{model.tracking_run_id}.json").read_text()
+    )
+    assert payload["tags"]["mbt.tuning.n_pruned"] == "0"
+    assert payload["tags"]["mbt.tuning.n_trials"] == "3"

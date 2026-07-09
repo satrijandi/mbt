@@ -9,6 +9,7 @@ dbt-style: ``mbt build --target prod --vars '...'``.
 
 import functools
 import json
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -18,6 +19,12 @@ import click
 import typer
 import yaml
 from rich.table import Table
+
+try:  # newer typer vendors click: its commands raise the vendored exception
+    # types, which are NOT subclasses of the real click's - catch both.
+    from typer._click import exceptions as typer_click_exc
+except ImportError:  # older typer drives the real click directly
+    from click import exceptions as typer_click_exc  # type: ignore[no-redef]
 
 from mbt.cli.common import (
     CLIContext,
@@ -30,7 +37,7 @@ from mbt.cli.common import (
     render_results_table,
     setup_bus,
 )
-from mbt.exceptions import MbtError
+from mbt.exceptions import ConfigError, MbtError
 
 app = typer.Typer(
     name="mbt",
@@ -43,6 +50,29 @@ docs_app = typer.Typer(help="Generate or serve the model cards + lineage site.")
 state_app = typer.Typer(help="Compare manifests (state:modified mechanics).")
 app.add_typer(docs_app, name="docs")
 app.add_typer(state_app, name="state")
+
+
+def _version_callback(show: bool) -> None:
+    if show:
+        import mbt
+
+        typer.echo(f"mbt {mbt.__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the mbt version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """mbt: a declarative build tool for machine learning models."""
 
 
 # -- common option aliases (FR-CLI-04) ------------------------------------------
@@ -79,6 +109,13 @@ ManifestOpt = Annotated[
     str | None,
     typer.Option("--manifest", help="Execute a stored manifest verbatim (FR-RUN-11)."),
 ]
+AllowEnvMismatchOpt = Annotated[
+    bool,
+    typer.Option(
+        "--allow-env-mismatch",
+        help="Downgrade the --manifest env_digest check from error to warning (ADR-19).",
+    ),
+]
 AnchorOpt = Annotated[
     str | None, typer.Option("--anchor", help="Pin the time anchor (ISO timestamp).")
 ]
@@ -95,9 +132,31 @@ def make_ctx(
     vars_: str | None,
     log_format: str,
     quiet: bool,
+    chdir: bool = True,
 ) -> CLIContext:
+    """Build the per-command context and enter the project directory.
+
+    The coordinator chdirs to the project dir so config-relative paths
+    (file:// artifact stores, sqlite URIs, adapter roots) resolve against
+    the project no matter where mbt was invoked - job subprocesses already
+    run with cwd=project_dir, this makes the coordinator match. Paths the
+    user typed on the command line are absolutized against the invocation
+    cwd via ctx.resolve_cli_path BEFORE they are used.
+    """
+    invocation_cwd = Path.cwd()
+    project_dir = (invocation_cwd / project_dir).resolve()
+    if profiles_dir is not None:
+        profiles_dir = (invocation_cwd / profiles_dir).resolve()
+    if chdir:
+        if not project_dir.is_dir():
+            raise ConfigError(
+                f"--project-dir {project_dir} is not a directory",
+                hint="run mbt from a project or point --project-dir at one",
+            )
+        os.chdir(project_dir)
     ctx = CLIContext(
         project_dir=project_dir,
+        invocation_cwd=invocation_cwd,
         profiles_dir=profiles_dir,
         target=target,
         cli_vars=parse_vars(vars_),
@@ -135,7 +194,8 @@ def init(
     """Scaffold a golden-path project (FR-PROJ-01)."""
     from mbt.cli.scaffold import scaffold_project
 
-    cli = make_ctx(project_dir, None, None, None, log_format, quiet)
+    # chdir=False: project_dir is the parent to scaffold into, not a project
+    cli = make_ctx(project_dir, None, None, None, log_format, quiet, chdir=False)
     destination = scaffold_project(name, cli.project_dir)
     out_console.print(f"Created [bold]{destination}[/bold]")
     out_console.print(
@@ -155,23 +215,90 @@ def deps(
     from mbt.deps import install_packages, load_packages
 
     cli = make_ctx(project_dir, None, None, None, log_format, quiet)
-    requirements = install_packages(load_packages(cli.project_dir), dry_run=dry_run)
+    pinned = cli.project_dir / "requirements.txt"
+    requirements = install_packages(
+        load_packages(cli.project_dir),
+        dry_run=dry_run,
+        requirements_file=pinned if pinned.is_file() else None,
+    )
     verb = "would install" if dry_run else "installed"
     out_console.print(f"{verb}: " + (", ".join(requirements) or "(nothing)"))
 
 
 @app.command()
 @guard
-def clean(project_dir: ProjectDirOpt = Path(".")) -> None:
-    """Delete target/ including the dataset cache (FR-RUN-09)."""
+def clean(
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    artifacts_older_than: Annotated[
+        str | None,
+        typer.Option(
+            "--artifacts-older-than",
+            help="Prune artifact-store run prefixes older than a duration (30d, 12h); "
+            "stage champions and the latest run's artifacts always survive.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="List what artifact GC would delete.")
+    ] = False,
+) -> None:
+    """Delete target/ (default), or prune the artifact store (--artifacts-older-than)."""
     import shutil
 
-    target_dir = project_dir / "target"
-    if target_dir.is_dir():
-        shutil.rmtree(target_dir)
-        out_console.print(f"removed {target_dir}")
-    else:
-        out_console.print(f"nothing to clean at {target_dir}")
+    if artifacts_older_than is None:
+        target_dir = project_dir / "target"
+        if target_dir.is_dir():
+            shutil.rmtree(target_dir)
+            out_console.print(f"removed {target_dir}")
+        else:
+            out_console.print(f"nothing to clean at {target_dir}")
+        return
+
+    from datetime import UTC, datetime
+
+    from mbt.adapters.registry import get_registry
+    from mbt.compile.windows import parse_window
+    from mbt.exceptions import ConfigError
+    from mbt.gc import (
+        apply_gc_plan,
+        artifact_gc_plan,
+        champion_artifact_uris,
+        run_results_artifact_uris,
+    )
+    from mbt.parsing import parse_project
+    from mbt.runtime import registry_adapter as build_registry_adapter
+    from mbt.runtime import resolve_artifact_store_uri
+
+    window = parse_window(artifacts_older_than)
+    if window.start.kind != "duration" or window.start.delta is None:
+        raise ConfigError(
+            f"--artifacts-older-than expects a duration, got {artifacts_older_than!r}",
+            hint="examples: 30d, 2w, 12h",
+        )
+    cutoff = datetime.now(tz=UTC) + window.start.delta  # delta is negative
+
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, "text", False)
+    parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
+    profiles = cli.profiles(parsed)
+    store_uri = resolve_artifact_store_uri(
+        profiles.target.artifact_store, cli.project_dir.resolve()
+    )
+    keep_uris = run_results_artifact_uris(cli.project_dir)
+    registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
+    keep_uris |= champion_artifact_uris(parsed, registry_adapter)
+
+    plan = artifact_gc_plan(store_uri, cutoff=cutoff, keep_uris=keep_uris)
+    verb = "would delete" if dry_run else "deleted"
+    for path in plan.delete:
+        out_console.print(f"{verb} {path}")
+    if not dry_run:
+        apply_gc_plan(plan)
+    out_console.print(
+        f"{verb} {len(plan.delete)} run prefix(es) ({plan.freed_bytes} bytes); "
+        f"kept {len(plan.keep)}"
+    )
 
 
 # -- parse / compile ------------------------------------------------------------------
@@ -228,13 +355,15 @@ def compile(
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     print_warnings(parsed)
     profiles = cli.profiles(parsed)
+    path = cli.project_dir / "target" / "manifest.json"
     manifest = compile_project(
         parsed,
         profiles,
-        options=CompileOptions(anchor=parse_anchor(anchor), deep_snapshot=deep_snapshot),
+        options=CompileOptions(
+            anchor=parse_anchor(anchor), deep_snapshot=deep_snapshot, manifest_path=path
+        ),
         cli_vars=cli.cli_vars,
     )
-    path = cli.project_dir / "target" / "manifest.json"
     manifest.write(path)
     out_console.print(f"wrote {path}")
 
@@ -259,6 +388,7 @@ def _register_execution_command(command: str, help_text: str) -> None:
         state: StateOpt = None,
         state_include_env: StateIncludeEnvOpt = False,
         manifest: ManifestOpt = None,
+        allow_env_mismatch: AllowEnvMismatchOpt = False,
         anchor: AnchorOpt = None,
         deep_snapshot: DeepSnapshotOpt = False,
         log_format: LogFormatOpt = "text",
@@ -274,9 +404,10 @@ def _register_execution_command(command: str, help_text: str) -> None:
                 exclude=exclude,
                 threads=threads,
                 fail_fast=fail_fast,
-                state=state,
+                state=cli.resolve_cli_path(state),
                 state_include_env=state_include_env,
-                manifest_path=manifest,
+                manifest_path=cli.resolve_cli_path(manifest),
+                allow_env_mismatch=allow_env_mismatch,
                 anchor=parse_anchor(anchor),
                 deep_snapshot=deep_snapshot,
             )
@@ -292,6 +423,9 @@ _register_execution_command(
     "build", "run + test interleaved in DAG order - the CI workhorse (FR-RUN-01)."
 )
 _register_execution_command("test", "Data tests + model quality gates; never trains (FR-TEST-01).")
+_register_execution_command(
+    "score", "Batch-score fresh data with registered champions + shift monitors (ADR-20)."
+)
 
 
 @app.command()
@@ -312,6 +446,7 @@ def evaluate(
         bool, typer.Option("--gates", help="Apply gate logic to the fresh metrics.")
     ] = False,
     manifest: ManifestOpt = None,
+    allow_env_mismatch: AllowEnvMismatchOpt = False,
     anchor: AnchorOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
@@ -321,11 +456,53 @@ def evaluate(
 
     cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
     results = run_evaluate(
-        cli.invocation("evaluate", manifest_path=manifest, anchor=parse_anchor(anchor)),
+        cli.invocation(
+            "evaluate",
+            manifest_path=cli.resolve_cli_path(manifest),
+            allow_env_mismatch=allow_env_mismatch,
+            anchor=parse_anchor(anchor),
+        ),
         model_name=model,
         version=version,
         stage=stage,
         apply_gates=gates,
+    )
+    render_results_table(results, cli)
+    code = results.exit_code()
+    if code:
+        raise typer.Exit(code)
+
+
+@app.command()
+@guard
+def monitor(
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    select: SelectOpt = None,
+    exclude: ExcludeOpt = None,
+    manifest: ManifestOpt = None,
+    allow_env_mismatch: AllowEnvMismatchOpt = False,
+    anchor: AnchorOpt = None,
+    deep_snapshot: DeepSnapshotOpt = False,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
+) -> None:
+    """Evaluate matured predictions against arrived labels; never trains (ADR-21)."""
+    from mbt.execute.monitor import run_monitor
+
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    results = run_monitor(
+        cli.invocation(
+            "monitor",
+            select=select,
+            exclude=exclude,
+            manifest_path=cli.resolve_cli_path(manifest),
+            allow_env_mismatch=allow_env_mismatch,
+            anchor=parse_anchor(anchor),
+            deep_snapshot=deep_snapshot,
+        )
     )
     render_results_table(results, cli)
     code = results.exit_code()
@@ -366,6 +543,7 @@ def promote(
     registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
 
     if from_file is not None:
+        from_file = Path(cli.resolve_cli_path(str(from_file)) or from_file)
         entries = load_promotions_file(from_file)
         for entry in entries:
             promote_model(
@@ -420,7 +598,7 @@ def ls(
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     nodes: dict[str, SelectableNode] = {}
     paths: dict[str, str] = {}
-    for pool in (parsed.datasets, parsed.models, parsed.exposures):
+    for pool in (parsed.datasets, parsed.models, parsed.scoring, parsed.exposures):
         for uid, res in pool.items():
             nodes[uid] = SelectableNode(
                 unique_id=uid,
@@ -503,10 +681,15 @@ def show(
             f"unknown resource {name!r}",
             hint=f"did you mean {suggestion!r}?" if suggestion else "run 'mbt ls'",
         )
+    # Redact tainted secrets: a spec field may render an env_var() value
+    # (jinja resolve context taints it), so this echoes rendered config the
+    # same way the manifest file does - through redact (NFR-07).
+    from mbt.secrets import redact
+
     if output == "json":
-        typer.echo(json.dumps(found, indent=2))
+        typer.echo(redact(json.dumps(found, indent=2)))
     else:
-        typer.echo(yaml.safe_dump(found, sort_keys=False, default_flow_style=False))
+        typer.echo(redact(yaml.safe_dump(found, sort_keys=False, default_flow_style=False)))
 
 
 @state_app.command("diff")
@@ -520,6 +703,7 @@ def state_diff(
     manifest: ManifestOpt = None,
     output: OutputOpt = "table",
     anchor: AnchorOpt = None,
+    deep_snapshot: DeepSnapshotOpt = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
 ) -> None:
@@ -530,6 +714,8 @@ def state_diff(
     from mbt.state.diff import diff_manifests, load_state
 
     cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    manifest = cli.resolve_cli_path(manifest)
+    state = cli.resolve_cli_path(state) or state
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
     else:
@@ -538,7 +724,7 @@ def state_diff(
         current = compile_project(
             parsed,
             profiles,
-            options=CompileOptions(anchor=parse_anchor(anchor)),
+            options=CompileOptions(anchor=parse_anchor(anchor), deep_snapshot=deep_snapshot),
             cli_vars=cli.cli_vars,
         )
     reference = load_state(state)
@@ -585,6 +771,7 @@ def docs_generate(
     from mbt.parsing import parse_project
 
     cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    manifest = cli.resolve_cli_path(manifest)
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
     else:
@@ -671,15 +858,15 @@ def main() -> None:
         result = app(standalone_mode=False)
         # click returns the code from ctx.exit()/typer.Exit in this mode.
         sys.exit(result if isinstance(result, int) else 0)
-    except click.exceptions.Exit as exc:  # pragma: no cover - version-dependent
+    except (click.exceptions.Exit, typer_click_exc.Exit) as exc:
         sys.exit(exc.exit_code)
-    except click.UsageError as exc:
+    except (click.UsageError, typer_click_exc.UsageError) as exc:
         exc.show(file=sys.stderr)
         sys.exit(1)
-    except click.ClickException as exc:
+    except (click.ClickException, typer_click_exc.ClickException) as exc:
         exc.show(file=sys.stderr)
         sys.exit(1)
-    except click.Abort:
+    except (click.Abort, typer_click_exc.Abort):
         err_console.print("aborted")
         sys.exit(1)
 

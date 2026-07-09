@@ -5,7 +5,7 @@ dependencies and is fully unit-testable (FR-TEST-02/03/06).
 """
 
 from mbt.artifacts.run_results import GateResult
-from mbt.contracts import DeterminismTier, GateSpec, MetricResults, MetricSpec
+from mbt.contracts import BootstrapDelta, DeterminismTier, GateSpec, MetricResults, MetricSpec
 from mbt.events import get_bus
 from mbt.events.models import GateEvaluated, LogMessage
 from mbt.exceptions import MbtError
@@ -20,7 +20,10 @@ def _metric_value(results: MetricResults, gate: GateSpec, *, who: str, resource:
             raise MbtError(
                 f"gate on slice {gate.slice!r} has no slice metrics for {who}",
                 resource=resource,
-                hint="declare the slice column under evaluation.slices",
+                hint=(
+                    "the slice value must occur in the test split with both classes "
+                    "present; degenerate slices are dropped from metrics"
+                ),
             )
         pool = slice_pool
     if gate.metric not in pool:
@@ -41,6 +44,7 @@ def evaluate_gates(
     champion_version: str | None,
     metric_specs: list[MetricSpec],
     determinism: DeterminismTier | None = None,
+    champion_delta_bounds: dict[str, BootstrapDelta] | None = None,
 ) -> list[GateResult]:
     """Evaluate all gates for one model; emits GateEvaluated events."""
     bus = get_bus()
@@ -60,6 +64,7 @@ def evaluate_gates(
             result = GateResult(
                 metric=gate.metric,
                 kind="threshold",
+                slice=gate.slice,
                 passed=passed,
                 expected=gate.threshold,
                 actual=actual,
@@ -71,6 +76,7 @@ def evaluate_gates(
             result = GateResult(
                 metric=gate.metric,
                 kind="champion",
+                slice=gate.slice,
                 passed=True,
                 actual=actual,
                 champion_version=None,
@@ -90,16 +96,46 @@ def evaluate_gates(
         else:
             champion_value = _metric_value(champion, gate, who="the champion", resource=resource)
             delta = (actual - champion_value) if greater else (champion_value - actual)
-            result = GateResult(
-                metric=gate.metric,
-                kind="champion",
-                passed=delta >= gate.min_delta,
-                actual=actual,
-                champion_version=champion_version,
-                champion_value=champion_value,
-                min_delta=gate.min_delta,
-                actual_delta=round(delta, 12),
-            )
+            bound = (champion_delta_bounds or {}).get(gate.metric)
+            if bound is not None and gate.confidence is not None and gate.slice is None:
+                # Paired-bootstrap criterion (ADR-18): the delta must clear
+                # min_delta at the gate's one-sided confidence, not merely on
+                # the point estimate, so noise cannot promote a challenger.
+                if bound.n_resamples > 0:
+                    message = (
+                        f"paired bootstrap ({bound.n_resamples} resamples): delta lower "
+                        f"bound {bound.lower:.6f} at {bound.confidence:.0%} confidence"
+                    )
+                else:
+                    message = "bootstrap degenerate (no valid resamples); point delta used"
+                result = GateResult(
+                    metric=gate.metric,
+                    kind="champion",
+                    slice=gate.slice,
+                    passed=bound.lower >= gate.min_delta,
+                    actual=actual,
+                    champion_version=champion_version,
+                    champion_value=champion_value,
+                    min_delta=gate.min_delta,
+                    actual_delta=round(delta, 12),
+                    delta_lower=round(bound.lower, 12),
+                    confidence=bound.confidence,
+                    message=message,
+                )
+            else:
+                # Point-estimate fallback: slice gates, hook metrics, or an
+                # explicit ``confidence: null`` opt-out.
+                result = GateResult(
+                    metric=gate.metric,
+                    kind="champion",
+                    slice=gate.slice,
+                    passed=delta >= gate.min_delta,
+                    actual=actual,
+                    champion_version=champion_version,
+                    champion_value=champion_value,
+                    min_delta=gate.min_delta,
+                    actual_delta=round(delta, 12),
+                )
         results.append(result)
         bus.emit(
             GateEvaluated(

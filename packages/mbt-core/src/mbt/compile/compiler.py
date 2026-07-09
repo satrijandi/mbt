@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 import mbt
@@ -22,10 +23,10 @@ from mbt.artifacts.manifest import (
     ManifestMetadata,
     ManifestSource,
 )
-from mbt.compile.hashing import config_hash, env_digest, input_hash
+from mbt.compile.hashing import config_hash, env_digest, env_freeze_digest, input_hash
 from mbt.compile.windows import format_ts, parse_window
 from mbt.config.profiles import LoadedProfiles
-from mbt.contracts import DatasetSpec, ManifestNode, ModelSpec, SplitStrategy
+from mbt.contracts import DatasetSpec, ManifestNode, ModelSpec, ScoringSpec, SplitStrategy
 from mbt.dag.graph import topological_order
 from mbt.events import get_bus
 from mbt.events.models import AdapterWarning, CompileCompleted, CompileStarted
@@ -42,6 +43,8 @@ from mbt_adapter_base.materialization import combine_snapshots
 class CompileOptions:
     anchor: datetime | None = None
     deep_snapshot: bool = False
+    manifest_path: Path | None = None
+    """Where the caller intends to write the manifest; shown in events only."""
 
 
 def _now_anchor() -> datetime:
@@ -78,6 +81,10 @@ def compile_project(
     rendered_models = {
         uid: _resolve_model(res, parsed, resolve_ctx, anchor, registry, report)
         for uid, res in parsed.models.items()
+    }
+    rendered_scoring = {
+        uid: _resolve_scoring(res, parsed, resolve_ctx, anchor)
+        for uid, res in parsed.scoring.items()
     }
     report.raise_if_errors()
 
@@ -132,12 +139,23 @@ def compile_project(
             hooks_path=res.hooks_path,
             hooks_hash=hooks_hash,
         )
+    for uid, res in parsed.scoring.items():
+        scoring_spec, config, resolved = rendered_scoring[uid]
+        nodes[uid] = ManifestNode(
+            unique_id=uid,
+            resource_type="scoring",
+            name=res.name,
+            path=res.path,
+            depends_on=res.depends_on,
+            config=config,
+            resolved=resolved,
+            snapshot_id=_scoring_snapshot(scoring_spec, snapshots),
+        )
 
     _hash_nodes(parsed, nodes)
 
     # 4. environment digest and adapter versions
-    _preload_target_plugins(profiles, registry)
-    digest = env_digest(registry.fingerprint_packages())
+    digest, freeze_digest = current_env_digests(profiles, registry)
     adapter_versions = _adapter_versions(parsed, profiles, registry)
 
     manifest = Manifest(
@@ -151,6 +169,7 @@ def compile_project(
             deep_snapshot=options.deep_snapshot,
             target_config=profiles.raw_target,
             env_digest=digest,
+            env_freeze_digest=freeze_digest,
             git=GitInfo.model_validate(collect_git_info(parsed.project_dir)),
         ),
         nodes=nodes,
@@ -182,6 +201,7 @@ def compile_project(
         CompileCompleted(
             nodes=len(nodes),
             anchor=anchor_iso,
+            manifest_path=str(options.manifest_path) if options.manifest_path else "",
             elapsed_s=time.monotonic() - started,
         )
     )
@@ -254,6 +274,30 @@ def _resolve_dataset(
     return spec, spec.model_dump(mode="json"), resolved
 
 
+def _resolve_scoring(
+    res: ParsedResource,
+    parsed: ParsedProject,
+    ctx: ResolveContext,
+    anchor: datetime,
+) -> tuple[ScoringSpec, dict[str, Any], dict[str, Any]]:
+    rendered = parsed.renderer.resolve(
+        res.raw, ctx, resource=res.unique_id, path=parsed.project_dir / res.path
+    )
+    try:
+        spec = ScoringSpec.model_validate(rendered)
+    except Exception as exc:
+        raise CompilationError(
+            f"scoring config invalid after target rendering: {exc}",
+            resource=res.unique_id,
+            path=res.path,
+        ) from exc
+    resolved: dict[str, Any] = {}
+    if spec.input.window is not None:
+        start, end = parse_window(spec.input.window).resolve(anchor)
+        resolved["windows"] = {"score": [format_ts(start), format_ts(end)]}
+    return spec, spec.model_dump(mode="json"), resolved
+
+
 def _resolve_model(
     res: ParsedResource,
     parsed: ParsedProject,
@@ -299,10 +343,15 @@ def _pin_snapshots(
     registry: AdapterRegistry,
     deep: bool,
 ) -> dict[str, str | None]:
-    """Snapshot every source referenced by at least one dataset (TSD §8.3)."""
+    """Snapshot every source referenced by a dataset or scoring input (TSD §8.3).
+
+    Ground-truth label sources are pinned too (recorded on the manifest's
+    sources for observability), but they never enter a scoring node's
+    ``snapshot_id`` (ADR-20).
+    """
     referenced: set[str] = set()
-    for dataset in parsed.datasets.values():
-        referenced.update(dep for dep in dataset.depends_on if dep.startswith("source."))
+    for res in (*parsed.datasets.values(), *parsed.scoring.values()):
+        referenced.update(dep for dep in res.depends_on if dep.startswith("source."))
     if not referenced:
         return {}
     adapter = build_data_adapter(profiles, parsed.project_dir, registry)
@@ -330,6 +379,19 @@ def _dataset_snapshot(
     return combine_snapshots({dep: snapshots[dep] for dep in res.depends_on if dep in snapshots})
 
 
+def _scoring_snapshot(spec: ScoringSpec, snapshots: dict[str, str | None]) -> str | None:
+    """Input sources only: the ground-truth label table is lineage, not
+    identity (ADR-20) - labels maturing later must never mark a scoring
+    node modified. In the resolved spec, source() calls already rendered
+    to source unique_ids."""
+    if spec.input.source is not None:
+        uids = [spec.input.source]
+    else:
+        assert spec.input.inputs is not None  # source XOR inputs, validated
+        uids = [spec.input.inputs.spine, *spec.input.inputs.features]
+    return combine_snapshots({uid: snapshots[uid] for uid in uids if uid in snapshots})
+
+
 # -- hashing ---------------------------------------------------------------------
 
 
@@ -347,6 +409,16 @@ def _hash_nodes(parsed: ParsedProject, nodes: dict[str, ManifestNode]) -> None:
 
 
 # -- environment ------------------------------------------------------------------
+
+
+def current_env_digests(profiles: LoadedProfiles, registry: AdapterRegistry) -> tuple[str, str]:
+    """(env_digest, env_freeze_digest) of the running environment.
+
+    Shared by compile and by ``--manifest`` execution so both sides compute
+    the digests identically (ADR-19).
+    """
+    _preload_target_plugins(profiles, registry)
+    return env_digest(registry.fingerprint_packages()), env_freeze_digest()
 
 
 def _preload_target_plugins(profiles: LoadedProfiles, registry: AdapterRegistry) -> None:

@@ -11,8 +11,10 @@ permissions:
   pull-requests: write
 
 env:
-  # Where prod builds publish their manifests (FR-STATE-03). Point this at
-  # s3://<bucket>/mbt/<project>/prod/manifests/latest.json in real setups.
+  # Local path where the prod baseline (mbt-state branch) materializes for
+  # --state. Real setups can point this straight at
+  # s3://<bucket>/mbt/<project>/prod/manifests/latest.json and drop the
+  # fetch step (FR-STATE-03).
   MBT_STATE_URI: state/prod/latest.json
 
 jobs:
@@ -25,32 +27,35 @@ jobs:
           python-version: "3.11"
       - name: Install project
         run: |
-          pip install mbt-core mbt-xgboost mbt-mlflow
+          pip install -r requirements.txt
           python scripts/generate_sample_data.py
       - name: Parse and compile
         run: |
           mbt parse
-          mbt compile --target dev
-      - name: Restore prod state manifest
+          # --deep-snapshot everywhere in CI: fresh checkouts rewrite mtimes,
+          # so the default mtime snapshots would flag every dataset as
+          # modified on every run (ADR-11). One token scheme, both sides.
+          mbt compile --target dev --deep-snapshot
+      - name: Restore prod state baseline (mbt-state branch)
         id: state
         run: |
-          if [ -f "$MBT_STATE_URI" ]; then
+          if bash scripts/fetch_state.sh "$MBT_STATE_URI"; then
             echo "have_state=true" >> "$GITHUB_OUTPUT"
           else
             echo "have_state=false" >> "$GITHUB_OUTPUT"
-            echo "No prod manifest yet; building everything (bootstrap)."
+            echo "No prod baseline yet; building everything (bootstrap)."
           fi
       - name: State diff
         if: steps.state.outputs.have_state == 'true'
         run: |
-          mbt state diff --state "$MBT_STATE_URI" --output json > target/state_diff.json
+          mbt state diff --state "$MBT_STATE_URI" --deep-snapshot --output json > target/state_diff.json
           cat target/state_diff.json
       - name: Build modified subgraph (dev target)
         run: |
           if [ "${{ steps.state.outputs.have_state }}" = "true" ]; then
-            mbt build --target dev --select state:modified+ --state "$MBT_STATE_URI"
+            mbt build --target dev --deep-snapshot --select state:modified+ --state "$MBT_STATE_URI"
           else
-            mbt build --target dev
+            mbt build --target dev --deep-snapshot
           fi
       - name: Post PR comment
         if: always()

@@ -1,0 +1,46 @@
+# Live external-system integration tier (B-tier of the integration-test
+# plan): runs nightly and on demand, never on PRs (fork PRs cannot see
+# secrets, and a flaky external system must not block merges). Each job
+# no-ops with an explicit notice when its secrets are not configured.
+name: Live integration
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  snowflake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Sync workspace
+        run: uv sync
+      - name: Materialize key-pair credential (when configured)
+        if: env.SNOWFLAKE_PRIVATE_KEY != ''
+        run: |
+          umask 077
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY" > "$RUNNER_TEMP/snowflake_key.p8"
+          echo "SNOWFLAKE_PRIVATE_KEY_FILE=$RUNNER_TEMP/snowflake_key.p8" >> "$GITHUB_ENV"
+      - name: Live Snowflake suite
+        if: env.SNOWFLAKE_ACCOUNT != ''
+        env:
+          MBT_LIVE_SNOWFLAKE: "1"
+        run: uv run pytest -q -m live_snowflake --timeout 900 -rA
+      - name: Not configured
+        if: env.SNOWFLAKE_ACCOUNT == ''
+        run: echo "SNOWFLAKE_* secrets are not configured - live Snowflake suite was not run."

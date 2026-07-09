@@ -19,7 +19,8 @@ from mbt.dag.selector import SelectableNode
 from mbt.exceptions import StateError
 from mbt.secrets import redact
 
-MANIFEST_SCHEMA_VERSION = 1
+#: v2 added the ``scoring`` node resource_type (ADR-20).
+MANIFEST_SCHEMA_VERSION = 2
 #: Core reads schema N and N-1 (TSD §19).
 _READABLE_VERSIONS = (MANIFEST_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION - 1)
 
@@ -48,6 +49,9 @@ class ManifestMetadata(BaseModel):
     #: as written so secrets never enter the manifest (TSD §18, ADR-5).
     target_config: dict[str, Any] = Field(default_factory=dict)
     env_digest: str = ""
+    #: Digest of the full installed distribution set (pip-freeze-like);
+    #: captures transitive drift env_digest cannot see (ADR-19).
+    env_freeze_digest: str = ""
     git: GitInfo = Field(default_factory=GitInfo)
 
 

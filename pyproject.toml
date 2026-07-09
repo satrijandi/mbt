@@ -7,6 +7,16 @@ requires-python = ">=3.11"
 [tool.uv]
 package = false
 
+# Sparkling Water pins pyspark <3.6 while mbt-spark rides Spark 4 (ADR-17);
+# forking the resolution keeps the dev lock on current Spark. The sparkling
+# backend is exercised against its own pinned resolution, not the dev env.
+conflicts = [
+    [
+        { group = "dev" },
+        { package = "mbt-h2o", extra = "sparkling" },
+    ],
+]
+
 [tool.uv.workspace]
 members = ["packages/*"]
 
@@ -37,13 +47,19 @@ dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
     "hypothesis>=6.100",
-    "mypy>=1.10",
-    "ruff>=0.5",
-    "yamllint>=1.35",
+    # Lint-stack floors track the versions the repo actually enforces
+    # (pre-commit revs / the strict-clean mypy claim); Renovate keeps them
+    # grouped with the locked versions.
+    "mypy>=2.0",
+    "ruff>=0.15",
+    "yamllint>=1.38",
     "pre-commit>=3.7",
     "jsonschema>=4.22",
-    "types-PyYAML",
+    "types-PyYAML>=6.0",
     "mkdocs-material>=9.5",
+    "moto[s3]>=5",
+    "pytest-cov>=5",
+    "pip-audit>=2.7",
 ]
 
 [tool.ruff]
@@ -111,6 +127,7 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "mbt_adapter_base.materialization",
+    "mbt_adapter_base.predictions",
     "mbt_snowflake.adapter",
     "mbt_h2o.adapter",
     "mbt_spark.data",
@@ -118,6 +135,30 @@ module = [
     "mbt.execute.job",
 ]
 disable_error_code = ["no-untyped-call", "attr-defined"]
+
+[tool.coverage.run]
+# Coordinator-process coverage; training-job subprocesses are not traced.
+# Subprocess-side modules (execute/job.py, plugin entry points) are held at
+# 100% by in-process unit tests that call their functions directly.
+source_pkgs = [
+    "mbt",
+    "mbt_adapter_base",
+    "mbt_xgboost",
+    "mbt_lightgbm",
+    "mbt_mlflow",
+    "mbt_optuna",
+    "mbt_snowflake",
+    "mbt_testing",
+]
+omit = ["*/_scaffold/*"]
+
+[tool.coverage.report]
+precision = 1
+skip_empty = true
+# The fast suite covers every line; CI's test job runs with --cov, so any
+# uncovered new line fails the build. JVM-bound packages (mbt-spark, mbt-h2o)
+# are exercised by the e2e tier instead and stay outside source_pkgs.
+fail_under = 100
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -130,12 +171,15 @@ testpaths = [
     "packages/mbt-spark/tests",
     "packages/mbt-optuna/tests",
     "packages/mbt-lightgbm/tests",
+    "packages/mbt-testing/tests",
     "tests",
 ]
 addopts = "-q --strict-markers"
 markers = [
     "e2e: end-to-end tests exercising the full CLI loop (slower)",
     "perf: performance budget tests (NFR-03)",
+    "live: live external-system integration tests (opt-in via MBT_LIVE_* env vars)",
+    "live_snowflake: live Snowflake tests (MBT_LIVE_SNOWFLAKE=1 + SNOWFLAKE_* env vars; see packages/mbt-snowflake/README.md)",
 ]
 timeout = 600
 

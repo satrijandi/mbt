@@ -1,7 +1,7 @@
 exposures:
   - name: retention_campaign_job
     type: batch_job
-    depends_on: [ref('churn_classifier')]
+    depends_on: [ref('retention_scoring')]
     owner: lifecycle-eng@example.com
     url: https://internal.example.com/jobs/retention-campaign
-    description: Nightly batch scoring feeding the retention campaign tool.
+    description: Consumes the retention_scoring predictions for campaign targeting.

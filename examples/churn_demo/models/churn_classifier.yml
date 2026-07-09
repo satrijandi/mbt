@@ -11,7 +11,7 @@ models:
     target: churned_90d
     features:
       include: ["*"]
-      exclude: [user_id, upgraded_90d, plan_type]   # id + sibling label are leakage
+      exclude: [user_id, upgraded_90d, plan_type, account_status]   # id, sibling label, post-outcome status
 
     hyperparameters:
       max_depth: 4
@@ -21,7 +21,11 @@ models:
 
     evaluation:
       protocol: {split: temporal}
-      metrics: [pr_auc, roc_auc, logloss, lift_at_decile]
+      # brier/ece: interventions consume the probabilities, so calibration
+      # is first-class; threshold_at_precision_0.35 is the deployable score
+      # cutoff for a 35%-precision outreach campaign (operating point).
+      metrics: [pr_auc, roc_auc, logloss, brier, ece,
+                threshold_at_precision_0.35, lift_at_0.1, campaign_capture_100]
       gates:
         - metric: pr_auc
           threshold: "{{ var('pr_auc_floor') }}"

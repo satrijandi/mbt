@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     "mbt-adapter-base[metrics]>=0.1.0,<0.2",
-    "lightgbm>=4.0",
+    "lightgbm>=4.4",  # first release with macOS arm64 wheels
     "numpy>=1.26",
 ]
 

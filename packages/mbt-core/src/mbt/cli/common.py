@@ -17,6 +17,7 @@ from mbt.events.models import LogMessage
 from mbt.exceptions import ConfigError, MbtError
 from mbt.execute.orchestrator import InvocationOptions
 from mbt.parsing import ParsedProject
+from mbt.secrets import redact
 
 err_console = Console(stderr=True, highlight=False)
 out_console = Console(highlight=False)
@@ -27,11 +28,28 @@ class CLIContext:
     """Global flag state shared by all commands (FR-CLI-04)."""
 
     project_dir: Path = Path(".")
+    #: Where the user invoked mbt. The coordinator chdirs to project_dir so
+    #: config-relative paths (file:// stores, sqlite URIs, adapter roots)
+    #: resolve against the project, exactly like job subprocesses (which
+    #: always run with cwd=project_dir); paths TYPED on the command line
+    #: stay shell-relative via resolve_cli_path.
+    invocation_cwd: Path = field(default_factory=Path.cwd)
     profiles_dir: Path | None = None
     target: str | None = None
     cli_vars: dict[str, Any] = field(default_factory=dict)
     log_format: str = "text"
     quiet: bool = False
+
+    def resolve_cli_path(self, value: str | None) -> str | None:
+        """Absolutize a path the user typed on the command line.
+
+        Shell convention: CLI path arguments are relative to where the user
+        ran mbt, never to the project dir (the coordinator has already
+        chdir'd there). URIs (anything with ``://``) pass through untouched.
+        """
+        if value is None or "://" in value:
+            return value
+        return str((self.invocation_cwd / value).resolve())
 
     def profiles(self, parsed: ParsedProject) -> LoadedProfiles:
         return load_profiles(
@@ -96,13 +114,17 @@ def setup_bus(ctx: CLIContext) -> None:
 
 
 def fail(exc: MbtError) -> "typer.Exit":
-    err_console.print(f"[bold red]Error:[/bold red] {exc.message}")
+    # Redact tainted secrets: the CLI error path is a serialization path too,
+    # and AdapterError.wrap embeds raw underlying exceptions that can carry a
+    # connection string or token (NFR-07 defense in depth, like the event/
+    # manifest/run_results sinks).
+    err_console.print(f"[bold red]Error:[/bold red] {redact(exc.message)}")
     if exc.resource:
-        err_console.print(f"  resource: {exc.resource}")
+        err_console.print(f"  resource: {redact(exc.resource)}")
     if exc.path:
-        err_console.print(f"  file: {exc.path}")
+        err_console.print(f"  file: {redact(exc.path)}")
     if exc.hint:
-        err_console.print(f"  [yellow]hint:[/yellow] {exc.hint}")
+        err_console.print(f"  [yellow]hint:[/yellow] {redact(exc.hint)}")
     return typer.Exit(exc.exit_code)
 
 
@@ -111,6 +133,12 @@ def print_warnings(parsed: ParsedProject) -> None:
 
     for issue in parsed.report.warnings:
         get_bus().emit(LogMessage(level="warn", message=issue.format()))
+
+
+def _format_metric(value: float) -> str:
+    """Whole-number metrics (counts like ``rows_scored``) render as integers;
+    genuine fractional metrics (pr_auc, logloss, ...) keep four decimals."""
+    return str(int(value)) if float(value).is_integer() else f"{value:.4f}"
 
 
 def render_results_table(results: RunResults, ctx: CLIContext) -> None:
@@ -126,17 +154,21 @@ def render_results_table(results: RunResults, ctx: CLIContext) -> None:
         "error": "red",
         "gate_failed": "red",
         "test_failed": "red",
+        "monitor_failed": "red",
         "skipped": "yellow",
     }
     for result in results.results:
         detail = ""
         if result.metrics:
             top = sorted(result.metrics.items())[:3]
-            detail = "  ".join(f"{k}={v:.4f}" for k, v in top)
+            detail = "  ".join(f"{k}={_format_metric(v)}" for k, v in top)
         if result.registration:
             detail += f"  -> {result.registration.name} v{result.registration.version}"
         if result.message and result.status != "success":
-            detail = result.message[:100]
+            # First line only: an errored node's message is str(MbtError),
+            # whose later lines repeat the resource (already the node column)
+            # and the hint (shown fully in the event log above the table).
+            detail = result.message.splitlines()[0][:100]
         table.add_row(
             result.unique_id,
             f"[{styles.get(result.status, '')}]{result.status}[/]",

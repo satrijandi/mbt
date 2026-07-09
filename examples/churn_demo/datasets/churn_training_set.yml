@@ -18,4 +18,10 @@ datasets:
       - no_future_columns
       - not_null:
           columns: [churned_90d, snapshot_date]
+      # account_status is generated post-outcome and literally encodes the
+      # label - a deliberate teaching asset. Remove this reviewed exclusion
+      # and the always-on scan blocks the build at V=1.000; the exclusion
+      # (and the fact the leak stays leaky) is pinned by tests/test_no_leakage.py.
+      - label_leakage_scan:
+          exclude: [account_status]
     tags: [churn]

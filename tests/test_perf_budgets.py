@@ -1,7 +1,14 @@
 """Performance budgets (NFR-03): parse < 2 s and compile < 10 s at 50
-resources; per-node execution overhead < 2 s."""
+resources; per-node execution overhead < 2 s.
+
+Budgets bound achievable speed, so each is measured as the BEST of a few
+runs after a warmup: a single sample on a shared CI runner measures the
+noisy neighbor, not the code (FEEDBACK 2.7). The budget numbers themselves
+are the NFR-03 contract and stay untouched.
+"""
 
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,6 +22,18 @@ from mbt.parsing import parse_project
 pytestmark = pytest.mark.perf
 
 N_MODELS = 40  # + 10 datasets = 50 resources
+MEASURE_RUNS = 3
+
+
+def best_of(fn: Callable[[], object], runs: int = MEASURE_RUNS) -> float:
+    """Minimum wall-clock over `runs` calls, after one untimed warmup."""
+    fn()
+    best = float("inf")
+    for _ in range(runs):
+        started = time.monotonic()
+        fn()
+        best = min(best, time.monotonic() - started)
+    return best
 
 
 def _write(path: Path, text: str) -> None:
@@ -28,12 +47,14 @@ def big_project(tmp_path_factory) -> Path:
     _write(project / "mbt_project.yml", 'name: perf\nversion: "1.0"\n')
     _write(
         project / "profiles.yml",
+        # absolute roots: bare `adapter: fake` defaults to ./target/... which
+        # resolves against the pytest cwd and litters the repo root
         "perf:\n  target: dev\n  outputs:\n    dev:\n"
         "      data: {adapter: local, config: {root: .}}\n"
-        "      tracking: {adapter: fake}\n"
-        "      registry: {adapter: fake}\n"
+        f"      tracking: {{adapter: fake, config: {{root: {project}/target/fake_tracking}}}}\n"
+        f"      registry: {{adapter: fake, config: {{root: {project}/target/fake_registry}}}}\n"
         "      compute: {adapter: fake}\n"
-        "      artifact_store: file://./target/artifacts\n",
+        f"      artifact_store: file://{project}/target/artifacts\n",
     )
     _write(
         project / "sources.yml",
@@ -80,40 +101,48 @@ def big_project(tmp_path_factory) -> Path:
 
 
 def test_parse_under_2s_at_50_resources(big_project: Path) -> None:
-    started = time.monotonic()
-    parsed = parse_project(big_project)
-    elapsed = time.monotonic() - started
-    assert len(parsed.nodes) == 50
-    assert elapsed < 2.0, f"parse took {elapsed:.2f}s (budget 2s, NFR-03)"
+    assert len(parse_project(big_project).nodes) == 50
+    elapsed = best_of(lambda: parse_project(big_project))
+    assert elapsed < 2.0, f"parse took {elapsed:.2f}s best-of-{MEASURE_RUNS} (budget 2s, NFR-03)"
 
 
 def test_compile_under_10s_at_50_resources(big_project: Path) -> None:
     parsed = parse_project(big_project)
     profiles = load_profiles("perf", big_project, project_vars=parsed.project.vars)
     anchor = datetime.fromisoformat(DEMO_ANCHOR.replace("Z", "+00:00")).astimezone(UTC)
-    started = time.monotonic()
-    manifest = compile_project(parsed, profiles, options=CompileOptions(anchor=anchor))
-    elapsed = time.monotonic() - started
-    assert len(manifest.nodes) == 50
-    assert elapsed < 10.0, f"compile took {elapsed:.2f}s (budget 10s, NFR-03)"
+    assert len(compile_project(parsed, profiles, options=CompileOptions(anchor=anchor)).nodes) == 50
+    elapsed = best_of(
+        lambda: compile_project(parsed, profiles, options=CompileOptions(anchor=anchor))
+    )
+    assert elapsed < 10.0, (
+        f"compile took {elapsed:.2f}s best-of-{MEASURE_RUNS} (budget 10s, NFR-03)"
+    )
 
 
 def test_per_node_overhead_under_2s(big_project: Path) -> None:
     """Execution overhead per node, excluding training itself (fake adapter
-    training is ~instant, so measured time ≈ overhead)."""
+    training is ~instant, so measured time ≈ overhead). Per-node minimum
+    across measured invocations, after one untimed warmup run."""
     from mbt.execute.orchestrator import InvocationOptions, run_command
 
     anchor = datetime.fromisoformat(DEMO_ANCHOR.replace("Z", "+00:00"))
-    results = run_command(
-        InvocationOptions(
-            command="run",
-            project_dir=big_project,
-            select=["m_0", "m_1", "m_2"],
-            anchor=anchor,
+
+    def run() -> dict[str, float]:
+        results = run_command(
+            InvocationOptions(
+                command="run",
+                project_dir=big_project,
+                select=["m_0", "m_1", "m_2"],
+                anchor=anchor,
+            )
         )
-    )
-    assert results.exit_code() == 0
-    for result in results.results:
-        assert result.execution_time_s < 2.0, (
-            f"{result.unique_id} overhead {result.execution_time_s:.2f}s (budget 2s)"
-        )
+        assert results.exit_code() == 0
+        return {r.unique_id: r.execution_time_s for r in results.results}
+
+    run()  # warmup (cold imports, first materialization)
+    best: dict[str, float] = {}
+    for _ in range(2):
+        for uid, elapsed in run().items():
+            best[uid] = min(elapsed, best.get(uid, float("inf")))
+    for uid, elapsed in best.items():
+        assert elapsed < 2.0, f"{uid} overhead {elapsed:.2f}s best-of-2 (budget 2s, NFR-03)"

@@ -50,6 +50,25 @@ coordinator's memory, defeating the point of distributed engines.
    and `RunContext.vars` already crosses the job boundary. Revisit if
    adapters accumulate real config surfaces.
 
+5. **Spark version policy: the ceiling lives with the package that needs
+   it.** `mbt-spark` declares `pyspark>=3.5,<4.2` - both majors are
+   exercised by the e2e suite, and the ceiling moves with what has
+   actually been validated. The `<3.6` pin lives only in
+   `mbt-h2o[sparkling]`, because `h2o-pysparkling-3.5` is version-locked
+   to the Spark 3.5 minor. The accepted tradeoff: installing the
+   Sparkling Water backend next to `mbt-spark` resolves the whole
+   environment back to Spark 3.5 until upstream ships pysparkling for
+   Spark 4.x - but plain `mbt-spark` users are no longer held a major
+   behind by an optional backend they never installed.
+
+6. **Local sessions pin the executor interpreter.** In `local` masters,
+   `get_session` sets `spark.pyspark.python` to the driver's
+   `sys.executable` unless the caller (or `PYSPARK_PYTHON`) already chose
+   one: local executors otherwise spawn whatever `python3` is on PATH,
+   which fails with `PYTHON_VERSION_MISMATCH` the moment the venv is not
+   activated. Remote masters are untouched - executor interpreters there
+   are the deployment image's contract.
+
 ## Consequences
 
 - The compliance suite runs unchanged against JVM adapters (its in-memory

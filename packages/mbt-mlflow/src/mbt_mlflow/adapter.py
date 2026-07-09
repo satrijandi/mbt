@@ -3,8 +3,11 @@
 One package, one plugin, two contracts sharing client config (``uri``).
 ``import mlflow`` happens lazily inside methods (ADR-14).
 
-Canonical mbt stages map to MLflow stages (``staging -> Staging`` ...);
-``use_aliases: true`` switches to registered-model aliases on MLflow >= 2.9.
+Canonical mbt stages map to registered-model aliases by default
+(``staging``/``production``/``archived``, exclusive per version to keep
+mbt's one-stage-at-a-time model); MLflow deprecated stage transitions and
+removes them in MLflow 4. ``use_aliases: false`` opts back into the legacy
+stage API for registry servers without alias support (MLflow < 2.9).
 """
 
 from pathlib import Path
@@ -27,6 +30,10 @@ _STAGE_MAP = {
     Stage.ARCHIVED: "Archived",
 }
 _STAGE_REVERSE = {v: k for k, v in _STAGE_MAP.items()}
+#: Alias-derived stage resolution order: a version should hold at most one
+#: canonical alias (transition keeps them exclusive), the order is a safety
+#: net for aliases set outside mbt.
+_ALIAS_STAGES = (Stage.PRODUCTION, Stage.STAGING, Stage.ARCHIVED)
 
 _ARTIFACT_TAGS = (
     "mbt.artifact_uri",
@@ -41,7 +48,7 @@ class _MlflowBase:
         config = config or {}
         self.uri: str = str(config.get("uri", "sqlite:///mlflow.db"))
         self.experiment: str = str(config.get("experiment", "mbt"))
-        self.use_aliases: bool = bool(config.get("use_aliases", False))
+        self.use_aliases: bool = bool(config.get("use_aliases", True))
         self._client: MlflowClient | None = None
 
     def client(self) -> "MlflowClient":
@@ -160,6 +167,9 @@ class MlflowRegistry(_MlflowBase):
                 size_bytes=int(tags["mbt.artifact_size_bytes"]),
             )
         stage = _STAGE_REVERSE.get(getattr(mv, "current_stage", None) or "")
+        if stage is None:
+            aliases = set(getattr(mv, "aliases", None) or [])
+            stage = next((s for s in _ALIAS_STAGES if s.value in aliases), None)
         return ModelVersion(
             name=mv.name,
             version=str(mv.version),
@@ -203,11 +213,18 @@ class MlflowRegistry(_MlflowBase):
         client = self.client()
         if self.use_aliases:
             client.set_registered_model_alias(version.name, stage.value, version.version)
+            # mbt stages are exclusive per version: drop the other canonical
+            # aliases this version still holds so promoting from staging to
+            # production also vacates the staging slot (stage-API parity).
+            mv = client.get_model_version(version.name, version.version)
+            for alias in set(getattr(mv, "aliases", None) or []):
+                if alias != stage.value and alias in {s.value for s in _ALIAS_STAGES}:
+                    client.delete_registered_model_alias(version.name, alias)
             return
         with warnings.catch_warnings():
-            # Stages are deprecated upstream but remain the default mapping
-            # for canonical mbt stages; opt into aliases with
-            # `use_aliases: true` (TSD §13.3).
+            # Legacy stage flow for registry servers without alias support
+            # (MLflow < 2.9); stages are deprecated upstream, hence the
+            # suppression. Aliases are the default (`use_aliases: true`).
             warnings.simplefilter("ignore", FutureWarning)
             client.transition_model_version_stage(
                 name=version.name,

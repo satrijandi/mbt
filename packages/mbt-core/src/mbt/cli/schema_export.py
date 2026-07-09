@@ -6,7 +6,14 @@ from typing import Any
 
 from mbt.config.profiles import ProfilesConfig
 from mbt.config.project import ProjectConfig
-from mbt.contracts import DatasetSpec, ExposureSpec, MetricSpec, ModelSpec, SourceGroup
+from mbt.contracts import (
+    DatasetSpec,
+    ExposureSpec,
+    MetricSpec,
+    ModelSpec,
+    ScoringSpec,
+    SourceGroup,
+)
 
 #: Matches "{{ ... }}" / "{% ... %}" values users write before rendering.
 _JINJA_STRING = {"type": "string", "pattern": "\\{\\{.*\\}\\}|\\{%.*%\\}"}
@@ -68,6 +75,9 @@ def write_json_schemas(output_dir: Path) -> list[Path]:
         ),
         "exposures.schema.json": _file_schema(
             "exposures", ExposureSpec.model_json_schema(), "mbt exposures file"
+        ),
+        "scoring.schema.json": _file_schema(
+            "scoring", ScoringSpec.model_json_schema(), "mbt scoring file"
         ),
         "mbt_project.schema.json": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",

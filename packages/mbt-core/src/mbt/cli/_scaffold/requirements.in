@@ -1,0 +1,6 @@
+# Direct toolchain dependencies for this project's CI workflows.
+# After editing, regenerate the fully pinned, hash-verified lock:
+#   uv pip compile --generate-hashes requirements.in -o requirements.txt
+mbt-core==__MBT_VERSION__
+mbt-xgboost==__MBT_VERSION__
+mbt-mlflow==__MBT_VERSION__

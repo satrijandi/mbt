@@ -60,12 +60,16 @@ class TransformedDatasetHandle:
         hooks: ModelHooks | None,
         hook_ctx_factory: "Callable[[str], HookContext]",
         time_column: str | None,
+        *,
+        require_target: bool = True,
     ) -> None:
         self._base = base
         self._spec = spec
         self._hooks = hooks
         self._hook_ctx_factory = hook_ctx_factory
         self._time_column = time_column
+        #: False for scoring inputs: unlabeled by design (ADR-20).
+        self._require_target = require_target
         self._cache: dict[str, pa.Table] = {}
         self.feature_columns: list[str] | None = None
 
@@ -96,10 +100,9 @@ class TransformedDatasetHandle:
         for extra in (self._spec.target, *self._spec.evaluation.slices):
             if extra in table.column_names and extra not in keep:
                 keep.append(extra)
-        missing = [c for c in (self._spec.target,) if c not in table.column_names]
-        if missing:
+        if self._require_target and self._spec.target not in table.column_names:
             raise ConfigError(
-                f"target column {missing[0]!r} missing after hooks for split {split!r}",
+                f"target column {self._spec.target!r} missing after hooks for split {split!r}",
                 hint="transform_features must preserve the target column",
             )
         table = table.select(keep)

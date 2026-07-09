@@ -27,7 +27,13 @@ from mbt.events import get_bus
 from mbt.events.models import LogMessage, RunFinished, RunStarted
 from mbt.exceptions import ConfigError, MbtError, StateError
 from mbt.execute.planner import ExecutionPlan, plan_execution
-from mbt.execute.runners import DatasetRunner, ExecutionContext, ModelRunner, ModelTestRunner
+from mbt.execute.runners import (
+    DatasetRunner,
+    ExecutionContext,
+    ModelRunner,
+    ModelTestRunner,
+    ScoringRunner,
+)
 from mbt.execute.scheduler import execute_plan
 from mbt.parsing import ParsedProject, parse_project
 from mbt.state.diff import ManifestStateIndex, load_state
@@ -37,7 +43,7 @@ from mbt.state.diff import ManifestStateIndex, load_state
 class InvocationOptions:
     """Uniform cross-command flags (FR-CLI-04)."""
 
-    command: str  # run | build | test | evaluate
+    command: str  # run | build | test | evaluate | score | monitor
     project_dir: Path
     profiles_dir: Path | None = None
     target: str | None = None
@@ -49,6 +55,7 @@ class InvocationOptions:
     state: str | None = None
     state_include_env: bool = False
     manifest_path: str | None = None
+    allow_env_mismatch: bool = False
     anchor: datetime | None = None
     deep_snapshot: bool = False
 
@@ -83,6 +90,7 @@ def prepare(
             cli_vars=opts.cli_vars,
             project_vars=parsed.project.vars if parsed else {},
         )
+        _verify_manifest_env(manifest, profiles, registry, opts)
         if parsed is not None:
             _warn_on_drift(parsed, profiles, manifest, registry, opts)
         return PreparedInvocation(
@@ -102,14 +110,17 @@ def prepare(
         cli_vars=opts.cli_vars,
         project_vars=parsed.project.vars,
     )
+    manifest_path = opts.project_dir / "target" / "manifest.json"
     manifest = compile_project(
         parsed,
         profiles,
         registry=registry,
-        options=CompileOptions(anchor=opts.anchor, deep_snapshot=opts.deep_snapshot),
+        options=CompileOptions(
+            anchor=opts.anchor, deep_snapshot=opts.deep_snapshot, manifest_path=manifest_path
+        ),
         cli_vars=opts.cli_vars,
     )
-    manifest.write(opts.project_dir / "target" / "manifest.json")
+    manifest.write(manifest_path)
     return PreparedInvocation(
         manifest=manifest,
         profiles=profiles,
@@ -133,6 +144,61 @@ def _try_parse(opts: InvocationOptions, registry: AdapterRegistry) -> ParsedProj
             )
         )
         return None
+
+
+def _verify_manifest_env(
+    manifest: Manifest,
+    profiles: LoadedProfiles,
+    registry: AdapterRegistry,
+    opts: InvocationOptions,
+) -> None:
+    """--manifest execution verifies the environment it runs in (ADR-19).
+
+    A stored manifest pins what the compiler saw; rebuilding it in a
+    different environment silently breaks the reproduction claim (G2).
+    An ``env_digest`` mismatch (Python, mbt, or fingerprinted adapter
+    packages) is a hard error unless ``--allow-env-mismatch`` downgrades it;
+    full-environment drift (``env_freeze_digest``) warns.
+    """
+    import contextlib
+
+    from mbt.compile.compiler import current_env_digests
+
+    # Load the manifest's node adapters so fingerprint_packages() covers the
+    # same plugin set compile saw, even when project files no longer parse.
+    for node in manifest.nodes.values():
+        if node.adapter:
+            with contextlib.suppress(Exception):
+                registry.get(node.adapter)
+    digest, freeze = current_env_digests(profiles, registry)
+    stored = manifest.metadata
+    if stored.env_digest and digest != stored.env_digest:
+        message = (
+            "the current environment does not match the manifest's env_digest "
+            f"(manifest {stored.env_digest}, current {digest})"
+        )
+        if not opts.allow_env_mismatch:
+            raise StateError(
+                message,
+                hint=(
+                    "reinstall the environment the manifest was compiled in, or pass "
+                    "--allow-env-mismatch to execute anyway (breaks reproducibility)"
+                ),
+            )
+        get_bus().emit(
+            LogMessage(level="warn", message=message + " - proceeding (--allow-env-mismatch)")
+        )
+    elif stored.env_freeze_digest and freeze != stored.env_freeze_digest:
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                message=(
+                    "installed packages differ from the manifest's environment "
+                    "(env_freeze_digest mismatch): fingerprinted packages match, but "
+                    "transitive dependencies drifted - results may not reproduce (ADR-19)"
+                ),
+            )
+        )
 
 
 def _warn_on_drift(
@@ -207,7 +273,8 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
     bus.run_id = prepared.run_id
 
     state_index = build_state_index(opts, manifest)
-    plan = plan_execution(manifest, opts.select, opts.exclude, state_index)
+    executable = ("scoring",) if opts.command == "score" else ("dataset", "model")
+    plan = plan_execution(manifest, opts.select, opts.exclude, state_index, executable=executable)
     bus.emit(
         RunStarted(
             command=opts.command,
@@ -251,7 +318,9 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
             command=opts.command,
             status={0: "success", 1: "error", 2: "quality_failure"}[run_results.exit_code()],
             succeeded=statuses.count("success"),
-            failed=sum(statuses.count(s) for s in ("error", "gate_failed", "test_failed")),
+            failed=sum(
+                statuses.count(s) for s in ("error", "gate_failed", "test_failed", "monitor_failed")
+            ),
             skipped=statuses.count("skipped"),
             elapsed_s=run_results.metadata.elapsed_s,
         )
@@ -278,11 +347,16 @@ def _execute(
     )
     dataset_runner = DatasetRunner(ctx)
     model_runner = ModelRunner(ctx) if opts.command in ("run", "build") else ModelTestRunner(ctx)
+    scoring_runner = ScoringRunner(ctx)
+    if opts.command == "score":
+        _require_scoring_capability(ctx)
 
     def run_node(uid: str) -> NodeResult:
         node = manifest.nodes[uid]
         if node.resource_type == "dataset":
             return dataset_runner.run(uid)
+        if node.resource_type == "scoring":
+            return scoring_runner.run(uid)
         return model_runner.run(uid)
 
     threads = opts.threads if opts.threads is not None else prepared.profiles.target.threads
@@ -293,6 +367,19 @@ def _execute(
         threads=threads,
         fail_fast=opts.fail_fast,
     )
+
+
+def _require_scoring_capability(ctx: ExecutionContext) -> None:
+    """Fail before any job runs when the data adapter predates contract 1.1."""
+    adapter = ctx.data_adapter
+    if not (hasattr(adapter, "build_scoring_input") and hasattr(adapter, "open_predictions")):
+        raise ConfigError(
+            f"data adapter {ctx.profiles.target.data.adapter!r} does not support "
+            "batch scoring (contract 1.1 adds build_scoring_input and "
+            "open_predictions)",
+            hint="upgrade the adapter package, or score against a target whose "
+            "data adapter supports scoring (the local adapter does)",
+        )
 
 
 # -- mbt evaluate (FR-RUN-07, TSD §10.6) -------------------------------------------

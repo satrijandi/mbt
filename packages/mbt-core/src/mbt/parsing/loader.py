@@ -16,6 +16,7 @@ TOP_LEVEL_KEYS = {
     "models": "model",
     "metrics": "metric",
     "exposures": "exposure",
+    "scoring": "scoring",
 }
 
 M = TypeVar("M", bound=BaseModel)

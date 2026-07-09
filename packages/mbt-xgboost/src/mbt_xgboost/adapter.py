@@ -5,10 +5,13 @@ tier: exact for CPU hist with a fixed seed and nthread=1 (documented).
 
 Feature derivation contract: the table an adapter reads contains features +
 target + declared slice columns; features are everything except the target
-and the slice columns. Non-numeric features are an error - exclude them or
-encode via a hooks.py transform.
+and the slice columns. Numeric columns pass through; string columns train
+as native categoricals (codes + ``enable_categorical``, train-time levels
+persisted as a booster attribute, unseen levels become missing); other
+types are an error - exclude them or encode via a hooks.py transform.
 """
 
+import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -31,6 +34,7 @@ from mbt_adapter_base import (
     TaskType,
     ValidationIssue,
 )
+from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
 from mbt_adapter_base.metrics import compute_binary_results
 from mbt_xgboost.params import XGBoostBinaryParams
 
@@ -38,16 +42,22 @@ if TYPE_CHECKING:
     import numpy as np
     import xgboost as xgb
 
-_NUMERIC_PREFIXES = ("int", "uint", "float", "double", "decimal", "bool")
-
 
 class XGBoostModel:
-    """Opaque trained-model wrapper: booster + the exact feature list."""
+    """Opaque trained-model wrapper: booster + the exact feature list + the
+    train-time categorical level mapping."""
 
-    def __init__(self, booster: "xgb.Booster", features: list[str], target: str) -> None:
+    def __init__(
+        self,
+        booster: "xgb.Booster",
+        features: list[str],
+        target: str,
+        categories: dict[str, list[str]] | None = None,
+    ) -> None:
         self.booster = booster
         self.features = features
         self.target = target
+        self.categories = categories or {}
 
 
 def _positive_rate(profile: DatasetProfile) -> float | None:
@@ -130,32 +140,22 @@ class XGBoostTrainingAdapter:
         except ValidationError as exc:
             raise ValueError(f"invalid xgboost hyperparameters: {exc}") from exc
 
-    def _feature_columns(self, table: pa.Table, spec: ModelSpec) -> list[str]:
-        candidates = [
-            name
-            for name in table.column_names
-            if name != spec.target and name not in spec.evaluation.slices
-        ]
-        bad = [
-            name
-            for name in candidates
-            if not str(table.schema.field(name).type).startswith(_NUMERIC_PREFIXES)
-        ]
-        if bad:
-            raise ValueError(
-                f"non-numeric feature column(s) for xgboost: {', '.join(bad)}. "
-                "Exclude them under features.exclude or encode them in a hooks.py "
-                "transform_features."
-            )
-        return candidates
-
     def _matrix(
-        self, table: pa.Table, features: list[str], target: str | None
+        self,
+        table: pa.Table,
+        features: list[str],
+        categories: dict[str, list[str]],
+        target: str | None,
     ) -> tuple["xgb.DMatrix", "np.ndarray | None"]:
         import numpy as np
         import xgboost as xgb
 
-        columns = [table.column(name).to_numpy(zero_copy_only=False) for name in features]
+        columns = [
+            categorical_codes(table, name, categories[name])
+            if name in categories
+            else table.column(name).to_numpy(zero_copy_only=False)
+            for name in features
+        ]
         if columns:
             x = np.column_stack(columns).astype(np.float32)
         else:
@@ -163,39 +163,99 @@ class XGBoostTrainingAdapter:
         y = None
         if target is not None:
             y = table.column(target).to_numpy(zero_copy_only=False).astype(np.float32)
-        return xgb.DMatrix(x, label=y, feature_names=features), y
+        matrix = xgb.DMatrix(
+            x,
+            label=y,
+            feature_names=features,
+            feature_types=(
+                ["c" if name in categories else "q" for name in features] if categories else None
+            ),
+            enable_categorical=bool(categories),
+        )
+        return matrix, y
 
     # -- training ------------------------------------------------------------------
 
     def train(self, spec: ModelSpec, data: DatasetHandle, ctx: RunContext) -> XGBoostModel:
+        return self._train(spec, data, ctx, report=None)
+
+    def train_with_report(
+        self,
+        spec: ModelSpec,
+        data: DatasetHandle,
+        ctx: RunContext,
+        report: "Any",
+    ) -> XGBoostModel:
+        """Optional tuning contract: report validation AUC (higher-is-better)
+        per boosting round. The report callback may raise to abort the trial
+        (pruning); the exception propagates out of xgb.train by design."""
+        return self._train(spec, data, ctx, report=report)
+
+    def _train(
+        self, spec: ModelSpec, data: DatasetHandle, ctx: RunContext, report: "Any"
+    ) -> XGBoostModel:
         import xgboost as xgb
 
         params = self._params(spec)
         table = data.read("train")
-        features = self._feature_columns(table, spec)
-        dtrain, _ = self._matrix(table, features, spec.target)
+        features, categorical = split_feature_columns(
+            table, target=spec.target, slices=spec.evaluation.slices, adapter="xgboost"
+        )
+        categories = train_categories(table, categorical)
+        dtrain, _ = self._matrix(table, features, categories, spec.target)
 
+        booster_params = params.booster_params(seed=ctx.seed)
         evals = []
-        if params.early_stopping_rounds is not None and "validation" in data.splits():
-            dval, _ = self._matrix(data.read("validation"), features, spec.target)
+        want_eval = params.early_stopping_rounds is not None or report is not None
+        if want_eval and "validation" in data.splits():
+            dval, _ = self._matrix(data.read("validation"), features, categories, spec.target)
             evals = [(dval, "validation")]
 
+        callbacks: list[Any] = []
+        if report is not None and evals:
+            # Ensure an AUC series exists on the validation set: the report
+            # contract is a higher-is-better value.
+            existing = booster_params.get("eval_metric")
+            if isinstance(existing, str):
+                metrics = [existing]
+            elif isinstance(existing, list):
+                metrics = [str(m) for m in existing]
+            else:
+                metrics = []
+            if "auc" not in metrics:
+                metrics.append("auc")
+            booster_params["eval_metric"] = metrics
+
+            class _ReportProgress(xgb.callback.TrainingCallback):
+                def after_iteration(self, model: Any, epoch: int, evals_log: Any) -> bool:
+                    series = (evals_log or {}).get("validation", {}).get("auc")
+                    if series:
+                        report(epoch, float(series[-1]))
+                    return False
+
+            callbacks.append(_ReportProgress())
+
         booster = xgb.train(
-            params.booster_params(seed=ctx.seed),
+            booster_params,
             dtrain,
             num_boost_round=params.n_estimators,
             evals=evals,
             early_stopping_rounds=params.early_stopping_rounds if evals else None,
+            callbacks=callbacks or None,
             verbose_eval=False,
         )
         # Persisted with the model so load() can reconstruct the wrapper.
         booster.set_attr(mbt_target=spec.target)
-        return XGBoostModel(booster=booster, features=features, target=spec.target)
+        if categories:
+            booster.set_attr(mbt_categories=json.dumps(categories, sort_keys=True))
+        return XGBoostModel(
+            booster=booster, features=features, target=spec.target, categories=categories
+        )
 
     # -- evaluation ------------------------------------------------------------------
 
     def _scores(self, model: XGBoostModel, table: pa.Table) -> "np.ndarray":
-        matrix, _ = self._matrix(table, model.features, None)
+        matrix, _ = self._matrix(table, model.features, model.categories, None)
         return model.booster.predict(matrix)
 
     def evaluate(
@@ -223,6 +283,17 @@ class XGBoostTrainingAdapter:
         scores = self._scores(model, table)
         return table.append_column("prediction", pa.array(scores.astype("float64")))
 
+    def feature_importance(self, model: XGBoostModel) -> dict[str, float]:
+        """Gain importance per feature, normalized to fractions (FR-DOCS-02)."""
+        scores: dict[str, float] = {}
+        for name, value in model.booster.get_score(importance_type="gain").items():
+            # multi-class boosters return per-class lists; binary returns floats
+            scores[name] = float(value[0]) if isinstance(value, list) else float(value)
+        total = sum(scores.values())
+        if not total:
+            return dict.fromkeys(model.features, 0.0)
+        return {name: round(scores.get(name, 0.0) / total, 6) for name in model.features}
+
     # -- artifacts -----------------------------------------------------------------------
 
     def export(self, model: XGBoostModel, format: str, store: ArtifactStore) -> ArtifactRef:
@@ -238,6 +309,11 @@ class XGBoostTrainingAdapter:
         )
 
     def _export_onnx(self, model: XGBoostModel, store: ArtifactStore) -> ArtifactRef:
+        if model.categories:
+            raise ValueError(
+                "ONNX export does not support categorical features yet; "
+                "export the native xgboost_ubj format instead"
+            )
         try:
             from onnxmltools import convert_xgboost  # type: ignore[import-not-found]
             from onnxmltools.convert.common.data_types import (  # type: ignore[import-not-found]
@@ -270,4 +346,5 @@ class XGBoostTrainingAdapter:
             booster=booster,
             features=features,
             target=attributes.get("mbt_target") or "",
+            categories=json.loads(attributes.get("mbt_categories") or "{}"),
         )

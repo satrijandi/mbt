@@ -13,6 +13,8 @@ import networkx as nx
 
 from mbt.artifacts.manifest import Manifest
 from mbt.artifacts.run_results import NodeResult, RunResults
+from mbt.contracts import AUTO
+from mbt.secrets import redact
 
 _CSS = """
 :root { --bg:#ffffff; --fg:#1f2430; --muted:#6b7280; --line:#e5e7eb;
@@ -131,6 +133,20 @@ def _metric_table(result: NodeResult | None) -> str:
     return out
 
 
+def _importance_table(result: NodeResult | None) -> str:
+    if result is None or not result.feature_importance:
+        return ""
+    top = sorted(result.feature_importance.items(), key=lambda kv: (-kv[1], kv[0]))[:15]
+    rows = "".join(
+        f"<tr><td><code>{html.escape(name)}</code></td><td>{share:.1%}</td></tr>"
+        for name, share in top
+    )
+    return (
+        "<h2>Feature importance (normalized gain, latest run)</h2>"
+        f"<table><tr><th>feature</th><th>share</th></tr>{rows}</table>"
+    )
+
+
 def _gate_table(result: NodeResult | None) -> str:
     if result is None or not result.gates:
         return ""
@@ -160,8 +176,12 @@ def _model_card(manifest: Manifest, uid: str, result: NodeResult | None) -> str:
     dataset_uid = next((d for d in node.depends_on if d.startswith("dataset.")), None)
     dataset = manifest.nodes.get(dataset_uid) if dataset_uid else None
 
+    # The manifest keeps the AUTO sentinel verbatim (ADR-12); the card is a
+    # human presentation layer, so show the keyword the user wrote ("auto")
+    # rather than the internal "__mbt_auto__" token.
     hyper_rows = "".join(
-        f"<tr><td><code>{html.escape(str(k))}</code></td><td><code>{html.escape(str(v))}</code></td>"
+        f"<tr><td><code>{html.escape(str(k))}</code></td>"
+        f"<td><code>{html.escape('auto' if v == AUTO else str(v))}</code></td>"
         f"<td>{html.escape(str(result.resolved_auto.get(k, ''))) if result else ''}</td></tr>"
         for k, v in sorted(config.get("hyperparameters", {}).items())
     )
@@ -217,6 +237,7 @@ def _model_card(manifest: Manifest, uid: str, result: NodeResult | None) -> str:
     <h2>Features</h2>
     <p>include: <code>{html.escape(str(features.get("include", ["*"])))}</code><br>
        exclude: <code>{html.escape(str(features.get("exclude", [])))}</code></p>
+    {_importance_table(result)}
     <h2>Hyperparameters</h2>
     <table><tr><th>param</th><th>value</th><th>resolved auto</th></tr>{hyper_rows}</table>
     <h2>Metrics (latest run)</h2>
@@ -252,7 +273,12 @@ def generate_docs(
             f"<td><code>{html.escape(str(node.config.get('owner', '')))}</code></td>"
             f"<td><span class='badge {badge}'>{html.escape(status)}</span></td></tr>"
         )
-        (output_dir / f"model_{node.name}.html").write_text(_model_card(manifest, uid, result))
+        # Redact tainted env_var() values that rendered into spec config
+        # (description, owner, hyperparameters, ...): docs are published, so a
+        # leak here is public. Redacting the assembled page catches every field.
+        (output_dir / f"model_{node.name}.html").write_text(
+            redact(_model_card(manifest, uid, result))
+        )
 
     exposure_rows = "".join(
         f"<tr><td><code>{html.escape(e.name)}</code></td>"
@@ -284,5 +310,5 @@ def generate_docs(
     }</script>
     """
     index = output_dir / "index.html"
-    index.write_text(_page(f"{meta.project_name} - mbt docs", index_body))
+    index.write_text(redact(_page(f"{meta.project_name} - mbt docs", index_body)))
     return index

@@ -22,24 +22,45 @@ jobs:
           python-version: "3.11"
       - name: Install project
         run: |
-          pip install mbt-core mbt-xgboost mbt-mlflow
+          pip install -r requirements.txt
           python scripts/generate_sample_data.py
-      - name: Build (prod target)
+      - name: Restore prod state baseline (mbt-state branch)
+        id: state
         run: |
-          if [ -f "$MBT_STATE_URI" ]; then
-            mbt build --target prod --select state:modified+ --state "$MBT_STATE_URI"
+          if bash scripts/fetch_state.sh "$MBT_STATE_URI"; then
+            echo "have_state=true" >> "$GITHUB_OUTPUT"
           else
-            mbt build --target prod
+            echo "have_state=false" >> "$GITHUB_OUTPUT"
+            echo "No prod baseline yet; building everything (bootstrap)."
           fi
-      - name: Publish manifest as latest (FR-STATE-03)
-        # Real setups: aws s3 cp target/manifest.json \
-        #   s3://<bucket>/mbt/<project>/prod/manifests/${GITHUB_SHA}.json (+ latest.json)
+      - name: Build (prod target)
+        # --deep-snapshot: the published baseline must use content-hash
+        # tokens, or the next fresh checkout's mtimes would flag every
+        # dataset as modified and retrain the world (ADR-11).
         run: |
-          mkdir -p state/prod
-          cp target/manifest.json "state/prod/${GITHUB_SHA}.json"
-          cp target/manifest.json state/prod/latest.json
+          if [ "${{ steps.state.outputs.have_state }}" = "true" ]; then
+            mbt build --target prod --deep-snapshot --select state:modified+ --state "$MBT_STATE_URI"
+          else
+            mbt build --target prod --deep-snapshot
+          fi
+      - name: Publish manifest as the new baseline (FR-STATE-03)
+        # Durable out of the box: an append-only mbt-state branch (needs the
+        # `contents: write` permission above, immune to main's branch
+        # protection, history = audit trail of every published baseline).
+        # Real setups can swap both state steps for the s3 layout instead:
+        #   aws s3 cp target/manifest.json s3://<bucket>/mbt/<project>/prod/manifests/latest.json
+        run: bash scripts/publish_state.sh target/manifest.json
       - name: Upload manifest artifact
         uses: actions/upload-artifact@v4
         with:
           name: mbt-manifest-${{ github.sha }}
           path: target/manifest.json
+      - name: Alert on failure
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.MBT_ALERT_WEBHOOK }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "MBT_ALERT_WEBHOOK not set; skipping alert"; exit 0; }
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\":\"mbt prod build failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            "$WEBHOOK"

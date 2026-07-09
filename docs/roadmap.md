@@ -21,8 +21,11 @@ state-aware retraining.
   same `DatasetHandle`/`DatasetLocator`.
 - **Ensembles/stacking** - models with `ref()` inputs from other models;
   the DAG and manifest already support model → model edges.
-- **`mbt score`** - batch inference from a registered artifact
-  (`TrainingAdapter.predict` is already in the contract).
+- **`mbt score`** - shipped: batch scoring pipelines are a first-class
+  `scoring` resource (1 config = 1 serving pipeline) executed by
+  `mbt score`, with shift monitors against training-time baselines and
+  delayed ground-truth evaluation via `mbt monitor` (ADR-20/21). Online
+  serving remains a non-goal; warehouse prediction sinks are follow-ups.
 - **Airflow provider** - an operator shelling out to `mbt build` per
   manifest-derived task group.
 - **Slice-level gates** - reporting ships in v0.1; gating is schema-ready.

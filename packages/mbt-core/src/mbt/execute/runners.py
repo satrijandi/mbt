@@ -26,6 +26,7 @@ from mbt.contracts import (
     MetricSpec,
     ModelSpec,
     ModelVersion,
+    ScoringSpec,
     SourceTable,
     Stage,
     TrainingJob,
@@ -33,10 +34,11 @@ from mbt.contracts import (
 from mbt.dag.selector import SelectableNode, evaluate_selector
 from mbt.events import get_bus
 from mbt.events.models import ArtifactRegistered, LogMessage, NodeFinished, NodeStarted
-from mbt.exceptions import AdapterError, ConfigError, MbtError
-from mbt.quality.checks import run_checks
+from mbt.exceptions import AdapterError, ConfigError, MbtError, StateError
+from mbt.quality.checks import run_checks, run_scoring_checks
 from mbt.quality.gates import all_gates_passed, evaluate_gates
 from mbt.quality.metrics import resolve_model_metrics
+from mbt.quality.monitors import all_monitors_passed, evaluate_monitors
 from mbt.quality.python_tests import PythonTestFile, run_python_tests
 from mbt.runtime import (
     data_adapter as build_data_adapter,
@@ -52,6 +54,28 @@ from mbt.runtime import (
 )
 from mbt.secrets import Secret
 from mbt.utils import canonical_json
+
+
+def _gate_failure_summary(gates: list[GateResult]) -> str:
+    """A specific, reviewer-facing summary of which gate(s) failed - feeds the
+    node message shown in the results table, the JSON run_results, and the
+    GitOps PR comment, consistent with the monitor path's ``gate breach: ...``.
+    """
+    parts: list[str] = []
+    for gate in gates:
+        if gate.passed:
+            continue
+        where = f" [{gate.slice}]" if gate.slice else ""
+        if gate.kind == "champion" and gate.delta_lower is not None:
+            parts.append(
+                f"{gate.metric}{where}: challenger delta lower bound "
+                f"{gate.delta_lower:.4f} < required {gate.min_delta}"
+            )
+        elif gate.actual is not None:
+            parts.append(f"{gate.metric}{where}={gate.actual:.4f} failed threshold {gate.expected}")
+        else:
+            parts.append(f"{gate.metric}{where}")
+    return "gate breach: " + "; ".join(parts) if parts else "one or more gates failed"
 
 
 @dataclass
@@ -417,6 +441,7 @@ class ModelRunner:
             champion_version=champion.version if champion else None,
             metric_specs=metric_specs,
             determinism=adapter.determinism,
+            champion_delta_bounds=job_result.champion_delta_bounds,
         )
 
     def _register(
@@ -443,7 +468,15 @@ class ModelRunner:
             "mbt.artifact_format": job_result.artifact.format,
             "mbt.artifact_content_hash": job_result.artifact.content_hash,
             "mbt.artifact_size_bytes": str(job_result.artifact.size_bytes),
+            # Scoring-time feature-transform parity check (ADR-20).
+            "mbt.hooks_hash": node.hooks_hash or "",
         }
+        if job_result.baseline is not None:
+            # The monitoring baseline scoring runs compare against (ADR-21).
+            metadata["mbt.baseline_uri"] = job_result.baseline.uri
+            metadata["mbt.baseline_format"] = job_result.baseline.format
+            metadata["mbt.baseline_content_hash"] = job_result.baseline.content_hash
+            metadata["mbt.baseline_size_bytes"] = str(job_result.baseline.size_bytes)
         version = registry_adapter.register(job_result.artifact, spec.registration.name, metadata)
         registry_adapter.transition(version, spec.registration.stage_on_pass)
         get_bus().emit(
@@ -521,7 +554,269 @@ class ModelRunner:
             registration=registration,
             tracking_run_id=job_result.tracking_run_id,
             resolved_auto=dict(job_result.resolved_auto),
-            message=None if passed else "one or more gates failed",
+            feature_importance=dict(job_result.feature_importance),
+            message=None if passed else _gate_failure_summary(gates),
+        )
+
+
+def scoring_run_key(node: ManifestNode, model_version: str) -> str:
+    """Prediction-run idempotency key (ADR-21): same manifest + same champion
+    re-scores overwrite cleanly; new data, window, or champion partitions
+    fresh. The scoring analog of ``materialization_key``."""
+    digest = hashlib.sha256()
+    digest.update(node.input_hash.encode())
+    digest.update(canonical_json(node.resolved.get("windows", {})).encode())
+    digest.update(model_version.encode())
+    return digest.hexdigest()[:16]
+
+
+class ScoringRunner:
+    """Coordinator side of a scoring run (ADR-20): jobs compute, core compares.
+
+    The champion is resolved from the registry at RUN time by stage alias -
+    promotions are registry state, deliberately outside node identity
+    (ADR-5), so scheduled scoring picks up a new champion on its next run
+    without a spec edit. The resolved version lands in run_results, the
+    tracking tags, and the prediction sidecar.
+    """
+
+    def __init__(self, ctx: ExecutionContext) -> None:
+        self.ctx = ctx
+
+    def run(self, uid: str) -> NodeResult:
+        ctx = self.ctx
+        node = ctx.manifest.nodes[uid]
+        bus = get_bus()
+        index = ctx.next_index()
+        bus.emit(
+            NodeStarted(unique_id=uid, resource_type="scoring", index=index, total=ctx.total_nodes)
+        )
+        started = time.monotonic()
+        try:
+            result = self._run_inner(uid, node)
+        except MbtError as exc:
+            result = NodeResult(unique_id=uid, status="error", message=str(exc))
+        result.execution_time_s = time.monotonic() - started
+        bus.emit(
+            NodeFinished(
+                unique_id=uid,
+                resource_type="scoring",
+                status=result.status,
+                execution_time_s=result.execution_time_s,
+                index=index,
+                total=ctx.total_nodes,
+                message=result.message,
+            )
+        )
+        return result
+
+    # -- helpers -------------------------------------------------------------
+
+    def _champion(self, spec: ScoringSpec, model_spec: ModelSpec, uid: str) -> ModelVersion:
+        registry_name = model_spec.registration.name if model_spec.registration else model_spec.name
+        champion: ModelVersion | None = self.ctx.registry_adapter().get_champion(
+            registry_name, spec.stage
+        )
+        if champion is None:
+            # Unlike a missing gate comparator (ADR-10 WARN), nothing to
+            # score WITH is an operational failure.
+            raise StateError(
+                f"no champion of {registry_name!r} in stage {spec.stage.value!r} to score with",
+                resource=uid,
+                hint="train and promote the model first (mbt build, then mbt promote)",
+            )
+        if champion.artifact is None:
+            raise AdapterError(
+                f"champion {registry_name} v{champion.version} in {spec.stage.value!r} has no "
+                "loadable artifact reference",
+                resource=uid,
+                hint="a champion that exists but cannot load is an error (ADR-10)",
+            )
+        return champion
+
+    def _check_hooks_parity(
+        self, champion: ModelVersion, model_node: ManifestNode, uid: str
+    ) -> None:
+        """The champion must have been trained with the hooks the scoring run
+        will apply; silent feature skew is worse than a hard stop (ADR-20)."""
+        registered = champion.tags.get("mbt.hooks_hash")
+        if registered is None:
+            get_bus().emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=uid,
+                    message=(
+                        "champion predates hooks-parity registration (no "
+                        "mbt.hooks_hash tag); cannot verify that scoring applies "
+                        "the hooks the champion was trained with"
+                    ),
+                )
+            )
+            return
+        if registered != (model_node.hooks_hash or ""):
+            raise StateError(
+                "the champion was trained with a different hooks.py than the "
+                "current project's (mbt.hooks_hash mismatch)",
+                resource=uid,
+                hint="retrain and promote, or check out the commit the champion was built from",
+            )
+
+    def _baseline_ref(self, champion: ModelVersion) -> ArtifactRef | None:
+        uri = champion.tags.get("mbt.baseline_uri")
+        if not uri:
+            return None
+        return ArtifactRef(
+            uri=uri,
+            format=champion.tags.get("mbt.baseline_format", "json"),
+            content_hash=champion.tags.get("mbt.baseline_content_hash", ""),
+            size_bytes=int(champion.tags.get("mbt.baseline_size_bytes", "0")),
+        )
+
+    def _materialize_input(self, node: ManifestNode, spec: ScoringSpec) -> Any:
+        ctx = self.ctx
+        key = materialization_key(node)
+        output_dir = ctx.project_dir / "target" / "scoring_inputs" / node.name / key
+        if (output_dir / "_SUCCESS").is_file():
+            get_bus().emit(LogMessage(unique_id=node.unique_id, message=f"cache hit ({key})"))
+            return ctx.data_adapter.from_locator(
+                DatasetLocator(
+                    adapter=ctx.profiles.target.data.adapter,
+                    uri=f"file://{output_dir.resolve()}",
+                    snapshot_id=node.snapshot_id or "",
+                )
+            )
+        if spec.input.source is not None:
+            spine_uid = spec.input.source
+            input_uids = [spine_uid]
+        else:
+            assert spec.input.inputs is not None
+            spine_uid = spec.input.inputs.spine
+            input_uids = [spine_uid, *spec.input.inputs.features]
+        source_tables = {
+            uid: ctx.manifest.sources[uid].config
+            for uid in input_uids
+            if uid in ctx.manifest.sources
+        }
+        if set(source_tables) != set(input_uids):
+            missing = sorted(set(input_uids) - set(source_tables))
+            raise ConfigError(
+                f"scoring input source(s) missing from the manifest: {', '.join(missing)}",
+                resource=node.unique_id,
+                hint="recompile: the manifest and spec disagree",
+            )
+        windows = {
+            split: (bounds[0], bounds[1])
+            for split, bounds in node.resolved.get("windows", {}).items()
+        }
+        build_ctx = _BuildContext(
+            node=node,
+            source=source_tables[spine_uid],
+            source_tables=source_tables,
+            resolved_windows=windows,
+            sample_fraction=float(ctx.merged_vars.get("sample_fraction", 1.0)),
+            deep_snapshot=ctx.manifest.metadata.deep_snapshot,
+            output_dir=output_dir,
+            events=get_bus(),
+        )
+        return ctx.data_adapter.build_scoring_input(spec.input, build_ctx)
+
+    def _assemble_job(
+        self,
+        node: ManifestNode,
+        model_node: ManifestNode,
+        spec: ScoringSpec,
+        champion: ModelVersion,
+        baseline: ArtifactRef | None,
+        handle: Any,
+    ) -> TrainingJob:
+        ctx = self.ctx
+        meta = ctx.manifest.metadata
+        return TrainingJob(
+            mode="score",
+            run_id=ctx.run_id,
+            project_dir=str(ctx.project_dir),
+            target_name=meta.target,
+            node=node,
+            model_node=model_node,
+            dataset=handle.locator(),
+            data=ctx.raw_adapter_ref("data"),
+            tracking=ctx.raw_adapter_ref("tracking"),
+            artifact=champion.artifact,
+            baseline=baseline,
+            output=spec.output,
+            model_version=champion.version,
+            run_key=scoring_run_key(node, champion.version),
+            artifact_store=resolve_artifact_store_uri(
+                ctx.profiles.target.artifact_store, ctx.project_dir
+            ),
+            required_env=list(ctx.profiles.required_env),
+            tracking_meta={
+                "mbt.run_id": ctx.run_id,
+                "mbt.config_hash": node.config_hash,
+                "mbt.input_hash": node.input_hash,
+                "mbt.manifest_hash": ctx.manifest.manifest_hash(),
+                "mbt.snapshot_id": node.snapshot_id or "",
+                "mbt.git_commit": meta.git.commit or "",
+                "mbt.anchor": meta.anchor,
+                "mbt.model_version": champion.version,
+            },
+            vars=ctx.job_safe_vars(),
+        )
+
+    # -- main path -------------------------------------------------------------
+
+    def _run_inner(self, uid: str, node: ManifestNode) -> NodeResult:
+        ctx = self.ctx
+        spec = ScoringSpec.model_validate(node.config)
+        model_uid = next(d for d in node.depends_on if d.startswith("model."))
+        model_node = ctx.manifest.nodes.get(model_uid)
+        if model_node is None:
+            raise ConfigError(
+                f"scoring model {model_uid!r} missing from the manifest",
+                resource=uid,
+                hint="recompile: the manifest and spec disagree",
+            )
+        model_spec = ModelSpec.model_validate(model_node.config)
+
+        champion = self._champion(spec, model_spec, uid)
+        self._check_hooks_parity(champion, model_node, uid)
+        baseline = self._baseline_ref(champion)
+
+        handle = self._materialize_input(node, spec)
+
+        checks = run_scoring_checks(spec, handle, node.resolved, resource=uid)
+        failed = [t for t in checks if not t.passed]
+        if failed:
+            # Never score on bad input: the job is skipped entirely.
+            return NodeResult(
+                unique_id=uid,
+                status="test_failed",
+                tests=[TestResultEntry(**t.model_dump()) for t in checks],
+                message=(
+                    f"{len(failed)} input check failure(s), scoring skipped: "
+                    + "; ".join(f"{t.name}: {t.message}" for t in failed)
+                ),
+            )
+
+        job = self._assemble_job(node, model_node, spec, champion, baseline, handle)
+        job_result = ctx.compute.wait(ctx.compute.submit(job))
+        if job_result.status == "error":
+            return NodeResult(
+                unique_id=uid, status="error", message=job_result.error or "scoring job failed"
+            )
+
+        monitors = evaluate_monitors(spec.monitors, job_result.monitor_stats, resource=uid)
+        passed = all_monitors_passed(monitors)
+        rows = float(job_result.predictions.row_count) if job_result.predictions else 0.0
+        failures = [m.message for m in monitors if not m.passed and m.message]
+        return NodeResult(
+            unique_id=uid,
+            status="success" if passed else "monitor_failed",
+            metrics={"rows_scored": rows},
+            monitors=monitors,
+            tests=[TestResultEntry(**t.model_dump()) for t in checks],
+            tracking_run_id=job_result.tracking_run_id,
+            message=None if passed else "monitor breach: " + "; ".join(failures),
         )
 
 
@@ -599,5 +894,6 @@ class ModelTestRunner:
             metrics=dict(job_result.metrics.metrics),
             slices=dict(job_result.metrics.slices),
             gates=gates,
-            message=None if passed else "one or more gates failed",
+            feature_importance=dict(job_result.feature_importance),
+            message=None if passed else _gate_failure_summary(gates),
         )
