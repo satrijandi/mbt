@@ -107,7 +107,11 @@ jobs:
       - name: Sync workspace
         run: uv sync
       - name: pip-audit (known-vulnerability scan of the locked environment)
-        run: uv run pip-audit --skip-editable
+        # PYSEC-2026-1443 (CVE-2024-7768): DoS of h2o's own REST endpoint
+        # (/3/ImportFiles), which mbt-h2o only runs as a local, ephemeral
+        # training-time process. No fixed h2o release exists (<= 3.46.1 all
+        # affected); drop the ignore when a fixed version lands via Renovate.
+        run: uv run pip-audit --skip-editable --ignore-vuln PYSEC-2026-1443
 
   docs:
     runs-on: ubuntu-latest

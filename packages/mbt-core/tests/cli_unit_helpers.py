@@ -35,7 +35,11 @@ def invoke(args: list[str], **kwargs: Any) -> Result:
     """Run the mbt Typer app in-process."""
     from mbt.cli import main as cli_main
 
-    return runner.invoke(cli_main.app, args, **kwargs)
+    # Pin the console width: non-TTY environments default rich to 80 columns,
+    # where error text wraps mid-phrase and breaks substring assertions
+    # depending on how long the runner's tmp path happens to be.
+    env = {"COLUMNS": "200", **(kwargs.pop("env", None) or {})}
+    return runner.invoke(cli_main.app, args, env=env, **kwargs)
 
 
 def debug(result: Result) -> str:
