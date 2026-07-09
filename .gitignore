@@ -22,12 +22,35 @@ htmlcov/
 # mbt project artifacts (demo/e2e runs)
 target/
 mlruns/
+mlartifacts/
 mlflow.db
 *.duckdb
+*.duckdb.wal
 examples/churn_demo/predictions/
+
+# JVM adapter leftovers (Spark/H2O e2e runs)
+derby.log
+metastore_db/
+spark-warehouse/
+h2ologs/
+hs_err_pid*
+
+# Local secrets / environment (live-Snowflake creds etc. flow via env vars;
+# a root profiles.yml would be a dev's personal copy - example projects keep
+# their tracked hermetic ones)
+.env
+.env.*
+/profiles.yml
+.python-version
+
+# Claude Code local state (shared config would be .claude/settings.json)
+.claude/settings.local.json
+.claude/*.lock
 
 # Editors / OS
 .vscode/
 .idea/
+.ipynb_checkpoints/
 .DS_Store
+Thumbs.db
 *.swp
