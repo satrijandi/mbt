@@ -1,0 +1,28 @@
+# mbt promotion pipeline (DESIGN.md section 6): pure GitOps - a reviewed
+# promotions.yml change on main is the only path to production. `mbt
+# promote` verifies the mbt.gates_passed stamp before moving any alias and
+# refuses versions without it; pinned entries make replays idempotent (the
+# pr-check lint rejects unpinned entries before they merge).
+#
+# The registry lives in the default (dev) target's shared MLflow, so the
+# next scheduled score run serves the new champion with zero redeploy
+# (run-time champion resolution, ADR-20).
+when:
+  - event: push
+    branch: main
+    path: promotions.yml
+
+steps:
+  - name: promote
+    image: mbt-showcase-runner:dev
+    environment:
+      # Promotion only talks to the registry, but rendering profiles.yml
+      # resolves the s3a env_var lookups strictly - the same env the build
+      # steps carry (committed demo credentials, isolated network).
+      AWS_ACCESS_KEY_ID: mbtadmin
+      AWS_SECRET_ACCESS_KEY: mbtsecret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
+      MBT_ALERT_WEBHOOK: http://webhook-sink:9099/alert
+    commands:
+      - bash scripts/run_mbt.sh mbt promote --from-file promotions.yml

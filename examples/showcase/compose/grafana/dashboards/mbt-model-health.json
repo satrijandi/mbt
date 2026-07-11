@@ -1,0 +1,52 @@
+{
+  "uid": "mbt-model-health",
+  "title": "mbt Model Health",
+  "tags": ["mbt"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Gate margin (signed headroom; < 0 means the gate failed)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "mbt-prometheus"},
+      "targets": [
+        {"expr": "mbt_gate_margin", "legendFormat": "{{node}} {{kind}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Realized metrics (ground truth, via mbt monitor)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "mbt-prometheus"},
+      "targets": [
+        {"expr": "mbt_realized_metric", "legendFormat": "{{metric}} {{node}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Feature / prediction shift vs threshold",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "mbt-prometheus"},
+      "targets": [
+        {"expr": "mbt_shift_value", "legendFormat": "{{monitor}} {{subject}} ({{measure}})", "refId": "A"},
+        {"expr": "max(mbt_shift_threshold)", "legendFormat": "threshold", "refId": "B"}
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Node duration (seconds)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "mbt-prometheus"},
+      "targets": [
+        {"expr": "mbt_node_duration_seconds", "legendFormat": "{{node}} {{command}}", "refId": "A"}
+      ]
+    }
+  ]
+}

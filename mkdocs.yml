@@ -18,6 +18,7 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Tutorial: tutorial.md
+  - Showcase: showcase.md
   - Concepts: concepts.md
   - Spec reference: spec-reference.md
   - CLI reference: cli-reference.md

@@ -174,12 +174,15 @@ testpaths = [
     "packages/mbt-testing/tests",
     "tests",
 ]
-addopts = "-q --strict-markers"
+# No -q here: the documented commands pass -q themselves, and doubling it
+# (-qq) suppresses the final pass/fail summary line entirely.
+addopts = "--strict-markers"
 markers = [
     "e2e: end-to-end tests exercising the full CLI loop (slower)",
     "perf: performance budget tests (NFR-03)",
     "live: live external-system integration tests (opt-in via MBT_LIVE_* env vars)",
     "live_snowflake: live Snowflake tests (MBT_LIVE_SNOWFLAKE=1 + SNOWFLAKE_* env vars; see packages/mbt-snowflake/README.md)",
+    "live_showcase: docker-compose showcase stack tests (MBT_LIVE_SHOWCASE=1 + local docker; see examples/showcase/README.md)",
 ]
 timeout = 600
 

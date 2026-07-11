@@ -105,15 +105,20 @@ class SparkDataAdapter:
 
     def snapshot_id(self, source: SourceTableLike, deep: bool = False) -> str:
         """Local paths: (path, size, mtime) listing - cheap, no Spark session.
-        URIs/catalog tables: hash of the table's input file listing."""
+        URIs/catalog tables: hash of the table's input file listing.
+
+        The branch is decided on the RESOLVED path: a relative table path
+        under a URI root (e.g. root s3://lake + path t/*.parquet) is a URI
+        source, and locally globbing it would always find nothing."""
         if deep:
             raise SparkAdapterError(
                 "--deep-snapshot is not supported by the spark adapter yet",
                 hint="rely on Delta/Iceberg immutable files, or file listings",
             )
         digest = hashlib.sha256()
-        if source.path is not None and "://" not in source.path:
-            pattern = self._resolve_path(source)
+        resolved = self._resolve_path(source) if source.path is not None else None
+        if resolved is not None and "://" not in resolved:
+            pattern = resolved
             root = Path(pattern.split("*", 1)[0]).parent if "*" in pattern else Path(pattern)
             files = sorted(
                 p

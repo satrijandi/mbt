@@ -1,0 +1,120 @@
+# Showcase profiles: committed and secret-free by design (the compose stack
+# supplies AWS_* via container env; in-network hostnames are not secrets).
+#
+# Targets (DESIGN.md section 4.3):
+#   dev        - DS fast inner loop: Spark local[2] reading the s3a lake,
+#                H2O local backend, shared MLflow + S3 artifact store. Also
+#                the merge-time prod-build target in .woodpecker/ (cluster
+#                training from CI step containers is P3's deployable-unit
+#                territory; SHOW-04 proves the cluster live).
+#   ci         - PR checks: same data/compute as dev, but a PER-RUN sqlite
+#                MLflow and a workspace-local artifact store. Green PRs must
+#                never register versions or re-point the shared staging
+#                alias; tradeoff: champion gates render "none (bootstrap)"
+#                in PR comments (DESIGN.md 4.3, documented).
+#   prod       - the cluster: Spark standalone master, sparkling H2O training
+#                inside executors. Run from the jupyterlab container (the
+#                driver advertises spark.driver.host=jupyterlab; executors
+#                connect back on the fixed ports below).
+#   prod_score - batch scoring/monitoring plane: LOCAL data adapter over the
+#                synced lake copy (mbt-spark has no contract-1.1 scoring
+#                methods); champion MOJOs load in a local JVM by design.
+#
+# dev and ci MUST keep identical vars: var lookups resolve into node config
+# hashes at compile time, so a var that differed between the PR side (ci)
+# and the published baseline (dev) would flag every model as state:modified.
+# (This comment avoids Jinja delimiters on purpose - profiles.yml is
+# rendered whole, comments included.)
+#
+# Both Spark sessions in a prod build coexist on the cluster (the data
+# adapter's session outlives dataset builds while the training job opens its
+# own), so each pins spark.cores.max and its own driver ports - otherwise the
+# first app hogs every core and the second waits forever.
+churn_lake:
+  target: dev
+  outputs:
+    dev:
+      data:
+        adapter: spark
+        config:
+          master: local[2]
+          root: s3://mbt-lake
+          conf: &s3a_conf
+            spark.hadoop.fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+            spark.hadoop.fs.s3a.endpoint: http://seaweedfs:8333
+            spark.hadoop.fs.s3a.path.style.access: "true"
+            spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
+            spark.hadoop.fs.s3a.access.key: "{{ env_var('AWS_ACCESS_KEY_ID') }}"
+            spark.hadoop.fs.s3a.secret.key: "{{ env_var('AWS_SECRET_ACCESS_KEY') }}"
+      tracking: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
+      registry: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
+      compute: {adapter: local}
+      artifact_store: s3://mbt-artifacts/churn_lake
+      threads: 1
+      vars:
+        sample_fraction: 1.0
+        h2o_backend: local
+        h2o_max_mem: 1G
+
+    ci:
+      data:
+        adapter: spark
+        config:
+          master: local[2]
+          root: s3://mbt-lake
+          conf: *s3a_conf
+      # Relative config paths resolve against the project directory (the CI
+      # clone), so every PR gets a fresh empty registry and artifact store
+      # that vanish with the pipeline workspace.
+      tracking: {adapter: mlflow, config: {uri: "sqlite:///target/ci_mlflow.db"}}
+      registry: {adapter: mlflow, config: {uri: "sqlite:///target/ci_mlflow.db"}}
+      compute: {adapter: local}
+      artifact_store: file://target/ci_artifacts
+      threads: 1
+      vars:
+        sample_fraction: 1.0
+        h2o_backend: local
+        h2o_max_mem: 1G
+
+    prod:
+      data:
+        adapter: spark
+        config:
+          master: spark://spark-master:7077
+          root: s3://mbt-lake
+          conf:
+            <<: *s3a_conf
+            # The runner entrypoint exports SPARK_DRIVER_HOST=$(hostname -i),
+            # so the prod target works from ANY container on the network -
+            # jupyterlab, a Woodpecker step, or an Airflow-launched unit
+            # (DESIGN.md section 2: executors connect back to the driver).
+            spark.driver.host: "{{ env_var('SPARK_DRIVER_HOST', 'jupyterlab') }}"
+            spark.driver.port: "40400"
+            spark.blockManager.port: "40401"
+            spark.executor.memory: 1g
+            spark.cores.max: "2"
+      tracking: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
+      registry: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
+      compute: {adapter: local}
+      artifact_store: s3://mbt-artifacts/churn_lake
+      threads: 1
+      vars:
+        sample_fraction: 1.0
+        h2o_backend: sparkling
+        spark_master: spark://spark-master:7077
+        spark_conf:
+          spark.driver.host: "{{ env_var('SPARK_DRIVER_HOST', 'jupyterlab') }}"
+          spark.driver.port: "40402"
+          spark.blockManager.port: "40403"
+          spark.executor.memory: 2g
+          spark.cores.max: "2"
+
+    prod_score:
+      data: {adapter: local, config: {root: /workspace/lake_local}}
+      tracking: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
+      registry: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
+      compute: {adapter: local}
+      artifact_store: s3://mbt-artifacts/churn_lake
+      threads: 1
+      vars:
+        sample_fraction: 1.0

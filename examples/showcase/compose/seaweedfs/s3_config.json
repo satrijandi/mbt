@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "mbtadmin",
+      "credentials": [
+        {
+          "accessKey": "mbtadmin",
+          "secretKey": "mbtsecret"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

@@ -116,6 +116,7 @@ determinism tiers per adapter otherwise).
 | `packages/mbt-optuna` | Optuna tuning engine (seeded TPE, per-target trial caps) |
 | `packages/mbt-testing` | Fake adapters for testing mbt projects without frameworks |
 | `examples/churn_demo` | The demo project used by golden and E2E tests |
+| `examples/showcase` | Docker-compose reference stack (S3 lake, HTTP MLflow, Spark cluster, Gitea + Woodpecker CI, Zot provenance, Airflow CD, Grafana; optional k3d/ArgoCD) with an opt-in live test tier |
 
 ## Development
 

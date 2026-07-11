@@ -1,6 +1,6 @@
 # CLAUDE.md - working guide for the mbt repo
 
-mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-mlflow, mbt-optuna, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/churn_demo`, repo-root `tests/` (E2E, golden, perf), and `docs/` (mkdocs + ADRs).
+mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-mlflow, mbt-optuna, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/{churn_demo, showcase}`, repo-root `tests/` (E2E, golden, perf, live), and `docs/` (mkdocs + ADRs).
 Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anything that looks odd.
 `FEEDBACK.md` carries an external review and a progress log; when working through it, append a log entry per completed item (symptom, fix, verification, docs).
 
@@ -19,7 +19,7 @@ uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packag
 ```
 
 - Run the JVM e2e tier via `uv run` (so `.venv/bin/spark-submit` is on PATH) with `JAVA_HOME=/opt/homebrew/opt/openjdk@17` locally.
-- Live external-system tests (`-m live_snowflake`) are opt-in and NOT part of the battery above: they skip unless `MBT_LIVE_SNOWFLAKE=1`, then fail loudly if `SNOWFLAKE_*` env vars are incomplete (setup in `packages/mbt-snowflake/README.md`; nightly in CI via `.github/workflows/live.yml`).
+- Live external-system tests (`-m live`) are opt-in and NOT part of the battery above; both tiers run nightly in CI via `.github/workflows/live.yml`. `-m live_snowflake` skips unless `MBT_LIVE_SNOWFLAKE=1`, then fails loudly if `SNOWFLAKE_*` env vars are incomplete (setup in `packages/mbt-snowflake/README.md`). `-m live_showcase` skips unless `MBT_LIVE_SHOWCASE=1`, then fails loudly if docker is unusable; it boots the `examples/showcase` compose stack (see its README).
 - Do not pipe test commands through `tail` and trust the exit code; the pipeline returns tail's status, not pytest's.
 - Workflow YAML under `.github/` (repo and scaffold) must also parse with PyYAML; unquoted scalars containing `: ` are syntax errors that yamllint's relaxed profile is the only local check for.
 

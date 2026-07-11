@@ -1,7 +1,8 @@
 # Live external-system integration tier (B-tier of the integration-test
 # plan): runs nightly and on demand, never on PRs (fork PRs cannot see
-# secrets, and a flaky external system must not block merges). Each job
-# no-ops with an explicit notice when its secrets are not configured.
+# secrets, and a flaky external system must not block merges). Credentialed
+# jobs no-op with an explicit notice when their secrets are not configured;
+# the showcase job needs only the runner's docker daemon.
 name: Live integration
 
 on:
@@ -44,3 +45,26 @@ jobs:
       - name: Not configured
         if: env.SNOWFLAKE_ACCOUNT == ''
         run: echo "SNOWFLAKE_* secrets are not configured - live Snowflake suite was not run."
+
+  # The docker-compose showcase stack (examples/showcase): builds the runner
+  # image, boots SeaweedFS + MLflow + Spark + Gitea/Woodpecker + Zot +
+  # Airflow + observability, and runs the lifecycle, CI-loop, provenance,
+  # and scheduling tiers. The k3d/ArgoCD module needs MBT_LIVE_SHOWCASE_K3D=1
+  # and stays local-only. No secrets needed - docker ships on ubuntu-latest.
+  showcase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Free runner disk space (the runner image alone is ~5GB)
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Sync workspace
+        run: uv sync
+      - name: Showcase stack suite
+        env:
+          MBT_LIVE_SHOWCASE: "1"
+        run: uv run pytest -q -m live_showcase --timeout 3600 -rA

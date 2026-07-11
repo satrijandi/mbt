@@ -1,0 +1,5 @@
+# GitOps promotions: reviewed edits here are applied by
+#   mbt promote --from-file promotions.yml
+# Always pin `version:` - an unpinned staging->production promotion vacates
+# the staging alias, so replays of the same file would exit 1.
+promotions: []

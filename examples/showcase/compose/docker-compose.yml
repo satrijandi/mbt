@@ -1,0 +1,319 @@
+# mbt showcase stack (see ../DESIGN.md). Boot with profiles so each tier only
+# pays for what it uses:
+#   core  - SeaweedFS (S3 lake + artifact store) + MLflow (tracking/registry)
+#   spark - standalone Spark cluster (pushdown + sparkling H2O training)
+#   dev   - JupyterLab (the DS workbench; also the container mbt runs in)
+#   obs   - Pushgateway + Prometheus + Grafana (docs/tutorial.md step 14)
+#   ci    - Gitea + Woodpecker + Zot + webhook-sink (the P2/P3 CI loop).
+#           Woodpecker boots with placeholder OAuth credentials;
+#           scripts/ci_bootstrap.py creates the Gitea OAuth app, then re-ups
+#           woodpecker-server with SHOWCASE_WOODPECKER_CLIENT/SECRET set.
+#   orch  - Airflow (LocalExecutor + postgres) + git-sync (the P4
+#           scheduling/CD half): DAGs live in the Gitea `deploy` repo,
+#           git-sync reconciles them, tasks run the pinned deployable unit.
+#
+# Required env (set by the Makefile or the pytest fixture):
+#   SHOWCASE_WORKSPACE - host dir bind-mounted at /workspace into every
+#     container that trains or reads data. The Spark adapters stage split
+#     writes through driver-local temp paths that executors must also see
+#     (ADR-17), so this identical-path shared mount is load-bearing.
+# Host ports are overridable; defaults avoid common dev-machine squatters.
+
+x-s3-env: &s3-env
+  AWS_ACCESS_KEY_ID: ${SHOWCASE_S3_KEY:-mbtadmin}
+  AWS_SECRET_ACCESS_KEY: ${SHOWCASE_S3_SECRET:-mbtsecret}
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
+
+x-airflow-env: &airflow-env
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+  # LocalExecutor: real parallel tasks without a Celery fleet (sqlite would
+  # force SequentialExecutor, which is invalid with LocalExecutor anyway).
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  # DAGs come from the git-synced deploy repo, never from an image bake.
+  AIRFLOW__CORE__DAGS_FOLDER: /gitsync/current/dags
+  AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
+  AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "5"
+  AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+  AIRFLOW__WEBSERVER__SECRET_KEY: mbt-showcase-airflow-secret
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+  # The DAG tasks drive the docker daemon (deployable-unit containers).
+  _PIP_ADDITIONAL_REQUIREMENTS: "docker==7.1.0"
+
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80
+    profiles: [core]
+    # -ip.bind: weed binds the container IP by default, which breaks
+    # localhost healthchecks.
+    command: server -ip.bind=0.0.0.0 -s3 -s3.config=/etc/seaweedfs/s3_config.json -dir=/data
+    volumes:
+      - seaweed-data:/data
+      - ./seaweedfs/s3_config.json:/etc/seaweedfs/s3_config.json:ro
+    ports:
+      - "${SHOWCASE_S3_PORT:-8333}:8333"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9333/cluster/healthz"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  mlflow:
+    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    profiles: [core]
+    # --allowed-hosts: mlflow 3.x rejects non-localhost Host headers (DNS
+    # rebinding protection); in-network clients send Host: mlflow:5000.
+    # Wildcard is a demo posture on an isolated compose network.
+    command: >
+      mlflow server --backend-store-uri sqlite:////data/mlflow.db
+      --host 0.0.0.0 --port 5000 --workers 1 --allowed-hosts "*"
+    volumes:
+      - mlflow-data:/data
+    ports:
+      - "${SHOWCASE_MLFLOW_PORT:-5501}:5000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/health >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+
+  spark-master:
+    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    profiles: [spark]
+    command: spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080
+    ports:
+      - "${SHOWCASE_SPARK_UI_PORT:-8380}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/json/ >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  spark-worker:
+    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    profiles: [spark]
+    command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --cores 4 --memory 4g --webui-port 8081
+    environment:
+      <<: *s3-env
+    volumes:
+      - ${SHOWCASE_WORKSPACE:?set SHOWCASE_WORKSPACE to the shared workspace dir}:/workspace
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081 >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  jupyterlab:
+    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    profiles: [dev]
+    command: jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''
+    working_dir: /workspace
+    environment:
+      <<: *s3-env
+      TMPDIR: /workspace/tmp
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ${SHOWCASE_WORKSPACE:?set SHOWCASE_WORKSPACE to the shared workspace dir}:/workspace
+    ports:
+      - "${SHOWCASE_JUPYTER_PORT:-8899}:8888"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8888/api >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  gitea:
+    image: gitea/gitea:1.24-rootless
+    profiles: [ci]
+    environment:
+      # Headless init: skip the web installer entirely.
+      GITEA__security__INSTALL_LOCK: "true"
+      # In-network canonical URL: Woodpecker clones and comments via this.
+      GITEA__server__ROOT_URL: http://gitea:3000/
+      # Gitea blocks webhooks to private addresses by default; Woodpecker is
+      # exactly such a target on the compose network.
+      GITEA__webhook__ALLOWED_HOST_LIST: woodpecker-server
+    ports:
+      - "${SHOWCASE_GITEA_PORT:-3305}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/healthz >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:v3
+    profiles: [ci]
+    environment:
+      WOODPECKER_OPEN: "true"
+      WOODPECKER_HOST: http://woodpecker-server:8000
+      WOODPECKER_AGENT_SECRET: mbt-showcase-agent-secret
+      WOODPECKER_ADMIN: mbtops
+      WOODPECKER_GITEA: "true"
+      WOODPECKER_GITEA_URL: http://gitea:3000
+      # Placeholders until ci_bootstrap.py creates the OAuth app and the
+      # stack re-ups this service with the real values (env change =>
+      # compose recreates it; its sqlite state is per-session anyway).
+      WOODPECKER_GITEA_CLIENT: ${SHOWCASE_WOODPECKER_CLIENT:-pending-bootstrap}
+      WOODPECKER_GITEA_SECRET: ${SHOWCASE_WOODPECKER_SECRET:-pending-bootstrap}
+    ports:
+      - "${SHOWCASE_WOODPECKER_PORT:-8305}:8000"
+
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:v3
+    profiles: [ci]
+    environment:
+      WOODPECKER_SERVER: woodpecker-server:9000
+      WOODPECKER_AGENT_SECRET: mbt-showcase-agent-secret
+      WOODPECKER_BACKEND: docker
+      # Step containers join the compose network so they resolve gitea,
+      # seaweedfs, mlflow, and webhook-sink by service name. The default
+      # network is named <project>_default; the fixture/Makefile export it.
+      WOODPECKER_BACKEND_DOCKER_NETWORK: ${SHOWCASE_NETWORK:-mbt-showcase_default}
+      # One workflow at a time: RAM guardrail (DESIGN.md section 2).
+      WOODPECKER_MAX_WORKFLOWS: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - woodpecker-server
+
+  zot:
+    image: ghcr.io/project-zot/zot:v2.1.2
+    profiles: [ci]
+    # OCI registry for the deployable unit + oras provenance artifacts.
+    # In-network pushes (oras) use zot:5000 over plain HTTP; the docker
+    # daemon pushes/pulls via the published localhost port, which docker
+    # treats as insecure-by-default - no daemon config needed (DESIGN.md
+    # open question 1, smoke-tested on Docker Desktop for macOS).
+    ports:
+      - "127.0.0.1:${SHOWCASE_ZOT_PORT:-15000}:5000"
+
+  webhook-sink:
+    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    profiles: [ci]
+    command: python /workspace/bootstrap/webhook_sink.py
+    volumes:
+      - ${SHOWCASE_WORKSPACE:?set SHOWCASE_WORKSPACE to the shared workspace dir}:/workspace
+    ports:
+      - "${SHOWCASE_WEBHOOK_PORT:-9309}:9099"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9099/ >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  airflow-db:
+    image: postgres:16-alpine
+    profiles: [orch]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  airflow-init:
+    image: apache/airflow:2.10.5
+    profiles: [orch]
+    environment:
+      <<: *airflow-env
+    command: >
+      bash -c "airflow db migrate && airflow users create --username admin
+      --password admin --role Admin --firstname mbt --lastname ops
+      --email ops@example.com"
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-scheduler:
+    image: apache/airflow:2.10.5
+    profiles: [orch]
+    # The docker socket (LocalExecutor runs tasks in-scheduler) is
+    # root-group rw; joining group 0 keeps the image's airflow user (the
+    # official entrypoint misbehaves under root with pip requirements).
+    group_add: ["0"]
+    environment:
+      <<: *airflow-env
+    command: scheduler
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - airflow-dags:/gitsync:ro
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-webserver:
+    image: apache/airflow:2.10.5
+    profiles: [orch]
+    environment:
+      <<: *airflow-env
+    command: webserver
+    volumes:
+      - airflow-dags:/gitsync:ro
+    ports:
+      - "${SHOWCASE_AIRFLOW_PORT:-8280}:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health >/dev/null"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+
+  git-sync:
+    image: registry.k8s.io/git-sync/git-sync:v4.2.4
+    profiles: [orch]
+    # Root so it can write the shared named volume; --max-failures=-1 keeps
+    # it retrying until ci_bootstrap.py has seeded the deploy repo.
+    user: "0:0"
+    command:
+      - --repo=http://gitea:3000/mbt-showcase/deploy.git
+      - --ref=main
+      - --period=5s
+      - --root=/gitsync
+      - --link=current
+      - --max-failures=-1
+    volumes:
+      - airflow-dags:/gitsync
+
+  pushgateway:
+    image: prom/pushgateway:v1.11.1
+    profiles: [obs]
+    ports:
+      - "${SHOWCASE_PUSHGW_PORT:-9491}:9091"
+
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    profiles: [obs]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+    ports:
+      - "${SHOWCASE_PROMETHEUS_PORT:-9490}:9090"
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    profiles: [obs]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${SHOWCASE_GRAFANA_PORT:-3390}:3000"
+
+volumes:
+  seaweed-data:
+  mlflow-data:
+  airflow-dags:

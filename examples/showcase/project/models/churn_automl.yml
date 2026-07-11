@@ -1,0 +1,38 @@
+models:
+  - name: churn_automl
+    description: "H2O AutoML churn challenger; sparkling (in-executor) training on the prod target"
+    task: binary_classification
+    adapter: h2o_automl
+    owner: growth-ds@example.com
+    tags: [churn, weekly]
+
+    dataset: ref('churn_training_set')
+
+    target: churned_90d
+    features:
+      include: ["*"]
+      exclude: [user_id, upgraded_90d, plan_type, account_status]   # id, sibling label, post-outcome status
+
+    # The known-deterministic spec shape (no time budgets, no CV): H2O's
+    # documented determinism tier is 0.02 tolerance on all metrics.
+    hyperparameters:
+      max_models: 3
+      include_algos: [GLM, GBM]
+      nfolds: 0
+      sort_metric: aucpr
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc, logloss]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+        - metric: pr_auc
+          compare_to: production
+          min_delta: 0.0
+
+    registration:
+      name: churn_automl
+      stage_on_pass: staging
+
+    seed: 42

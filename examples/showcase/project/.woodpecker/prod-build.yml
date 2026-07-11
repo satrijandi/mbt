@@ -1,0 +1,123 @@
+# mbt prod build on Woodpecker (DESIGN.md section 6): on every push to main,
+# build exactly the state-modified subgraph and publish the manifest as the
+# new baseline on the mbt-state branch. A no-change push trains nothing and
+# republishes a byte-identical manifest (fixed anchor => generated_at ==
+# anchor => deterministic bytes, ADR-19).
+#
+# The merge build targets `dev` - spark local[2] + the SHARED MLflow
+# registry/S3 artifact store - so merges register real versions and move the
+# staging alias. Cluster (sparkling) training from CI step containers is
+# P3's deployable-unit territory; the cluster path is proven live by the
+# lifecycle tier (SHOW-04).
+when:
+  - event: push
+    branch: main
+
+steps:
+  - name: build
+    image: mbt-showcase-runner:dev
+    environment:
+      AWS_ACCESS_KEY_ID: mbtadmin
+      AWS_SECRET_ACCESS_KEY: mbtsecret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
+      SHOWCASE_ANCHOR: "2026-06-30T00:00:00Z"
+      MBT_STATE_URI: state/prod/latest.json
+      MBT_ALERT_WEBHOOK: http://webhook-sink:9099/alert
+    commands:
+      - mbt parse
+      - |
+        set +e
+        bash scripts/fetch_state.sh "$MBT_STATE_URI"
+        rc=$?
+        set -e
+        if [ "$rc" = 0 ]; then
+          bash scripts/run_mbt.sh mbt build --target dev --anchor "$SHOWCASE_ANCHOR" \
+            --select state:modified+ --state "$MBT_STATE_URI"
+        elif [ "$rc" = 3 ]; then
+          echo "No prod baseline yet; building everything (bootstrap)."
+          bash scripts/run_mbt.sh mbt build --target dev --anchor "$SHOWCASE_ANCHOR"
+        else
+          exit "$rc"
+        fi
+
+  - name: publish-state
+    image: mbt-showcase-runner:dev
+    environment:
+      GITEA_TOKEN:
+        from_secret: gitea_token
+    commands:
+      # Woodpecker's clone has no push credential; wire the repo secret into
+      # the push remote (publish_state never echoes the remote URL).
+      - bash scripts/publish_state.sh target/manifest.json "http://mbtops:$${GITEA_TOKEN}@gitea:3000/$${CI_REPO}.git"
+
+  # ---- deployable unit + provenance (DESIGN.md P3) -------------------------
+  # Docker layer digests embed file mtimes, so every bake mints a new image
+  # digest even for identical source. Baking is therefore gated on "this
+  # merge retrained something" (or "no unit exists yet"): an inert merge -
+  # docs, promotions.yml - must leave the deploy repo HEAD and the pinned
+  # digest untouched. That is the ADR-20 inversion the scheduling tier
+  # asserts: promotion is a registry event, never a deploy.
+  - name: plan-bake
+    image: mbt-showcase-runner:dev
+    commands:
+      - |
+        trained=$(python3 -c "import json; print(len(json.load(open('target/run_results.json')).get('results', [])))" 2>/dev/null || echo 0)
+        images_env_url=http://gitea:3000/mbt-showcase/deploy/raw/branch/main/images.env
+        have_unit=$(curl -fsS "$images_env_url" 2>/dev/null | grep -c '^IMAGE=.*@sha256:' || true)
+        if [ "$trained" -gt 0 ] || [ "$have_unit" = 0 ]; then
+          touch target/bake_needed
+          echo "bake planned (trained=$trained have_unit=$have_unit)"
+        else
+          echo "nothing retrained and a deployable unit exists; skipping bake"
+        fi
+
+  - name: bake
+    image: docker:27-cli
+    # Requires the repo's trusted.volumes flag (set by ci_bootstrap.py):
+    # the bake talks to the host daemon, which resolves the localhost zot
+    # port itself (insecure-by-default for localhost registries).
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      ZOT_PUSH_REPO:
+        from_secret: zot_push_repo
+    commands:
+      - |
+        [ -f target/bake_needed ] || { echo "skipped"; exit 0; }
+        docker build -f deploy/Dockerfile -t "$ZOT_PUSH_REPO:$CI_COMMIT_SHA" .
+        docker push "$ZOT_PUSH_REPO:$CI_COMMIT_SHA"
+        docker inspect --format '{{join .RepoDigests "\n"}}' "$ZOT_PUSH_REPO:$CI_COMMIT_SHA" \
+          | grep "^$ZOT_PUSH_REPO@" | head -1 > target/image_digest
+        echo "baked $(cat target/image_digest)"
+
+  - name: provenance
+    image: ghcr.io/oras-project/oras:v1.2.0
+    commands:
+      # The manifest is secret-free by construction, so it can live in the
+      # registry as an audit artifact; tag = source sha pairs it with both
+      # the baked image tag and the mbt-state commit from this same run.
+      - |
+        [ -f target/bake_needed ] || { echo "skipped"; exit 0; }
+        oras push --plain-http zot:5000/mbt/churn/provenance:$CI_COMMIT_SHA \
+          target/manifest.json target/run_results.json
+
+  - name: deploy-digest
+    image: mbt-showcase-runner:dev
+    environment:
+      GITEA_TOKEN:
+        from_secret: gitea_token
+    commands:
+      - |
+        [ -f target/bake_needed ] || { echo "skipped"; exit 0; }
+        digest_ref=$(cat target/image_digest)
+        git clone --depth 1 "http://mbtops:$${GITEA_TOKEN}@gitea:3000/mbt-showcase/deploy.git" /tmp/deploy
+        cd /tmp/deploy
+        sed -i "s|^IMAGE=.*|IMAGE=$digest_ref|" images.env
+        # Same digest, in-network registry ref for the k3d/ArgoCD profile.
+        digest_only="$${digest_ref#*@}"
+        sed -i "s|image: zot:5000/mbt/churn.*|image: zot:5000/mbt/churn@$digest_only|" k8s/score-cronjob.yaml
+        if git diff --quiet; then echo "digest unchanged; deploy repo already current"; exit 0; fi
+        git -c user.name=mbt-ci -c user.email=ci@showcase.local commit -am "deploy: unit digest from $CI_COMMIT_SHA"
+        git push --quiet origin main
+        echo "deploy repo pinned to new unit digest"

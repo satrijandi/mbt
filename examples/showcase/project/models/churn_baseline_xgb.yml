@@ -1,0 +1,33 @@
+models:
+  - name: churn_baseline_xgb
+    description: "Deterministic xgboost baseline (bit-exact manifest reproduction; the CI-loop workhorse)"
+    task: binary_classification
+    adapter: xgboost
+    owner: growth-ds@example.com
+    tags: [churn, weekly]
+
+    dataset: ref('churn_training_set')
+
+    target: churned_90d
+    features:
+      include: ["*"]
+      exclude: [user_id, upgraded_90d, plan_type, account_status]
+
+    hyperparameters:
+      max_depth: 4
+      learning_rate: 0.1
+      n_estimators: 120
+      scale_pos_weight: "{{ auto }}"
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc, logloss]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+
+    registration:
+      name: churn_baseline_xgb
+      stage_on_pass: staging
+
+    seed: 42

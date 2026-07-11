@@ -1,0 +1,46 @@
+scoring:
+  - name: retention_scoring
+    description: Daily churn scores feeding the retention campaign tool.
+    owner: lifecycle-eng@example.com
+    tags: [daily]
+
+    model: ref('churn_automl')
+    stage: production              # champion resolved from the registry at run time (ADR-20)
+
+    input:
+      source: source('lake', 'scoring_batch')
+      # Same population the model trained on (see churn_training_set).
+      filters:
+        - "is_active = true"
+        - "tenure_days >= 30"
+      time_column: snapshot_date
+      window: "-7d:now"
+
+    checks:
+      - not_null:
+          columns: [user_id, snapshot_date]
+
+    # Distribution shift vs the champion's training-time baseline (ADR-20);
+    # a breach exits 2, like a failed gate.
+    monitors:
+      feature_shift:
+        threshold: 0.25
+      prediction_shift:
+        threshold: 0.25
+
+    # Realized metrics once outcomes mature: `mbt monitor` joins them to the
+    # stored predictions on its own schedule (ADR-21).
+    ground_truth:
+      label:
+        source: source('lake', 'churn_outcomes')
+        column: churned_90d
+      join_key: user_id
+      maturity: "14d"
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+
+    output:
+      path: predictions/retention_scores
+      columns: [user_id, snapshot_date]

@@ -1,0 +1,18 @@
+# One sources.yml serves BOTH data planes (DESIGN.md section 4.2):
+# table paths are RELATIVE and each target's data adapter supplies the root -
+# the spark targets use root s3://mbt-lake (the s3:// spelling is exempt from
+# project-dir path resolution; fs.s3.impl maps it onto S3AFileSystem), and the
+# prod_score target's local adapter uses root /workspace/lake_local.
+sources:
+  - name: lake
+    description: Offline feature store on SeaweedFS (gold-layer parquet).
+    tables:
+      - name: subscribers
+        path: subscribers/*.parquet
+        description: One row per subscriber per monthly snapshot.
+      - name: scoring_batch
+        path: scoring_batch/*.parquet
+        description: Fresh unlabeled subscribers to score (last week before the anchor).
+      - name: churn_outcomes
+        path: churn_outcomes/*.parquet
+        description: Realized churn outcomes, arriving ~90 days after scoring.

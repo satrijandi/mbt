@@ -1,6 +1,7 @@
 """Spark adapter tests: data plane, SparkML training compliance, and the
 spark-submit compute seam. Heavy (JVM); runs under the e2e marker."""
 
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -191,6 +192,27 @@ def test_snapshot_changes_when_source_files_change(source_root: Path) -> None:
     _write_tables(source_root, n=410)
     assert adapter.snapshot_id(table) != before
     _write_tables(source_root, n=400)  # restore for other tests
+
+
+def test_snapshot_uri_branch_for_relative_path_under_uri_root() -> None:
+    """A relative table path under a URI root is a URI source: the snapshot
+    must hash the cluster's file listing, never glob the resolved pattern
+    locally (which always finds nothing). Surfaced end-to-end by the
+    showcase's SeaweedFS lake (root s3://mbt-lake + path <table>/*.parquet)."""
+    adapter = SparkDataAdapter({"root": "s3://lake"})
+    table = FakeSourceTable("events", "events/*.parquet")
+    listing = ["s3://lake/events/part-001.parquet", "s3://lake/events/part-000.parquet"]
+
+    class FakeFrame:
+        def inputFiles(self) -> list[str]:
+            return listing
+
+    adapter._read = lambda source: FakeFrame()  # type: ignore[method-assign]
+    digest = hashlib.sha256()
+    for uri in sorted(listing):
+        digest.update(uri.encode())
+        digest.update(b"\n")
+    assert adapter.snapshot_id(table) == "sha256:" + digest.hexdigest()
 
 
 # -- training plane: the compliance suite (FR-ADPT-05) ---------------------------------

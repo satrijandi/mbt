@@ -1,0 +1,42 @@
+# The scoring schedule rendered as a Kubernetes CronJob for the optional
+# k3d + ArgoCD fidelity profile (DESIGN.md P6). Suspended on purpose: the
+# showcase's executing schedules live on the compose side (Airflow); this
+# object exists to prove the CD mechanics - ArgoCD syncing this repo,
+# insecure pulls from zot, digest bumps rolling the spec, selfHeal.
+#
+# The image line is maintained by CI (prod-build's deploy-digest step) with
+# the IN-NETWORK registry ref (k3d nodes join the compose network and mark
+# zot:5000 insecure via registries.yaml); images.env carries the same digest
+# in daemon-perspective form for Airflow.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mbt-score
+  namespace: mbt
+spec:
+  schedule: "0 6 * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: score
+              image: zot:5000/mbt/churn:seed
+              command:
+                - bash
+                - -c
+                - >
+                  mbt score --target prod_score --select tag:daily
+                  --anchor 2026-06-30T00:00:00Z --deep-snapshot
+              env:
+                - name: AWS_ACCESS_KEY_ID
+                  value: mbtadmin
+                - name: AWS_SECRET_ACCESS_KEY
+                  value: mbtsecret
+                - name: AWS_DEFAULT_REGION
+                  value: us-east-1
+                - name: AWS_ENDPOINT_URL_S3
+                  value: http://seaweedfs:8333

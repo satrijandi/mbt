@@ -1,0 +1,4 @@
+# Keep the deployable unit to project + compiled manifest: the fetched
+# state baseline and git history are CI workspace artifacts, not the unit.
+.git
+state

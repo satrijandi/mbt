@@ -1,0 +1,65 @@
+# mbt PR check on Woodpecker (DESIGN.md section 6): lint promotions.yml ->
+# parse -> compile -> fetch the prod baseline (exit 3 = bootstrap) -> state
+# diff -> slim build of state:modified+ on the `ci` target -> update-in-place
+# PR comment. Exit-code fidelity comes from scripts/run_mbt.sh (Woodpecker
+# collapses any nonzero exit into "failed", erasing mbt's 1-vs-2 contract).
+#
+# The anchor is PINNED (DESIGN.md 4.5): the lake's seed data is fixed-dated,
+# so a wall-clock anchor would rot into empty training windows within weeks;
+# a fixed anchor also keeps same-source rebuilds byte-identical
+# (generated_at == anchor, ADR-19).
+#
+# No --deep-snapshot anywhere in this project's build pipelines (a documented
+# deviation from the GitHub scaffold): the spark data adapter rejects it, and
+# its URI snapshot tokens hash object-store listings, which are
+# checkout-mtime-independent - the "one token scheme per pipeline" rule is
+# satisfied with the spark scheme on both the baseline and diff sides.
+when:
+  - event: pull_request
+
+steps:
+  - name: lint-promotions
+    image: mbt-showcase-runner:dev
+    commands:
+      - python3 scripts/lint_promotions.py
+
+  - name: build
+    image: mbt-showcase-runner:dev
+    environment:
+      # Demo credentials, committed on purpose (they already live in
+      # compose/seaweedfs/s3_config.json); the compose network is isolated.
+      AWS_ACCESS_KEY_ID: mbtadmin
+      AWS_SECRET_ACCESS_KEY: mbtsecret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
+      SHOWCASE_ANCHOR: "2026-06-30T00:00:00Z"
+      MBT_STATE_URI: state/prod/latest.json
+      MBT_ALERT_WEBHOOK: http://webhook-sink:9099/alert
+    commands:
+      - mbt parse
+      - mbt compile --target ci --anchor "$SHOWCASE_ANCHOR"
+      - |
+        set +e
+        bash scripts/fetch_state.sh "$MBT_STATE_URI"
+        rc=$?
+        set -e
+        if [ "$rc" = 0 ]; then
+          mbt state diff --state "$MBT_STATE_URI" --output json > target/state_diff.json
+          bash scripts/run_mbt.sh mbt build --target ci --anchor "$SHOWCASE_ANCHOR" \
+            --select state:modified+ --state "$MBT_STATE_URI"
+        elif [ "$rc" = 3 ]; then
+          echo "No prod baseline yet; building everything (bootstrap)."
+          bash scripts/run_mbt.sh mbt build --target ci --anchor "$SHOWCASE_ANCHOR"
+        else
+          exit "$rc"
+        fi
+
+  - name: comment
+    image: mbt-showcase-runner:dev
+    when:
+      - status: [success, failure]
+    environment:
+      GITEA_TOKEN:
+        from_secret: gitea_token
+    commands:
+      - python3 scripts/gitea_pr_comment.py

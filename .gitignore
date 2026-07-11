@@ -40,6 +40,7 @@ hs_err_pid*
 # their tracked hermetic ones)
 .env
 .env.*
+!.env.example
 /profiles.yml
 .python-version
 

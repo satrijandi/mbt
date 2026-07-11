@@ -1,0 +1,32 @@
+# The four canonical mbt alert rules from docs/tutorial.md step 14.
+# Philosophy: mbt gates ENFORCE (exit 2); observability OBSERVES.
+groups:
+  - name: mbt
+    rules:
+      - alert: MbtGateFailed
+        expr: mbt_gate_passed == 0
+        labels: {severity: notify}
+        annotations:
+          summary: "a gate failed (mbt already enforced via exit 2) on {{ $labels.node }}"
+
+      - alert: MbtScheduleStale
+        # The one failure no in-band mechanism catches: the schedule died.
+        # 30 minutes here (the tutorial's prod suggestion is 8 days) so the
+        # demo can show it without waiting a week.
+        expr: time() - push_time_seconds{command=~"score|monitor"} > 1800
+        labels: {severity: page}
+        annotations:
+          summary: "no {{ $labels.command }} push for 30m - the schedule silently died?"
+
+      - alert: MbtGateNearBreach
+        expr: mbt_gate_margin >= 0 and mbt_gate_margin < 0.02
+        labels: {severity: notify}
+        annotations:
+          summary: "gate margin below 0.02 on {{ $labels.node }} - headroom nearly gone"
+
+      - alert: MbtShiftBreach
+        expr: mbt_shift_value >= mbt_shift_threshold
+        for: 10s
+        labels: {severity: notify}
+        annotations:
+          summary: "{{ $labels.monitor }} breach on {{ $labels.subject }} ({{ $labels.measure }})"

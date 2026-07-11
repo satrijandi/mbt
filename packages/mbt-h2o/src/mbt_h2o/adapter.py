@@ -112,10 +112,23 @@ class H2OAutoMLAdapter:
         builder = SparkSession.builder.appName("mbt-h2o-sparkling").master(
             str(vars_.get("spark_master", "local[*]"))
         )
-        for key, value in dict(vars_.get("spark_conf", {})).items():
-            builder = builder.config(str(key), str(value))
-        spark = builder.getOrCreate()
-        return H2OContext.getOrCreate(H2OConf(spark).setInternalClusterMode())
+        conf = {str(key): str(value) for key, value in dict(vars_.get("spark_conf", {})).items()}
+        # Sparkling's REST client uses the JDK-internal sun.net.www http
+        # handler; Java 16+ strong encapsulation refuses that without an
+        # explicit export (harmless on Java 11). Appended so user-provided
+        # extraJavaOptions survive.
+        exports = (
+            "--add-exports=java.base/sun.net.www.protocol.http=ALL-UNNAMED "
+            "--add-exports=java.base/sun.net.www.protocol.https=ALL-UNNAMED"
+        )
+        for key in ("spark.driver.extraJavaOptions", "spark.executor.extraJavaOptions"):
+            conf[key] = f"{conf.get(key, '')} {exports}".strip()
+        for key, value in conf.items():
+            builder = builder.config(key, value)
+        builder.getOrCreate()
+        # H2OConf takes no session since sparkling 3.32: it reads the active
+        # SparkSession (created above) itself.
+        return H2OContext.getOrCreate(H2OConf().setInternalClusterMode())
 
     @staticmethod
     def _shutdown_quietly() -> None:

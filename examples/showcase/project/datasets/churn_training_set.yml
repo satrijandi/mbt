@@ -1,0 +1,26 @@
+datasets:
+  - name: churn_training_set
+    description: Active subscribers labeled with 90-day churn.
+    source: source('lake', 'subscribers')
+    label:
+      column: churned_90d
+      definition: "cancelled within 90 days of snapshot_date"
+    filters:
+      - "is_active = true"
+      - "tenure_days >= 30"
+    split:
+      strategy: temporal
+      time_column: snapshot_date
+      train: "-150d:-28d"
+      test: "-28d:now"
+    checks:
+      - class_balance_report
+      - no_future_columns
+      - not_null:
+          columns: [churned_90d, snapshot_date]
+      # account_status is generated post-outcome and literally encodes the
+      # label (the demo data's deliberate teaching leak); the always-on scan
+      # blocks the build unless it stays behind this reviewed exclusion.
+      - label_leakage_scan:
+          exclude: [account_status]
+    tags: [churn]
