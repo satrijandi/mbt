@@ -65,6 +65,6 @@ Modules (repo-root `tests/`), which boot their own isolated compose project on e
 
 ## Knobs
 
-See `.env.example` for host ports (defaults dodge common squatters), S3 credentials, workspace location, and the runner image tag.
+See `.env.example` for host ports (defaults dodge common squatters), S3 credentials, workspace location, the runner image tag, and `DOCKER_SOCK_GID` (the docker-socket group airflow-scheduler joins to run DAG tasks; the Makefile and the test harness probe it - 0 on Docker Desktop, the `docker` group on native Linux).
 RAM guardrails live in the compose file: 1 Spark worker (4 cores / 4g), executor 1-2g per session, `h2o_max_mem: 1G` on the dev target, `WOODPECKER_MAX_WORKFLOWS=1`, Airflow on LocalExecutor.
 Budget roughly: ~5GB steady state with every profile up, 8-9GB peak during sparkling training, +~1.5GB while the optional k3d/ArgoCD profile runs.

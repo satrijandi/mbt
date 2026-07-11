@@ -236,10 +236,13 @@ services:
   airflow-scheduler:
     image: apache/airflow:2.10.5
     profiles: [orch]
-    # The docker socket (LocalExecutor runs tasks in-scheduler) is
-    # root-group rw; joining group 0 keeps the image's airflow user (the
-    # official entrypoint misbehaves under root with pip requirements).
-    group_add: ["0"]
+    # The DAG tasks drive the docker daemon (LocalExecutor runs them
+    # in-scheduler), and the image's airflow user must stay non-root (the
+    # official entrypoint misbehaves under root with pip requirements), so
+    # the container joins the socket's owning group. That group is 0 on
+    # Docker Desktop's VM but the `docker` group on native Linux hosts -
+    # the Makefile and the test harness probe it (stat the socket).
+    group_add: ["${DOCKER_SOCK_GID:-0}"]
     environment:
       <<: *airflow-env
     command: scheduler

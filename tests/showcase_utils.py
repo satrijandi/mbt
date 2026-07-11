@@ -14,6 +14,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -60,6 +61,20 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def docker_sock_gid() -> int:
+    """GID of the group owning /var/run/docker.sock as containers see it.
+
+    airflow-scheduler's non-root user joins this group to run DAG tasks.
+    Native Linux bind-mounts the host socket (root:docker), so the host
+    stat is authoritative; Docker Desktop resolves the mount inside its VM
+    where the socket is group 0, and the host stat would be wrong.
+    """
+    sock = Path("/var/run/docker.sock")
+    if sys.platform == "linux" and sock.exists():
+        return sock.stat().st_gid
+    return 0
+
+
 class ComposeStack:
     """One compose project (core+spark+dev+obs+ci profiles), tmp workspace."""
 
@@ -88,6 +103,7 @@ class ComposeStack:
         # how they join the session network and resolve gitea/seaweedfs/
         # mlflow/webhook-sink by name (compose names it <project>_default).
         self.env["SHOWCASE_NETWORK"] = f"{self.project_name}_default"
+        self.env["DOCKER_SOCK_GID"] = str(docker_sock_gid())
 
     # -- docker plumbing -----------------------------------------------------
     def compose(self, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
@@ -443,7 +459,7 @@ class CiHarness:
         return files
 
     # -- airflow ----------------------------------------------------------------------
-    def af_api(self, method: str, path: str, payload: dict | None = None):
+    def af_api(self, method: str, path: str, payload: dict | None = None, *, raw: bool = False):
         import requests
 
         resp = requests.request(
@@ -451,9 +467,12 @@ class CiHarness:
             f"{self.stack.airflow_url()}/api/v1{path}",
             json=payload,
             auth=("admin", "admin"),
+            headers={"Accept": "text/plain"} if raw else None,
             timeout=60,
         )
         assert resp.ok, f"airflow {method} {path} -> {resp.status_code}: {resp.text[:2000]}"
+        if raw:
+            return resp.text
         return resp.json() if resp.content else None
 
     def wait_dag(self, dag_id: str, timeout_s: int = 300) -> None:
@@ -486,10 +505,37 @@ class CiHarness:
         end = time.time() + timeout_s
         while time.time() < end:
             state = self.af_api("GET", f"/dags/{dag_id}/dagRuns/{encoded}")["state"]
-            if state in ("success", "failed"):
+            if state == "failed":
+                # Failed is a legitimate verdict for some tests, but when it
+                # is NOT the expected one the task log is the only evidence
+                # (the stack is torn down before a human can look) - dump it.
+                self._dump_failed_task_logs(dag_id, encoded)
+                return state
+            if state == "success":
                 return state
             time.sleep(5)
         pytest.fail(f"DAG run {dag_id}/{run_id} still not terminal after {timeout_s}s")
+
+    def _dump_failed_task_logs(self, dag_id: str, encoded_run_id: str) -> None:
+        # Best-effort: a broken log fetch must not mask the caller's verdict.
+        try:
+            tis = self.af_api("GET", f"/dags/{dag_id}/dagRuns/{encoded_run_id}/taskInstances")
+            for ti in tis["task_instances"]:
+                if ti["state"] != "failed":
+                    continue
+                for attempt in range(1, (ti["try_number"] or 1) + 1):
+                    log = self.af_api(
+                        "GET",
+                        f"/dags/{dag_id}/dagRuns/{encoded_run_id}/taskInstances"
+                        f"/{ti['task_id']}/logs/{attempt}?full_content=true",
+                        raw=True,
+                    )
+                    print(
+                        f"--- {dag_id}.{ti['task_id']} try {attempt}/{ti['try_number']} "
+                        f"(failed) ---\n{log[-4000:]}"
+                    )
+        except Exception as exc:
+            print(f"(could not fetch failed-task logs for {dag_id}: {exc})")
 
     def task_instances(self, dag_id: str, run_id: str) -> dict:
         import urllib.parse

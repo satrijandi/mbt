@@ -7,6 +7,11 @@ REPO_ROOT := $(abspath $(SHOWCASE_DIR)/../..)
 
 export SHOWCASE_WORKSPACE ?= $(HOME)/.cache/mbt-showcase/workspace
 export SHOWCASE_RUNNER_IMAGE ?= mbt-showcase-runner:dev
+# Native Linux: /var/run/docker.sock is root:docker, so airflow-scheduler
+# must join that group to run DAG tasks. Docker Desktop resolves the mount
+# in its VM where the socket is group 0, and the host stat would be wrong -
+# hence the uname guard.
+export DOCKER_SOCK_GID ?= $(shell [ "$$(uname -s)" = Linux ] && stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)
 COMPOSE := docker compose -p mbt-showcase -f $(SHOWCASE_DIR)/compose/docker-compose.yml \
 	--profile core --profile spark --profile dev --profile obs --profile ci --profile orch
 EXEC := $(COMPOSE) exec -T --workdir /workspace/project jupyterlab
