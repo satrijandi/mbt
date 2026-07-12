@@ -124,7 +124,7 @@ determinism tiers per adapter otherwise).
 git clone <repo> && cd mbt
 uv sync                                   # whole workspace, all extras
 uv run pytest -m "not e2e"               # fast suite
-uv run pytest -m e2e                      # full CLI E2E (XGBoost + MLflow)
+uv run pytest -m e2e                      # full CLI E2E incl. JVM adapters (Java 17)
 uv run ruff check . && uv run mypy packages/mbt-core/src
 uv run pre-commit install                 # hooks: ruff, yamllint, mypy
 ```
@@ -154,9 +154,7 @@ sources).
 
 ## Status
 
-v0.1: the full PR -> CI -> registry -> promotion -> batch scoring loop works
-end-to-end for binary classification on local Parquet with XGBoost/LightGBM +
-MLflow, including shift monitoring against training-time baselines and
-delayed ground-truth evaluation (ADR-20/21).
-See `docs/roadmap.md` for what lands in v1 (remote compute, sklearn/PyTorch,
-Feast, ensembles, warehouse prediction sinks).
+v0.1: the full PR -> CI -> registry -> promotion -> batch scoring -> ground-truth monitoring loop works end-to-end for binary classification (ADR-20/21).
+Data comes from local Parquet, Snowflake, or a Spark lakehouse; training covers XGBoost, LightGBM, SparkML, and H2O AutoML (optionally distributed via Sparkling Water); MLflow tracks and registers.
+The dockerized showcase (`examples/showcase`) proves the loop nightly in CI against real services: S3 lake, HTTP MLflow, a Spark cluster, Gitea + Woodpecker CI, Zot provenance, Airflow CD, and Prometheus/Grafana observability.
+See `docs/roadmap.md` for what lands in v1 (sklearn/PyTorch, Feast, ensembles, warehouse prediction sinks, Iceberg sources).

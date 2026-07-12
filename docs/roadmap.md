@@ -2,11 +2,9 @@
 
 ## v0.1 (this release)
 
-One vertical slice done extremely well: declarative **binary classification**
-over local Parquet, trained by **XGBoost/LightGBM**, tracked and registered
-in **MLflow**, tuned by **Optuna**, with the full PR → CI → registry →
-promotion loop, exact reproducibility via stored manifests, and
-state-aware retraining.
+One vertical slice done extremely well: declarative **binary classification**, with the full PR → CI → registry → promotion → batch scoring → ground-truth monitoring loop, exact reproducibility via stored manifests, and state-aware retraining.
+Data comes from local Parquet, **Snowflake**, or a **Spark lakehouse**; training adapters cover **XGBoost/LightGBM** plus **SparkML** and **H2O AutoML** (optionally distributed via Sparkling Water); **MLflow** tracks and registers; **Optuna** tunes.
+The dockerized showcase (`examples/showcase`) proves the loop nightly in CI against real services end to end.
 
 ## v1 candidates (architecture already accommodates)
 
@@ -27,7 +25,9 @@ state-aware retraining.
   delayed ground-truth evaluation via `mbt monitor` (ADR-20/21). Online
   serving remains a non-goal; warehouse prediction sinks are follow-ups.
 - **Airflow provider** - an operator shelling out to `mbt build` per
-  manifest-derived task group.
+  manifest-derived task group. Reference DAGs that run the digest-pinned
+  deployable unit with exit-code routing (quality verdicts never retried)
+  ship in `examples/showcase`; a first-class provider package remains open.
 - **Slice-level gates** - reporting ships in v0.1; gating is schema-ready.
 - **Iceberg sources** - snapshot IDs from table metadata via
   `mbt-core[iceberg]`.
