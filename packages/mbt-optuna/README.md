@@ -1,1 +1,1 @@
-# mbt-optuna — see the repository root README
+# mbt-optuna - see the repository root README

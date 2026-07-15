@@ -1,7 +1,7 @@
 # mbt - Product Requirements Document
 
 **Product:** mbt (Model Build Tool) - "dbt for machine learning models"
-**Version:** 0.1 · **Status:** Draft for review (revision 2) · **Last updated:** 2026-07-06
+**Version:** 0.1 · **Status:** implemented in v0.1 (historical design document; requirement IDs remain cited from code) · **Last updated:** 2026-07-06
 **Audience:** the building team (2 engineers + 1 DS design partner)
 **Related documents:** [PLAN.md](PLAN.md) (vision, rationale, roadmap) · [TSD.md](TSD.md) (technical design)
 

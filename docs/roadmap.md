@@ -28,6 +28,9 @@ The dockerized showcase (`examples/showcase`) proves the loop nightly in CI agai
   manifest-derived task group. Reference DAGs that run the digest-pinned
   deployable unit with exit-code routing (quality verdicts never retried)
   ship in `examples/showcase`; a first-class provider package remains open.
-- **Slice-level gates** - reporting ships in v0.1; gating is schema-ready.
+- **Slice-level gates** - shipped: threshold and champion gates on slices
+  are evaluated and block registration. The open piece is statistical:
+  champion slice gates compare point deltas, not the ADR-18 paired-bootstrap
+  lower bound used for whole-split champion gates.
 - **Iceberg sources** - snapshot IDs from table metadata via
   `mbt-core[iceberg]`.

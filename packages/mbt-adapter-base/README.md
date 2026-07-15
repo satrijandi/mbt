@@ -1,1 +1,1 @@
-# mbt-adapter-base — see the repository root README
+# mbt-adapter-base - see the repository root README

@@ -1,7 +1,7 @@
 # mbt - Task Breakdown (TASK.md)
 
 **Product:** mbt (Model Build Tool)
-**Version:** 0.1 · **Status:** Draft for review · **Last updated:** 2026-07-06
+**Version:** 0.1 · **Status:** completed (historical planning document; the shipped scope exceeds it) · **Last updated:** 2026-07-06
 **Related documents:** [PRD.md](PRD.md) (requirements) · [TSD.md](TSD.md) (technical design) · [PLAN.md](PLAN.md) (vision)
 
 This document breaks the v0.1 scope into sprints and tasks with testable DONE definitions.

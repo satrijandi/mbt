@@ -107,7 +107,7 @@ It ends up on model cards, in run artifacts, and (later) as the alert-routing la
 mbt parse
 ```
 
-**Expect:** `Parsed 3 nodes, 3 sources in 0.02s`.
+**Expect:** `Parsed 3 nodes, 3 sources, 0 exposures in 0.02s`.
 Schema validation with did-you-mean suggestions, task/adapter compatibility, hyperparameter validation, and DAG construction all happen here, with all errors reported in one pass.
 
 Optional but recommended once per machine:

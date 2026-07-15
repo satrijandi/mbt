@@ -1,1 +1,1 @@
-# mbt-lightgbm — see the repository root README
+# mbt-lightgbm - see the repository root README

@@ -1,1 +1,1 @@
-# mbt-core — see the repository root README
+# mbt-core - see the repository root README

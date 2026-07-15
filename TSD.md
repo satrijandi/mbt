@@ -1,7 +1,7 @@
 # mbt - Technical Specification Document
 
 **Product:** mbt (Model Build Tool)
-**Version:** 0.1 · **Status:** Draft for review (revision 2) · **Last updated:** 2026-07-06
+**Version:** 0.1 · **Status:** implemented in v0.1 (historical design document; ADRs now live in `docs/adr/`, section numbers remain cited from code) · **Last updated:** 2026-07-06
 **Related documents:** [PLAN.md](PLAN.md) (vision, rationale) · [PRD.md](PRD.md) (requirements)
 
 This document is implementation-ready: an engineer should be able to start coding from it.

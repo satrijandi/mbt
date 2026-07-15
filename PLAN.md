@@ -1,14 +1,14 @@
-# mbt — Model Build Tool
+# mbt - Model Build Tool
 
 **"dbt for machine learning models": declarative Model-as-Code, adapter-based, GitOps-native**
 
-**Version:** 0.1 Design Proposal · **Status:** Draft for review · **Last updated:** 2026-07-04
+**Version:** 0.1 Design Proposal · **Status:** implemented in v0.1 (historical design document; current docs live in `docs/`) · **Last updated:** 2026-07-04
 
 ---
 
 ## TL;DR
 
-mbt brings dbt's declarative, Git-centered workflow to model building. Data scientists describe a model — data, algorithm, hyperparameters, quality gates, registration target — in a reviewed YAML spec; pluggable adapters execute training; a compiled manifest pins data snapshots, config hashes, seeds, and environment digests so runs are reproducible; and `state:modified` selection retrains only what changed, making ML-in-CI economical. v0 ships one vertical slice done extremely well — declarative XGBoost training over local Parquet data, tracked and registered in MLflow — in ~18 weeks with 2 engineers and 1 DS design partner.
+mbt brings dbt's declarative, Git-centered workflow to model building. Data scientists describe a model - data, algorithm, hyperparameters, quality gates, registration target - in a reviewed YAML spec; pluggable adapters execute training; a compiled manifest pins data snapshots, config hashes, seeds, and environment digests so runs are reproducible; and `state:modified` selection retrains only what changed, making ML-in-CI economical. v0 ships one vertical slice done extremely well - declarative XGBoost training over local Parquet data, tracked and registered in MLflow - in ~18 weeks with 2 engineers and 1 DS design partner.
 
 ---
 
@@ -47,10 +47,10 @@ Data science teams today glue together notebooks, ad-hoc training scripts, and b
 ### 1.4 Design Principles
 
 1. **Declarative first, escape hatches second.** 90% of models need zero custom code; a `hooks.py` covers the rest without breaking the contract.
-2. **Adapters own execution.** The core never imports XGBoost — it defines contracts; adapters implement them (exactly like dbt's adapter plugin model).
+2. **Adapters own execution.** The core never imports XGBoost - it defines contracts; adapters implement them (exactly like dbt's adapter plugin model).
 3. **Deterministic & reproducible.** A compiled manifest pins data snapshots, config hashes, seeds, and environment digests; `mbt run` twice on the same inputs = same result.
 4. **CI is the primary user.** Every command is non-interactive-safe, exits with meaningful codes, and emits machine-readable artifacts (JSON manifest, run results).
-5. **State-aware.** `mbt run --select state:modified+` retrains only what changed — the killer dbt feature, ported to ML (where training is 1000× more expensive than a view).
+5. **State-aware.** `mbt run --select state:modified+` retrains only what changed - the killer dbt feature, ported to ML (where training is 1000× more expensive than a view).
 
 ### 1.5 Success Criteria (v0.1)
 
@@ -157,7 +157,7 @@ datasets:
 `ref('churn_training_set')` and `ref('churn_classifier')` build the dependency graph, enabling:
 - `mbt run --select churn_classifier+` (model and downstream ensembles)
 - `mbt run --select +churn_classifier` (upstream dataset build first)
-- `mbt run --select tag:weekly,state:modified+` (CI: only weekly models that changed — comma is intersection, dbt-style)
+- `mbt run --select tag:weekly,state:modified+` (CI: only weekly models that changed - comma is intersection, dbt-style)
 - Ensembles/stacking declared as models whose inputs are `ref()`s to other models.
 
 ---
@@ -210,7 +210,7 @@ my_ml_project/
 ### 4.1 Contracts (core defines, plugins implement)
 
 ```python
-# mbt-core: contracts only — no ML framework imports, ever.
+# mbt-core: contracts only - no ML framework imports, ever.
 
 class TrainingAdapter(Protocol):
     name: str
@@ -239,7 +239,7 @@ class ComputeAdapter(Protocol):           # where training runs
     def submit(self, job: TrainingJob) -> JobHandle: ...   # local | k8s | ray
 ```
 
-- **Discovery:** Python entry points (`mbt.adapters` group), exactly like dbt — `pip install mbt-xgboost` and `adapter: xgboost` just works.
+- **Discovery:** Python entry points (`mbt.adapters` group), exactly like dbt - `pip install mbt-xgboost` and `adapter: xgboost` just works.
 - **Task schemas** are also pluggable: an adapter declares which tasks it supports; core validates spec ↔ task ↔ adapter compatibility at `mbt parse` time.
 - **Versioned contract** (`mbt-adapter-base`) so adapters pin against a stable interface.
 
@@ -247,7 +247,7 @@ class ComputeAdapter(Protocol):           # where training runs
 
 | Criterion | Why XGBoost wins for v0 |
 |---|---|
-| Coverage | Handles binary/multiclass classification, regression, ranking, even survival (AFT) — one adapter, many tasks later |
+| Coverage | Handles binary/multiclass classification, regression, ranking, even survival (AFT) - one adapter, many tasks later |
 | Config-friendliness | Nearly everything is a hyperparameter dict → maps perfectly to YAML |
 | Team reality | The workhorse of tabular DS teams; instant credibility |
 | Simplicity | No GPU/distributed complexity required for v0; deterministic with a seed |
@@ -282,16 +282,16 @@ flowchart LR
 - **Git is the source of truth for specs; the registry is the source of truth for artifacts.** The compiled `manifest.json` (stored per run, e.g., in S3 or as a CI artifact) links the two: config hash ↔ data snapshot ↔ model version.
 - **`state:modified` retraining:** CI diffs the new manifest against the last production manifest; only models whose config, dataset spec, upstream deps, or pinned data snapshot changed get retrained. This is what makes ML-in-CI economically sane.
 - **Champion/challenger gates in config** (`compare_to: production`) mean promotion criteria are reviewed in PRs like any other code.
-- **Promotion as PR:** `mbt promote` can run in a pipeline triggered by a reviewed "promotion file" change (pure GitOps) or via a manually-approved CD stage — support both.
+- **Promotion as PR:** `mbt promote` can run in a pipeline triggered by a reviewed "promotion file" change (pure GitOps) or via a manually-approved CD stage - support both.
 - **Environments via `profiles.yml` targets:** dev (sampled data, 5 tuning trials, local MLflow) vs prod (full data, 50 trials, prod registry). Same specs, different target.
-- **Scheduled retraining = CI cron:** nightly/weekly `mbt build --select tag:weekly` — no new orchestrator concept needed for v0; Airflow can simply shell out to mbt later.
+- **Scheduled retraining = CI cron:** nightly/weekly `mbt build --select tag:weekly` - no new orchestrator concept needed for v0; Airflow can simply shell out to mbt later.
 
 ---
 
 ## 6. Engineering Best Practices Baked In
 
 **For Data Scientists (users of mbt):**
-- PR-reviewed model changes; no notebook-to-prod gap — the YAML *is* what runs.
+- PR-reviewed model changes; no notebook-to-prod gap - the YAML *is* what runs.
 - Leakage guards as config (`features.exclude`, dataset `checks`) and as tests.
 - Temporal splits by default for time-dependent problems; random split must be opted into.
 - Seeds mandatory; `mbt run` warns if any nondeterminism source is detected.
@@ -299,7 +299,7 @@ flowchart LR
 
 **For MLOps Engineers (builders/operators of mbt):**
 - `mbt-core` = pure Python 3.11+, typed (mypy --strict), Pydantic v2 schemas, zero ML deps.
-- Plugin repos per adapter with a shared **adapter compliance test suite** (like dbt's) — an adapter passes the suite or it doesn't ship.
+- Plugin repos per adapter with a shared **adapter compliance test suite** (like dbt's) - an adapter passes the suite or it doesn't ship.
 - Semantic versioning + versioned adapter contract; deprecation policy from day one.
 - Structured logging (JSON), OpenTelemetry hooks, machine-readable `run_results.json`.
 - Golden-path template repo (`mbt init` output) encoding conventions: pre-commit (ruff, mypy, yamllint), CI workflows, CODEOWNERS on `models/`.
@@ -314,7 +314,7 @@ flowchart LR
 | Language | Python 3.11+ | Meets DS ecosystem where it lives |
 | CLI | **Typer** (Click-based) + Rich | dbt-like UX, pretty tables/progress |
 | Config schemas | **Pydantic v2** | Validation, JSON-schema export for editor autocomplete |
-| Templating | **Jinja2** | `{{ var() }}`, `{{ env_var() }}`, macros — dbt muscle memory |
+| Templating | **Jinja2** | `{{ var() }}`, `{{ env_var() }}`, macros - dbt muscle memory |
 | DAG | **networkx** | Topological sort, selectors, cycle detection |
 | Parallel execution | `concurrent.futures` (v0) → ComputeAdapter (v1) | `--threads` semantics |
 | Data handling | **Polars** + **DuckDB** + PyArrow | Fast local dataset builds; Iceberg via pyiceberg |
@@ -332,13 +332,13 @@ flowchart LR
 
 | Phase | Duration | Deliverables | Definition of Done |
 |---|---|---|---|
-| **0 — Spike & spec** | 2 wks | Naming, ADRs, Pydantic schemas for project/dataset/model, `mbt init/parse/ls` | A demo project parses; JSON schema published for editor autocomplete |
-| **1 — Vertical slice** | 4 wks | `compile` (Jinja, profiles, manifest), `run` for **XGBoost binary classification**, local Parquet DataAdapter, MLflow tracking, seed/reproducibility | `mbt build` trains a real churn model end-to-end from YAML; rerun = identical metrics |
-| **2 — DAG & gates** | 4 wks | `ref()` DAG + selectors, dataset resources, `mbt test` (data tests + metric gates), champion/challenger vs registry, `run_results.json` | Multi-model project with dependencies; failing gate blocks registration with exit code 2 |
-| **3 — GitOps & state** | 3 wks | `state:modified` selectors + `mbt state diff`, manifest storage convention, reference GitHub Actions (PR check + prod build + promotion), `mbt promote` | The full loop in §5.1 runs on a demo repo; PR comment bot shows metric deltas |
-| **4 — Adapter hardening** | 3 wks | Extract `mbt-adapter-base`, compliance test suite, Optuna tuning support, `mbt docs` model cards + lineage site | A second adapter (LightGBM) built by "someone else" using only public contracts + suite |
-| **5 — v0.1 release** | 2 wks | Packaging on PyPI, docs site, quickstart tutorial, template repo, dogfood on 2–3 internal models | External-quality README + tutorial; two real models migrated from notebooks |
-| **Later (v1+)** | — | K8s/Ray ComputeAdapters, sklearn/PyTorch adapters, survival & ranking task schemas, Feast DataAdapter, ensembles, batch scoring (`mbt score`), Airflow provider | Driven by dogfooding feedback |
+| **0 - Spike & spec** | 2 wks | Naming, ADRs, Pydantic schemas for project/dataset/model, `mbt init/parse/ls` | A demo project parses; JSON schema published for editor autocomplete |
+| **1 - Vertical slice** | 4 wks | `compile` (Jinja, profiles, manifest), `run` for **XGBoost binary classification**, local Parquet DataAdapter, MLflow tracking, seed/reproducibility | `mbt build` trains a real churn model end-to-end from YAML; rerun = identical metrics |
+| **2 - DAG & gates** | 4 wks | `ref()` DAG + selectors, dataset resources, `mbt test` (data tests + metric gates), champion/challenger vs registry, `run_results.json` | Multi-model project with dependencies; failing gate blocks registration with exit code 2 |
+| **3 - GitOps & state** | 3 wks | `state:modified` selectors + `mbt state diff`, manifest storage convention, reference GitHub Actions (PR check + prod build + promotion), `mbt promote` | The full loop in §5.1 runs on a demo repo; PR comment bot shows metric deltas |
+| **4 - Adapter hardening** | 3 wks | Extract `mbt-adapter-base`, compliance test suite, Optuna tuning support, `mbt docs` model cards + lineage site | A second adapter (LightGBM) built by "someone else" using only public contracts + suite |
+| **5 - v0.1 release** | 2 wks | Packaging on PyPI, docs site, quickstart tutorial, template repo, dogfood on 2–3 internal models | External-quality README + tutorial; two real models migrated from notebooks |
+| **Later (v1+)** | - | K8s/Ray ComputeAdapters, sklearn/PyTorch adapters, survival & ranking task schemas, Feast DataAdapter, ensembles, batch scoring (`mbt score`), Airflow provider | Driven by dogfooding feedback |
 
 **Timeline:** ~18 weeks (~4.5 months) to v0.1 · **Team shape:** 2 engineers + 1 DS design partner is enough through Phase 5.
 
@@ -348,12 +348,12 @@ flowchart LR
 
 | Risk / Question | Position |
 |---|---|
-| "YAML hell" — configs grow unwieldy | Task schemas keep them small; `hooks.py` escape hatch; macros for repetition; resist adding knobs until dogfooding demands them |
+| "YAML hell" - configs grow unwieldy | Task schemas keep them small; `hooks.py` escape hatch; macros for repetition; resist adding knobs until dogfooding demands them |
 | Training in CI is slow/expensive | `state:modified` selection, sampled dev targets, tuning-trial caps per target, cost estimate in PR comment |
-| Overlap with Kubeflow/ZenML/Metaflow | Those are *pipeline/orchestration* tools (imperative Python). mbt is a *declarative spec + build tool* that can run inside them — complement, not competitor. Keep scope discipline |
+| Overlap with Kubeflow/ZenML/Metaflow | Those are *pipeline/orchestration* tools (imperative Python). mbt is a *declarative spec + build tool* that can run inside them - complement, not competitor. Keep scope discipline |
 | Where does feature engineering live? | v0: in the dataset source (dbt/warehouse) or `hooks.py`. v1: Feast DataAdapter. mbt should not become a feature engineering DSL |
 | Registry as deployment trigger vs mbt deploying | mbt stops at the registry + exposures; serving CD (Argo) reacts to registry stages. Clean seam |
 | Nondeterministic training (GPU, threads) | Document determinism tiers per adapter; gates use tolerance bands where exact reproducibility is impossible |
-| DS adoption — "I'll just keep my notebook" | Golden-path `mbt init`, one-hour quickstart, model cards and state-aware CI as carrots; migrate 2–3 flagship models alongside a design partner before broad rollout |
+| DS adoption - "I'll just keep my notebook" | Golden-path `mbt init`, one-hour quickstart, model cards and state-aware CI as carrots; migrate 2–3 flagship models alongside a design partner before broad rollout |
 | Secrets & credentials in `profiles.yml` | Follow dbt: resolve via `{{ env_var() }}`, keep profiles outside the repo by default, never write secrets into the manifest |
 | Name collision check | Verify "mbt" availability on PyPI/GitHub before public release |

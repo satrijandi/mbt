@@ -12,7 +12,8 @@
 | **test** | `tests/*.py` | Python data tests: `def test_*(dataset, spec) -> TestResult` |
 | **exposure** | `exposures.yml` | Downstream consumers, for lineage and impact analysis |
 
-Every resource gets a stable unique id: `<type>.<project>.<name>`.
+Every resource gets a stable unique id: `<type>.<project>.<name>`
+(sources are the one exception: `source.<project>.<group>.<table>`).
 
 ## The DAG and selection
 
