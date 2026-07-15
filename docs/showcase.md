@@ -5,7 +5,7 @@ Where the [tutorial](tutorial.md) walks a team through the concepts, the showcas
 
 | Service | Role |
 |---|---|
-| SeaweedFS | S3-compatible object store: the feature-store lake (read via `s3a://`) and the MLflow artifact store |
+| SeaweedFS | S3-compatible object store: the data lake of gold-layer feature tables (read via `s3a://`) and the MLflow artifact store |
 | MLflow (HTTP server) | Tracking + model registry; champion source of truth |
 | Spark standalone cluster | Dataset pushdown; H2O AutoML training inside the executors via Sparkling Water |
 | JupyterLab | The DS workbench; its terminal runs the same `mbt` as everything else |

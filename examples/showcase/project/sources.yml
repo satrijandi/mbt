@@ -5,7 +5,7 @@
 # prod_score target's local adapter uses root /workspace/lake_local.
 sources:
   - name: lake
-    description: Offline feature store on SeaweedFS (gold-layer parquet).
+    description: Gold-layer feature tables on the SeaweedFS parquet lake.
     tables:
       - name: subscribers
         path: subscribers/*.parquet
