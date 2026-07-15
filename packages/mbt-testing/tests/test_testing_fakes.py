@@ -175,3 +175,16 @@ def test_fake_tuning_minimize_direction_tracks_the_lowest_value() -> None:
 
     result = FakeTuningEngine({}).tune(spec, objective, n_trials=4, seed=3)
     assert result.best_value == pytest.approx(min(seen))
+
+
+def test_sleep_seconds_hyperparameter_delays_training() -> None:
+    """The timeout-test control knob: train() honors sleep_seconds in-process
+    (the integration timeout test exercises it only inside a killed subprocess,
+    which coverage cannot trace)."""
+    import time
+
+    adapter = FakeTrainingAdapter({})
+    started = time.monotonic()
+    model = adapter.train(_spec(sleep_seconds=0.05), tiny_binary_dataset(), _ctx())
+    assert time.monotonic() - started >= 0.05
+    assert model.value > 0

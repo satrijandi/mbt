@@ -218,3 +218,48 @@ def test_parse_job_line_wraps_everything_else_as_raw_output(line: str) -> None:
     event = parse_job_line(line)
     assert isinstance(event, JobLine)
     assert event.line == line
+
+
+def test_terminate_after_exit_leaves_the_result_authoritative(
+    tmp_path: Path, recording_bus: RecordingSink
+) -> None:
+    """terminate() racing a just-finished job: the result file still wins."""
+    adapter = LocalComputeAdapter()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    process.wait()
+    job_path = _job_dir(tmp_path) / "job.json"
+    result_path_for(job_path).write_text(JobResult(status="success").model_dump_json())
+    handle = LocalJobHandle(job_id="local-done", process=process, job_path=job_path)
+    adapter.terminate(handle, "cancelled by --fail-fast")  # early return: already exited
+    assert adapter.wait(handle).status == "success"
+
+
+def test_terminate_falls_back_to_kill_when_sigterm_is_ignored(tmp_path: Path) -> None:
+    class _StubbornProcess:
+        killed = False
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None: ...
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired(cmd="job", timeout=timeout or 0)
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = _StubbornProcess()
+    handle = LocalJobHandle(
+        job_id="local-stubborn",
+        process=process,  # type: ignore[arg-type]
+        job_path=tmp_path / "job.json",
+    )
+    LocalComputeAdapter().terminate(handle, "timed out after 1s and was killed")
+    assert process.killed
+    assert handle.terminated_reason == "timed out after 1s and was killed"

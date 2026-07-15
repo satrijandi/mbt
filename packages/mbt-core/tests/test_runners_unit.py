@@ -27,6 +27,7 @@ from mbt.contracts import ScoringSpec
 from mbt.exceptions import ConfigError
 from mbt.execute.runners import (
     DatasetRunner,
+    ExecutionContext,
     ModelRunner,
     ModelTestRunner,
     ScoringRunner,
@@ -384,3 +385,34 @@ def test_test_command_job_error(demo_project: Path, fake_registry: AdapterRegist
     assert results.exit_code() == 1
     model = {r.unique_id: r for r in results.results}[MODEL]
     assert model.status == "error"
+
+
+def test_cancel_active_jobs_is_a_noop_without_a_terminate_seam() -> None:
+    import threading
+
+    ctx = SimpleNamespace(
+        compute=object(),  # no terminate(): older/remote compute adapters
+        _job_handles_lock=threading.Lock(),
+        _active_job_handles=[object()],
+    )
+    ExecutionContext.cancel_active_jobs(ctx)  # must not raise
+
+
+def test_cancel_active_jobs_terminates_each_handle_and_survives_races() -> None:
+    import threading
+
+    calls: list[tuple[object, str]] = []
+
+    class _Compute:
+        def terminate(self, handle: object, reason: str) -> None:
+            calls.append((handle, reason))
+            if len(calls) == 1:
+                raise RuntimeError("job just exited")  # must not stop the sweep
+
+    ctx = SimpleNamespace(
+        compute=_Compute(),
+        _job_handles_lock=threading.Lock(),
+        _active_job_handles=["h1", "h2"],
+    )
+    ExecutionContext.cancel_active_jobs(ctx)
+    assert [reason for _, reason in calls] == ["cancelled by --fail-fast"] * 2
