@@ -4,6 +4,9 @@
 # For a fully transitively pinned, hash-verified lock, run:
 #   uv pip compile --generate-hashes requirements.in -o requirements.txt
 # and commit the result.
+# NOTE: the mbt packages are not on PyPI yet - until they are, point pip at
+# the index that serves them (e.g. an internal index via PIP_INDEX_URL), or
+# swap these pins for git refs: mbt-core @ git+https://github.com/satrijandi/mbt@<tag>#subdirectory=packages/mbt-core
 mbt-core==__MBT_VERSION__
 mbt-xgboost==__MBT_VERSION__
 mbt-mlflow==__MBT_VERSION__

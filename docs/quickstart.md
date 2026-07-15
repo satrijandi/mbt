@@ -5,10 +5,15 @@ Budget: well under an hour; the training itself takes seconds.
 
 ## 1. Install
 
+The packages are not on PyPI yet, so install from a source checkout:
+
 ```bash
-pip install mbt-core mbt-xgboost mbt-mlflow
+git clone https://github.com/satrijandi/mbt && cd mbt
+uv sync && source .venv/bin/activate     # puts `mbt` on PATH
 ```
 
+Once the packages are published this becomes
+`pip install mbt-core mbt-xgboost mbt-mlflow`.
 Python 3.11+ required (3.11 through 3.14 are tested in CI). This brings the
 CLI (`mbt`), the XGBoost training adapter, and MLflow tracking/registry
 adapters.

@@ -12,6 +12,7 @@ Session configuration comes from target vars (``spark_master``,
 Determinism: tolerance tier (distributed floating-point reduction order).
 """
 
+import atexit
 import shutil
 import tempfile
 from pathlib import Path
@@ -35,7 +36,6 @@ from mbt_adapter_base import (
     TaskType,
     ValidationIssue,
 )
-from mbt_adapter_base.metrics import compute_binary_results
 
 if TYPE_CHECKING:
     import numpy as np
@@ -117,17 +117,13 @@ class SparkMLTrainingAdapter:
     # -- data plumbing ----------------------------------------------------------------
 
     def _split_frame(self, spark: Any, data: DatasetHandle, split: str) -> "DataFrame":
-        split_path = getattr(data, "split_path", None)
-        if callable(split_path):
-            frame: DataFrame = spark.read.parquet(str(split_path(split)))
-            return frame
-        # handles without on-disk backing (compliance fixtures): stage locally
-        out = Path(tempfile.mkdtemp(prefix="mbt-spark-stage-")) / f"{split}.parquet"
-        import pyarrow.parquet as pq
+        # handles without on-disk backing (compliance fixtures) stage locally
+        from mbt_adapter_base.training_helpers import staged_split_path
 
-        pq.write_table(data.read(split), out)
-        staged: DataFrame = spark.read.parquet(str(out))
-        return staged
+        frame: DataFrame = spark.read.parquet(
+            str(staged_split_path(data, split, prefix="mbt-spark-stage-"))
+        )
+        return frame
 
     def _feature_columns(self, columns: list[str], spec: ModelSpec) -> list[str]:
         return [c for c in columns if c != spec.target and c not in spec.evaluation.slices]
@@ -188,18 +184,32 @@ class SparkMLTrainingAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        import numpy as np
+        from mbt_adapter_base.training_helpers import evaluate_binary_split
 
-        target = model.target or getattr(data, "label_column", "")
+        target = str(model.target or getattr(data, "label_column", ""))
         table = data.read(split)
-        y_true = table.column(target).to_numpy(zero_copy_only=False).astype(np.float64)
-        y_score = self._scores(model, data, split)
-        slice_columns = {
-            name: table.column(name).to_numpy(zero_copy_only=False)
-            for name in (slices or [])
-            if name in table.column_names
+        return evaluate_binary_split(
+            table, target, self._scores(model, data, split), metrics, slices
+        )
+
+    def feature_importance(self, model: SparkMLModel) -> dict[str, float]:
+        """GBT featureImportances normalized to fractions (FR-DOCS-02).
+
+        The importance vector is indexed by the VectorAssembler's inputCols,
+        which is exactly ``model.features`` in order.
+        """
+        classifier = model.model.stages[-1]
+        if not hasattr(classifier, "featureImportances"):
+            return {}
+        importances = classifier.featureImportances
+        values = [float(importances[i]) for i in range(len(model.features))]
+        total = sum(values)
+        if not total:
+            return dict.fromkeys(model.features, 0.0)
+        return {
+            name: round(value / total, 6)
+            for name, value in zip(model.features, values, strict=True)
         }
-        return compute_binary_results(metrics, y_true, y_score, slice_columns)
 
     def predict(self, model: SparkMLModel, data: DatasetHandle, split: str) -> pa.Table:
         table = data.read(split)
@@ -228,6 +238,9 @@ class SparkMLTrainingAdapter:
             raise ValueError(f"sparkml cannot load artifact format {ref.format!r}")
         self._spark()  # loading needs an active session
         extract_dir = Path(tempfile.mkdtemp(prefix="mbt-sparkml-load-"))
+        # The loaded model reads from this dir for the rest of the (short-
+        # lived) job process; clean it up at exit like the staged splits.
+        atexit.register(shutil.rmtree, extract_dir, ignore_errors=True)
         shutil.unpack_archive(store.fetch(ref), extract_dir, "zip")
         columns = (extract_dir / "mbt_columns.txt").read_text().splitlines()
         model = PipelineModel.load(str(extract_dir))

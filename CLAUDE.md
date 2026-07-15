@@ -12,7 +12,8 @@ uv run pytest -q -m e2e --timeout 1800   # e2e tier incl. JVM; needs java 17
 uv run ruff check . && uv run ruff format --check .
 uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
   packages/mbt-xgboost/src packages/mbt-mlflow/src packages/mbt-optuna/src \
-  packages/mbt-lightgbm/src packages/mbt-testing/src   # strict, must be clean
+  packages/mbt-lightgbm/src packages/mbt-testing/src packages/mbt-snowflake/src \
+  packages/mbt-spark/src packages/mbt-h2o/src   # strict, all 10 packages, must be clean
 uv run pre-commit run --all-files
 uv run mkdocs build --strict         # docs changes; site/ is gitignored output
 uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples .github

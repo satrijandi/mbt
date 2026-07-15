@@ -9,11 +9,31 @@ description = "LightGBM training adapter for mbt (the extensibility proof)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+authors = [{ name = "Nugroho Satrijandi", email = "satrijandi@gmail.com" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
     "mbt-adapter-base[metrics]>=0.1.0,<0.2",
     "lightgbm>=4.4",  # first release with macOS arm64 wheels
     "numpy>=1.26",
 ]
+
+[project.urls]
+Homepage = "https://github.com/satrijandi/mbt"
+Documentation = "https://satrijandi.github.io/mbt/"
+Repository = "https://github.com/satrijandi/mbt"
+Issues = "https://github.com/satrijandi/mbt/issues"
 
 [project.entry-points."mbt.adapters"]
 lightgbm = "mbt_lightgbm.plugin:PLUGIN"

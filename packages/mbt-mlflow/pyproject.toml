@@ -9,12 +9,32 @@ description = "MLflow tracking and registry adapters for mbt"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+authors = [{ name = "Nugroho Satrijandi", email = "satrijandi@gmail.com" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
     "mbt-adapter-base>=0.1.0,<0.2",
     # 2.16: first release importable in setuptools-free environments (older
     # ones import pkg_resources). use_aliases=false still covers old servers.
     "mlflow>=2.16",
 ]
+
+[project.urls]
+Homepage = "https://github.com/satrijandi/mbt"
+Documentation = "https://satrijandi.github.io/mbt/"
+Repository = "https://github.com/satrijandi/mbt"
+Issues = "https://github.com/satrijandi/mbt/issues"
 
 [project.entry-points."mbt.adapters"]
 mlflow = "mbt_mlflow.plugin:PLUGIN"

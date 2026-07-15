@@ -1,6 +1,8 @@
 site_name: mbt - Model Build Tool
 site_description: dbt for machine learning models
-repo_url: https://github.com/mbt-dev/mbt
+site_url: https://satrijandi.github.io/mbt/
+repo_url: https://github.com/satrijandi/mbt
+edit_uri: edit/main/docs/
 theme:
   name: material
   palette:
@@ -25,6 +27,7 @@ nav:
   - GitOps & CI: gitops.md
   - Troubleshooting: troubleshooting.md
   - Adapter authoring: adapter-authoring.md
+  - Adapter API reference: api-reference.md
   - Roadmap: roadmap.md
   - v0.1 status: v0.1-status.md
   - MLOps alignment: mlops-alignment.md
@@ -56,3 +59,12 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.highlight
   - tables
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_root_heading: true

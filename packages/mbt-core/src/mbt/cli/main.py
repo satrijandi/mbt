@@ -482,6 +482,10 @@ def monitor(
     vars_: VarsOpt = None,
     select: SelectOpt = None,
     exclude: ExcludeOpt = None,
+    threads: ThreadsOpt = None,
+    fail_fast: Annotated[
+        bool, typer.Option("--fail-fast", help="Stop everything on first failure.")
+    ] = False,
     manifest: ManifestOpt = None,
     allow_env_mismatch: AllowEnvMismatchOpt = False,
     anchor: AnchorOpt = None,
@@ -498,6 +502,8 @@ def monitor(
             "monitor",
             select=select,
             exclude=exclude,
+            threads=threads,
+            fail_fast=fail_fast,
             manifest_path=cli.resolve_cli_path(manifest),
             allow_env_mismatch=allow_env_mismatch,
             anchor=parse_anchor(anchor),

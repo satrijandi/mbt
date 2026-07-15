@@ -334,3 +334,29 @@ def test_auto_resolution_lands_in_results(
     assert model.status == "success"
     assert "scale_pos_weight" in model.resolved_auto
     assert float(model.resolved_auto["scale_pos_weight"]) > 0
+
+
+def test_job_timeout_kills_the_training_subprocess(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """job_timeout_seconds in the compute profile config reclaims hung jobs:
+    the watchdog kills the subprocess and the node errors with the reason."""
+    profiles = demo_project / "profiles.yml"
+    profiles.write_text(
+        profiles.read_text().replace(
+            "compute: {adapter: fake}",
+            "compute: {adapter: local, config: {job_timeout_seconds: 2}}",
+        )
+    )
+    model_yml = demo_project / "models/churn_model.yml"
+    model_yml.write_text(
+        model_yml.read_text().replace(
+            "fake_metric_value: 0.61",
+            "fake_metric_value: 0.61\n      sleep_seconds: 300",
+        )
+    )
+    results = invoke(demo_project, fake_registry)
+    assert results.exit_code() == 1
+    by_id = {r.unique_id: r for r in results.results}
+    assert by_id[MODEL].status == "error"
+    assert "timed out after 2s and was killed" in (by_id[MODEL].message or "")

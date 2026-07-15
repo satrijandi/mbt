@@ -10,6 +10,13 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# One live run at a time: a manual dispatch during the nightly window must
+# queue, not race it (both drive the same external systems). Never cancel a
+# live run mid-flight - half-torn-down stacks leak containers.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   snowflake:
     runs-on: ubuntu-latest
@@ -68,3 +75,21 @@ jobs:
         env:
           MBT_LIVE_SHOWCASE: "1"
         run: uv run pytest -q -m live_showcase --timeout 3600 -rA
+      - name: Collect stack logs
+        # A red 2-hour docker run without logs can only be debugged by
+        # rerunning; grab every container's output while the stack is up.
+        if: failure()
+        run: |
+          docker compose -p mbt-showcase -f examples/showcase/compose/docker-compose.yml \
+            logs --no-color --timestamps > showcase-docker.log 2>&1 || true
+          docker ps -a > showcase-containers.log 2>&1 || true
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: showcase-diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            showcase-docker.log
+            showcase-containers.log

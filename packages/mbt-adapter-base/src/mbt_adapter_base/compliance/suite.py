@@ -267,6 +267,28 @@ class TrainingAdapterCompliance:
         metrics = self._train_and_evaluate()
         assert metrics["roc_auc"] > 0.7, f"roc_auc {metrics['roc_auc']} suggests no learning"
 
+    def test_feature_importance_is_normalized_when_supported(self) -> None:
+        """OPTIONAL capability (``SupportsFeatureImportance``): when the method
+        exists, importances are non-negative fractions summing to ~1 - or {}
+        when the winning model cannot attribute (e.g. an ensemble leader)."""
+        import pytest
+
+        adapter = self.adapter()
+        if not hasattr(adapter, "feature_importance"):
+            pytest.skip("adapter does not expose feature_importance (optional)")
+        data = self.dataset()
+        model = adapter.train(
+            self.model_spec(TaskType.BINARY_CLASSIFICATION), data, self.run_context()
+        )
+        importance = adapter.feature_importance(model)
+        if not importance:
+            return  # the documented escape hatch for unattributable models
+        features = getattr(model, "features", None)
+        if features is not None:
+            assert set(importance) <= set(features)
+        assert all(value >= 0 for value in importance.values())
+        assert sum(importance.values()) == pytest.approx(1.0, abs=1e-2)
+
 
 def _tiny_predictions(n_rows: int, offset: int = 0) -> pa.Table:
     return pa.table(

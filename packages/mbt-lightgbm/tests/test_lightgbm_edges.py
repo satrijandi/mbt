@@ -21,10 +21,27 @@ from mbt_adapter_base import (
     EvaluationProtocol,
     EvaluationSpec,
     ModelSpec,
+    RunContext,
     TaskType,
 )
 from mbt_adapter_base.compliance import tiny_binary_dataset
 from mbt_adapter_base.compliance.suite import TempArtifactStore
+from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+
+def _ctx() -> RunContext:
+    class _Null:
+        def emit(self, event: object) -> None: ...
+
+    return RunContext(
+        run_id="t",
+        unique_id="m",
+        seed=5,
+        target_name="dev",
+        project_dir=".",
+        vars={},
+        events=_Null(),
+    )
 
 
 def _spec(**overrides: Any) -> ModelSpec:
@@ -62,9 +79,9 @@ def test_validate_wraps_threading_warnings_as_issues() -> None:
 def test_auto_scale_pos_weight_needs_a_positive_class_balance() -> None:
     adapter = LightGBMTrainingAdapter({})
     spec = _spec(hyperparameters={"scale_pos_weight": AUTO})
-    with pytest.raises(ValueError, match="without a positive-class balance"):
+    with pytest.raises(ValueError, match="no positive-class balance"):
         adapter.resolve_auto(spec, _profile({"0": 1.0}))
-    with pytest.raises(ValueError, match="without a positive-class balance"):
+    with pytest.raises(ValueError, match="no positive-class balance"):
         adapter.resolve_auto(spec, _profile(None))
 
 
@@ -127,6 +144,56 @@ def test_booster_params_pass_scale_pos_weight_through() -> None:
     params = LightGBMBinaryParams(scale_pos_weight=3.5).booster_params(seed=7)
     assert params["scale_pos_weight"] == 3.5
     assert "scale_pos_weight" not in LightGBMBinaryParams().booster_params(seed=7)
+
+
+def test_booster_params_enable_bagging_when_subsampling() -> None:
+    # bagging_fraction is inert in LightGBM unless bagging_freq > 0.
+    sampled = LightGBMBinaryParams(subsample=0.6).booster_params(seed=7)
+    assert sampled["bagging_fraction"] == 0.6
+    assert sampled["bagging_freq"] == 1
+    assert "bagging_freq" not in LightGBMBinaryParams().booster_params(seed=7)
+
+
+def test_early_stopping_stops_before_the_round_budget(tmp_path: Path) -> None:
+    # Mirrors the xgboost contract: early_stopping_rounds needs a validation
+    # split. LightGBM scores at the best iteration natively, and
+    # model_to_string persists only the best iteration, so an export/load
+    # round trip scores exactly like the in-memory model.
+    base = tiny_binary_dataset()
+    train, val = base.read("train"), base.read("test")
+    data = InMemoryDatasetHandle(
+        {"train": train, "validation": val, "test": val}, label_column="label"
+    )
+    adapter = LightGBMTrainingAdapter({})
+    hp = {
+        "n_estimators": 300,
+        "num_leaves": 15,
+        "min_child_samples": 5,
+        "early_stopping_rounds": 5,
+    }
+    model = adapter.train(_spec(hyperparameters=hp), data, _ctx())
+    best = model.booster.best_iteration
+    assert 0 < best < 300  # early stopping actually fired
+    x = adapter._features_matrix(val, model.features, model.categories)
+    best_slice = model.booster.predict(x, num_iteration=best)
+    scores = adapter.predict(model, data, "test").column("prediction").to_pylist()
+    assert scores == pytest.approx(best_slice)  # predict honors best_iteration
+    loaded = adapter.load(
+        adapter.export(model, "native", TempArtifactStore(tmp_path)), TempArtifactStore(tmp_path)
+    )
+    reloaded_scores = adapter.predict(loaded, data, "test").column("prediction").to_pylist()
+    assert reloaded_scores == pytest.approx(scores)
+
+
+def test_subsample_changes_the_trained_model() -> None:
+    adapter = LightGBMTrainingAdapter({})
+    data = tiny_binary_dataset()
+    hp = {"n_estimators": 20, "num_leaves": 15, "min_child_samples": 5}
+    full = adapter.train(_spec(hyperparameters=hp), data, _ctx())
+    sampled = adapter.train(_spec(hyperparameters={**hp, "subsample": 0.6}), data, _ctx())
+    full_scores = adapter.predict(full, data, "test").column("prediction").to_pylist()
+    sampled_scores = adapter.predict(sampled, data, "test").column("prediction").to_pylist()
+    assert full_scores != sampled_scores
 
 
 def test_plugin_descriptor_wires_the_training_adapter() -> None:

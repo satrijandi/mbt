@@ -239,3 +239,19 @@ Try 'mbt state diff --help' for help.
 ```
 
 Exit code is 1 (hard error), so CI scripts fail fast on typos instead of proceeding without the flag they thought they passed.
+
+## `training job timed out after 3600s and was killed`
+
+**Symptom (node errors, exit 1):**
+
+```text
+training job timed out after 2s and was killed (job payload kept at /tmp/mbt-job-…/job.json)
+```
+
+**Why:** the target's compute config sets `job_timeout_seconds`, and this job outlived it.
+Without the limit, a wedged training job (an infinite loop, a hung network call inside a framework) blocks the whole run forever; with it, the watchdog SIGTERMs the subprocess (SIGKILL after a grace period) and the node reports the reason.
+The kept job payload is the exact serialized job for reproduction: `python -m mbt.execute.job <path>` reruns it under a debugger.
+
+**Fix:** if the job was genuinely making progress, raise `job_timeout_seconds` in `profiles.yml` (or remove it for no limit).
+If it was hung, the payload plus the tail of the event log tells you where.
+The same key works for the Spark compute adapter (`spark-submit` wording in the message).

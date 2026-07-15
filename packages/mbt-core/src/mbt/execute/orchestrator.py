@@ -362,10 +362,11 @@ def _execute(
     threads = opts.threads if opts.threads is not None else prepared.profiles.target.threads
     return execute_plan(
         plan,
-        manifest.graph(),
+        ctx.graph(),
         run_node,
         threads=threads,
         fail_fast=opts.fail_fast,
+        cancel_running=ctx.cancel_active_jobs,
     )
 
 
@@ -436,8 +437,17 @@ def run_evaluate(
     for dep in node.depends_on:
         if manifest.nodes.get(dep) is not None and manifest.nodes[dep].resource_type == "dataset":
             results.append(dataset_runner.run(dep))
-    if any(r.status == "error" for r in results):
-        pass  # fall through: the model result will carry the error context
+    failed_datasets = [r for r in results if r.status == "error"]
+    if failed_datasets:
+        # The model still gets a row (matching the scheduler's skip semantics);
+        # the dataset row carries the error detail.
+        results.append(
+            NodeResult(
+                unique_id=model_uid,
+                status="skipped",
+                message=f"upstream {failed_datasets[0].unique_id} error",
+            )
+        )
     else:
         model_runner = ModelRunner(ctx)
         registry_name = spec.registration.name if spec.registration else spec.name
@@ -457,17 +467,9 @@ def run_evaluate(
                 f"no registered version of {registry_name!r} to evaluate",
                 hint="pass --version N or --stage <stage>, or train the model first",
             )
-        metric_specs = model_runner._metric_specs(spec, node)
-        champion, _ = model_runner._champion(spec, node) if apply_gates else (None, None)
-        job = model_runner._assemble_job(
-            node,
-            spec,
-            metric_specs,
-            champion,
-            mode="evaluate",
-            artifact=resolved_version.artifact,
+        job_result, gates = model_runner.evaluate_artifact(
+            node, spec, resolved_version.artifact, apply_gates=apply_gates
         )
-        job_result = ctx.compute.wait(ctx.compute.submit(job))
         if job_result.status == "error" or job_result.metrics is None:
             results.append(
                 NodeResult(
@@ -477,10 +479,8 @@ def run_evaluate(
                 )
             )
         else:
-            gates = []
             status = "success"
             if apply_gates and spec.evaluation.gates:
-                gates = model_runner._gate_results(spec, node, job_result, champion, metric_specs)
                 from mbt.quality.gates import all_gates_passed
 
                 status = "success" if all_gates_passed(gates) else "gate_failed"

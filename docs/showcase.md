@@ -1,6 +1,6 @@
 # Showcase: the full lifecycle on a dockerized platform stack
 
-The [showcase](https://github.com/mbt-dev/mbt/tree/main/examples/showcase) (`examples/showcase`) is a laptop-runnable reference environment that demonstrates mbt end to end on real services instead of local stand-ins.
+The [showcase](https://github.com/satrijandi/mbt/tree/main/examples/showcase) (`examples/showcase`) is a laptop-runnable reference environment that demonstrates mbt end to end on real services instead of local stand-ins.
 Where the [tutorial](tutorial.md) walks a team through the concepts, the showcase is the lab where the whole loop actually runs: build, promote, score, monitor, alert.
 
 | Service | Role |
@@ -32,8 +32,8 @@ make down      # stop and remove everything (volumes included)
 `make up` prints the UI URLs (JupyterLab, MLflow, Spark, Grafana, Prometheus, Gitea, Woodpecker, Zot, Airflow).
 `make ci` seeds the CI loop headlessly; then clone the printed repo URL and open a PR - Woodpecker runs the state-diff check and posts the mbt build report comment, and merges to main bake the deployable unit, pin its digest in the deploy repo, and feed the Airflow DAGs via git-sync.
 `make inject-drift` poisons the scoring batch: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert, and `make score` recovers.
-The [showcase README](https://github.com/mbt-dev/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
-The design of record is [DESIGN.md](https://github.com/mbt-dev/mbt/blob/main/examples/showcase/DESIGN.md); every phase in its plan is implemented, with the k3d/ArgoCD fidelity profile local-only behind its own gate.
+The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
+The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); every phase in its plan is implemented, with the k3d/ArgoCD fidelity profile local-only behind its own gate.
 
 ## What it proves
 

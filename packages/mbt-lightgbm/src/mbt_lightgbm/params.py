@@ -19,8 +19,12 @@ class LightGBMBinaryParams(BaseModel):
     reg_lambda: float = Field(default=0.0, ge=0)
     scale_pos_weight: float | None = None  # '{{ auto }}' resolves from the profile
     num_threads: int = Field(default=1, ge=1)  # >1 breaks the exact tier
+    # Needs a validation split; mirrors the xgboost contract. model_to_string
+    # persists only the best iteration, so export/load stays consistent.
+    early_stopping_rounds: int | None = Field(default=None, ge=1)
 
     def booster_params(self, seed: int) -> dict[str, object]:
+        # early_stopping_rounds is train-loop plumbing, not a booster param.
         params: dict[str, object] = {
             "objective": "binary",
             "metric": "binary_logloss",
@@ -38,6 +42,9 @@ class LightGBMBinaryParams(BaseModel):
             "force_row_wise": True,
             "verbosity": -1,
         }
+        if self.subsample < 1.0:
+            # bagging_fraction is a no-op unless bagging_freq > 0.
+            params["bagging_freq"] = 1
         if self.scale_pos_weight is not None:
             params["scale_pos_weight"] = self.scale_pos_weight
         return params

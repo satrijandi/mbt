@@ -41,6 +41,7 @@ from mbt.execute.orchestrator import (
 )
 from mbt.execute.planner import plan_execution
 from mbt.execute.runners import ExecutionContext, _BuildContext, materialization_key
+from mbt.execute.scheduler import execute_plan
 from mbt.quality.metrics import resolve_metric
 from mbt.quality.monitors import all_monitors_passed, evaluate_ground_truth_gates
 
@@ -80,8 +81,7 @@ def run_monitor(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
     _require_scoring_capability(ctx)
     anchor = _parse_ts(manifest.metadata.anchor)
 
-    results: list[NodeResult] = []
-    for uid in plan.order:
+    def run_one(uid: str) -> NodeResult:
         node = manifest.nodes[uid]
         index = ctx.next_index()
         bus.emit(
@@ -104,7 +104,13 @@ def run_monitor(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
                 message=result.message,
             )
         )
-        results.append(result)
+        return result
+
+    # Scoring nodes are independent of each other, so monitoring parallelizes
+    # exactly like the other execution commands (--threads, --fail-fast).
+    threads = opts.threads if opts.threads is not None else prepared.profiles.target.threads
+    by_uid = execute_plan(plan, ctx.graph(), run_one, threads=threads, fail_fast=opts.fail_fast)
+    results: list[NodeResult] = [by_uid[uid] for uid in plan.order if uid in by_uid]
 
     run_results = RunResults(
         metadata=RunResultsMetadata(

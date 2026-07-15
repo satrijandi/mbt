@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import networkx as nx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from mbt.compile.hashing import manifest_hash
 from mbt.contracts import ManifestNode, SourceTable
@@ -94,15 +94,30 @@ class Manifest(BaseModel):
     metrics: dict[str, dict[str, Any]] = Field(default_factory=dict)
     adapter_versions: dict[str, AdapterVersion] = Field(default_factory=dict)
 
+    # A manifest is immutable once compiled/read, so the derived views memoize:
+    # manifest_hash() re-serialized the WHOLE manifest per call and is invoked
+    # once per node per run (effectively O(N^2) without the cache).
+    _hash_cache: str | None = PrivateAttr(default=None)
+    _graph_cache: "nx.DiGraph | None" = PrivateAttr(default=None)
+    _selectable_cache: dict[str, SelectableNode] | None = PrivateAttr(default=None)
+
     # -- identity ----------------------------------------------------------
 
     def manifest_hash(self) -> str:
-        return manifest_hash(self.model_dump(mode="json"))
+        if self._hash_cache is None:
+            self._hash_cache = manifest_hash(self.model_dump(mode="json"))
+        return self._hash_cache
 
     # -- graph views ---------------------------------------------------------
 
     def graph(self) -> "nx.DiGraph":
-        """Reconstruct the DAG (including source and exposure nodes)."""
+        """Reconstruct the DAG (including source and exposure nodes).
+
+        The returned graph is shared and must be treated as read-only
+        (selector traversals use non-copying views already).
+        """
+        if self._graph_cache is not None:
+            return self._graph_cache
         graph = nx.DiGraph()
         for uid in self.sources:
             graph.add_node(uid, resource_type="source")
@@ -114,10 +129,13 @@ class Manifest(BaseModel):
             graph.add_node(uid, resource_type="exposure")
             for dep in exposure.depends_on:
                 graph.add_edge(dep, uid)
+        self._graph_cache = graph
         return graph
 
     def selectable_nodes(self) -> dict[str, SelectableNode]:
         """All selectable resources (nodes + sources + exposures)."""
+        if self._selectable_cache is not None:
+            return self._selectable_cache
         out: dict[str, SelectableNode] = {}
         for uid, node in self.nodes.items():
             out[uid] = SelectableNode(
@@ -138,6 +156,7 @@ class Manifest(BaseModel):
                 resource_type="exposure",
                 tags=tuple(tags) if isinstance(tags, list) else (),
             )
+        self._selectable_cache = out
         return out
 
     # -- serialization -------------------------------------------------------

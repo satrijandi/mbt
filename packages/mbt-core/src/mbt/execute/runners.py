@@ -1,10 +1,12 @@
 """Node runners: datasets in-process, models via ComputeAdapter (TSD §10.4/§10.5)."""
 
+import contextlib
 import hashlib
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 
@@ -22,6 +24,7 @@ from mbt.contracts import (
     ArtifactRef,
     DatasetLocator,
     DatasetSpec,
+    JobResult,
     ManifestNode,
     MetricSpec,
     ModelSpec,
@@ -93,6 +96,8 @@ class ExecutionContext:
     total_nodes: int = 0
     _dataset_handles: dict[str, Any] = field(default_factory=dict)
     _counter: list[int] = field(default_factory=lambda: [0])
+    _active_job_handles: list[Any] = field(default_factory=list)
+    _job_handles_lock: Any = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         self.data_adapter = build_data_adapter(self.profiles, self.project_dir, self.registry)
@@ -135,6 +140,27 @@ class ExecutionContext:
     def next_index(self) -> int:
         self._counter[0] += 1
         return self._counter[0]
+
+    def run_job(self, job: TrainingJob) -> JobResult:
+        """Submit + wait, tracking the handle so --fail-fast can reclaim it."""
+        handle = self.compute.submit(job)
+        with self._job_handles_lock:
+            self._active_job_handles.append(handle)
+        try:
+            return cast(JobResult, self.compute.wait(handle))
+        finally:
+            with self._job_handles_lock:
+                self._active_job_handles.remove(handle)
+
+    def cancel_active_jobs(self) -> None:
+        """Terminate in-flight job subprocesses (--fail-fast); best-effort."""
+        if not hasattr(self.compute, "terminate"):
+            return  # older/remote compute adapters without a kill seam
+        with self._job_handles_lock:
+            handles = list(self._active_job_handles)
+        for handle in handles:
+            with contextlib.suppress(Exception):  # the job may have just exited
+                self.compute.terminate(handle, "cancelled by --fail-fast")
 
     def raw_adapter_ref(self, kind: str) -> AdapterRef:
         raw = self.manifest.metadata.target_config.get(kind)
@@ -527,8 +553,7 @@ class ModelRunner:
         champion, _stage = self._champion(spec, node)
 
         job = self._assemble_job(node, spec, metric_specs, champion)
-        handle = self.ctx.compute.submit(job)
-        job_result = self.ctx.compute.wait(handle)
+        job_result = self.ctx.run_job(job)
 
         if job_result.status == "error" or job_result.metrics is None:
             return NodeResult(
@@ -557,6 +582,38 @@ class ModelRunner:
             feature_importance=dict(job_result.feature_importance),
             message=None if passed else _gate_failure_summary(gates),
         )
+
+    # -- re-evaluation of registered artifacts (FR-RUN-07, TSD §11.3) -----------
+
+    def evaluate_artifact(
+        self,
+        node: ManifestNode,
+        spec: ModelSpec,
+        artifact: ArtifactRef,
+        *,
+        apply_gates: bool = True,
+    ) -> tuple[JobResult, list[GateResult]]:
+        """Run an evaluate-mode job for a registered artifact; never trains.
+
+        The one flow behind both ``mbt test`` on models and ``mbt evaluate``,
+        so the two commands cannot drift: fresh data, the stored artifact,
+        gate logic against the current champion when requested.
+        """
+        metric_specs = self._metric_specs(spec, node)
+        champion, _stage = self._champion(spec, node) if apply_gates else (None, None)
+        job = self._assemble_job(
+            node, spec, metric_specs, champion, mode="evaluate", artifact=artifact
+        )
+        job_result = self.ctx.run_job(job)
+        gates: list[GateResult] = []
+        if (
+            apply_gates
+            and job_result.status != "error"
+            and job_result.metrics is not None
+            and spec.evaluation.gates
+        ):
+            gates = self._gate_results(spec, node, job_result, champion, metric_specs)
+        return job_result, gates
 
 
 def scoring_run_key(node: ManifestNode, model_version: str) -> str:
@@ -799,7 +856,7 @@ class ScoringRunner:
             )
 
         job = self._assemble_job(node, model_node, spec, champion, baseline, handle)
-        job_result = ctx.compute.wait(ctx.compute.submit(job))
+        job_result = ctx.run_job(job)
         if job_result.status == "error":
             return NodeResult(
                 unique_id=uid, status="error", message=job_result.error or "scoring job failed"
@@ -876,17 +933,11 @@ class ModelTestRunner:
             )
             return NodeResult(unique_id=uid, status="skipped", message="no registered version")
 
-        metric_specs = self._model_runner._metric_specs(spec, node)
-        champion, _ = self._model_runner._champion(spec, node)
-        job = self._model_runner._assemble_job(
-            node, spec, metric_specs, champion, mode="evaluate", artifact=version.artifact
-        )
-        job_result = ctx.compute.wait(ctx.compute.submit(job))
+        job_result, gates = self._model_runner.evaluate_artifact(node, spec, version.artifact)
         if job_result.status == "error" or job_result.metrics is None:
             return NodeResult(
                 unique_id=uid, status="error", message=job_result.error or "no metrics"
             )
-        gates = self._model_runner._gate_results(spec, node, job_result, champion, metric_specs)
         passed = all_gates_passed(gates)
         return NodeResult(
             unique_id=uid,

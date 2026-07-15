@@ -35,7 +35,6 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
-from mbt_adapter_base.metrics import compute_binary_results
 from mbt_xgboost.params import XGBoostBinaryParams
 
 if TYPE_CHECKING:
@@ -58,14 +57,6 @@ class XGBoostModel:
         self.features = features
         self.target = target
         self.categories = categories or {}
-
-
-def _positive_rate(profile: DatasetProfile) -> float | None:
-    balance = profile.label_balance or {}
-    for key in ("1", "1.0", "true", "True"):
-        if key in balance:
-            return balance[key]
-    return None
 
 
 class XGBoostTrainingAdapter:
@@ -113,18 +104,14 @@ class XGBoostTrainingAdapter:
     # -- AUTO resolution (FR-RES-10) -------------------------------------------
 
     def resolve_auto(self, spec: ModelSpec, profile: DatasetProfile) -> ModelSpec:
+        from mbt_adapter_base.training_helpers import resolve_scale_pos_weight
+
         resolved = dict(spec.hyperparameters)
         for key, value in list(resolved.items()):
             if value != AUTO:
                 continue
             if key == "scale_pos_weight":
-                positive = _positive_rate(profile)
-                if positive is None or positive <= 0:
-                    raise ValueError(
-                        "cannot auto-resolve scale_pos_weight: the dataset profile has "
-                        "no positive-class balance"
-                    )
-                resolved[key] = round((1.0 - positive) / positive, 6)
+                resolved[key] = resolve_scale_pos_weight(profile)
             else:
                 raise ValueError(
                     f"xgboost cannot auto-resolve hyperparameter {key!r}; "
@@ -256,6 +243,13 @@ class XGBoostTrainingAdapter:
 
     def _scores(self, model: XGBoostModel, table: pa.Table) -> "np.ndarray":
         matrix, _ = self._matrix(table, model.features, model.categories, None)
+        # After early stopping the native Booster keeps every trained round and
+        # predict() uses them all by default; score with the best iteration
+        # instead (the attribute persists through save/load, so loaded
+        # champions behave identically to freshly trained models).
+        best = getattr(model.booster, "best_iteration", None)
+        if best is not None:
+            return model.booster.predict(matrix, iteration_range=(0, int(best) + 1))
         return model.booster.predict(matrix)
 
     def evaluate(
@@ -266,17 +260,12 @@ class XGBoostTrainingAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        import numpy as np
+        from mbt_adapter_base.training_helpers import evaluate_binary_split
 
         table = data.read(split)
-        y_true = table.column(model.target).to_numpy(zero_copy_only=False).astype(np.float64)
-        y_score = self._scores(model, table).astype(np.float64)
-        slice_columns = {
-            name: table.column(name).to_numpy(zero_copy_only=False)
-            for name in (slices or [])
-            if name in table.column_names
-        }
-        return compute_binary_results(metrics, y_true, y_score, slice_columns)
+        return evaluate_binary_split(
+            table, model.target, self._scores(model, table), metrics, slices
+        )
 
     def predict(self, model: XGBoostModel, data: DatasetHandle, split: str) -> pa.Table:
         table = data.read(split)

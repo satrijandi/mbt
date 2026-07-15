@@ -64,8 +64,17 @@ empty) config dict. Required surface (see `mbt_adapter_base.protocols`):
 | `export(model, format, store)` | write via `store.put_file(...)`; return the `ArtifactRef` |
 | `load(ref, store)` | reconstruct the model from an artifact (champion evaluation, `mbt evaluate`) |
 | `nondeterminism_warnings(spec)` | strings describing settings that break your determinism tier |
-| `feature_importance(model)` | optional: normalized per-feature fractions; rendered in model cards and `run_results.json` (FR-DOCS-02) |
+| `feature_importance(model)` | optional: normalized per-feature fractions; rendered in model cards and `run_results.json` (FR-DOCS-02). Return `{}` when the winning model cannot attribute (e.g. an ensemble leader) |
 | `train_with_report(spec, data, ctx, report)` | optional: train while calling `report(step, value)` per iteration with a HIGHER-IS-BETTER validation value (e.g. AUC on the `validation` split); lets tuning pruners stop weak trials early. The callback may raise - let that exception propagate out of your training loop |
+
+The optional members are probed with `hasattr`, but their signatures are
+pinned by the `SupportsFeatureImportance` and `SupportsTrainWithReport`
+protocols in `mbt_adapter_base.protocols`, and the compliance suite checks
+`feature_importance` output when present - see the
+[Adapter API reference](api-reference.md). Shared implementation helpers
+(`mbt_adapter_base.training_helpers`) cover the common `evaluate()` body,
+`{{ auto }}` scale_pos_weight resolution, and the staged-parquet fallback
+for `data_access="path"` frameworks - prefer them over re-implementing.
 
 ### What your `train`/`evaluate` tables contain
 

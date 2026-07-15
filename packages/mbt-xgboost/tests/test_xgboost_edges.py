@@ -254,3 +254,26 @@ def test_load_rejects_foreign_artifact_formats(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="cannot load artifact format 'lightgbm_json'"):
         XGBoostTrainingAdapter({}).load(ref, TempArtifactStore(tmp_path))
+
+
+def test_early_stopped_models_score_with_the_best_iteration() -> None:
+    # The native Booster keeps every trained round after early stopping and
+    # predict() uses them all unless iteration_range says otherwise.
+    base = tiny_binary_dataset()
+    train, val = base.read("train"), base.read("test")
+    data = InMemoryDatasetHandle(
+        {"train": train, "validation": val, "test": val}, label_column="label"
+    )
+    adapter = XGBoostTrainingAdapter({})
+    model = adapter.train(
+        _spec(hyperparameters={"n_estimators": 300, "early_stopping_rounds": 5}), data, _ctx()
+    )
+    best = model.booster.best_iteration
+    rounds = model.booster.num_boosted_rounds()
+    assert best is not None and best + 1 < rounds  # early stopping actually fired
+    matrix, _ = adapter._matrix(val, model.features, model.categories, None)
+    best_slice = model.booster.predict(matrix, iteration_range=(0, int(best) + 1))
+    all_trees = model.booster.predict(matrix, iteration_range=(0, rounds))
+    scores = adapter.predict(model, data, "test").column("prediction").to_pylist()
+    assert scores == pytest.approx(best_slice.astype("float64"))
+    assert scores != pytest.approx(all_trees.astype("float64"))

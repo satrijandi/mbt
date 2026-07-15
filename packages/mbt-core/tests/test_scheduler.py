@@ -87,6 +87,38 @@ def test_fail_fast_cancels_pending_work() -> None:
     assert skipped, "fail-fast should cancel pending nodes"
 
 
+def test_fail_fast_invokes_the_cancel_hook_exactly_once() -> None:
+    graph = _graph([], {"a", "b", "c"})
+    cancels: list[int] = []
+
+    def run(uid: str) -> NodeResult:
+        # Two failures: the hook must still fire only on the first trip.
+        status = "error" if uid in ("a", "b") else "success"
+        return NodeResult(unique_id=uid, status=status)
+
+    results = execute_plan(
+        _plan({"a", "b", "c"}, ["a", "b", "c"]),
+        graph,
+        run,
+        threads=2,
+        fail_fast=True,
+        cancel_running=lambda: cancels.append(1),
+    )
+    assert len(cancels) == 1
+    assert results["a"].status == "error"
+
+
+def test_monitor_failed_trips_fail_fast() -> None:
+    graph = _graph([], {"a", "b"})
+
+    def run(uid: str) -> NodeResult:
+        return NodeResult(unique_id=uid, status="monitor_failed" if uid == "a" else "success")
+
+    results = execute_plan(_plan({"a", "b"}, ["a", "b"]), graph, run, threads=1, fail_fast=True)
+    assert results["a"].status == "monitor_failed"
+    assert results["b"].status == "skipped"
+
+
 def test_parallel_branches_actually_overlap() -> None:
     graph = _graph([], {"a", "b"})
     concurrent = {"count": 0, "max": 0}

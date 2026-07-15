@@ -25,7 +25,7 @@ The scaffold encodes this split in `CODEOWNERS`: model and dataset specs route t
 ## Prerequisites (both)
 
 - Python 3.11+ (3.11 through 3.14 are tested in CI).
-- `pip install mbt-core mbt-xgboost mbt-mlflow` (or run from this repo with `uv run mbt ...`).
+- An mbt install: clone the repo and `uv sync && source .venv/bin/activate` (the packages are not on PyPI yet; once published, `pip install mbt-core mbt-xgboost mbt-mlflow`).
 - A git host with PR reviews if you want the full team loop; every step below also works purely locally.
 
 ---

@@ -192,4 +192,7 @@ def test_run_evaluate_dataset_error_skips_the_model(
     by_id = {r.unique_id: r for r in results.results}
     assert by_id[DATASET_UID].status == "error"
     assert "no source in the manifest" in by_id[DATASET_UID].message
-    assert MODEL_UID not in by_id  # the model result is skipped entirely
+    # The evaluated model still gets a row (scheduler skip semantics), so the
+    # requested node never silently vanishes from run_results.
+    assert by_id[MODEL_UID].status == "skipped"
+    assert by_id[MODEL_UID].message == f"upstream {DATASET_UID} error"

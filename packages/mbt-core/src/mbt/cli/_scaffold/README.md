@@ -1,6 +1,6 @@
 # __PROJECT_NAME__
 
-A machine-learning model project built with [mbt](https://github.com/mbt-dev/mbt) -
+A machine-learning model project built with [mbt](https://github.com/satrijandi/mbt) -
 declarative Model-as-Code: the model config IS the model.
 
 ## Quickstart

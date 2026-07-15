@@ -53,6 +53,7 @@ class FakeParams(BaseModel):
     scale_pos_weight: float | str | None = None
     fake_metric_value: float = 0.5  # test control: every metric returns this
     fail_training: bool = False  # test control: raise inside train()
+    sleep_seconds: float = 0.0  # test control: hang inside train() (timeout tests)
 
 
 class FakeModel:
@@ -85,7 +86,8 @@ class FakeTrainingAdapter:
             if value == AUTO:
                 balance = profile.label_balance or {}
                 positive = balance.get("1", balance.get("1.0", 0.5)) or 0.5
-                resolved[key] = round((1 - positive) / positive, 4)
+                # 6dp matches resolve_scale_pos_weight in adapter-base
+                resolved[key] = round((1 - positive) / positive, 6)
         return spec.model_copy(update={"hyperparameters": resolved})
 
     def _params(self, spec: ModelSpec) -> FakeParams:
@@ -97,6 +99,10 @@ class FakeTrainingAdapter:
         params = self._params(spec)
         if params.fail_training:
             raise RuntimeError("fake training failure (fail_training=true)")
+        if params.sleep_seconds:
+            import time
+
+            time.sleep(params.sleep_seconds)
         data.read("train")  # honor the contract: training reads the data
         # A tiny deterministic dependence on params so tuning has a landscape.
         value = params.fake_metric_value + params.max_depth * 1e-4

@@ -186,6 +186,40 @@ class TrainingAdapter(Protocol):
         ...
 
 
+@runtime_checkable
+class SupportsTrainWithReport(Protocol):
+    """OPTIONAL TrainingAdapter capability: per-round tuning progress.
+
+    Core probes for the method with ``hasattr``; this protocol pins the
+    signature so adapters cannot drift apart. ``report(step, value)`` takes a
+    HIGHER-IS-BETTER validation value each round (the tuning engine flips the
+    sign for minimize objectives) and may raise to abort the trial (pruning);
+    let that exception propagate out of the framework's training loop.
+    Adapters without the method fall back to full trials with a warning.
+    """
+
+    def train_with_report(
+        self,
+        spec: "ModelSpec",
+        data: DatasetHandle,
+        ctx: RunContext,
+        report: Any,
+    ) -> TrainedModel: ...
+
+
+@runtime_checkable
+class SupportsFeatureImportance(Protocol):
+    """OPTIONAL TrainingAdapter capability: per-feature importance.
+
+    Probed with ``hasattr`` after training (FR-DOCS-02). Return importances
+    normalized to fractions keyed by feature name; absence simply leaves
+    model cards without an importance table. Adapters whose winning model
+    cannot attribute importance (e.g. an AutoML ensemble leader) return {}.
+    """
+
+    def feature_importance(self, model: TrainedModel) -> dict[str, float]: ...
+
+
 class PredictionStore(Protocol):
     """One scoring pipeline's prediction sink (contract 1.1, ADR-21).
 

@@ -36,7 +36,10 @@ models:
 ## Five minutes to a trained, registered model
 
 ```bash
-pip install mbt-core mbt-xgboost mbt-mlflow
+# Not on PyPI yet - install from a source checkout for now
+# (once published: pip install mbt-core mbt-xgboost mbt-mlflow):
+git clone https://github.com/satrijandi/mbt && cd mbt
+uv sync && source .venv/bin/activate     # puts `mbt` on PATH
 
 mbt init my_models && cd my_models
 python scripts/generate_sample_data.py   # or point sources.yml at your parquet
@@ -120,8 +123,10 @@ determinism tiers per adapter otherwise).
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full loop; the short version:
+
 ```bash
-git clone <repo> && cd mbt
+git clone https://github.com/satrijandi/mbt && cd mbt
 uv sync                                   # whole workspace, all extras
 uv run pytest -m "not e2e"               # fast suite
 uv run pytest -m e2e                      # full CLI E2E incl. JVM adapters (Java 17)

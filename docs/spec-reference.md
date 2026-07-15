@@ -31,7 +31,9 @@ macro_paths: [macros]
       # the registry maps mbt stages to registered-model aliases by default;
       # set use_aliases: false for MLflow servers without alias support (<2.9)
       registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
-      compute:  {adapter: local}                    # optional, default local
+      # job_timeout_seconds kills any training job that outlives it
+      # (local and spark compute; omit for no limit)
+      compute:  {adapter: local, config: {job_timeout_seconds: 3600}}
       artifact_store: file://./target/artifacts     # or s3://bucket/prefix (s3 extra)
       threads: 4                                    # optional, default 1
       vars: {sample_fraction: 0.1, max_tuning_trials: 5}
@@ -309,6 +311,43 @@ exposures:
     depends_on: [ref('churn_classifier')]
     owner: lifecycle-eng@company.com
     url: https://internal/jobs/retention
+```
+
+## promotions.yml
+
+The GitOps promotion ledger: a reviewed change to this file is what moves a
+model between stages (the scaffold's `promote.yml` workflow runs
+`mbt promote --from-file promotions.yml` on merge). `mbt promote` refuses
+versions whose gates were not recorded as passed, so review + gates stay the
+only path to production.
+
+```yaml
+promotions:
+  - model: churn_classifier      # registration name in the registry
+    version: "3"                 # registry version to promote
+    to: production               # target stage alias
+```
+
+An empty list (`promotions: []`) is valid and no-ops. Re-running an
+already-merged file is safe: promoting a version to a stage it already holds
+re-points the alias at the same version. Direct
+`mbt promote --model X --to production` works too - `--from-file` exists so
+the change itself is reviewable (and `--force` is the only way past a version
+whose gates were not recorded as passed).
+
+## packages.yml
+
+The project's adapter-package requirements, consumed by `mbt deps`
+(installation prefers the project's pinned `requirements.txt` when present;
+either way the installed environment is verified against these pins
+afterward, and a mismatch fails with the offending package named).
+
+```yaml
+packages:
+  - package: mbt-xgboost
+    version: "~=0.1"
+  - package: mbt-mlflow
+    version: "~=0.1"
 ```
 
 ## hooks.py

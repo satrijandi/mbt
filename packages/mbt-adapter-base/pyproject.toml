@@ -9,10 +9,30 @@ description = "mbt adapter contracts, interchange types, and the adapter complia
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+authors = [{ name = "Nugroho Satrijandi", email = "satrijandi@gmail.com" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
     "pydantic>=2.7",
     "pyarrow>=15.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/satrijandi/mbt"
+Documentation = "https://satrijandi.github.io/mbt/"
+Repository = "https://github.com/satrijandi/mbt"
+Issues = "https://github.com/satrijandi/mbt/issues"
 
 [project.optional-dependencies]
 # Shared metric computation helpers for tabular training adapters.

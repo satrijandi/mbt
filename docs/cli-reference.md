@@ -51,7 +51,11 @@ union     := "intersect intersect"     # space = OR
 ## Execution flags
 
 - `--threads N` - parallel independent DAG branches (default: the target's).
-- `--fail-fast` - cancel pending work on the first failure.
+  Also on `mbt monitor`: scoring nodes are independent, so they evaluate in
+  parallel.
+- `--fail-fast` - cancel pending work on the first failure and terminate
+  in-flight training jobs (SIGTERM, then SIGKILL after a grace period).
+  Also on `mbt monitor`.
 - `--manifest <path>` - execute a stored manifest verbatim (no recompile,
   no re-anchoring): the reproducibility and audit mechanism. Verifies the
   environment first: an `env_digest` mismatch errors, transitive drift

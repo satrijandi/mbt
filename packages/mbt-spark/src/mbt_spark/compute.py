@@ -12,11 +12,13 @@ a cluster - and is itself useful for memory-isolated local runs.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -29,7 +31,8 @@ class SparkJobHandle:
     job_id: str
     process: "subprocess.Popen[str]"
     job_path: Path
-    forwarded: list[str] = field(default_factory=list)
+    #: Why terminate() was called (timeout, --fail-fast); None if never.
+    terminated_reason: str | None = None
 
 
 class SparkComputeAdapter:
@@ -38,11 +41,15 @@ class SparkComputeAdapter:
     name = "spark"
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
+        # Same key and validation as the local adapter (the public seam).
+        from mbt.adapters.local.compute import parse_job_timeout
+
         config = config or {}
         self.master: str = str(config.get("master", "local[*]"))
         self.deploy_mode: str | None = config.get("deploy_mode")
         self.conf: dict[str, Any] = dict(config.get("conf", {}))
         self.spark_submit: str = str(config.get("spark_submit", "spark-submit"))
+        self.job_timeout_seconds = parse_job_timeout(config)
 
     def _command(self, job_path: Path) -> list[str]:
         wrapper = files("mbt_spark") / "job_wrapper.py"
@@ -74,23 +81,61 @@ class SparkComputeAdapter:
             job_id=f"spark-{uuid.uuid4().hex[:12]}", process=process, job_path=job_path
         )
 
+    def terminate(self, handle: SparkJobHandle, reason: str = "terminated") -> None:
+        """SIGTERM spark-submit (its shutdown hook tears the driver down),
+        then SIGKILL after a grace period; mirrors the local adapter."""
+        handle.terminated_reason = reason
+        process = handle.process
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
     def wait(self, handle: SparkJobHandle) -> JobResult:
         # Forward the job's event stream through the mbt bus, exactly like
         # the local compute adapter (spark-submit noise stays at debug level).
-        from mbt.adapters.local.compute import _parse_job_line, result_path_for
+        from mbt.adapters.local.compute import parse_job_line, result_path_for
         from mbt.events import get_bus
 
         bus = get_bus()
+        timeout = self.job_timeout_seconds
+        watchdog: threading.Timer | None = None
+        if timeout is not None:
+            watchdog = threading.Timer(
+                timeout,
+                self.terminate,
+                args=(handle, f"timed out after {timeout:g}s and was killed"),
+            )
+            watchdog.daemon = True
+            watchdog.start()
         assert handle.process.stdout is not None
-        for raw_line in handle.process.stdout:
-            line = raw_line.rstrip("\n")
-            if line:
-                bus.emit(_parse_job_line(line))
-        returncode = handle.process.wait()
+        try:
+            for raw_line in handle.process.stdout:
+                line = raw_line.rstrip("\n")
+                if line:
+                    bus.emit(parse_job_line(line))
+            returncode = handle.process.wait()
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
 
         result_path = result_path_for(handle.job_path)
         if result_path.is_file():
-            return JobResult.model_validate_json(result_path.read_text())
+            result = JobResult.model_validate_json(result_path.read_text())
+            if result.status != "error":
+                shutil.rmtree(handle.job_path.parent, ignore_errors=True)
+            return result
+        if handle.terminated_reason is not None:
+            return JobResult(
+                status="error",
+                error=(
+                    f"spark-submit job {handle.terminated_reason} "
+                    f"(job payload kept at {handle.job_path})"
+                ),
+            )
         return JobResult(
             status="error",
             error=(

@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 from pydantic import BaseModel, ValidationError
 
 from mbt_adapter_base import (
@@ -41,7 +40,6 @@ from mbt_adapter_base import (
     TaskType,
     ValidationIssue,
 )
-from mbt_adapter_base.metrics import compute_binary_results
 from mbt_h2o.params import H2OAutoMLParams
 
 if TYPE_CHECKING:
@@ -196,14 +194,11 @@ class H2OAutoMLAdapter:
             raise ValueError(f"invalid h2o_automl hyperparameters: {exc}") from exc
 
     def _split_file(self, data: DatasetHandle, split: str) -> Path:
-        """The split's parquet file; falls back to writing one for handles
+        """The split's parquet file; falls back to staging one for handles
         without on-disk backing (e.g. the compliance suite's fixtures)."""
-        split_path = getattr(data, "split_path", None)
-        if callable(split_path):
-            return Path(split_path(split))
-        out = Path(tempfile.mkdtemp(prefix="mbt-h2o-split-")) / f"{split}.parquet"
-        pq.write_table(data.read(split), out)
-        return out
+        from mbt_adapter_base.training_helpers import staged_split_path
+
+        return staged_split_path(data, split, prefix="mbt-h2o-split-")
 
     def _frame(self, h2o: Any, data: DatasetHandle, split: str, target: str) -> Any:
         frame = h2o.import_file(str(self._split_file(data, split)))
@@ -263,18 +258,42 @@ class H2OAutoMLAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        import numpy as np
+        from mbt_adapter_base.training_helpers import evaluate_binary_split
 
-        target = model.target or getattr(data, "label_column", "")
+        target = str(model.target or getattr(data, "label_column", ""))
         table = data.read(split)
-        y_true = table.column(target).to_numpy(zero_copy_only=False).astype(np.float64)
-        y_score = self._scores(model, data, split).astype(np.float64)
-        slice_columns = {
-            name: table.column(name).to_numpy(zero_copy_only=False)
-            for name in (slices or [])
-            if name in table.column_names
-        }
-        return compute_binary_results(metrics, y_true, y_score, slice_columns)
+        return evaluate_binary_split(
+            table, target, self._scores(model, data, split), metrics, slices
+        )
+
+    def feature_importance(self, model: H2OModel) -> dict[str, float]:
+        """Leader varimp percentages as fractions (FR-DOCS-02).
+
+        Ensemble leaders have no variable importance - they yield {} and the
+        model card simply omits the table (the documented optional-capability
+        contract), rather than inventing numbers from a metalearner.
+        """
+        try:
+            rows = model.model.varimp(use_pandas=False)
+        except (AttributeError, ValueError):
+            return {}
+        if not rows:
+            return {}
+        # rows: (variable, relative_importance, scaled_importance, percentage).
+        # GLM et al. expand categoricals to one "column.level" row per level;
+        # roll those up to the column so fractions keep summing to ~1.
+        by_feature: dict[str, float] = dict.fromkeys(model.features, 0.0)
+        for row in rows:
+            name, pct = str(row[0]), float(row[3])
+            if name in by_feature:
+                by_feature[name] += pct
+                continue
+            base = max(
+                (f for f in model.features if name.startswith(f + ".")), key=len, default=None
+            )
+            if base is not None:
+                by_feature[base] += pct
+        return {name: round(value, 6) for name, value in by_feature.items()}
 
     def predict(self, model: H2OModel, data: DatasetHandle, split: str) -> pa.Table:
         table = data.read(split)

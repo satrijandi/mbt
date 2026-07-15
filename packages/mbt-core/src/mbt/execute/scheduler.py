@@ -15,7 +15,7 @@ import networkx as nx
 from mbt.artifacts.run_results import NodeResult
 from mbt.execute.planner import ExecutionPlan
 
-_FAILING_STATUSES = frozenset({"error", "gate_failed", "test_failed"})
+_FAILING_STATUSES = frozenset({"error", "gate_failed", "test_failed", "monitor_failed"})
 
 
 def execute_plan(
@@ -25,8 +25,14 @@ def execute_plan(
     *,
     threads: int = 1,
     fail_fast: bool = False,
+    cancel_running: Callable[[], None] | None = None,
 ) -> dict[str, NodeResult]:
-    """Run every node in the plan; returns a result for each one."""
+    """Run every node in the plan; returns a result for each one.
+
+    ``cancel_running`` is invoked once when ``--fail-fast`` trips: the
+    orchestrator passes a hook that terminates in-flight job subprocesses,
+    so fail-fast reclaims running work instead of only pending work.
+    """
     execution_set = set(plan.execution_set)
     results: dict[str, NodeResult] = {}
     lock = threading.Lock()
@@ -69,6 +75,7 @@ def execute_plan(
         submit_ready()
         while futures:
             done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+            cancel_now = False
             with lock:
                 for future in done:
                     uid = futures.pop(future)
@@ -78,11 +85,15 @@ def execute_plan(
                         for descendant in nx.descendants(graph, uid):
                             if descendant in execution_set:
                                 mark_skipped(descendant, f"upstream {uid} {result.status}")
-                        if fail_fast:
+                        if fail_fast and not stop_scheduling:
                             stop_scheduling = True
+                            cancel_now = True
                     for child in children[uid]:
                         remaining[child] -= 1
                 submit_ready()
+            if cancel_now and cancel_running is not None:
+                # Outside the lock: termination waits on a kill grace period.
+                cancel_running()
 
         if stop_scheduling:
             for uid in execution_set:

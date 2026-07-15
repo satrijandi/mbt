@@ -1,4 +1,12 @@
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=2000]  # uv.lock is ~1MB and must stay committable
   # Keep in lockstep with the ruff version in uv.lock (grouped by renovate.json).
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.20
@@ -11,12 +19,17 @@ repos:
     hooks:
       - id: yamllint
         args: [-d, "{extends: relaxed, rules: {line-length: {max: 140}}}"]
-        files: ^(packages|examples)/
+        files: ^(packages|examples|\.github)/
   - repo: local
     hooks:
       - id: mypy
-        name: mypy --strict (mbt-core + adapter-base)
-        entry: uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src
+        name: mypy --strict (all 10 packages, matching CI)
+        entry: >-
+          uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src
+          packages/mbt-xgboost/src packages/mbt-mlflow/src
+          packages/mbt-optuna/src packages/mbt-lightgbm/src
+          packages/mbt-testing/src packages/mbt-snowflake/src
+          packages/mbt-spark/src packages/mbt-h2o/src
         language: system
         pass_filenames: false
         files: '\.py$'

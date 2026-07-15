@@ -1,5 +1,6 @@
 """Artifact stores (file://, s3:// via the s3 extra) and URI readers."""
 
+import atexit
 import hashlib
 import shutil
 import tempfile
@@ -78,7 +79,10 @@ class S3ArtifactStore:
         self._prefix = run_prefix or uuid.uuid4().hex[:16]
         self._uri = uri
         self._client = boto3.client("s3")
+        # Download cache: lives as long as the process (fetches reuse it),
+        # removed at exit so long-lived runners do not accumulate copies.
         self._cache = Path(tempfile.mkdtemp(prefix="mbt-s3-artifacts-"))
+        atexit.register(shutil.rmtree, self._cache, ignore_errors=True)
 
     @property
     def uri(self) -> str:

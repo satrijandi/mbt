@@ -143,6 +143,8 @@ def _materialize_for_path_adapter(handle: Any, spec: ModelSpec) -> Any:
     natively). Hooks and feature selection are already applied by the
     transformed handle, so path adapters see exactly what arrow adapters see.
     """
+    import atexit
+    import shutil
     import tempfile
 
     import pyarrow.parquet as pq
@@ -153,6 +155,9 @@ def _materialize_for_path_adapter(handle: Any, spec: ModelSpec) -> Any:
     )
 
     directory = Path(tempfile.mkdtemp(prefix="mbt-path-data-"))
+    # The handle reads these files for the rest of the job; the job process
+    # is short-lived, so process exit is the natural cleanup point.
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
     counts: dict[str, int] = {}
     for split in sorted(handle.splits()):
         table = handle.read(split)
@@ -297,9 +302,10 @@ def _export_baseline(runtime: _JobRuntime, model: Any) -> Any:
     predictions: pa.Table = runtime.adapter.predict(model, runtime.handle, "test")
     scores = predictions.column("prediction").to_numpy(zero_copy_only=False)
     baseline = build_baseline(train, feature_columns, scores, model_name=runtime.spec.name)
-    path = Path(tempfile.mkdtemp(prefix="mbt-baseline-")) / "baseline.json"
-    write_baseline(baseline, path)
-    return runtime.store.put_file(path, "baseline.json", format="json")
+    with tempfile.TemporaryDirectory(prefix="mbt-baseline-") as staging:
+        path = Path(staging) / "baseline.json"
+        write_baseline(baseline, path)
+        return runtime.store.put_file(path, "baseline.json", format="json")
 
 
 def _feature_importance(runtime: _JobRuntime, model: Any) -> dict[str, float]:
@@ -791,8 +797,12 @@ def main(argv: list[str] | None = None) -> int:
     get_bus().run_id = job.run_id
     result = run_job(job)
     from mbt.adapters.local.compute import result_path_for
+    from mbt.secrets import redact
 
-    result_path_for(job_path).write_text(result.model_dump_json())
+    # The job taints its rendered adapter configs, so an exception message
+    # embedding a credential (connection strings in tracebacks) is masked
+    # before it ever reaches disk - same guarantee as the event sinks.
+    result_path_for(job_path).write_text(redact(result.model_dump_json()))
     return 0 if result.status == "success" else 3
 
 

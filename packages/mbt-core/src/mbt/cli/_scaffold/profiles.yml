@@ -10,7 +10,9 @@ __PROJECT_NAME__:
       compute: {adapter: local}
       artifact_store: file://./target/artifacts
       vars:
-        sample_fraction: 1.0
+        # Dev/PR builds train on half the data: cheap by construction, and
+        # the sampling is reproducible (seeded by the manifest identity).
+        sample_fraction: 0.5
         max_tuning_trials: 5
     prod:
       data: {adapter: local, config: {root: "{{ env_var('MBT_DATA_ROOT', '.') }}"}}

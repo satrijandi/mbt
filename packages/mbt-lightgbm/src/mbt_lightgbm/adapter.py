@@ -37,7 +37,6 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
-from mbt_adapter_base.metrics import compute_binary_results
 from mbt_lightgbm.params import LightGBMBinaryParams
 
 if TYPE_CHECKING:
@@ -102,20 +101,14 @@ class LightGBMTrainingAdapter:
     # -- AUTO resolution ----------------------------------------------------------
 
     def resolve_auto(self, spec: ModelSpec, profile: DatasetProfile) -> ModelSpec:
+        from mbt_adapter_base.training_helpers import resolve_scale_pos_weight
+
         resolved = dict(spec.hyperparameters)
         for key, value in list(resolved.items()):
             if value != AUTO:
                 continue
             if key == "scale_pos_weight":
-                balance = profile.label_balance or {}
-                positive = next(
-                    (balance[k] for k in ("1", "1.0", "true", "True") if k in balance), None
-                )
-                if positive is None or positive <= 0:
-                    raise ValueError(
-                        "cannot auto-resolve scale_pos_weight without a positive-class balance"
-                    )
-                resolved[key] = round((1.0 - positive) / positive, 6)
+                resolved[key] = resolve_scale_pos_weight(profile)
             else:
                 raise ValueError(
                     f"lightgbm cannot auto-resolve hyperparameter {key!r}; "
@@ -185,26 +178,30 @@ class LightGBMTrainingAdapter:
         )
         booster_params = params.booster_params(seed=ctx.seed)
         valid_sets = None
-        callbacks = None
-        if report is not None and "validation" in data.splits():
+        callbacks: list[Any] = []
+        want_eval = params.early_stopping_rounds is not None or report is not None
+        if want_eval and "validation" in data.splits():
             val_table = data.read("validation")
             val_x = self._features_matrix(val_table, features, categories)
             val_y = val_table.column(spec.target).to_numpy(zero_copy_only=False)
             valid_sets = [lgb.Dataset(val_x, label=val_y.astype(np.float64), reference=train_set)]
-            booster_params["metric"] = ["auc"]  # higher-is-better report contract
+            if params.early_stopping_rounds is not None:
+                callbacks.append(lgb.early_stopping(params.early_stopping_rounds, verbose=False))
+            if report is not None:
+                booster_params["metric"] = ["auc"]  # higher-is-better report contract
 
-            def _report_progress(env: Any) -> None:
-                for _name, _metric, value, _bigger in env.evaluation_result_list or []:
-                    report(env.iteration, float(value))
+                def _report_progress(env: Any) -> None:
+                    for _name, _metric, value, _bigger in env.evaluation_result_list or []:
+                        report(env.iteration, float(value))
 
-            callbacks = [_report_progress]
+                callbacks.append(_report_progress)
 
         booster = lgb.train(
             booster_params,
             train_set,
             num_boost_round=params.n_estimators,
             valid_sets=valid_sets,
-            callbacks=callbacks,
+            callbacks=callbacks or None,
         )
         return LightGBMModel(
             booster=booster, features=features, target=spec.target, categories=categories
@@ -226,17 +223,12 @@ class LightGBMTrainingAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        import numpy as np
+        from mbt_adapter_base.training_helpers import evaluate_binary_split
 
         table = data.read(split)
-        y_true = table.column(model.target).to_numpy(zero_copy_only=False).astype(np.float64)
-        y_score = self._scores(model, table).astype(np.float64)
-        slice_columns = {
-            name: table.column(name).to_numpy(zero_copy_only=False)
-            for name in (slices or [])
-            if name in table.column_names
-        }
-        return compute_binary_results(metrics, y_true, y_score, slice_columns)
+        return evaluate_binary_split(
+            table, model.target, self._scores(model, table), metrics, slices
+        )
 
     def predict(self, model: LightGBMModel, data: DatasetHandle, split: str) -> pa.Table:
         table = data.read(split)
