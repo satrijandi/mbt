@@ -15,7 +15,10 @@ unit pinned by digest in images.env. This module proves:
 - SHOW-13 at the scheduler: a realized-gate breach (exit 2) fails the task
   on try 1 with NO retry (quality verdicts are deterministic; the owner is
   notified, not on-call), while a hard error (exit 1) consumes a retry
-  before failing.
+  before failing;
+- SHOW-17's scheduled path: the monthly cadence's score DAG runs the
+  tag:monthly batch on the DuckDB plane from Airflow, inside the same
+  pinned unit.
 """
 
 import pytest
@@ -23,7 +26,7 @@ from showcase_utils import ANCHOR, SHOWCASE_MARKS
 
 pytestmark = SHOWCASE_MARKS
 
-DAGS = ("mbt_retrain", "mbt_score", "mbt_monitor")
+DAGS = ("mbt_retrain", "mbt_score", "mbt_score_monthly", "mbt_monitor")
 _state: dict = {}
 
 
@@ -62,13 +65,15 @@ def sched(showcase_ci):
     for dag_id in DAGS:
         ci.wait_dag(dag_id)
 
-    # A production champion must exist (it does after the lifecycle module;
-    # standalone runs promote the freshest gate-stamped staging version).
+    # Production champions must exist (they do after the lifecycle and
+    # monthly modules; standalone runs promote the freshest gate-stamped
+    # staging versions - the CI bootstrap registered both models).
     client = _client(ci.stack)
-    try:
-        client.get_model_version_by_alias("churn_automl", "production")
-    except Exception:
-        ci.stack.mbt("promote", "--model", "churn_automl", "--to", "production", timeout=300)
+    for model in ("churn_automl", "churn_monthly_xgb"):
+        try:
+            client.get_model_version_by_alias(model, "production")
+        except Exception:
+            ci.stack.mbt("promote", "--model", model, "--to", "production", timeout=300)
     return ci
 
 
@@ -155,6 +160,30 @@ def test_score_dags_straddling_promotion_flip_champion_zero_redeploy(sched) -> N
     assert ci.deploy_commits()[0]["sha"] == deploy_head
     assert ci.images_env()["IMAGE"] == image
     _state["scored_versions"] = (served_before, promoted)
+
+
+def test_score_monthly_dag_runs_duckdb_plane_from_scheduler(sched) -> None:
+    """SHOW-17's scheduled path: the monthly cadence runs from Airflow too,
+    entirely on the DuckDB plane inside the pinned unit (no cluster)."""
+    import json
+
+    ci = sched
+    client = _client(ci.stack)
+    champion = client.get_model_version_by_alias("churn_monthly_xgb", "production").version
+
+    run_id = ci.trigger_dag("mbt_score_monthly")
+    assert ci.wait_dag_run("mbt_score_monthly", run_id) == "success"
+
+    # The month-start batch scored with the run-time champion (same-anchor
+    # re-scores overwrite the same run_key, so >= 1 run exists either way).
+    root = ci.stack.workspace / "lake_local" / "predictions" / "monthly_retention_scores"
+    sidecars = [
+        json.loads(path.read_text())
+        for path in sorted(root.glob("*/predictions.json"), key=lambda p: p.stat().st_mtime)
+    ]
+    assert sidecars, "no monthly prediction runs after the DAG"
+    assert str(sidecars[-1]["model_version"]) == str(champion), sidecars[-1]
+    assert sidecars[-1]["row_count"] > 0, sidecars[-1]
 
 
 def test_monitor_dag_routes_exit_codes(sched) -> None:
