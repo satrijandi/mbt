@@ -73,7 +73,7 @@ steps:
         fi
 
   - name: bake
-    image: docker:27-cli
+    image: docker:29-cli
     # Requires the repo's trusted.volumes flag (set by ci_bootstrap.py):
     # the bake talks to the host daemon, which resolves the localhost zot
     # port itself (insecure-by-default for localhost registries).
@@ -92,7 +92,7 @@ steps:
         echo "baked $(cat target/image_digest)"
 
   - name: provenance
-    image: ghcr.io/oras-project/oras:v1.2.0
+    image: ghcr.io/oras-project/oras:v1.3.3
     commands:
       # The manifest is secret-free by construction, so it can live in the
       # registry as an audit artifact; tag = source sha pairs it with both

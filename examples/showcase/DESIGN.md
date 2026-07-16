@@ -63,16 +63,16 @@ The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `
 | Service | Image | Role |
 |---|---|---|
 | runner (built, not run) | `zot:5000/mbt/runner:<tag>` from `python:3.11-slim@<digest>` + JDK 17 + Spark 3.5.8 + hadoop-aws jars + workspace wheels + `mbt-h2o[sparkling]` + `mbt-core[s3]` + `mbt-mlflow` + jupyterlab | Universal environment; env_digest identity by construction |
-| gitea | `gitea/gitea:1.24-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
+| gitea | `gitea/gitea:1.27-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
 | woodpecker server + agent | `woodpeckerci/woodpecker-*:v3` | CI: pr-check, prod-build, promote pipelines; agent mounts docker socket; repo marked trusted for the `/workspace` volume |
-| seaweedfs | `chrislusf/seaweedfs:3.80` (`weed server -s3`) | S3-compatible object store: `lake` bucket (feature store parquet, read via s3a://) and `mbt` bucket (artifact store `s3://mbt/churn/artifacts`) |
+| seaweedfs | `chrislusf/seaweedfs:4.39` (`weed server -s3`) | S3-compatible object store: `lake` bucket (feature store parquet, read via s3a://) and `mbt` bucket (artifact store `s3://mbt/churn/artifacts`) |
 | spark-master, spark-worker | runner image running `start-master.sh` / `start-worker.sh` | Standalone cluster: pushdown joins/sampling/windows + sparkling H2O training |
-| mlflow | `ghcr.io/mlflow/mlflow:v2.22` (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode, needs >= 2.9); champion source of truth |
+| mlflow | runner image (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode, needs >= 2.9); champion source of truth |
 | jupyterlab | runner image + `jupyter lab` | DS workbench; terminal runs the same `mbt` as CI |
-| airflow | `apache/airflow:2.10-python3.11`, **LocalExecutor + postgres** (sqlite forces SequentialExecutor; invalid with LocalExecutor) + git-sync sidecar | Schedules retrain/score/monitor DAGs; DockerOperator runs the pinned digest from `deploy/images.env` |
+| airflow | `apache/airflow:3.3.0` (api-server + scheduler + dag-processor), **LocalExecutor + postgres** (sqlite forces SequentialExecutor; invalid with LocalExecutor) + git-sync sidecar | Schedules retrain/score/monitor DAGs; tasks drive the docker SDK to run the pinned digest from `deploy/images.env` |
 | zot | `ghcr.io/project-zot/zot:v2.1` | OCI registry: runner images, baked deployable units, and oras-pushed `manifest.json`/`run_results.json` provenance artifacts |
-| prometheus + pushgateway | `prom/prometheus:v3.4`, `prom/pushgateway:v1.11` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) |
-| grafana | `grafana/grafana:12` | File-provisioned dashboards + unified alerting with owner-label routing (no separate Alertmanager container) |
+| prometheus + pushgateway | `prom/prometheus:v3.13`, `prom/pushgateway:v1.11` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) |
+| grafana | `grafana/grafana:13` | File-provisioned dashboards + unified alerting with owner-label routing (no separate Alertmanager container) |
 | webhook-sink | ~40-line python recorder with `GET /requests` | Convergence point for `MBT_ALERT_WEBHOOK` curls and Grafana contact points; human-readable in demos, assertable in tests |
 | bootstrap (one-shot) | runner image running `bootstrap.sh` | Idempotent seeding: Gitea org/repos/tokens/branch protection, Woodpecker activation + secrets, buckets (retention explicitly disabled), seed data upload, repo pushes, image build+push |
 

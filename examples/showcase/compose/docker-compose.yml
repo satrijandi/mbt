@@ -31,19 +31,26 @@ x-airflow-env: &airflow-env
   # force SequentialExecutor, which is invalid with LocalExecutor anyway).
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  # FabAuthManager instead of Airflow 3's default SimpleAuthManager: it keeps
+  # deterministic admin/admin credentials (SimpleAuthManager generates random
+  # passwords into a file) and serves the same JWT /auth/token endpoint.
+  AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
   # DAGs come from the git-synced deploy repo, never from an image bake.
   AIRFLOW__CORE__DAGS_FOLDER: /gitsync/current/dags
-  AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
-  AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "5"
-  AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
-  AIRFLOW__WEBSERVER__SECRET_KEY: mbt-showcase-airflow-secret
+  AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
+  AIRFLOW__DAG_PROCESSOR__MIN_FILE_PROCESS_INTERVAL: "5"
+  # Airflow 3 tasks call back into the api-server's execution API, and the
+  # in-cluster log fetch is signed with the JWT secret - both must be shared
+  # across every airflow service for the split-component setup to work.
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+  AIRFLOW__API_AUTH__JWT_SECRET: mbt-showcase-airflow-jwt-secret
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
   # The DAG tasks drive the docker daemon (deployable-unit containers).
   _PIP_ADDITIONAL_REQUIREMENTS: "docker==7.1.0"
 
 services:
   seaweedfs:
-    image: chrislusf/seaweedfs:3.80
+    image: chrislusf/seaweedfs:4.39
     profiles: [core]
     # -ip.bind: weed binds the container IP by default, which breaks
     # localhost healthchecks.
@@ -127,13 +134,18 @@ services:
       retries: 30
 
   gitea:
-    image: gitea/gitea:1.24-rootless
+    image: gitea/gitea:1.27-rootless
     profiles: [ci]
     environment:
       # Headless init: skip the web installer entirely.
       GITEA__security__INSTALL_LOCK: "true"
       # In-network canonical URL: Woodpecker clones and comments via this.
       GITEA__server__ROOT_URL: http://gitea:3000/
+      # Gitea >= 1.26 defaults to deriving public URLs from the request's
+      # Host header ("auto"), so a PR opened via the host-mapped port would
+      # put localhost:<hostport> clone URLs into the webhook payload - which
+      # Woodpecker's step containers cannot reach. Pin to ROOT_URL always.
+      GITEA__server__PUBLIC_URL_DETECTION: never
       # Gitea blocks webhooks to private addresses by default; Woodpecker is
       # exactly such a target on the compose network.
       GITEA__webhook__ALLOWED_HOST_LIST: woodpecker-server
@@ -182,7 +194,7 @@ services:
       - woodpecker-server
 
   zot:
-    image: ghcr.io/project-zot/zot:v2.1.2
+    image: ghcr.io/project-zot/zot:v2.1.18
     profiles: [ci]
     # OCI registry for the deployable unit + oras provenance artifacts.
     # In-network pushes (oras) use zot:5000 over plain HTTP; the docker
@@ -207,7 +219,7 @@ services:
       retries: 30
 
   airflow-db:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     profiles: [orch]
     environment:
       POSTGRES_USER: airflow
@@ -220,21 +232,26 @@ services:
       retries: 30
 
   airflow-init:
-    image: apache/airflow:2.10.5
+    image: apache/airflow:3.3.0
     profiles: [orch]
+    # The image entrypoint handles db migration (core + FAB provider tables)
+    # and admin-user creation when these _AIRFLOW_* vars are set - the
+    # supported one-shot init flow for the split-component 3.x setup.
     environment:
       <<: *airflow-env
-    command: >
-      bash -c "airflow db migrate && airflow users create --username admin
-      --password admin --role Admin --firstname mbt --lastname ops
-      --email ops@example.com"
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      _PIP_ADDITIONAL_REQUIREMENTS: ""
+    command: airflow version
     depends_on:
       airflow-db:
         condition: service_healthy
     restart: "no"
 
   airflow-scheduler:
-    image: apache/airflow:2.10.5
+    image: apache/airflow:3.3.0
     profiles: [orch]
     # The DAG tasks drive the docker daemon (LocalExecutor runs them
     # in-scheduler), and the image's airflow user must stay non-root (the
@@ -252,13 +269,31 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+      # Tasks run in-scheduler (LocalExecutor) and talk to the api-server's
+      # execution API from their first heartbeat.
+      airflow-apiserver:
+        condition: service_healthy
 
-  airflow-webserver:
-    image: apache/airflow:2.10.5
+  # Airflow 3 split DAG parsing out of the scheduler into its own component;
+  # without it no DAG ever leaves the "new file" state.
+  airflow-dag-processor:
+    image: apache/airflow:3.3.0
     profiles: [orch]
     environment:
       <<: *airflow-env
-    command: webserver
+    command: dag-processor
+    volumes:
+      - airflow-dags:/gitsync:ro
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-apiserver:
+    image: apache/airflow:3.3.0
+    profiles: [orch]
+    environment:
+      <<: *airflow-env
+    command: api-server
     volumes:
       - airflow-dags:/gitsync:ro
     ports:
@@ -267,13 +302,13 @@ services:
       airflow-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health >/dev/null"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/v2/monitor/health >/dev/null"]
       interval: 5s
       timeout: 10s
       retries: 60
 
   git-sync:
-    image: registry.k8s.io/git-sync/git-sync:v4.2.4
+    image: registry.k8s.io/git-sync/git-sync:v4.7.0
     profiles: [orch]
     # Root so it can write the shared named volume; --max-failures=-1 keeps
     # it retrying until ci_bootstrap.py has seeded the deploy repo.
@@ -289,13 +324,13 @@ services:
       - airflow-dags:/gitsync
 
   pushgateway:
-    image: prom/pushgateway:v1.11.1
+    image: prom/pushgateway:v1.11.3
     profiles: [obs]
     ports:
       - "${SHOWCASE_PUSHGW_PORT:-9491}:9091"
 
   prometheus:
-    image: prom/prometheus:v3.4.1
+    image: prom/prometheus:v3.13.1
     profiles: [obs]
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -304,7 +339,7 @@ services:
       - "${SHOWCASE_PROMETHEUS_PORT:-9490}:9090"
 
   grafana:
-    image: grafana/grafana:11.6.0
+    image: grafana/grafana:13.1.0
     profiles: [obs]
     environment:
       GF_SECURITY_ADMIN_USER: admin

@@ -19,7 +19,7 @@ in this repo: bumping IMAGE (or `git revert`) IS the deploy.
 import shlex
 from pathlib import Path
 
-from airflow.exceptions import AirflowException, AirflowFailException
+from airflow.sdk.exceptions import AirflowException, AirflowFailException
 
 CONF_PATH = Path(__file__).resolve().parent.parent / "images.env"
 

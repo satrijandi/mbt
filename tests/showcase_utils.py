@@ -292,6 +292,7 @@ class CiHarness:
         self.repo_id = repo_id
         self.workdir = workdir
         self.seen_pipelines: set = set()
+        self._af_token: str | None = None
 
     # -- gitea -----------------------------------------------------------------
     def gitea_api(
@@ -459,20 +460,34 @@ class CiHarness:
         return files
 
     # -- airflow ----------------------------------------------------------------------
-    def af_api(self, method: str, path: str, payload: dict | None = None, *, raw: bool = False):
+    def af_token(self, *, force: bool = False) -> str:
+        """Mint (and cache) a JWT for the v2 API; Airflow 3 dropped basic auth."""
         import requests
 
-        resp = requests.request(
-            method,
-            f"{self.stack.airflow_url()}/api/v1{path}",
-            json=payload,
-            auth=("admin", "admin"),
-            headers={"Accept": "text/plain"} if raw else None,
-            timeout=60,
-        )
+        if force or self._af_token is None:
+            resp = requests.post(
+                f"{self.stack.airflow_url()}/auth/token",
+                json={"username": "admin", "password": "admin"},
+                timeout=60,
+            )
+            assert resp.ok, f"airflow token mint -> {resp.status_code}: {resp.text[:2000]}"
+            self._af_token = resp.json()["access_token"]
+        return self._af_token
+
+    def af_api(self, method: str, path: str, payload: dict | None = None):
+        import requests
+
+        for attempt in (1, 2):  # one retry with a fresh token on expiry
+            resp = requests.request(
+                method,
+                f"{self.stack.airflow_url()}/api/v2{path}",
+                json=payload,
+                headers={"Authorization": f"Bearer {self.af_token(force=attempt > 1)}"},
+                timeout=60,
+            )
+            if resp.status_code != 401:
+                break
         assert resp.ok, f"airflow {method} {path} -> {resp.status_code}: {resp.text[:2000]}"
-        if raw:
-            return resp.text
         return resp.json() if resp.content else None
 
     def wait_dag(self, dag_id: str, timeout_s: int = 300) -> None:
@@ -484,17 +499,22 @@ class CiHarness:
         end = time.time() + timeout_s
         while time.time() < end:
             resp = requests.get(
-                f"{self.stack.airflow_url()}/api/v1/dags/{dag_id}",
-                auth=("admin", "admin"),
+                f"{self.stack.airflow_url()}/api/v2/dags/{dag_id}",
+                headers={"Authorization": f"Bearer {self.af_token()}"},
                 timeout=30,
             )
-            if resp.ok and not resp.json().get("is_paused", True):
+            if resp.status_code == 401:
+                self.af_token(force=True)
+            elif resp.ok and not resp.json().get("is_paused", True):
                 return
             time.sleep(5)
         pytest.fail(f"DAG {dag_id} never appeared unpaused within {timeout_s}s")
 
     def trigger_dag(self, dag_id: str, conf: dict | None = None) -> str:
-        run = self.af_api("POST", f"/dags/{dag_id}/dagRuns", {"conf": conf or {}})
+        # logical_date is a required (nullable) field in the v2 trigger body.
+        run = self.af_api(
+            "POST", f"/dags/{dag_id}/dagRuns", {"logical_date": None, "conf": conf or {}}
+        )
         return run["dag_run_id"]
 
     def wait_dag_run(self, dag_id: str, run_id: str, timeout_s: int = 1800) -> str:
@@ -524,11 +544,16 @@ class CiHarness:
                 if ti["state"] != "failed":
                     continue
                 for attempt in range(1, (ti["try_number"] or 1) + 1):
-                    log = self.af_api(
+                    # v2 serves structured log events, not text/plain: each
+                    # content item is a StructuredLogMessage (or a string).
+                    payload = self.af_api(
                         "GET",
                         f"/dags/{dag_id}/dagRuns/{encoded_run_id}/taskInstances"
                         f"/{ti['task_id']}/logs/{attempt}?full_content=true",
-                        raw=True,
+                    )
+                    log = "\n".join(
+                        event.get("event", str(event)) if isinstance(event, dict) else str(event)
+                        for event in payload["content"]
                     )
                     print(
                         f"--- {dag_id}.{ti['task_id']} try {attempt}/{ti['try_number']} "

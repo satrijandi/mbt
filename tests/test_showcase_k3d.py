@@ -29,7 +29,7 @@ pytestmark = [
 ]
 
 ARGOCD_CORE = (
-    "https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/core-install.yaml"
+    "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.5/manifests/core-install.yaml"
 )
 # The core install ships no API server, and it is the API server that
 # normally creates the `default` AppProject - without this, the Application
@@ -135,8 +135,8 @@ class K3d:
             "import",
             "-c",
             self.name,
-            "quay.io/argoproj/argocd:v2.13.3",
-            "redis:7.0.15-alpine",
+            "quay.io/argoproj/argocd:v3.4.5",
+            "public.ecr.aws/docker/library/redis:8.2.3-alpine",
             check=False,
             timeout=600,
         )
@@ -199,7 +199,10 @@ def cd(showcase_ci, tmp_path_factory: pytest.TempPathFactory):
     try:
         cluster.up()
         cluster.kubectl("create", "namespace", "argocd")
-        cluster.kubectl("apply", "-n", "argocd", "-f", ARGOCD_CORE, timeout=600)
+        # --server-side: ArgoCD v3's applicationsets CRD blows past the
+        # 262144-byte last-applied-configuration annotation limit that
+        # client-side apply would write.
+        cluster.kubectl("apply", "--server-side", "-n", "argocd", "-f", ARGOCD_CORE, timeout=600)
         cluster.wait_for(
             "get",
             "-n",

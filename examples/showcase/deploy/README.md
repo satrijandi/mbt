@@ -5,8 +5,8 @@ This repo is what continuous delivery reconciles, and nothing else:
 - `images.env` - the pinned deployable-unit digest (written by the
   prod-build pipeline's `deploy-digest` step) plus the session wiring the
   Airflow DAGs need (docker network, shared workspace host path).
-- `dags/` - the Airflow DAGs. git-sync pulls this repo into the scheduler
-  every few seconds; rollback is `git revert`.
+- `dags/` - the Airflow DAGs. git-sync pulls this repo into a volume shared
+  by the Airflow services every few seconds; rollback is `git revert`.
 - `k8s/` - the same unit rendered as Kubernetes CronJobs for the optional
   k3d + ArgoCD fidelity profile.
 

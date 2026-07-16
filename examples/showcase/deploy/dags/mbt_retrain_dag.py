@@ -15,8 +15,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from airflow.decorators import task
-from airflow.models.dag import DAG
+from airflow.sdk import DAG, task
 
 # git-sync serves the dags folder through a flipping symlink; Airflow's
 # DAG processor imports files under the resolved worktree path, where the
