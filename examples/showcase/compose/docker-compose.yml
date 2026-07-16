@@ -198,7 +198,12 @@ services:
       - woodpecker-server
 
   zot:
-    image: ghcr.io/project-zot/zot:v2.1.18
+    # v2.1.16 pin is load-bearing: v2.1.17+ added hard HTTP timeouts
+    # (project-zot/zot#3984) that kill multi-GB blob uploads on slow disks -
+    # the ~5GB runner-image layer's push died mid-upload on ubuntu-latest
+    # (docker retried then "use of closed network connection"). Do not bump
+    # past v2.1.16 until project-zot/zot#4140 / #4149 land in a release.
+    image: ghcr.io/project-zot/zot:v2.1.16
     profiles: [ci]
     # OCI registry for the deployable unit + oras provenance artifacts.
     # In-network pushes (oras) use zot:5000 over plain HTTP; the docker

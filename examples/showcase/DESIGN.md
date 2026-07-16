@@ -71,7 +71,7 @@ The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `
 | mlflow | runner image (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode, needs >= 2.9); champion source of truth |
 | jupyterlab | runner image + `jupyter lab` | DS workbench; terminal runs the same `mbt` as CI |
 | airflow | `apache/airflow:3.3.0` (api-server + scheduler + dag-processor), **LocalExecutor + postgres** (sqlite forces SequentialExecutor; invalid with LocalExecutor) + git-sync sidecar | Schedules retrain/score/monitor DAGs; tasks drive the docker SDK to run the pinned digest from `deploy/images.env` |
-| zot | `ghcr.io/project-zot/zot:v2.1.18` | OCI registry: runner images, baked deployable units, and oras-pushed `manifest.json`/`run_results.json` provenance artifacts |
+| zot | `ghcr.io/project-zot/zot:v2.1.16` (v2.1.17+ breaks multi-GB pushes on slow disks, zot#4140) | OCI registry: runner images, baked deployable units, and oras-pushed `manifest.json`/`run_results.json` provenance artifacts |
 | prometheus + pushgateway | `prom/prometheus:v3.13`, `prom/pushgateway:v1.11` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) |
 | grafana | `grafana/grafana:13` | File-provisioned dashboards + unified alerting with owner-label routing (no separate Alertmanager container) |
 | webhook-sink | ~40-line python recorder with `GET /requests` | Convergence point for `MBT_ALERT_WEBHOOK` curls and Grafana contact points; human-readable in demos, assertable in tests |
