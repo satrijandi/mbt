@@ -125,17 +125,18 @@ The unit tests run the adapter's generated SQL in DuckDB and need no account.
 `tests/test_snowflake_live.py` additionally proves the dialect surfaces (`MD5_NUMBER_LOWER64` sampling, snapshot tokens, Arrow streaming, case rules) and the full local-training loop against a real Snowflake account.
 It is double-gated: every test skips unless `MBT_LIVE_SNOWFLAKE=1`, and once opted in, incomplete configuration fails loudly instead of skipping.
 
+Credentials live in environment variables, never in `profiles.yml` (it is committed and secret-free; values flow in through `env_var()`).
+Copy [`.env.example`](.env.example) to `.env` next to it (gitignored - the repo ignores `.env` and `.env.*` everywhere) and load it, or export the variables directly:
+
 ```bash
-export SNOWFLAKE_ACCOUNT=myorg-myaccount
-export SNOWFLAKE_USER=me@example.com
-export SNOWFLAKE_AUTHENTICATOR=externalbrowser   # or SNOWFLAKE_PASSWORD / SNOWFLAKE_PRIVATE_KEY_FILE
-export SNOWFLAKE_WAREHOUSE=ML_WH
-export SNOWFLAKE_DATABASE=ANALYTICS
-export SNOWFLAKE_SCHEMA=SANDBOX                  # CREATE TABLE privilege needed here
-export SNOWFLAKE_ROLE=ML_ROLE                    # optional
+cp packages/mbt-snowflake/.env.example packages/mbt-snowflake/.env   # then edit
+set -a; source packages/mbt-snowflake/.env; set +a
 
 MBT_LIVE_SNOWFLAKE=1 uv run pytest -q -m live_snowflake
 ```
+
+The variables: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA` (required), exactly one of `SNOWFLAKE_AUTHENTICATOR=externalbrowser` / `SNOWFLAKE_PASSWORD` / `SNOWFLAKE_PRIVATE_KEY_FILE` (+`_PWD`), and optionally `SNOWFLAKE_ROLE`.
+The `MBT_LIVE_SNOWFLAKE=1` gate stays out of `.env` on purpose: credentials sitting in your shell must never be enough to trigger warehouse traffic or an SSO popup by themselves.
 
 The suite creates uniquely named `MBT_LIVE_*` tables in that database.schema (a few hundred small rows), drops them at teardown, and touches nothing else.
 With `externalbrowser` the whole run needs one browser prompt (the SSO token is cached).
