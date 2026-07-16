@@ -134,7 +134,11 @@ services:
       retries: 30
 
   gitea:
-    image: gitea/gitea:1.27-rootless
+    # Pinned exact deliberately (like every service here): a rolling tag
+    # lets upstream behavior change under the suite overnight with no repo
+    # diff - Gitea >= 1.26's PUBLIC_URL_DETECTION default flip was exactly
+    # that shape of breakage.
+    image: gitea/gitea:1.27.0-rootless
     profiles: [ci]
     environment:
       # Headless init: skip the web installer entirely.
@@ -158,7 +162,7 @@ services:
       retries: 30
 
   woodpecker-server:
-    image: woodpeckerci/woodpecker-server:v3
+    image: woodpeckerci/woodpecker-server:v3.16.0
     profiles: [ci]
     environment:
       WOODPECKER_OPEN: "true"
@@ -176,7 +180,7 @@ services:
       - "${SHOWCASE_WOODPECKER_PORT:-8305}:8000"
 
   woodpecker-agent:
-    image: woodpeckerci/woodpecker-agent:v3
+    image: woodpeckerci/woodpecker-agent:v3.16.0
     profiles: [ci]
     environment:
       WOODPECKER_SERVER: woodpecker-server:9000

@@ -2,7 +2,8 @@
 
 Status: IMPLEMENTED (all phases; P6 separately gated).
 P1 (runner image + data/ML core), P2 (Gitea + Woodpecker CI loop incl. branch protection + CODEOWNERS on promotions.yml), P3 (Zot deployable unit + oras provenance), P4 (Airflow + git-sync CD + the scoring/promotion/monitoring plane), P5 (observability), and P6 (k3d + ArgoCD, local-only behind its own MBT_LIVE_SHOWCASE_K3D gate) are implemented and covered by the `live_showcase` test tier; see README.md for what runs today.
-The test catalog below maps onto eight modules: `tests/test_showcase_infra.py` (SHOW-01/02/15), `tests/test_showcase_ci.py` (SHOW-05/06/07/10), `tests/test_showcase_lifecycle.py` (SHOW-03/04 + 10/11/12/13 CLI-driven), `tests/test_showcase_monthly.py` (SHOW-17), `tests/test_showcase_obs.py` (SHOW-14), `tests/test_showcase_provenance.py` (SHOW-08/09), `tests/test_showcase_scheduling.py` (SHOW-11 strong form + SHOW-13 routing + SHOW-17's scheduled path), `tests/test_showcase_k3d.py` (SHOW-16).
+The test catalog below maps onto nine modules: `tests/test_showcase_infra.py` (SHOW-01/02/15), `tests/test_showcase_ci.py` (SHOW-05/06/07/10), `tests/test_showcase_lifecycle.py` (SHOW-03/04 + 10/11/12/13 CLI-driven), `tests/test_showcase_monthly.py` (SHOW-17), `tests/test_showcase_obs.py` (SHOW-14), `tests/test_showcase_provenance.py` (SHOW-08/09), `tests/test_showcase_scheduling.py` (SHOW-11 strong form + SHOW-13 routing + SHOW-17's scheduled path), `tests/test_showcase_k3d.py` (SHOW-16), `tests/test_showcase_make.py` (SHOW-18, its own gate).
+Modules share one session stack and run in collection (alphabetical) order; the only load-bearing constraint is that `test_showcase_ci` is the first forge consumer (virgin-bootstrap assertion) - everything else provisions or promotes what it needs and scopes score/monitor by cadence tag.
 Implementation notes (deliberate scoping vs the sections below):
 pr-check builds on the `ci` target and the merge-time prod-build on `dev` (spark local[2] + the shared registry); the scheduled retrain DAG is the cluster-from-CI path (prod target from a pinned unit), tested with the deterministic xgboost workhorse - sparkling stays confined to SHOW-04's module per the flake-isolation rule.
 Baking is gated on "this merge retrained something": docker layer digests embed mtimes, so an unconditional bake would mint a new digest per merge and break the ADR-20 "promotion deploys nothing" claim.
@@ -63,14 +64,14 @@ The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `
 | Service | Image | Role |
 |---|---|---|
 | runner (built, not run) | `zot:5000/mbt/runner:<tag>` from `python:3.11-slim@<digest>` + JDK 17 + Spark 3.5.8 + hadoop-aws jars + workspace wheels + `mbt-h2o[sparkling]` + `mbt-core[s3]` + `mbt-mlflow` + jupyterlab | Universal environment; env_digest identity by construction |
-| gitea | `gitea/gitea:1.27-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
-| woodpecker server + agent | `woodpeckerci/woodpecker-*:v3` | CI: pr-check, prod-build, promote pipelines; agent mounts docker socket; repo marked trusted for the `/workspace` volume |
+| gitea | `gitea/gitea:1.27.0-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
+| woodpecker server + agent | `woodpeckerci/woodpecker-*:v3.16.0` | CI: pr-check, prod-build, promote pipelines; agent mounts docker socket; repo marked trusted for the `/workspace` volume |
 | seaweedfs | `chrislusf/seaweedfs:4.39` (`weed server -s3`) | S3-compatible object store: `lake` bucket (feature store parquet, read via s3a://) and `mbt` bucket (artifact store `s3://mbt/churn/artifacts`) |
 | spark-master, spark-worker | runner image running `start-master.sh` / `start-worker.sh` | Standalone cluster: pushdown joins/sampling/windows + sparkling H2O training |
 | mlflow | runner image (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode, needs >= 2.9); champion source of truth |
 | jupyterlab | runner image + `jupyter lab` | DS workbench; terminal runs the same `mbt` as CI |
 | airflow | `apache/airflow:3.3.0` (api-server + scheduler + dag-processor), **LocalExecutor + postgres** (sqlite forces SequentialExecutor; invalid with LocalExecutor) + git-sync sidecar | Schedules retrain/score/monitor DAGs; tasks drive the docker SDK to run the pinned digest from `deploy/images.env` |
-| zot | `ghcr.io/project-zot/zot:v2.1` | OCI registry: runner images, baked deployable units, and oras-pushed `manifest.json`/`run_results.json` provenance artifacts |
+| zot | `ghcr.io/project-zot/zot:v2.1.18` | OCI registry: runner images, baked deployable units, and oras-pushed `manifest.json`/`run_results.json` provenance artifacts |
 | prometheus + pushgateway | `prom/prometheus:v3.13`, `prom/pushgateway:v1.11` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) |
 | grafana | `grafana/grafana:13` | File-provisioned dashboards + unified alerting with owner-label routing (no separate Alertmanager container) |
 | webhook-sink | ~40-line python recorder with `GET /requests` | Convergence point for `MBT_ALERT_WEBHOOK` curls and Grafana contact points; human-readable in demos, assertable in tests |
@@ -192,6 +193,7 @@ Every mbt surface is a batch job that exits, so there is no live scrape target; 
 | SHOW-15 | meta: collection hygiene | The fast suite imports all showcase modules cleanly and self-skips without docker; `MBT_LIVE_SHOWCASE=1` without docker fails loudly (pins the double-gate contract) |
 | SHOW-16 | optional: CD fidelity | argocd profile only: digest bump in the deploy repo rolls the k3d CronJobs, insecure-registry pull from Zot works, selfHeal recreates a deleted CronJob |
 | SHOW-17 | monthly cadence | `tag:monthly` trains on the prod_score plane (DuckDB over the synced lake, no cluster) and passes its gate; the month-start batch scores with the run-time champion under both shift monitors; its 30-day labels mature at the pinned monitor anchor and evaluate exactly once; the `mbt_score_monthly` DAG runs the same batch from the scheduler in the pinned unit |
+| SHOW-18 | runbook fidelity | Extra gate MBT_LIVE_SHOWCASE_MAKE=1: the README golden path driven through `make` on an isolated SHOWCASE_PROJECT - up, demo (both cadences' predictions exist), monthly, score, monitor, inject-drift + recovery, down leaves no containers, clean removes the workspace - so the runbook cannot drift from the tested harness silently |
 
 ## 9. Known constraints this design respects (do not "fix" silently)
 

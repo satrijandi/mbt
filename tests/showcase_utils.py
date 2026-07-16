@@ -5,6 +5,16 @@ skipif unless MBT_LIVE_SHOWCASE=1, then loud pytest.fail once opted in if
 docker/compose are missing. Modules using this helper apply SHOWCASE_MARKS
 as their pytestmark.
 
+Module ordering and coupling: the modules share one session-scoped stack
+and run in collection (alphabetical) order. Exactly ONE ordering constraint
+is load-bearing: test_showcase_ci must be the first forge consumer (its
+bootstrap test asserts a virgin Woodpecker). Every other module is
+standalone-safe by construction - it provisions or promotes whatever it
+needs (ensure_seeded, ensure_daily_champion, the scheduling fixture's
+promote-if-missing loop) - and every score/monitor invocation is
+cadence-scoped (--select tag:...) so adding a cadence never breaks a
+neighbor.
+
 Everything the stack writes lives under the pytest tmp workspace or in
 compose-project-scoped docker volumes; teardown is `down -v` in a finally.
 """
@@ -133,7 +143,9 @@ class ComposeStack:
         )
 
     def logs(self) -> str:
-        return self.compose("logs", "--no-color", timeout=120).stdout[-20000:]
+        # --tail is per SERVICE: a chatty service (spark, airflow) must not
+        # scroll the interesting one out of the single flat truncation.
+        return self.compose("logs", "--no-color", "--tail", "150", timeout=120).stdout[-60000:]
 
     def up(self) -> None:
         self._stage_workspace()
@@ -224,6 +236,26 @@ class ComposeStack:
 
         with urllib.request.urlopen(url, timeout=30) as resp:
             return json.loads(resp.read().decode())
+
+
+def ensure_daily_champion(stack: ComposeStack) -> None:
+    """Standalone-safety: modules that score `tag:daily` need a production
+    churn_automl champion. A full session inherits the lifecycle module's;
+    a solo module run trains and promotes one here instead (dev target,
+    spark snapshot scheme - no --deep-snapshot)."""
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=stack.mlflow_url())
+    try:
+        client.get_model_version_by_alias("churn_automl", "production")
+        return
+    except Exception:
+        pass
+    stack.sync_lake()
+    stack.mbt(
+        "build", "--target", "dev", "--select", "churn_automl", "--anchor", ANCHOR, timeout=1800
+    )
+    stack.mbt("promote", "--model", "churn_automl", "--to", "production", timeout=300)
 
 
 def build_runner_image() -> None:

@@ -9,7 +9,7 @@ module trains anything.
 import importlib
 
 import pytest
-from showcase_utils import SHOWCASE_MARKS, SKIP_REASON
+from showcase_utils import ANCHOR, SHOWCASE_MARKS, SKIP_REASON
 
 pytestmark = SHOWCASE_MARKS
 
@@ -94,6 +94,32 @@ def test_runner_env_sanity_and_sparkling_version_matrix(showcase_stack) -> None:
     assert "h2o-client=" in probe.stdout
 
 
+def test_registry_outage_is_a_hard_error_not_quality(showcase_stack) -> None:
+    """The exit-code contract under a real infra failure: a dead registry is
+    a hard error (exit 1 - retryable, pages on-call), NEVER a quality
+    verdict (exit 2 - the model owner's problem). The quality half of the
+    contract is covered everywhere; this is the infra half."""
+    stack = showcase_stack
+    stopped = stack.compose("stop", "mlflow", timeout=120)
+    assert stopped.returncode == 0, stopped.stderr
+    try:
+        stack.mbt(
+            "build",
+            "--target",
+            "dev",
+            "--select",
+            "churn_baseline_xgb",
+            "--anchor",
+            ANCHOR,
+            expect_exit=1,
+            timeout=900,
+        )
+    finally:
+        # Later modules need the registry back and healthy.
+        up = stack.compose("up", "-d", "--wait", "mlflow", timeout=300)
+        assert up.returncode == 0, f"{up.stdout}\n{up.stderr}"
+
+
 def test_collection_hygiene_and_double_gate() -> None:
     """SHOW-15: the tier is safe to collect everywhere and loud once opted in."""
     for module_name in (
@@ -101,6 +127,8 @@ def test_collection_hygiene_and_double_gate() -> None:
         "test_showcase_infra",
         "test_showcase_k3d",
         "test_showcase_lifecycle",
+        "test_showcase_make",
+        "test_showcase_monthly",
         "test_showcase_obs",
         "test_showcase_provenance",
         "test_showcase_scheduling",

@@ -1,16 +1,22 @@
 """Showcase observability loop (SHOW-14): run_results -> Pushgateway ->
 Prometheus -> alert firing on injected shift.
 
-Runs after the lifecycle module (alphabetical order), so a production
-champion already exists; scores its own runs regardless, because the loop
-under test here is metrics, not models.
+Standalone-safe: a full session inherits the lifecycle module's champion,
+while a solo run trains and promotes one itself (the loop under test here
+is metrics, not models - the champion is plumbing).
 """
 
 import time
 
-from showcase_utils import ANCHOR, SHOWCASE_MARKS
+import pytest
+from showcase_utils import ANCHOR, SHOWCASE_MARKS, ensure_daily_champion
 
 pytestmark = SHOWCASE_MARKS
+
+
+@pytest.fixture(scope="module", autouse=True)
+def daily_champion(showcase_stack):
+    ensure_daily_champion(showcase_stack)
 
 
 def _query(stack, promql: str) -> list:

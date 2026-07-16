@@ -60,6 +60,7 @@ Modules (repo-root `tests/`), which boot their own isolated compose project on e
 - `test_showcase_lifecycle.py` - the narrative: dev build from the s3a lake registering to HTTP MLflow with S3 artifacts (integration items A2 + A3, live), sparkling training on the actual cluster, gate-verified GitOps promotion with pinned-replay idempotency and the unpinned-replay refusal, run-time champion resolution, prediction-store idempotency (same anchor overwrites, new anchor partitions), and ground-truth monitoring (evaluated exactly once; a realized-gate breach exits 2, never 1).
 - `test_showcase_monthly.py` - the monthly cadence (SHOW-17): `tag:monthly` trains on the prod_score plane (DuckDB over the synced lake, no cluster), gate-verified promote, the month-start batch scores with the run-time champion under both shift monitors, and its 30-day labels mature at the pinned monitor anchor and evaluate exactly once.
 - `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules, and `MbtShiftBreach` actually firing on injected shift.
+- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, monthly, score, monitor, inject-drift + recovery, down, clean), so these documented commands cannot drift from the tested harness silently.
 
 ## Deviations from the scaffold defaults (documented, deliberate)
 

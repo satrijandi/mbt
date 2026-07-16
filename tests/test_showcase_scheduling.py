@@ -171,8 +171,18 @@ def test_score_monthly_dag_runs_duckdb_plane_from_scheduler(sched) -> None:
     client = _client(ci.stack)
     champion = client.get_model_version_by_alias("churn_monthly_xgb", "production").version
 
+    def _spark_apps() -> int:
+        master = ci.stack.http_json(
+            f"http://localhost:{ci.stack.ports['SHOWCASE_SPARK_UI_PORT']}/json/"
+        )
+        return len(master.get("completedapps", [])) + len(master.get("activeapps", []))
+
+    apps_before = _spark_apps()
     run_id = ci.trigger_dag("mbt_score_monthly")
     assert ci.wait_dag_run("mbt_score_monthly", run_id) == "success"
+
+    # The DuckDB-plane claim, asserted: the cluster saw no new applications.
+    assert _spark_apps() == apps_before
 
     # The month-start batch scored with the run-time champion (same-anchor
     # re-scores overwrite the same run_key, so >= 1 run exists either way).
