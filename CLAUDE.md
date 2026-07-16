@@ -7,7 +7,7 @@ Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anyth
 ## Verify (run all of these before calling work done)
 
 ```bash
-uv run pytest -q -m "not e2e"        # fast suite (~35 s)
+uv run pytest -q -m "not e2e" --cov  # fast suite + CI's 100% coverage gate (~2 min)
 uv run pytest -q -m e2e --timeout 1800   # e2e tier incl. JVM; needs java 17
 uv run ruff check . && uv run ruff format --check .
 uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
