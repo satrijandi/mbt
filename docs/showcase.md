@@ -36,7 +36,7 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 `make score` and `make monitor` also work standalone: they rerun just the daily scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
 `make monthly` runs the second, cluster-free cadence: the `tag:monthly` churn pipeline trains, promotes, and scores entirely on the DuckDB batch plane over the synced S3 parquet lake.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
-The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); every phase in its plan is implemented, with the k3d/ArgoCD fidelity profile local-only behind its own gate.
+The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); phases P1-P6 of its plan are implemented (the k3d/ArgoCD fidelity profile local-only behind its own gate), and a P7 Snowflake warehouse variant is scoped but deliberately parked.
 
 ## What it proves
 

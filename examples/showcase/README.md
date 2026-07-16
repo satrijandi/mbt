@@ -5,7 +5,8 @@ SeaweedFS is the S3 data lake (gold-layer feature tables) and artifact store, ML
 A second, cluster-free cadence rides the same lake: the `tag:monthly` churn pipeline trains, scores, and monitors entirely on the DuckDB batch plane (`prod_score`) over the synced S3 parquet (SHOW-17).
 
 The design of record is [DESIGN.md](DESIGN.md).
-All phases are implemented: P1 (runner image + data/ML core), P2 (CI loop), P3 (deployable unit + provenance), P4 (scheduling + CD + the scoring/promotion/monitoring plane), P5 (observability), and P6 (k3d + ArgoCD - local-only, behind its own `MBT_LIVE_SHOWCASE_K3D=1` gate).
+Phases P1-P6 are implemented: P1 (runner image + data/ML core), P2 (CI loop), P3 (deployable unit + provenance), P4 (scheduling + CD + the scoring/promotion/monitoring plane), P5 (observability), and P6 (k3d + ArgoCD - local-only, behind its own `MBT_LIVE_SHOWCASE_K3D=1` gate).
+P7 (a Snowflake warehouse variant with Snowflake as read-only data storage) is scoped in DESIGN.md and deliberately parked.
 
 Everything mbt-related runs inside ONE runner image (Jupyter kernel, Spark master/worker, MLflow server, every `mbt` invocation), which makes ADR-19 `env_digest` verification hold by construction.
 

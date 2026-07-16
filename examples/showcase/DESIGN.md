@@ -242,6 +242,12 @@ tests/
 4. **P4 Scheduling + CD + promotion**: airflow + postgres + git-sync, deploy repo, DAGs with exit-code routing, prod_score plane, promotion flow. Tests SHOW-10..13.
 5. **P5 Observability + docs**: prometheus/pushgateway/grafana, dashboards, rules, drift injection; docs page in mkdocs nav; one exactly-true sentence in v0.1-status; nightly workflow. Tests SHOW-14..15.
 6. **P6 (optional) ArgoCD fidelity profile**: k3d + ArgoCD over the same deploy repo. Test SHOW-16, local-only.
+7. **P7 (proposed, parked 2026-07-16) Snowflake warehouse variant**: NOT implemented - recorded here so the scoping survives.
+   Decided direction: Snowflake stays read-only data storage (source tables, scoring batches, ground-truth labels); predictions, registry, and artifacts stay on mbt's side, so no warehouse-resident prediction store.
+   Scope when picked up: (a) extend mbt-snowflake to the contract-1.1 read side - `build_scoring_input` reuses the `build_dataset` SELECT machinery, `open_predictions` delegates to the local prediction store via a configured root; unit-testable against the DuckDB-as-Snowflake stub, then proven in the live_snowflake suite.
+   (b) A small host-run warehouse demo project BESIDE the showcase project, not inside it: snowflake sources use `identifier:` and cannot build on the spark `ci`/`dev` targets, so putting them in the churn repo would break every CI economy build.
+   Host-run keeps `externalbrowser` SSO trivial (the `mbt-snowflake[sso]` keyring cache; in-container SSO needs the localhost-callback port dance and credentials in the container) - the target reaches the stack's MLflow/S3 via host-mapped ports.
+   (c) Seeding mirrors the live suite (deterministic churn tables under a configurable prefix, a drop/cleanup make target), and the test module is triple-gated (MBT_LIVE_SHOWCASE=1 + MBT_LIVE_SNOWFLAKE=1 + complete SNOWFLAKE_* env) so it never enters the hermetic grand-suite guarantee.
 
 ## 12. Open questions
 
