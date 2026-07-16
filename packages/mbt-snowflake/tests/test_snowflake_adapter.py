@@ -461,6 +461,41 @@ def test_connect_passes_config_through_and_caches(monkeypatch: pytest.MonkeyPatc
     assert calls == [{"account": "acct", "user": "u", "role": "R", "login_timeout": 5}]
 
 
+def test_connect_externalbrowser_defaults_sso_token_caching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each job subprocess opens its own connection, so externalbrowser
+    without cached tokens would prompt once PER NODE - the adapter defaults
+    the cache on (an explicit connect_args value still wins)."""
+    import snowflake.connector
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_connect(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(snowflake.connector, "connect", fake_connect)
+
+    SnowflakeDataAdapter(
+        {"account": "acct", "user": "u", "authenticator": "EXTERNALBROWSER"}
+    )._connect()
+    assert calls[-1]["client_store_temporary_credential"] is True
+
+    SnowflakeDataAdapter(
+        {
+            "account": "acct",
+            "user": "u",
+            "authenticator": "externalbrowser",
+            "connect_args": {"client_store_temporary_credential": False},
+        }
+    )._connect()
+    assert calls[-1]["client_store_temporary_credential"] is False
+
+    SnowflakeDataAdapter({"account": "acct", "user": "u", "password": "pw"})._connect()
+    assert "client_store_temporary_credential" not in calls[-1]
+
+
 def test_connect_failure_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
     import snowflake.connector
 

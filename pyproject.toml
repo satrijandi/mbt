@@ -39,7 +39,9 @@ dev = [
     "mbt-testing",
     "mbt-xgboost",
     "mbt-mlflow",
-    "mbt-snowflake",
+    # [sso]: keyring-backed SSO token caching, so the live_snowflake suite's
+    # externalbrowser runs need exactly one browser prompt per session.
+    "mbt-snowflake[sso]",
     "mbt-h2o",
     "mbt-spark",
     "mbt-optuna",

@@ -91,6 +91,16 @@ class SnowflakeDataAdapter:
             key: self.config[key] for key in _CONNECT_KEYS if self.config.get(key)
         }
         kwargs.update(self.config.get("connect_args", {}))
+        # SSO must survive mbt's execution model: every job subprocess opens
+        # its own connection, so without cached tokens `externalbrowser`
+        # would pop one browser window PER NODE. Cache by default (an
+        # explicit connect_args value still wins); persisting the cache
+        # needs keyring - install `mbt-snowflake[sso]`.
+        if (
+            str(kwargs.get("authenticator", "")).lower() == "externalbrowser"
+            and "client_store_temporary_credential" not in kwargs
+        ):
+            kwargs["client_store_temporary_credential"] = True
         if "account" not in kwargs:
             raise SnowflakeAdapterError(
                 "snowflake adapter config needs at least 'account' and 'user'",

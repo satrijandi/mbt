@@ -87,11 +87,24 @@ config:
   warehouse: ML_WH
   database: ANALYTICS
   schema: GOLD
-  connect_args:
-    # cache the SSO token: compile and each dataset job open their own
-    # connection, and without this every one prompts the browser again
-    client_store_temporary_credential: true
 ```
+
+With `authenticator: externalbrowser` the adapter defaults
+`client_store_temporary_credential` to `true`: compile and each dataset job
+open their own connection, and without the cached SSO token every one of
+them would prompt the browser again.
+Set it explicitly under `connect_args` to override (e.g. `false` on a shared
+machine).
+
+Persisting that token cache requires the connector's keyring backend - install the extra:
+
+```bash
+pip install 'mbt-snowflake[sso]'    # = snowflake-connector-python[secure-local-storage]
+```
+
+Without it the connector silently skips caching and `externalbrowser` re-prompts per connection.
+Verified against `snowflake-connector-python` 4.7.1 (current stable; the `>=3.7` floor still holds - both the caching parameter and the `secure-local-storage` extra predate it).
+In containers/WSL, where the localhost callback of `externalbrowser` can hang, the connector offers `SNOWFLAKE_AUTH_SOCKET_REUSE_PORT=true` with a fixed `SF_AUTH_SOCKET_PORT` (see its docs).
 
 Key-pair for CI and service users (new Snowflake accounts enforce MFA on password logins, so automation should use key-pair):
 

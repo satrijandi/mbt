@@ -90,8 +90,9 @@ def _adapter_config() -> dict[str, Any]:
         if os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE_PWD"):
             connect_args["private_key_file_pwd"] = os.environ["SNOWFLAKE_PRIVATE_KEY_FILE_PWD"]
     if config.get("authenticator") == "externalbrowser":
-        # cache the SSO token: one browser prompt for the whole session,
-        # not one per connection (compile + each dataset job connect)
+        # The adapter defaults this on, but the suite's own seeding
+        # connection calls snowflake.connector.connect directly - inject it
+        # there too so ONE browser prompt covers the whole session.
         connect_args["client_store_temporary_credential"] = True
     if connect_args:
         config["connect_args"] = connect_args
@@ -422,8 +423,9 @@ def _write_project(live: LiveWarehouse, project: Path) -> Path:
         connect_args.append(
             "            private_key_file: \"{{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE') }}\""
         )
-    if os.environ.get("SNOWFLAKE_AUTHENTICATOR") == "externalbrowser":
-        connect_args.append("            client_store_temporary_credential: true")
+    # No client_store_temporary_credential here on purpose: with
+    # authenticator externalbrowser the ADAPTER defaults it on, and this
+    # generated profile is where the live suite proves that default.
     if connect_args:
         config_lines.append("          connect_args:")
         config_lines.extend(connect_args)
