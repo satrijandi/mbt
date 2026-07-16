@@ -42,7 +42,16 @@ def test_metrics_flow_and_alert_rules_loaded(showcase_stack) -> None:
     # A scored run pushed through the exporter shows up in Prometheus with
     # the documented names and group labels.
     stack.sync_lake()
-    stack.mbt("score", "--target", "prod_score", "--anchor", ANCHOR, "--deep-snapshot")
+    stack.mbt(
+        "score",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        ANCHOR,
+        "--deep-snapshot",
+    )
     push = stack.exec("python", "/workspace/project/scripts/push_metrics.py", "/workspace/project")
     assert "pushed" in push.stdout, push.stdout
 
@@ -68,7 +77,15 @@ def test_injected_shift_breaches_and_alert_fires(showcase_stack) -> None:
     # Poison the scoring batch, score again: mbt itself enforces (exit 2)...
     stack.exec("python", "/workspace/bootstrap/inject_drift.py")
     stack.mbt(
-        "score", "--target", "prod_score", "--anchor", ANCHOR, "--deep-snapshot", expect_exit=2
+        "score",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        ANCHOR,
+        "--deep-snapshot",
+        expect_exit=2,
     )
     scoring = stack.result_for("scoring.churn_lake.retention_scoring")
     assert scoring["status"] == "monitor_failed", scoring

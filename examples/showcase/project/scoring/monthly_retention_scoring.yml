@@ -1,0 +1,46 @@
+scoring:
+  - name: monthly_retention_scoring
+    description: Month-start churn scores for the retention campaign's monthly review.
+    owner: lifecycle-eng@example.com
+    tags: [monthly]
+
+    model: ref('churn_monthly_xgb')
+    stage: production              # champion resolved from the registry at run time (ADR-20)
+
+    input:
+      source: source('lake', 'monthly_scoring_batch')
+      # Same population the model trained on (see monthly_churn_training).
+      filters:
+        - "is_active = true"
+        - "tenure_days >= 30"
+      time_column: snapshot_date
+      window: "-31d:now"           # exactly the newest month-start batch
+
+    checks:
+      - not_null:
+          columns: [user_id, snapshot_date]
+
+    monitors:
+      feature_shift:
+        threshold: 0.25
+      prediction_shift:
+        threshold: 0.25
+
+    # Maturity counts from scored_at (the scoring run's anchor, 2026-06-30).
+    # The batch's 30-day outcomes are fully realized one day later (month
+    # -start snapshot + 30d = 2026-07-01), so 14d models label-arrival lag
+    # and matures inside the pinned monitor anchor (2026-07-14 <= 2026-07-20).
+    ground_truth:
+      label:
+        source: source('lake', 'monthly_churn_outcomes')
+        column: churned_30d
+      join_key: user_id
+      maturity: "14d"
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('monthly_pr_auc_floor') }}"
+
+    output:
+      path: predictions/monthly_retention_scores
+      columns: [user_id, snapshot_date]

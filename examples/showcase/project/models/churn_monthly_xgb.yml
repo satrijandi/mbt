@@ -1,0 +1,33 @@
+models:
+  - name: churn_monthly_xgb
+    description: "Monthly batch churn model on the DuckDB plane over the S3 parquet lake"
+    task: binary_classification
+    adapter: xgboost
+    owner: growth-ds@example.com
+    tags: [churn, monthly]
+
+    dataset: ref('monthly_churn_training')
+
+    target: churned_30d
+    features:
+      include: ["*"]
+      exclude: [user_id]
+
+    hyperparameters:
+      max_depth: 4
+      learning_rate: 0.1
+      n_estimators: 120
+      scale_pos_weight: "{{ auto }}"
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc, logloss]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('monthly_pr_auc_floor') }}"
+
+    registration:
+      name: churn_monthly_xgb
+      stage_on_pass: staging
+
+    seed: 42

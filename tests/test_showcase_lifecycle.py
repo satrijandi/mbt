@@ -145,7 +145,16 @@ def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
     stack = showcase_stack
     stack.sync_lake()
 
-    stack.mbt("score", "--target", "prod_score", "--anchor", ANCHOR, "--deep-snapshot")
+    stack.mbt(
+        "score",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        ANCHOR,
+        "--deep-snapshot",
+    )
     scoring = stack.result_for(SCORING)
     assert scoring["status"] == "success", scoring
     runs_after_first = _predictions_runs(stack)
@@ -163,12 +172,28 @@ def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
 
     # Same anchor again: the run_key is anchor-independent by construction
     # (input hash + windows + champion version), so this OVERWRITES.
-    stack.mbt("score", "--target", "prod_score", "--anchor", ANCHOR, "--deep-snapshot")
+    stack.mbt(
+        "score",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        ANCHOR,
+        "--deep-snapshot",
+    )
     assert _predictions_runs(stack) == runs_after_first
 
     # A different anchor resolves different windows: new partition.
     stack.mbt(
-        "score", "--target", "prod_score", "--anchor", "2026-07-01T00:00:00Z", "--deep-snapshot"
+        "score",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        "2026-07-01T00:00:00Z",
+        "--deep-snapshot",
     )
     runs_after_third = _predictions_runs(stack)
     assert len(runs_after_third) == 2, runs_after_third
@@ -184,7 +209,14 @@ def test_ground_truth_monitoring_exactly_once_and_exit_2(showcase_stack) -> None
     stack = showcase_stack
 
     first = stack.mbt(
-        "monitor", "--target", "prod_score", "--anchor", MONITOR_ANCHOR, "--deep-snapshot"
+        "monitor",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        MONITOR_ANCHOR,
+        "--deep-snapshot",
     )
     scoring = stack.result_for(SCORING)
     assert scoring["status"] == "success", scoring
@@ -193,7 +225,14 @@ def test_ground_truth_monitoring_exactly_once_and_exit_2(showcase_stack) -> None
 
     # Exactly-once: the same anchor finds nothing left to evaluate.
     second = stack.mbt(
-        "monitor", "--target", "prod_score", "--anchor", MONITOR_ANCHOR, "--deep-snapshot"
+        "monitor",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        MONITOR_ANCHOR,
+        "--deep-snapshot",
     )
     assert "0 matured prediction runs" in (second.stdout + second.stderr), (
         second.stdout + second.stderr
@@ -202,12 +241,21 @@ def test_ground_truth_monitoring_exactly_once_and_exit_2(showcase_stack) -> None
     # A fresh prediction run + an impossible realized-metric floor: the gate
     # verdict is deterministic quality failure (exit 2), never a hard error.
     stack.mbt(
-        "score", "--target", "prod_score", "--anchor", "2026-07-02T00:00:00Z", "--deep-snapshot"
+        "score",
+        "--target",
+        "prod_score",
+        "--select",
+        "tag:daily",
+        "--anchor",
+        "2026-07-02T00:00:00Z",
+        "--deep-snapshot",
     )
     breached = stack.mbt(
         "monitor",
         "--target",
         "prod_score",
+        "--select",
+        "tag:daily",
         "--anchor",
         MONITOR_ANCHOR,
         "--deep-snapshot",

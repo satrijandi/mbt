@@ -33,7 +33,8 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 `make up` prints the UI URLs (JupyterLab, MLflow, Spark, Grafana, Prometheus, Gitea, Woodpecker, Zot, Airflow).
 `make ci` seeds the CI loop headlessly; then clone the printed repo URL and open a PR - Woodpecker runs the state-diff check and posts the mbt build report comment, and merges to main bake the deployable unit, pin its digest in the deploy repo, and feed the Airflow DAGs via git-sync.
 `make inject-drift` poisons the scoring batch: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert, and `make score` recovers.
-`make score` and `make monitor` also work standalone: they rerun just the scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
+`make score` and `make monitor` also work standalone: they rerun just the daily scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
+`make monthly` runs the second, cluster-free cadence: the `tag:monthly` churn pipeline trains, promotes, and scores entirely on the DuckDB batch plane over the synced S3 parquet lake.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
 The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); every phase in its plan is implemented, with the k3d/ArgoCD fidelity profile local-only behind its own gate.
 
@@ -48,6 +49,7 @@ The demo narrative exercises mbt's differentiators against real service boundari
 - Manifest-verified reproducible execution (ADR-19): the deployable unit baked into Zot reproduces its own manifest (`mbt run --manifest`; xgboost bit-exact, H2O within its documented 0.02 tier), refuses a tampered environment with exit 1, and its oras provenance artifact is byte-identical to the published `mbt-state` baseline - and secret-free.
 - CD that promotion never touches: two scheduled score runs straddling a promotion serve different champions while the deploy repo HEAD and the pinned image digest stay byte-identical.
 - Run-time champion resolution (ADR-20): a promotion changes the next scoring run with zero redeploy.
+- Adapter portability on one lake: the monthly cadence trains, scores, and ground-truth-monitors the same project's `tag:monthly` pipeline on the DuckDB local adapter - no cluster - while the daily/weekly cadences use Spark, from the same `sources.yml`.
 - Prediction-store idempotency (ADR-21): same-anchor re-runs overwrite one `run_key`, new anchors partition.
 - Ground-truth monitoring: realized metrics are evaluated exactly once per prediction run, and a realized-gate breach exits 2, never 1.
 - Observability: `run_results.json` becomes Pushgateway gauges, and injected shift makes the provisioned Prometheus rule actually fire.

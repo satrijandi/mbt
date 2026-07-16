@@ -22,7 +22,7 @@ WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 
-.PHONY: image workspace up seed down clean urls demo score monitor ci
+.PHONY: image workspace up seed down clean urls demo score monthly monitor ci
 
 image:
 	$(SHOWCASE_DIR)/scripts/build_image.sh
@@ -31,6 +31,7 @@ workspace:
 	mkdir -p $(SHOWCASE_WORKSPACE)/tmp
 	rsync -a --delete $(SHOWCASE_DIR)/project/ $(SHOWCASE_WORKSPACE)/project/
 	rsync -a --delete $(REPO_ROOT)/examples/churn_demo/data/ $(SHOWCASE_WORKSPACE)/seed/
+	rsync -a $(SHOWCASE_DIR)/data/ $(SHOWCASE_WORKSPACE)/seed/
 	rsync -a $(SHOWCASE_DIR)/bootstrap/ $(SHOWCASE_WORKSPACE)/bootstrap/
 
 up: image workspace
@@ -92,8 +93,9 @@ demo:
 	$(EXEC) mbt build --target dev --anchor $(ANCHOR)
 	@echo "==> [2/6] Cluster training: mbt build --target prod (sparkling H2O inside Spark executors)"
 	$(EXEC) mbt build --target prod --anchor $(ANCHOR)
-	@echo "==> [3/6] Gate-verified promotion of the freshest staging champion to production"
+	@echo "==> [3/6] Gate-verified promotion of the freshest staging champions to production"
 	$(EXEC) bash -c 'mbt promote --model churn_automl --to production'
+	$(EXEC) bash -c 'mbt promote --model churn_monthly_xgb --to production'
 	@echo "==> [4/6] Sync the lake to the scoring plane"
 	$(EXEC) python /workspace/bootstrap/sync_lake.py
 	@echo "==> [5/6] Batch scoring with the production champion (run-time resolution)"
@@ -108,7 +110,17 @@ demo:
 
 score:
 	$(EXEC) python /workspace/bootstrap/sync_lake.py
-	$(EXEC) mbt score --target prod_score --anchor $(ANCHOR) --deep-snapshot
+	$(EXEC) mbt score --target prod_score --select tag:daily --anchor $(ANCHOR) --deep-snapshot
+	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
+
+# The monthly cadence (SHOW-17), entirely on the DuckDB batch plane: retrain
+# from the synced lake, gate-verified promote, score the month-start batch.
+# `make monitor` evaluates its 30-day labels once they mature.
+monthly:
+	$(EXEC) python /workspace/bootstrap/sync_lake.py
+	$(EXEC) mbt build --target prod_score --select tag:monthly --anchor $(ANCHOR) --deep-snapshot
+	$(EXEC) bash -c 'mbt promote --model churn_monthly_xgb --to production'
+	$(EXEC) mbt score --target prod_score --select tag:monthly --anchor $(ANCHOR) --deep-snapshot
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
 
 monitor:
@@ -119,6 +131,6 @@ monitor:
 # shift the scoring batch, score (exit 2 tolerated), push, check Grafana.
 inject-drift:
 	$(EXEC) python /workspace/bootstrap/inject_drift.py
-	-$(EXEC) mbt score --target prod_score --anchor $(ANCHOR) --deep-snapshot
+	-$(EXEC) mbt score --target prod_score --select tag:daily --anchor $(ANCHOR) --deep-snapshot
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
 	@echo "shift injected: watch MbtShiftBreach fire in Prometheus/Grafana; make score to recover"

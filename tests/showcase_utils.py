@@ -157,6 +157,9 @@ class ComposeStack:
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(src, dest)
+        # The monthly tables live beside the showcase (SHOW-17); merge them
+        # into the same seed dir the churn_demo tables come from.
+        shutil.copytree(SHOWCASE_DIR / "data", self.workspace / "seed", dirs_exist_ok=True)
 
     # -- in-container execution ----------------------------------------------
     def exec(

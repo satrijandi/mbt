@@ -2,6 +2,7 @@
 
 A laptop-runnable reference environment that demonstrates mbt end to end on real services instead of local stand-ins:
 SeaweedFS is the S3 data lake (gold-layer feature tables) and artifact store, MLflow (over HTTP) is the tracking server and model registry, a standalone Spark cluster does dataset pushdown and in-executor H2O (sparkling) AutoML training, JupyterLab is the DS workbench, Gitea + Woodpecker run the state-diff CI loop with PR comments and gate-classified alerts, Zot holds the digest-pinned deployable unit and its oras provenance artifacts, Airflow (fed by git-sync from the Gitea `deploy` repo) schedules retrain/score/monitor runs of that unit, and Prometheus + Grafana observe production scoring through the Pushgateway spec documented in the tutorial.
+A second, cluster-free cadence rides the same lake: the `tag:monthly` churn pipeline trains, scores, and monitors entirely on the DuckDB batch plane (`prod_score`) over the synced S3 parquet (SHOW-17).
 
 The design of record is [DESIGN.md](DESIGN.md).
 All phases are implemented: P1 (runner image + data/ML core), P2 (CI loop), P3 (deployable unit + provenance), P4 (scheduling + CD + the scoring/promotion/monitoring plane), P5 (observability), and P6 (k3d + ArgoCD - local-only, behind its own `MBT_LIVE_SHOWCASE_K3D=1` gate).
@@ -31,7 +32,8 @@ After `make demo`, look at:
 - **Predictions** on disk: `~/.cache/mbt-showcase/workspace/lake_local/predictions/retention_scores/<run_key>/`.
 - `make inject-drift` then Grafana/Prometheus: the scoring batch is poisoned, `mbt score` exits 2 (mbt enforces), and the pushed breach fires the `MbtShiftBreach` alert (observability observes). `make score` recovers.
 
-`make score` and `make monitor` also work standalone: they rerun just the scoring stage (lake sync, `mbt score`, metric push) or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
+`make score` and `make monitor` also work standalone: they rerun just the daily scoring stage (lake sync, `mbt score --select tag:daily`, metric push) or just the ground-truth monitoring stage (all matured cadences), with the same pinned anchors as the demo.
+`make monthly` runs the monthly cadence end to end on the DuckDB plane: lake sync, `tag:monthly` retrain, gate-verified promote, and month-start batch scoring - no cluster involved.
 
 ## The CI loop (make ci)
 
@@ -55,6 +57,7 @@ Modules (repo-root `tests/`), which boot their own isolated compose project on e
 - `test_showcase_scheduling.py` - Airflow runs the pinned unit: the retrain DAG builds on the prod target (cluster pushdown from a scheduled container), two score DAG runs straddling a promotion serve different champions while the deploy repo HEAD and digest stay byte-identical (the ADR-20 inversion), and monitor exit codes route correctly (a realized-gate breach fails on try 1 with no retry; a hard error consumes a retry).
 - `test_showcase_k3d.py` (extra gate: `MBT_LIVE_SHOWCASE_K3D=1`, local-only) - ArgoCD core in a k3d cluster on the compose network syncs the deploy repo's `k8s/`: the CronJob lands pinned to the baked digest, an insecure-HTTP pull from zot runs the unit, a digest bump rolls the spec, and selfHeal recreates a deleted CronJob.
 - `test_showcase_lifecycle.py` - the narrative: dev build from the s3a lake registering to HTTP MLflow with S3 artifacts (integration items A2 + A3, live), sparkling training on the actual cluster, gate-verified GitOps promotion with pinned-replay idempotency and the unpinned-replay refusal, run-time champion resolution, prediction-store idempotency (same anchor overwrites, new anchor partitions), and ground-truth monitoring (evaluated exactly once; a realized-gate breach exits 2, never 1).
+- `test_showcase_monthly.py` - the monthly cadence (SHOW-17): `tag:monthly` trains on the prod_score plane (DuckDB over the synced lake, no cluster), gate-verified promote, the month-start batch scores with the run-time champion under both shift monitors, and its 30-day labels mature at the pinned monitor anchor and evaluate exactly once.
 - `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules, and `MbtShiftBreach` actually firing on injected shift.
 
 ## Deviations from the scaffold defaults (documented, deliberate)

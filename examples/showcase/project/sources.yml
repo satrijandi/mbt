@@ -16,3 +16,12 @@ sources:
       - name: churn_outcomes
         path: churn_outcomes/*.parquet
         description: Realized churn outcomes, arriving ~90 days after scoring.
+      - name: monthly_subscribers
+        path: monthly_subscribers/*.parquet
+        description: One row per subscriber per month-start snapshot, labeled with 30-day churn.
+      - name: monthly_scoring_batch
+        path: monthly_scoring_batch/*.parquet
+        description: Fresh unlabeled subscribers at the newest month start.
+      - name: monthly_churn_outcomes
+        path: monthly_churn_outcomes/*.parquet
+        description: Realized 30-day churn outcomes for the monthly batch, arriving ~30 days later.

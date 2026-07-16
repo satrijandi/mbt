@@ -19,6 +19,9 @@
 #   prod_score - batch scoring/monitoring plane: LOCAL data adapter over the
 #                synced lake copy (mbt-spark has no contract-1.1 scoring
 #                methods); champion MOJOs load in a local JVM by design.
+#                Also the monthly cadence's whole plane (SHOW-17): the
+#                tag:monthly pipeline trains here too - a monthly xgboost
+#                needs no cluster, DuckDB over the synced parquet suffices.
 #
 # dev and ci MUST keep identical vars: var lookups resolve into node config
 # hashes at compile time, so a var that differed between the PR side (ci)
