@@ -26,12 +26,14 @@ cd examples/showcase
 make up        # build the runner image (first time ~10 min), boot, seed the lake
 make demo      # the whole lifecycle, narrated: build dev -> build prod -> promote -> score -> monitor
 make ci        # seed Gitea + Woodpecker: org, churn repo, OAuth app, repo activation
-make down      # stop and remove everything (volumes included)
+make down      # stop and remove containers, volumes, and the network (the workspace survives)
+make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/workspace)
 ```
 
 `make up` prints the UI URLs (JupyterLab, MLflow, Spark, Grafana, Prometheus, Gitea, Woodpecker, Zot, Airflow).
 `make ci` seeds the CI loop headlessly; then clone the printed repo URL and open a PR - Woodpecker runs the state-diff check and posts the mbt build report comment, and merges to main bake the deployable unit, pin its digest in the deploy repo, and feed the Airflow DAGs via git-sync.
 `make inject-drift` poisons the scoring batch: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert, and `make score` recovers.
+`make score` and `make monitor` also work standalone: they rerun just the scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
 The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); every phase in its plan is implemented, with the k3d/ArgoCD fidelity profile local-only behind its own gate.
 

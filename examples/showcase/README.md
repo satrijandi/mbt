@@ -17,7 +17,8 @@ cd examples/showcase
 make up        # build the runner image (first time ~10 min), boot, seed the lake
 make demo      # the whole lifecycle, narrated (build dev -> build prod -> promote -> score -> monitor)
 make ci        # seed Gitea + Woodpecker + the deploy repo: org, repos, OAuth app, activation
-make down      # stop and remove everything (volumes included)
+make down      # stop and remove containers, volumes, and the network (the workspace survives)
+make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/workspace)
 ```
 
 After `make ci`, pushing to main runs prod-build end to end: economy build, `mbt-state` baseline publish, deployable-unit bake to Zot (digest-pinned in the deploy repo), and oras provenance push; git-sync feeds the deploy repo's DAGs into Airflow, where `mbt_retrain`/`mbt_score`/`mbt_monitor` run the pinned unit on demand.
@@ -29,6 +30,8 @@ After `make demo`, look at:
 - **Grafana** (`admin`/`admin`): the "mbt Model Health" dashboard - gate margins, realized metrics, shift-vs-threshold.
 - **Predictions** on disk: `~/.cache/mbt-showcase/workspace/lake_local/predictions/retention_scores/<run_key>/`.
 - `make inject-drift` then Grafana/Prometheus: the scoring batch is poisoned, `mbt score` exits 2 (mbt enforces), and the pushed breach fires the `MbtShiftBreach` alert (observability observes). `make score` recovers.
+
+`make score` and `make monitor` also work standalone: they rerun just the scoring stage (lake sync, `mbt score`, metric push) or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
 
 ## The CI loop (make ci)
 
