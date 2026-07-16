@@ -11,6 +11,12 @@
 #      which H2O requires to match exactly).
 #   3. docker build
 #
+# Staleness: the build is skipped only when the existing image's content
+# label matches a hash of everything that shapes it (package sources and
+# pyprojects, uv.lock, the runner Dockerfile/entrypoint, this script). A
+# bare tag-existence check let week-old wheels pass as "the current build"
+# and every in-container mbt assertion silently tested old code.
+#
 # Usage: build_image.sh [--force]
 set -euo pipefail
 
@@ -18,6 +24,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RUNNER_DIR="$REPO_ROOT/examples/showcase/images/runner"
 CACHE_DIR="${MBT_SHOWCASE_CACHE:-$HOME/.cache/mbt-showcase}/build"
 IMAGE_TAG="${MBT_SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}"
+CONTENT_LABEL="mbt.showcase.content"
 
 # Pins for the sparkling fork. h2o-pysparkling-3-5 3.46.0.6.post1 embeds the
 # H2O 3.46.0.6 backend; the h2o python client version must match it exactly.
@@ -25,8 +32,40 @@ PYSPARK_PIN="pyspark==3.5.8"
 H2O_PIN="h2o==3.46.0.6"
 PYSPARKLING_PIN="h2o-pysparkling-3-5==3.46.0.6.post1"
 
-if [ "${1:-}" != "--force" ] && docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
-    echo "image $IMAGE_TAG already exists (use --force to rebuild)"
+# Hash of everything that shapes the image. Package tests/READMEs stay out
+# on purpose: they never reach the installed wheels, and hashing them would
+# force pointless ~10-minute rebuilds.
+CONTENT_HASH="$(python3 - "$REPO_ROOT" <<'EOF'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+paths = [root / "uv.lock"]
+paths += sorted((root / "packages").glob("*/pyproject.toml"))
+for src in sorted((root / "packages").glob("*/src")):
+    paths += sorted(
+        p for p in src.rglob("*") if p.is_file() and "__pycache__" not in p.parts
+    )
+runner = root / "examples" / "showcase" / "images" / "runner"
+paths += [
+    runner / "Dockerfile",
+    runner / "entrypoint.sh",
+    root / "examples" / "showcase" / "scripts" / "build_image.sh",
+]
+digest = hashlib.sha256()
+for path in paths:
+    digest.update(str(path.relative_to(root)).encode())
+    digest.update(path.read_bytes())
+print(digest.hexdigest()[:16])
+EOF
+)"
+
+existing_hash="$(docker image inspect --format '{{json .Config.Labels}}' "$IMAGE_TAG" 2>/dev/null \
+    | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('$CONTENT_LABEL',''))" 2>/dev/null \
+    || true)"
+if [ "${1:-}" != "--force" ] && [ -n "$existing_hash" ] && [ "$existing_hash" = "$CONTENT_HASH" ]; then
+    echo "image $IMAGE_TAG up to date (content $CONTENT_HASH; use --force to rebuild anyway)"
     exit 0
 fi
 
@@ -51,6 +90,6 @@ grep -vE '^(pyspark|h2o|h2o-pysparkling-3-5)==' "$CACHE_DIR/constraints-full.txt
 
 cp "$RUNNER_DIR/Dockerfile" "$RUNNER_DIR/entrypoint.sh" "$CACHE_DIR/"
 
-echo "==> docker build $IMAGE_TAG"
-docker build -t "$IMAGE_TAG" "$CACHE_DIR"
+echo "==> docker build $IMAGE_TAG (content $CONTENT_HASH)"
+docker build -t "$IMAGE_TAG" --label "$CONTENT_LABEL=$CONTENT_HASH" "$CACHE_DIR"
 echo "==> built $IMAGE_TAG"

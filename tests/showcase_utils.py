@@ -414,9 +414,51 @@ class CiHarness:
             if done:
                 pipeline = sorted(done, key=lambda p: p["number"])[0]
                 self.seen_pipelines.add(pipeline["number"])
+                if pipeline["status"] != "success":
+                    # Non-success is a legitimate verdict for some tests, but
+                    # when it is NOT the expected one the step logs are the
+                    # only evidence (the stack tears down before a human can
+                    # look) - same rationale as _dump_failed_task_logs.
+                    self._dump_pipeline_logs(pipeline["number"])
                 return pipeline
             time.sleep(3)
+        # Timeout: whatever pipeline is stuck (or never turned terminal) is
+        # the only evidence there is - dump it before failing.
+        stuck = [
+            p
+            for p in (self.wp_api(f"/repos/{self.repo_id}/pipelines?perPage=50") or [])
+            if p["number"] not in self.seen_pipelines
+        ]
+        if stuck:
+            self._dump_pipeline_logs(max(p["number"] for p in stuck))
         pytest.fail(f"no new terminal {event} pipeline within {timeout_s}s")
+
+    def _dump_pipeline_logs(self, number: int) -> None:
+        # Best-effort: a broken log fetch must not mask the caller's verdict.
+        import base64
+
+        try:
+            detail = self.wp_api(f"/repos/{self.repo_id}/pipelines/{number}")
+        except Exception as exc:
+            print(f"(could not fetch pipeline {number} detail: {exc})")
+            return
+        for workflow in detail.get("workflows", []):
+            for step in workflow.get("children", []):
+                if step.get("state") == "success":
+                    continue
+                print(
+                    f"--- pipeline {number} workflow {workflow.get('name')!r} "
+                    f"step {step.get('name')!r} state={step.get('state')} ---"
+                )
+                try:
+                    entries = self.wp_api(f"/repos/{self.repo_id}/logs/{number}/{step['id']}")
+                    log = "".join(
+                        base64.b64decode(entry.get("data") or "").decode(errors="replace")
+                        for entry in entries or []
+                    )
+                    print(log[-4000:] if log else "(no log output)")
+                except Exception as exc:
+                    print(f"(could not fetch step logs: {exc})")
 
     def ensure_seeded(self, timeout_s: int = 1200) -> bool:
         """First-ever push to main: full bootstrap build (fetch_state exit 3),
