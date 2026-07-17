@@ -9,8 +9,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class XGBoostBinaryParams(BaseModel):
-    """Static hyperparameters for binary classification (extra='forbid')."""
+class _XGBoostCommonParams(BaseModel):
+    """Hyperparameters shared by every XGBoost task (extra='forbid')."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -23,16 +23,14 @@ class XGBoostBinaryParams(BaseModel):
     gamma: float = Field(default=0.0, ge=0)
     reg_alpha: float = Field(default=0.0, ge=0)
     reg_lambda: float = Field(default=1.0, ge=0)
-    scale_pos_weight: float | None = None  # '{{ auto }}' resolves from the profile
     tree_method: Literal["hist", "exact", "approx"] = "hist"
     device: Literal["cpu", "cuda"] = "cpu"
     early_stopping_rounds: int | None = Field(default=None, ge=1)
 
-    def booster_params(self, seed: int, positive_rate_default: float = 1.0) -> dict[str, object]:
-        """The xgb.train param dict (fixed nthread for determinism, TSD §13.1)."""
+    def _common_booster_params(self, seed: int) -> dict[str, object]:
+        """The task-independent part of the xgb.train param dict (fixed nthread
+        for determinism, TSD §13.1)."""
         return {
-            "objective": "binary:logistic",
-            "eval_metric": "logloss",
             "max_depth": self.max_depth,
             "eta": self.learning_rate,
             "min_child_weight": self.min_child_weight,
@@ -41,13 +39,37 @@ class XGBoostBinaryParams(BaseModel):
             "gamma": self.gamma,
             "alpha": self.reg_alpha,
             "lambda": self.reg_lambda,
+            "tree_method": self.tree_method,
+            "device": self.device,
+            "seed": seed,
+            "nthread": 1,
+        }
+
+
+class XGBoostBinaryParams(_XGBoostCommonParams):
+    """Static hyperparameters for binary classification."""
+
+    scale_pos_weight: float | None = None  # '{{ auto }}' resolves from the profile
+
+    def booster_params(self, seed: int, positive_rate_default: float = 1.0) -> dict[str, object]:
+        return {
+            "objective": "binary:logistic",
+            "eval_metric": "logloss",
+            **self._common_booster_params(seed),
             "scale_pos_weight": (
                 self.scale_pos_weight
                 if self.scale_pos_weight is not None
                 else positive_rate_default
             ),
-            "tree_method": self.tree_method,
-            "device": self.device,
-            "seed": seed,
-            "nthread": 1,
+        }
+
+
+class XGBoostRegressionParams(_XGBoostCommonParams):
+    """Static hyperparameters for regression (squared error, no class weight)."""
+
+    def booster_params(self, seed: int) -> dict[str, object]:
+        return {
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
+            **self._common_booster_params(seed),
         }

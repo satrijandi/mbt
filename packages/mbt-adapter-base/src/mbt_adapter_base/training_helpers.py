@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 
-def evaluate_binary_split(
+def evaluate_split(
     table: "pa.Table",
     target: str,
     y_score: Any,
@@ -33,7 +33,7 @@ def evaluate_binary_split(
     so metric semantics stay identical across adapters by construction."""
     import numpy as np
 
-    from mbt_adapter_base.metrics import compute_binary_results
+    from mbt_adapter_base.metrics import compute_results
 
     y_true = table.column(target).to_numpy(zero_copy_only=False).astype(np.float64)
     slice_columns = {
@@ -41,9 +41,7 @@ def evaluate_binary_split(
         for name in (slices or [])
         if name in table.column_names
     }
-    return compute_binary_results(
-        metrics, y_true, np.asarray(y_score, dtype=np.float64), slice_columns
-    )
+    return compute_results(metrics, y_true, np.asarray(y_score, dtype=np.float64), slice_columns)
 
 
 def positive_rate(profile: DatasetProfile) -> float | None:

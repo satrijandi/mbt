@@ -59,3 +59,22 @@ def test_unknown_metric_suggests_a_close_candidate() -> None:
     assert isinstance(outcome, str)
     assert "did you mean 'pr_auc'" in outcome
     assert "unknown metric" in outcome
+
+
+def test_regression_metric_direction_and_resolution() -> None:
+    from mbt.config.tasks import get_task_schema
+    from mbt.quality.metrics import default_direction
+
+    assert default_direction("rmse") is False
+    assert default_direction("mae") is False
+    assert default_direction("mape") is False
+    assert default_direction("r2") is True
+
+    reg = get_task_schema(TaskType.REGRESSION)
+    rmse = resolve_metric("rmse", {}, reg, has_hooks=False)
+    assert isinstance(rmse, MetricSpec) and rmse.greater_is_better is False
+    r2 = resolve_metric("r2", {}, reg, has_hooks=False)
+    assert isinstance(r2, MetricSpec) and r2.greater_is_better is True
+    # a binary metric is not a builtin for regression
+    bad = resolve_metric("roc_auc", {}, reg, has_hooks=False)
+    assert isinstance(bad, str) and "unknown metric" in bad

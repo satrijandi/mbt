@@ -7,6 +7,7 @@ import pytest
 import mbt.config.tasks as tasks_mod
 from mbt.config.tasks import (
     BinaryClassificationSchema,
+    RegressionSchema,
     get_task_schema,
     register_task_schema,
     supported_tasks,
@@ -21,12 +22,11 @@ def scratch_registry(monkeypatch) -> None:
     monkeypatch.setattr(tasks_mod, "_REGISTRY", dict(tasks_mod._REGISTRY))
 
 
-class _RegressionSchema:
-    task = TaskType.REGRESSION
-    allowed_metrics: ClassVar[set[str]] = set()
+class _StubTaskSchema:
+    """A stand-in for a task a plugin might register (survival is not builtin)."""
 
-    def is_allowed_metric(self, name: str) -> bool:
-        return False
+    task = TaskType.SURVIVAL
+    allowed_metrics: ClassVar[set[str]] = set()
 
     def validate_spec(self, spec):
         return []
@@ -37,8 +37,9 @@ class _RegressionSchema:
 
 def test_get_task_schema_builtin_and_unsupported() -> None:
     assert isinstance(get_task_schema(TaskType.BINARY_CLASSIFICATION), BinaryClassificationSchema)
-    with pytest.raises(ConfigError, match="'regression' has no registered task schema") as excinfo:
-        get_task_schema(TaskType.REGRESSION)
+    assert isinstance(get_task_schema(TaskType.REGRESSION), RegressionSchema)  # now a builtin
+    with pytest.raises(ConfigError, match="'survival' has no registered task schema") as excinfo:
+        get_task_schema(TaskType.SURVIVAL)
     assert "binary_classification" in (excinfo.value.hint or "")
 
 
@@ -49,10 +50,10 @@ def test_register_task_schema_rejects_duplicates(scratch_registry) -> None:
 
 
 def test_register_task_schema_new_and_override(scratch_registry) -> None:
-    schema = _RegressionSchema()
+    schema = _StubTaskSchema()
     register_task_schema(schema)
-    assert tasks_mod.get_task_schema(TaskType.REGRESSION) is schema
-    assert TaskType.REGRESSION in tasks_mod.supported_tasks()
+    assert tasks_mod.get_task_schema(TaskType.SURVIVAL) is schema
+    assert TaskType.SURVIVAL in tasks_mod.supported_tasks()
 
     replacement = BinaryClassificationSchema()
     register_task_schema(replacement, override=True)
@@ -130,3 +131,64 @@ def test_validate_dataset_branches() -> None:
     assert "extreme class imbalance" in imbalanced[0].message
 
     assert schema.validate_dataset(spec, make_profile({"1": 0.3, "0": 0.7})) == []
+
+
+# -- RegressionSchema -------------------------------------------------------------
+
+
+def make_regression_spec(slices: list[str] | None = None) -> ModelSpec:
+    return ModelSpec.model_validate(
+        {
+            "name": "m",
+            "task": "regression",
+            "adapter": "xgboost",
+            "owner": "ds@example.com",
+            "dataset": "ref('d')",
+            "target": "spend",
+            "evaluation": {
+                "protocol": {"split": "temporal"},
+                "metrics": ["rmse"],
+                "slices": slices or [],
+            },
+            "seed": 1,
+        }
+    )
+
+
+def make_regression_profile(label_dtype: str) -> DatasetProfile:
+    return DatasetProfile(
+        n_rows={"train": 100, "test": 20},
+        columns={"spend": label_dtype, "region": "string"},
+        label_column="spend",
+    )
+
+
+def test_regression_allowed_metrics() -> None:
+    schema = RegressionSchema()
+    assert {"rmse", "mae", "r2"} <= schema.allowed_metrics
+    assert "roc_auc" not in schema.allowed_metrics
+
+
+def test_regression_validate_spec_rejects_slicing_by_target() -> None:
+    schema = RegressionSchema()
+    issues = schema.validate_spec(make_regression_spec(slices=["spend"]))
+    assert len(issues) == 1 and "meaningless" in issues[0].message
+    assert schema.validate_spec(make_regression_spec(slices=["region"])) == []
+
+
+def test_regression_validate_dataset_requires_numeric_target() -> None:
+    schema = RegressionSchema()
+    spec = make_regression_spec()
+    assert schema.validate_dataset(spec, make_regression_profile("double")) == []
+    assert schema.validate_dataset(spec, make_regression_profile("int64")) == []
+
+    non_numeric = schema.validate_dataset(spec, make_regression_profile("string"))
+    assert len(non_numeric) == 1
+    assert "requires a numeric target" in non_numeric[0].message
+
+    # unknown label column -> empty dtype -> error names the column
+    missing = schema.validate_dataset(
+        spec,
+        DatasetProfile(n_rows={"train": 1}, columns={"region": "string"}, label_column="spend"),
+    )
+    assert len(missing) == 1 and "requires a numeric target" in missing[0].message

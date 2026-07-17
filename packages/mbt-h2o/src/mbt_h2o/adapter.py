@@ -258,13 +258,11 @@ class H2OAutoMLAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        from mbt_adapter_base.training_helpers import evaluate_binary_split
+        from mbt_adapter_base.training_helpers import evaluate_split
 
         target = str(model.target or getattr(data, "label_column", ""))
         table = data.read(split)
-        return evaluate_binary_split(
-            table, target, self._scores(model, data, split), metrics, slices
-        )
+        return evaluate_split(table, target, self._scores(model, data, split), metrics, slices)
 
     def feature_importance(self, model: H2OModel) -> dict[str, float]:
         """Leader varimp percentages as fractions (FR-DOCS-02).

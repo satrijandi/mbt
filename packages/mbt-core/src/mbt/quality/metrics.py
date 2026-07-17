@@ -9,8 +9,9 @@ from mbt.contracts import MetricSpec, ModelSpec, TaskSchema
 from mbt.utils import did_you_mean
 from mbt_adapter_base.metrics import parse_metric_sugar
 
-#: Builtin metrics where lower is better; everything else defaults to higher.
-LOWER_IS_BETTER = frozenset({"logloss", "ece", "brier"})
+#: Builtin metrics where lower is better; everything else defaults to higher
+#: (binary: logloss/ece/brier; regression: rmse/mae/mape - r2 is higher-better).
+LOWER_IS_BETTER = frozenset({"logloss", "ece", "brier", "rmse", "mae", "mape"})
 
 
 def default_direction(base_name: str) -> bool:

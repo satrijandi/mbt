@@ -5,7 +5,7 @@ import pytest
 
 from mbt_adapter_base.metrics import (
     compute_binary_metric,
-    compute_binary_results,
+    compute_results,
     is_builtin_binary_metric,
 )
 from mbt_adapter_base.specs import MetricSpec
@@ -60,6 +60,6 @@ def test_single_class_slice_is_skipped() -> None:
     y_true = np.array([0, 1, 0, 1, 1, 1])
     y_score = np.array([0.2, 0.8, 0.3, 0.7, 0.9, 0.6])
     slices = {"plan": np.array(["basic", "basic", "basic", "basic", "premium", "premium"])}
-    results = compute_binary_results([MetricSpec(name="roc_auc")], y_true, y_score, slices)
+    results = compute_results([MetricSpec(name="roc_auc")], y_true, y_score, slices)
     assert "plan=basic" in results.slices
     assert "plan=premium" not in results.slices  # single-class: metrics undefined

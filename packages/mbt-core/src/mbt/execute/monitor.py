@@ -316,7 +316,7 @@ def _evaluate_run(
         )
 
     try:
-        from mbt_adapter_base.metrics import compute_binary_results
+        from mbt_adapter_base.metrics import compute_results
     except ImportError as exc:  # pragma: no cover - env-specific
         raise ConfigError(
             f"ground-truth evaluation needs the metric engine: {exc}",
@@ -339,7 +339,7 @@ def _evaluate_run(
         )
         return None
 
-    metrics = dict(compute_binary_results(metric_specs, y_true, y_score).metrics)
+    metrics = dict(compute_results(metric_specs, y_true, y_score).metrics)
     gate_results = evaluate_ground_truth_gates(
         spec.ground_truth.gates, metrics, metric_specs, run_key=run.run_key
     )

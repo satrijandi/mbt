@@ -35,7 +35,7 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
-from mbt_xgboost.params import XGBoostBinaryParams
+from mbt_xgboost.params import XGBoostBinaryParams, XGBoostRegressionParams
 
 if TYPE_CHECKING:
     import numpy as np
@@ -60,12 +60,15 @@ class XGBoostModel:
 
 
 class XGBoostTrainingAdapter:
-    """TrainingAdapter for binary classification over Arrow tables."""
+    """TrainingAdapter for binary classification and regression over Arrow tables."""
 
     name = "xgboost"
     contract_version = CONTRACT_VERSION
     data_access = "arrow"
-    supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
+    supported_tasks: ClassVar[set[TaskType]] = {
+        TaskType.BINARY_CLASSIFICATION,
+        TaskType.REGRESSION,
+    }
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -74,6 +77,8 @@ class XGBoostTrainingAdapter:
     # -- validation ---------------------------------------------------------
 
     def param_model(self, task: TaskType) -> type[BaseModel]:
+        if task == TaskType.REGRESSION:
+            return XGBoostRegressionParams
         return XGBoostBinaryParams
 
     def validate(self, spec: ModelSpec) -> list[ValidationIssue]:
@@ -121,9 +126,12 @@ class XGBoostTrainingAdapter:
 
     # -- data plumbing -----------------------------------------------------------
 
-    def _params(self, spec: ModelSpec) -> XGBoostBinaryParams:
+    def _params(self, spec: ModelSpec) -> XGBoostBinaryParams | XGBoostRegressionParams:
+        model_cls = (
+            XGBoostRegressionParams if spec.task == TaskType.REGRESSION else XGBoostBinaryParams
+        )
         try:
-            return XGBoostBinaryParams.model_validate(spec.hyperparameters)
+            return model_cls.model_validate(spec.hyperparameters)
         except ValidationError as exc:
             raise ValueError(f"invalid xgboost hyperparameters: {exc}") from exc
 
@@ -200,8 +208,11 @@ class XGBoostTrainingAdapter:
 
         callbacks: list[Any] = []
         if report is not None and evals:
-            # Ensure an AUC series exists on the validation set: the report
-            # contract is a higher-is-better value.
+            # The report contract is a higher-is-better value per round. Binary
+            # reports validation AUC directly; regression reports -RMSE (RMSE is
+            # lower-better), so pruning maximizes the same way for both.
+            is_regression = spec.task == TaskType.REGRESSION
+            report_metric = "rmse" if is_regression else "auc"
             existing = booster_params.get("eval_metric")
             if isinstance(existing, str):
                 metrics = [existing]
@@ -209,15 +220,16 @@ class XGBoostTrainingAdapter:
                 metrics = [str(m) for m in existing]
             else:
                 metrics = []
-            if "auc" not in metrics:
-                metrics.append("auc")
+            if report_metric not in metrics:
+                metrics.append(report_metric)
             booster_params["eval_metric"] = metrics
 
             class _ReportProgress(xgb.callback.TrainingCallback):
                 def after_iteration(self, model: Any, epoch: int, evals_log: Any) -> bool:
-                    series = (evals_log or {}).get("validation", {}).get("auc")
+                    series = (evals_log or {}).get("validation", {}).get(report_metric)
                     if series:
-                        report(epoch, float(series[-1]))
+                        value = float(series[-1])
+                        report(epoch, -value if is_regression else value)
                     return False
 
             callbacks.append(_ReportProgress())
@@ -260,12 +272,10 @@ class XGBoostTrainingAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        from mbt_adapter_base.training_helpers import evaluate_binary_split
+        from mbt_adapter_base.training_helpers import evaluate_split
 
         table = data.read(split)
-        return evaluate_binary_split(
-            table, model.target, self._scores(model, table), metrics, slices
-        )
+        return evaluate_split(table, model.target, self._scores(model, table), metrics, slices)
 
     def predict(self, model: XGBoostModel, data: DatasetHandle, split: str) -> pa.Table:
         table = data.read(split)

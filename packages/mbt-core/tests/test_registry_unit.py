@@ -17,9 +17,11 @@ class _NullTraining:
         self.config = config or {}
 
 
-class _RegressionSchema:
-    task = TaskType.REGRESSION
-    allowed_metrics: ClassVar[set[str]] = {"rmse"}
+class _StubTaskSchema:
+    # survival is not a builtin task, so a plugin registering it does not
+    # collide with the schemas core registers (binary_classification, regression)
+    task = TaskType.SURVIVAL
+    allowed_metrics: ClassVar[set[str]] = {"c_index"}
 
     def validate_spec(self, spec: Any) -> list[Any]:
         return []
@@ -86,11 +88,11 @@ def test_lazy_load_registers_task_schemas_once(
 
     # register into a scratch copy so the process-wide schema registry survives
     monkeypatch.setattr(tasks_module, "_REGISTRY", dict(tasks_module._REGISTRY))
-    plugin = _plugin(task_schemas={TaskType.REGRESSION: _RegressionSchema})
+    plugin = _plugin(task_schemas={TaskType.SURVIVAL: _StubTaskSchema})
     fake_registry._entries["nulladapter"] = _Entry(name="nulladapter", load=lambda: plugin)
 
     assert fake_registry.get("nulladapter") is plugin
-    assert TaskType.REGRESSION in tasks_module._REGISTRY
+    assert TaskType.SURVIVAL in tasks_module._REGISTRY
     # a second registration attempt is a no-op (would raise "already registered")
     fake_registry._register_task_schemas(plugin)
 

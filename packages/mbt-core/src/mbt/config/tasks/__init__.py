@@ -5,11 +5,13 @@ Core registers builtin task schemas; adapter plugins may register more via
 """
 
 from mbt.config.tasks.binary import BinaryClassificationSchema
+from mbt.config.tasks.regression import RegressionSchema
 from mbt.contracts import TaskSchema, TaskType
 from mbt.exceptions import ConfigError
 
 _REGISTRY: dict[TaskType, TaskSchema] = {
     TaskType.BINARY_CLASSIFICATION: BinaryClassificationSchema(),
+    TaskType.REGRESSION: RegressionSchema(),
 }
 
 
@@ -41,6 +43,7 @@ def supported_tasks() -> set[TaskType]:
 
 __all__ = [
     "BinaryClassificationSchema",
+    "RegressionSchema",
     "get_task_schema",
     "register_task_schema",
     "supported_tasks",

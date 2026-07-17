@@ -269,7 +269,7 @@ def test_adapter_capability_error_branches(
             evaluation: {protocol: {split: temporal}, metrics: [pr_auc]}
             seed: 7
           - name: m_no_schema
-            task: regression
+            task: survival
             adapter: reggy
             owner: ds@example.com
             dataset: ref('churn_training')
@@ -287,7 +287,7 @@ def test_adapter_capability_error_branches(
     assert wrong_task and "binary_classification" in (wrong_task[0].hint or "")
     assert any("fussy adapter says no" in m for m in messages)
     assert any("fussy adapter is uneasy" in m for m in warning_messages(parsed))
-    assert any("task 'regression' has no registered task schema" in m for m in messages)
+    assert any("task 'survival' has no registered task schema" in m for m in messages)
 
 
 def test_tuning_engine_errors(demo_project: Path, fake_registry: AdapterRegistry) -> None:
@@ -474,7 +474,7 @@ def test_scoring_link_error_branches(demo_project: Path, fake_registry: AdapterR
         """
         models:
           - name: reggy_model
-            task: regression
+            task: survival
             adapter: reggy
             owner: ds@example.com
             dataset: ref('churn_training')

@@ -38,11 +38,12 @@ class _UnitTrainingAdapter:
         return []
 
 
-class RegressionOnlyAdapter(_UnitTrainingAdapter):
-    """Supports a task that has no registered task schema."""
+class SchemalessTaskAdapter(_UnitTrainingAdapter):
+    """Supports a task that has no registered task schema (survival is a v1
+    task; core registers no schema for it)."""
 
     name = "reggy"
-    supported_tasks: ClassVar[set[TaskType]] = {TaskType.REGRESSION}
+    supported_tasks: ClassVar[set[TaskType]] = {TaskType.SURVIVAL}
 
 
 class FussyAdapter(_UnitTrainingAdapter):
@@ -75,7 +76,7 @@ def register_unit_plugins(registry: AdapterRegistry) -> None:
     )
     registry.register(
         AdapterPlugin(
-            name="reggy", contract_version=CONTRACT_VERSION, training=RegressionOnlyAdapter
+            name="reggy", contract_version=CONTRACT_VERSION, training=SchemalessTaskAdapter
         )
     )
     registry.register(

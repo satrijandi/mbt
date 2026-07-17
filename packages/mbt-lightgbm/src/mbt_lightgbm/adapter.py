@@ -37,7 +37,7 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
-from mbt_lightgbm.params import LightGBMBinaryParams
+from mbt_lightgbm.params import LightGBMBinaryParams, LightGBMRegressionParams
 
 if TYPE_CHECKING:
     import lightgbm as lgb
@@ -64,12 +64,15 @@ class LightGBMModel:
 
 
 class LightGBMTrainingAdapter:
-    """TrainingAdapter for binary classification over Arrow tables."""
+    """TrainingAdapter for binary classification and regression over Arrow tables."""
 
     name = "lightgbm"
     contract_version = CONTRACT_VERSION
     data_access = "arrow"
-    supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
+    supported_tasks: ClassVar[set[TaskType]] = {
+        TaskType.BINARY_CLASSIFICATION,
+        TaskType.REGRESSION,
+    }
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -78,6 +81,8 @@ class LightGBMTrainingAdapter:
     # -- validation ------------------------------------------------------------
 
     def param_model(self, task: TaskType) -> type[BaseModel]:
+        if task == TaskType.REGRESSION:
+            return LightGBMRegressionParams
         return LightGBMBinaryParams
 
     def validate(self, spec: ModelSpec) -> list[ValidationIssue]:
@@ -118,9 +123,12 @@ class LightGBMTrainingAdapter:
 
     # -- data plumbing ---------------------------------------------------------------
 
-    def _params(self, spec: ModelSpec) -> LightGBMBinaryParams:
+    def _params(self, spec: ModelSpec) -> LightGBMBinaryParams | LightGBMRegressionParams:
+        model_cls = (
+            LightGBMRegressionParams if spec.task == TaskType.REGRESSION else LightGBMBinaryParams
+        )
         try:
-            return LightGBMBinaryParams.model_validate(spec.hyperparameters)
+            return model_cls.model_validate(spec.hyperparameters)
         except ValidationError as exc:
             raise ValueError(f"invalid lightgbm hyperparameters: {exc}") from exc
 
@@ -188,11 +196,14 @@ class LightGBMTrainingAdapter:
             if params.early_stopping_rounds is not None:
                 callbacks.append(lgb.early_stopping(params.early_stopping_rounds, verbose=False))
             if report is not None:
-                booster_params["metric"] = ["auc"]  # higher-is-better report contract
+                # The report contract is higher-is-better per round: binary
+                # reports validation AUC, regression reports -RMSE.
+                is_regression = spec.task == TaskType.REGRESSION
+                booster_params["metric"] = ["rmse"] if is_regression else ["auc"]
 
                 def _report_progress(env: Any) -> None:
                     for _name, _metric, value, _bigger in env.evaluation_result_list or []:
-                        report(env.iteration, float(value))
+                        report(env.iteration, -float(value) if is_regression else float(value))
 
                 callbacks.append(_report_progress)
 
@@ -223,12 +234,10 @@ class LightGBMTrainingAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        from mbt_adapter_base.training_helpers import evaluate_binary_split
+        from mbt_adapter_base.training_helpers import evaluate_split
 
         table = data.read(split)
-        return evaluate_binary_split(
-            table, model.target, self._scores(model, table), metrics, slices
-        )
+        return evaluate_split(table, model.target, self._scores(model, table), metrics, slices)
 
     def predict(self, model: LightGBMModel, data: DatasetHandle, split: str) -> pa.Table:
         table = data.read(split)

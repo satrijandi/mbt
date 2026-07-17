@@ -9,7 +9,7 @@ from mbt_adapter_base.compliance import tiny_binary_dataset
 from mbt_adapter_base.interchange import DatasetProfile
 from mbt_adapter_base.specs import MetricSpec
 from mbt_adapter_base.training_helpers import (
-    evaluate_binary_split,
+    evaluate_split,
     positive_rate,
     resolve_scale_pos_weight,
     staged_split_path,
@@ -25,7 +25,7 @@ def _profile(balance: dict[str, float] | None) -> DatasetProfile:
     )
 
 
-def test_evaluate_binary_split_computes_metrics_and_slices() -> None:
+def test_evaluate_split_computes_metrics_and_slices() -> None:
     import pyarrow as pa
 
     table = pa.table(
@@ -35,13 +35,11 @@ def test_evaluate_binary_split_computes_metrics_and_slices() -> None:
         }
     )
     scores = [0.1, 0.9, 0.2, 0.8]
-    results = evaluate_binary_split(
-        table, "label", scores, [MetricSpec(name="roc_auc")], slices=["plan"]
-    )
+    results = evaluate_split(table, "label", scores, [MetricSpec(name="roc_auc")], slices=["plan"])
     assert results.metrics["roc_auc"] == 1.0
     assert set(results.slices) == {"plan=a", "plan=b"}
     # a declared slice column absent from the table is simply skipped
-    no_slice = evaluate_binary_split(
+    no_slice = evaluate_split(
         table, "label", scores, [MetricSpec(name="roc_auc")], slices=["missing"]
     )
     assert no_slice.slices == {}

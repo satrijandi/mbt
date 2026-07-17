@@ -97,11 +97,13 @@ favor; champion deltas never widen.
 
 ### Metrics
 
-For binary classification, `mbt_adapter_base.metrics.compute_binary_results`
-gives you the shared implementations (roc_auc, pr_auc, logloss, brier,
-accuracy, ece, recall_at_precision_*, precision_at_recall_*) plus slice
-group-bys - use it so champion/challenger comparisons across adapters are
-apples to apples.
+`mbt_adapter_base.metrics.compute_results` (via the shared
+`training_helpers.evaluate_split`) gives you the builtin implementations plus
+slice group-bys - use it so champion/challenger comparisons across adapters are
+apples to apples. It dispatches on the metric name: binary classification
+(roc_auc, pr_auc, logloss, brier, accuracy, ece, recall_at_precision_*,
+precision_at_recall_*) and regression (rmse, mae, r2, mape) share one entry
+point, so an adapter that supports both tasks needs no metric-side branching.
 
 ## 4. Pass the compliance suite - the ship bar
 

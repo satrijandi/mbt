@@ -218,7 +218,7 @@ never need warehouse credentials. See `packages/mbt-snowflake/README.md`.
 models:
   - name: churn_classifier
     description: "90-day churn prediction"
-    task: binary_classification     # selects the task schema
+    task: binary_classification     # or 'regression'; selects the task schema
     adapter: xgboost                # which plugin executes this
     owner: growth-ds@company.com    # required
     tags: [churn, weekly]
@@ -277,6 +277,12 @@ cutoff meeting the precision target (maximal coverage), and
 precision) - the deployable decision rule interventions consume; an
 unattainable precision target reports the 1.0 sentinel ("predict nothing").
 Lower-is-better defaults: `logloss`, `ece`, `brier`.
+
+Regression (`task: regression`, XGBoost/LightGBM) uses `rmse`, `mae`, `r2`,
+`mape`; the target must be a numeric column (no 0/1 label check, no
+`scale_pos_weight`). Lower-is-better: `rmse`, `mae`, `mape`; `r2` is
+higher-is-better. Champion gates and slice metrics work identically - the
+metric engine dispatches on the metric name (ADR-24).
 
 ## scoring/*.yml
 

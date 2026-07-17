@@ -184,13 +184,11 @@ class SparkMLTrainingAdapter:
         metrics: list[MetricSpec],
         slices: list[str] | None = None,
     ) -> MetricResults:
-        from mbt_adapter_base.training_helpers import evaluate_binary_split
+        from mbt_adapter_base.training_helpers import evaluate_split
 
         target = str(model.target or getattr(data, "label_column", ""))
         table = data.read(split)
-        return evaluate_binary_split(
-            table, target, self._scores(model, data, split), metrics, slices
-        )
+        return evaluate_split(table, target, self._scores(model, data, split), metrics, slices)
 
     def feature_importance(self, model: SparkMLModel) -> dict[str, float]:
         """GBT featureImportances normalized to fractions (FR-DOCS-02).

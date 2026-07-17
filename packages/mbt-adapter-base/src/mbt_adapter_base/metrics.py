@@ -1,8 +1,10 @@
-"""Shared binary-classification metric computation for tabular adapters.
+"""Shared metric computation for tabular adapters (binary + regression).
 
 Training adapters compute metrics; core compares them (TSD §10.3). This
 module keeps that computation identical across adapters (XGBoost, LightGBM)
-so champion/challenger deltas are apples to apples.
+so champion/challenger deltas are apples to apples. ``compute_metric``
+dispatches on the metric name (the binary and regression name sets are
+disjoint), so no task context is threaded through the adapter layer.
 
 numpy/scikit-learn load lazily: importing this module is cheap (ADR-14).
 Requires the ``mbt-adapter-base[metrics]`` extra at call time.
@@ -34,6 +36,16 @@ BINARY_METRIC_BASES = frozenset(
         "gain",
     }
 )
+
+#: Builtin metric base names for regression. Disjoint from the binary set, so
+#: the engine dispatches on the metric name alone - no task needs to be threaded
+#: through the adapter ``evaluate()`` layer.
+REGRESSION_METRIC_BASES = frozenset({"rmse", "mae", "r2", "mape"})
+
+
+def is_builtin_regression_metric(name: str) -> bool:
+    """True when a metric name is a builtin regression metric (no sugar forms)."""
+    return name in REGRESSION_METRIC_BASES
 
 
 def parse_metric_sugar(name: str) -> tuple[str, dict[str, Any]] | None:
@@ -212,13 +224,51 @@ def compute_binary_metric(spec: MetricSpec, y_true: "np.ndarray", y_score: "np.n
     raise ValueError(f"unhandled builtin binary metric: {base!r}")  # pragma: no cover
 
 
-def compute_binary_results(
+def compute_regression_metric(
+    spec: MetricSpec, y_true: "np.ndarray", y_pred: "np.ndarray"
+) -> float:
+    """Compute one builtin regression metric on target-scale predictions."""
+    import numpy as np
+    from sklearn.metrics import (
+        mean_absolute_error,
+        mean_absolute_percentage_error,
+        mean_squared_error,
+        r2_score,
+    )
+
+    base = spec.name
+    if base == "rmse":
+        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    if base == "mae":
+        return float(mean_absolute_error(y_true, y_pred))
+    if base == "r2":
+        return float(r2_score(y_true, y_pred))
+    if base == "mape":
+        return float(mean_absolute_percentage_error(y_true, y_pred))
+    raise ValueError(f"unknown builtin regression metric: {spec.name!r}")
+
+
+def compute_metric(spec: MetricSpec, y_true: "np.ndarray", y_score: "np.ndarray") -> float:
+    """Compute one builtin metric, dispatched by name (binary or regression).
+
+    The binary and regression metric-name sets are disjoint, so the metric name
+    alone selects the engine - the caller needs no task context. ``y_score`` is
+    a probability for binary metrics and a target-scale prediction for
+    regression; the adapters put both in the same ``prediction`` column.
+    """
+    if is_builtin_regression_metric(spec.name):
+        return compute_regression_metric(spec, y_true, y_score)
+    return compute_binary_metric(spec, y_true, y_score)
+
+
+def compute_results(
     metric_specs: list[MetricSpec],
     y_true: "np.ndarray",
     y_score: "np.ndarray",
     slice_columns: dict[str, "np.ndarray"] | None = None,
 ) -> MetricResults:
-    """Compute all requested metrics, plus per-slice values (FR-TEST-04).
+    """Compute all requested builtin metrics (binary or regression, dispatched
+    by name), plus per-slice values (FR-TEST-04).
 
     Hook metrics (``kind == "hook"``) are computed by the caller and merged
     afterwards; this function skips them.
@@ -226,19 +276,18 @@ def compute_binary_results(
     import numpy as np
 
     builtin = [s for s in metric_specs if s.kind == "builtin"]
-    metrics = {s.name: compute_binary_metric(s, y_true, y_score) for s in builtin}
+    metrics = {s.name: compute_metric(s, y_true, y_score) for s in builtin}
 
     slices: dict[str, dict[str, float]] = {}
     for column, values in (slice_columns or {}).items():
         for value in sorted({str(v) for v in values.tolist()}):
             mask = np.asarray([str(v) == value for v in values.tolist()])
             if int(mask.sum()) == 0 or len(set(y_true[mask].tolist())) < 2:
-                # Degenerate slice: single-class metrics are undefined; skip.
+                # Degenerate slice: a single distinct label makes classification
+                # metrics and R^2 undefined; skip it for either task.
                 continue
             key = f"{column}={value}"
-            slices[key] = {
-                s.name: compute_binary_metric(s, y_true[mask], y_score[mask]) for s in builtin
-            }
+            slices[key] = {s.name: compute_metric(s, y_true[mask], y_score[mask]) for s in builtin}
     return MetricResults(metrics=metrics, slices=slices)
 
 
@@ -267,8 +316,8 @@ def paired_bootstrap_delta(
     import numpy as np
 
     def _delta(indices: "np.ndarray") -> float:
-        challenger = compute_binary_metric(spec, y_true[indices], challenger_scores[indices])
-        champion = compute_binary_metric(spec, y_true[indices], champion_scores[indices])
+        challenger = compute_metric(spec, y_true[indices], challenger_scores[indices])
+        champion = compute_metric(spec, y_true[indices], champion_scores[indices])
         return (challenger - champion) if greater_is_better else (champion - challenger)
 
     n = len(y_true)

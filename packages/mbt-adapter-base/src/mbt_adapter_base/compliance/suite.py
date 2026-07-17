@@ -90,11 +90,54 @@ def tiny_binary_dataset(n_rows: int = 1000, seed: int = 99) -> InMemoryDatasetHa
     )
 
 
+def tiny_regression_dataset(n_rows: int = 1000, seed: int = 99) -> InMemoryDatasetHandle:
+    """~1k deterministic rows: 4 numeric features, learnable continuous label."""
+    from random import Random
+
+    rng = Random(seed)
+    columns: dict[str, list[Any]] = {
+        "f_signal": [],
+        "f_noise": [],
+        "f_scale": [],
+        "f_binary": [],
+        "label": [],
+    }
+    for _ in range(n_rows):
+        signal = rng.gauss(0, 1)
+        scale = rng.uniform(0, 100)
+        columns["f_signal"].append(signal)
+        columns["f_noise"].append(rng.gauss(0, 1))
+        columns["f_scale"].append(scale)
+        columns["f_binary"].append(rng.random() > 0.5)
+        # continuous target: mostly linear in the signal, with a small scaled
+        # term and gaussian noise, so a real regressor comfortably beats the mean
+        columns["label"].append(3.0 * signal + 0.02 * scale + rng.gauss(0, 0.5))
+    table = pa.table(columns)
+    split = int(n_rows * 0.8)
+    return InMemoryDatasetHandle(
+        {"train": table.slice(0, split), "test": table.slice(split)},
+        snapshot_id="sha256:compliance-tiny-regression",
+        label_column="label",
+    )
+
+
 _BINARY_METRICS = [
     MetricSpec(name="roc_auc", kind="builtin"),
     MetricSpec(name="pr_auc", kind="builtin"),
     MetricSpec(name="logloss", kind="builtin", greater_is_better=False),
 ]
+
+_REGRESSION_METRICS = [
+    MetricSpec(name="rmse", kind="builtin", greater_is_better=False),
+    MetricSpec(name="mae", kind="builtin", greater_is_better=False),
+    MetricSpec(name="r2", kind="builtin"),
+]
+
+#: Builtin metrics used by the compliance model spec for each task.
+_TASK_METRICS = {
+    TaskType.BINARY_CLASSIFICATION: _BINARY_METRICS,
+    TaskType.REGRESSION: _REGRESSION_METRICS,
+}
 
 
 class TrainingAdapterCompliance:
@@ -132,7 +175,8 @@ class TrainingAdapterCompliance:
             target="label",
             hyperparameters=hyperparameters,
             evaluation=EvaluationSpec(
-                protocol=EvaluationProtocol(), metrics=[m.name for m in _BINARY_METRICS]
+                protocol=EvaluationProtocol(),
+                metrics=[m.name for m in _TASK_METRICS[task]],
             ),
             seed=seed,
             **overrides,
@@ -266,6 +310,25 @@ class TrainingAdapterCompliance:
         """A signal-bearing dataset must beat coin-flip ROC AUC comfortably."""
         metrics = self._train_and_evaluate()
         assert metrics["roc_auc"] > 0.7, f"roc_auc {metrics['roc_auc']} suggests no learning"
+
+    def test_regression_train_predict_evaluate(self) -> None:
+        """OPTIONAL (adapters that declare ``REGRESSION``): train a real
+        regressor - predictions are target-scale and a signal-bearing set beats
+        predicting the mean (R^2 well above 0)."""
+        import pytest
+
+        if TaskType.REGRESSION not in self.adapter().supported_tasks:
+            pytest.skip("adapter does not support regression")
+        adapter = self.adapter()
+        data = tiny_regression_dataset()
+        spec = self.model_spec(TaskType.REGRESSION)
+        model = adapter.train(spec, data, self.run_context())
+        predictions = adapter.predict(model, data, "test")
+        assert "prediction" in predictions.column_names
+        assert predictions.num_rows == data.read("test").num_rows
+        results = adapter.evaluate(model, data, "test", _REGRESSION_METRICS)
+        assert results.metrics["rmse"] >= 0.0
+        assert results.metrics["r2"] > 0.5, f"r2 {results.metrics['r2']} suggests no learning"
 
     def test_feature_importance_is_normalized_when_supported(self) -> None:
         """OPTIONAL capability (``SupportsFeatureImportance``): when the method
