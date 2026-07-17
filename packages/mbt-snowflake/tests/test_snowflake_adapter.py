@@ -23,10 +23,19 @@ from mbt_snowflake.sql import (
     key_hash_expr,
     qualify_table,
     sampling_predicate,
+    scoring_query,
+    scoring_relation,
     split_queries,
 )
 
-from mbt_adapter_base import DatasetLocator, DatasetSpec, ManifestNode
+from mbt_adapter_base import (
+    DatasetLocator,
+    DatasetSpec,
+    ManifestNode,
+    PredictionRunInfo,
+    ScoringInputSpec,
+    ScoringOutputSpec,
+)
 from mbt_adapter_base.materialization import combine_snapshots
 
 ANCHOR = datetime(2026, 7, 1)
@@ -738,3 +747,211 @@ def test_from_locator_wraps_missing_materializations(tmp_path: Path) -> None:
     )
     with pytest.raises(SnowflakeAdapterError, match="no complete dataset materialization"):
         SnowflakeDataAdapter({}).from_locator(locator)
+
+
+# -- batch scoring (contract 1.1, ADR-20/21/23) ---------------------------------------
+
+
+class _CapturingSink:
+    def __init__(self) -> None:
+        self.messages: list[Any] = []
+
+    def emit(self, event: Any) -> None:
+        self.messages.append(event)
+
+
+SCORE_WINDOW = ("2026-06-03T00:00:00Z", "2026-07-01T00:00:00Z")
+
+
+def _scoring_sources() -> dict[str, FakeSourceTable]:
+    return {USAGE_UID: FakeSourceTable(name="usage_features", identifier="USAGE_FEATURES")}
+
+
+def _scoring_ctx(
+    tmp_path: Path,
+    adapter: SnowflakeDataAdapter,
+    sources: dict[str, FakeSourceTable],
+    *,
+    sample_fraction: float = 1.0,
+    window: tuple[str, str] | None = SCORE_WINDOW,
+    events: Any = None,
+    verify_snapshot: bool = False,
+) -> FakeBuildContext:
+    pinned = None
+    if verify_snapshot:
+        pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
+    node = ManifestNode(
+        unique_id="scoring.p.churn_scoring",
+        resource_type="scoring",
+        name="churn_scoring",
+        path="scoring/churn_scoring.yml",
+        config={},
+        snapshot_id=pinned,
+    )
+    return FakeBuildContext(
+        node=node,
+        source=next(iter(sources.values())),
+        source_tables=sources,
+        resolved_windows={"score": window} if window else {},
+        sample_fraction=sample_fraction,
+        deep_snapshot=False,
+        output_dir=tmp_path / "score",
+        events=events,
+    )
+
+
+def test_scoring_relation_single_source_and_label_free_joins() -> None:
+    single = ScoringInputSpec.model_validate({"source": USAGE_UID})
+    assert scoring_relation(single, {USAGE_UID: "DB.S.USAGE"}) == "DB.S.USAGE"
+
+    joined = ScoringInputSpec.model_validate(
+        {
+            "inputs": {
+                "spine": LABEL_UID,
+                "features": [USAGE_UID],
+                "join_key": ["customer_id", "snapshot_date"],
+            }
+        }
+    )
+    sql = scoring_relation(joined, {LABEL_UID: "DB.S.SPINE", USAGE_UID: "DB.S.FEAT"})
+    assert "DB.S.SPINE AS mbt_spine" in sql
+    assert "LEFT JOIN DB.S.FEAT AS mbt_f0 USING (customer_id, snapshot_date)" in sql
+    assert "mbt_label" not in sql  # a scoring relation never joins a label
+
+
+def test_scoring_query_applies_window_only_with_time_column() -> None:
+    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
+    windowed = scoring_query(spec, {USAGE_UID: "T"}, ["(is_active)"], SCORE_WINDOW)
+    assert "TO_TIMESTAMP_NTZ('2026-06-03 00:00:00')" in windowed
+    assert "(is_active)" in windowed
+    assert scoring_query(spec, {USAGE_UID: "T"}, [], None) == "SELECT * FROM T"
+
+
+def test_build_scoring_input_streams_windowed_single_source(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    sources = _scoring_sources()
+    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
+    handle = adapter.build_scoring_input(spec, _scoring_ctx(tmp_path, adapter, sources))
+
+    assert handle.splits() == {"score"}
+    score = handle.read("score")
+    assert "monthly_usage" in score.column_names  # normalized to lowercase
+    assert 0 < score.num_rows < 200  # the score window pruned the batch
+    selects = [q for q in stub.executed if q.startswith("SELECT *")]
+    assert len(selects) == 1 and "TO_TIMESTAMP_NTZ" in selects[0]
+
+    # rebuilding clears stale outputs and re-materializes deterministically
+    again = adapter.build_scoring_input(spec, _scoring_ctx(tmp_path, adapter, sources))
+    assert again.read("score").num_rows == score.num_rows
+
+
+def test_build_scoring_input_joins_spine_and_features(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    sources = _sources()  # spine + feature tables
+    spec = ScoringInputSpec.model_validate(
+        {
+            "inputs": {
+                "spine": LABEL_UID,
+                "features": [USAGE_UID],
+                "join_key": ["customer_id", "snapshot_date"],
+            },
+            "time_column": "snapshot_date",
+        }
+    )
+    score = adapter.build_scoring_input(spec, _scoring_ctx(tmp_path, adapter, sources)).read(
+        "score"
+    )
+    assert {"customer_id", "snapshot_date", "monthly_usage"} <= set(score.column_names)
+    selects = [q for q in stub.executed if q.startswith("SELECT *")]
+    assert "USING (customer_id, snapshot_date)" in selects[0]
+
+
+def test_build_scoring_input_without_time_column_scores_full_batch(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    sources = _scoring_sources()
+    spec = ScoringInputSpec.model_validate({"source": USAGE_UID})  # no time_column
+    handle = adapter.build_scoring_input(
+        spec, _scoring_ctx(tmp_path, adapter, sources, window=None)
+    )
+    assert handle.read("score").num_rows == 200  # whole table, no window predicate
+    selects = [q for q in stub.executed if q.startswith("SELECT *")]
+    assert "WHERE" not in selects[0]
+
+
+def test_build_scoring_input_pushes_down_sampling(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    sources = _scoring_sources()
+    spec = ScoringInputSpec.model_validate(
+        {"source": USAGE_UID, "time_column": "snapshot_date", "sample_key": ["customer_id"]}
+    )
+    handle = adapter.build_scoring_input(
+        spec, _scoring_ctx(tmp_path, adapter, sources, sample_fraction=0.5)
+    )
+    selects = [q for q in stub.executed if q.startswith("SELECT *")]
+    assert "MD5_NUMBER_LOWER64" in selects[0]  # sampling pushed into the warehouse
+    assert handle.read("score").num_rows < 200
+
+
+def test_build_scoring_input_rejects_bad_sample_fraction(tmp_path: Path) -> None:
+    adapter = SnowflakeDataAdapter({"database": "ANALYTICS", "schema": "GOLD"})
+    spec = ScoringInputSpec.model_validate({"source": USAGE_UID})
+    ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), sample_fraction=1.5, window=None)
+    with pytest.raises(SnowflakeAdapterError, match=r"sample_fraction must be in \(0, 1\]"):
+        adapter.build_scoring_input(spec, ctx)
+
+
+def test_build_scoring_input_sampling_needs_a_key(tmp_path: Path) -> None:
+    adapter = SnowflakeDataAdapter({"database": "ANALYTICS", "schema": "GOLD"})
+    spec = ScoringInputSpec.model_validate({"source": USAGE_UID})  # no sample_key
+    ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), sample_fraction=0.5, window=None)
+    with pytest.raises(SnowflakeAdapterError, match="stable row identity"):
+        adapter.build_scoring_input(spec, ctx)
+
+
+def test_build_scoring_input_wraps_invalid_identifiers(tmp_path: Path) -> None:
+    adapter = SnowflakeDataAdapter({"database": "ANALYTICS", "schema": "GOLD"})
+    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "bad; DROP"})
+    ctx = _scoring_ctx(
+        tmp_path, adapter, _scoring_sources()
+    )  # window present -> validates time_col
+    with pytest.raises(SnowflakeAdapterError, match="invalid column identifier"):
+        adapter.build_scoring_input(spec, ctx)
+
+
+def test_build_scoring_input_zero_rows_warns_not_errors(tmp_path: Path) -> None:
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
+    events = _CapturingSink()
+    future = ("2030-01-01T00:00:00Z", "2030-02-01T00:00:00Z")  # matches no rows
+    ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), window=future, events=events)
+    handle = adapter.build_scoring_input(spec, ctx)
+    assert handle.read("score").num_rows == 0
+    assert any("0 rows" in str(m) for m in events.messages)
+
+
+def test_open_predictions_stages_runs_under_root(tmp_path: Path) -> None:
+    adapter = SnowflakeDataAdapter(
+        {"database": "ANALYTICS", "schema": "GOLD", "predictions_root": str(tmp_path)}
+    )
+    output = ScoringOutputSpec.model_validate({"path": "churn_scoring/preds"})
+    store = adapter.open_predictions(output)
+    assert store.root == tmp_path / "churn_scoring" / "preds"
+
+    table = pa.table({"customer_id": [1, 2], "prediction": [0.1, 0.9]})
+    info = PredictionRunInfo(
+        run_key="r1",
+        uri="",
+        scored_at="2026-07-01T00:00:00Z",
+        run_id="run1",
+        model_name="churn",
+        model_version="1",
+        row_count=0,
+    )
+    assert store.write_run(table, info).row_count == 2
+    assert [r.run_key for r in store.list_runs()] == ["r1"]
+    assert store.read("r1").num_rows == 2

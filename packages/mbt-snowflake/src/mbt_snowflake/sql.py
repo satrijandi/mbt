@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime
 
-from mbt_adapter_base import DatasetSpec, parse_time_offset
+from mbt_adapter_base import DatasetSpec, ScoringInputSpec, parse_time_offset
 from mbt_adapter_base.materialization import SAMPLE_MODULUS
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -187,3 +187,41 @@ def split_queries(
         queries[split] = f"SELECT {select} FROM {relation} WHERE {' AND '.join(predicates)}"
         low += fraction
     return queries
+
+
+def scoring_relation(spec: ScoringInputSpec, table_refs: Mapping[str, str]) -> str:
+    """FROM clause for an unlabeled scoring batch (ADR-20): a single source, or a
+    spine + feature USING joins in declaration order. Never a label join - a
+    scoring input has no label by design (contrast ``base_relation``)."""
+    if spec.inputs is None:
+        assert spec.source is not None
+        return table_refs[spec.source]
+    join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
+    sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
+    for i, (feature_uid, using_cols) in enumerate(spec.inputs.feature_entries):
+        using = ", ".join(validate_column(c) for c in using_cols)
+        sql += f" {join_kind} {table_refs[feature_uid]} AS mbt_f{i} USING ({using})"
+    return sql
+
+
+def scoring_query(
+    spec: ScoringInputSpec,
+    table_refs: Mapping[str, str],
+    where: list[str],
+    window: tuple[str, str] | None,
+) -> str:
+    """One SELECT materializing the unlabeled scoring batch (ADR-20/23).
+
+    Filters push down; a ``[start, end)`` window on ``time_column`` is applied
+    when the scoring node resolved a ``score`` window (same half-open temporal
+    predicate as the training splits)."""
+    predicates = list(where)
+    if window is not None and spec.time_column is not None:
+        start, end = window
+        time_sql = f"CAST({validate_column(spec.time_column)} AS TIMESTAMP_NTZ)"
+        predicates += [
+            f"{time_sql} >= TO_TIMESTAMP_NTZ('{_iso_to_ntz(start)}')",
+            f"{time_sql} < TO_TIMESTAMP_NTZ('{_iso_to_ntz(end)}')",
+        ]
+    clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    return f"SELECT * FROM {scoring_relation(spec, table_refs)}{clause}"

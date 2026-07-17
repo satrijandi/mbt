@@ -54,6 +54,7 @@ nav:
       - adr/0020-scoring-resource-and-runtime-champion.md
       - adr/0021-prediction-store-and-ground-truth-ledger.md
       - adr/0022-population-spine-and-per-table-joins.md
+      - adr/0023-warehouse-batch-scoring.md
 
 markdown_extensions:
   - admonition

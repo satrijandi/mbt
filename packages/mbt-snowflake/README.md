@@ -72,6 +72,29 @@ datasets:
 - Rows stream via the connector's Arrow batch API into one parquet file per
   split; nothing is held fully in memory on the mbt side.
 
+## Batch scoring (ADR-23)
+
+`mbt score` and `mbt monitor` run against a Snowflake target: the unlabeled
+scoring input is read straight from the warehouse (filters, the `score` window,
+and `sample_fraction` push down, exactly like training), and predictions are
+staged as parquet under `predictions_root` (adapter config, default the project
+dir) joined with the scoring node's `output.path`.
+
+Staging reuses mbt's shared prediction-store layout (per-run directories,
+idempotent-by-`run_key` writes, the ground-truth ledger). A warehouse-native
+store that writes predictions back into Snowflake tables is designed in ADR-23
+and gated on the first credentialed `live_snowflake` run - until then predictions
+land in the staging path, not a Snowflake table.
+
+```yaml
+# profiles.yml (data adapter)
+config:
+  adapter: snowflake
+  database: ANALYTICS
+  schema: GOLD
+  predictions_root: /mnt/mbt-stage   # where scoring predictions are staged
+```
+
 ## Authentication
 
 The config keys `account`, `user`, `password`, `warehouse`, `database`, `schema`, `role`, and `authenticator` pass straight to `snowflake.connector.connect()`.

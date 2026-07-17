@@ -25,19 +25,26 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from mbt_adapter_base import DatasetLocator, DatasetSpec
+from mbt_adapter_base import (
+    DatasetLocator,
+    DatasetSpec,
+    ScoringInputSpec,
+    ScoringOutputSpec,
+)
 from mbt_adapter_base.materialization import (
     MaterializationError,
     MaterializedDatasetHandle,
     combine_snapshots,
     write_materialization_metadata,
 )
+from mbt_adapter_base.predictions import LocalPredictionStore
 from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
 from mbt_snowflake.sql import (
     SnowflakeSQLError,
     base_relation,
     qualify_table,
     sampling_predicate,
+    scoring_query,
     split_queries,
 )
 
@@ -280,3 +287,75 @@ class SnowflakeDataAdapter:
                 hint="the manifest pin and the materialized data disagree; recompile",
             )
         return handle
+
+    # -- batch scoring (contract 1.1, ADR-20/21/23) ----------------------------------
+
+    def build_scoring_input(
+        self, spec: ScoringInputSpec, ctx: DataBuildContext
+    ) -> MaterializedDatasetHandle:
+        """Materialize one unlabeled Snowflake batch as a single ``score`` split.
+
+        Reads the scoring input straight from Snowflake (filters and the
+        ``score`` window push down); streams it to ``score.parquet`` via the
+        same Arrow path training uses. Zero rows is a warning, not an error - an
+        empty nightly batch is legitimate (unlike a training split; ADR-20).
+        """
+        self._verify_snapshot(ctx)
+        output_dir = ctx.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for stale in output_dir.glob("*"):
+            stale.unlink()
+
+        table_refs = {uid: self._table_ref(t) for uid, t in ctx.source_tables.items()}
+        where: list[str] = [f"({f})" for f in spec.filters]
+        if not 0.0 < ctx.sample_fraction <= 1.0:
+            raise SnowflakeAdapterError(
+                f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}"
+            )
+        if ctx.sample_fraction < 1.0:
+            keys = spec.sample_key_columns
+            if not keys:
+                raise SnowflakeAdapterError(
+                    "sampling a Snowflake scoring input needs a stable row identity",
+                    hint="declare sample_key on the input (or use the inputs form, "
+                    "whose join_key is used)",
+                )
+            where.append(sampling_predicate(keys, ctx.sample_fraction))
+
+        window = ctx.resolved_windows.get("score") if spec.time_column is not None else None
+        try:
+            sql = scoring_query(spec, table_refs, where, window)
+        except SnowflakeSQLError as exc:
+            raise SnowflakeAdapterError(str(exc)) from exc
+        count = self._stream_query_to_parquet(sql, output_dir / "score.parquet")
+
+        if count == 0:
+            # EventSink wraps a plain string in a LogMessage (adapters cannot
+            # import core event models); mirrors the local adapter's warning.
+            ctx.events.emit(
+                f"scoring input {ctx.node.unique_id}: materialized 0 rows; nothing to score"
+            )
+        write_materialization_metadata(
+            output_dir,
+            snapshot_id=ctx.node.snapshot_id,
+            dataset=ctx.node.name,
+            label_column="",  # unlabeled by design (ADR-20)
+            time_column=spec.time_column,
+            windows=ctx.resolved_windows,
+            sample_fraction=ctx.sample_fraction,
+            row_counts={"score": count},
+        )
+        return MaterializedDatasetHandle(output_dir, adapter=self.name)
+
+    def open_predictions(self, output: ScoringOutputSpec) -> LocalPredictionStore:
+        """Prediction store for a Snowflake scoring pipeline.
+
+        v1 stages prediction runs as parquet under ``predictions_root`` using the
+        shared local layout (ADR-21's sanctioned reuse: "warehouse adapters can
+        reuse it for staged exports"). A warehouse-native, Snowflake-table-backed
+        store is designed in ADR-23 and gated on live-credential verification.
+        ``predictions_root`` (adapter config, default the project dir) is joined
+        with the scoring node's ``output.path``.
+        """
+        root = Path(str(self.config.get("predictions_root", "."))) / output.path
+        return LocalPredictionStore(root)
