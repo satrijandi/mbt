@@ -6,6 +6,7 @@ the candidates.
 """
 
 from mbt.contracts import MetricSpec, ModelSpec, TaskSchema
+from mbt.utils import did_you_mean
 from mbt_adapter_base.metrics import parse_metric_sugar
 
 #: Builtin metrics where lower is better; everything else defaults to higher.
@@ -53,9 +54,11 @@ def resolve_metric(
         return MetricSpec(name=name, kind="hook", greater_is_better=True)
 
     candidates = sorted(task_schema.allowed_metrics | set(declared))
+    suggestion = did_you_mean(name, candidates)
+    lead = f"did you mean {suggestion!r}? " if suggestion else ""
     return (
         f"unknown metric {name!r} for task {task_schema.task.value!r}; "
-        f"candidates: {', '.join(candidates)}; parameterized forms like "
+        f"{lead}candidates: {', '.join(candidates)}; parameterized forms like "
         "'recall_at_precision_0.9' are also accepted; hook metrics require a hooks.py"
     )
 

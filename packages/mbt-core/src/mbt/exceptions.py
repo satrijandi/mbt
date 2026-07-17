@@ -38,6 +38,17 @@ class MbtError(Exception):
         return "\n  ".join(parts)
 
 
+def cause_message(exc: BaseException) -> str:
+    """The one-line text to interpolate when wrapping ``exc`` in another error.
+
+    For an ``MbtError``, use only its ``message``: its ``__str__`` is multi-line
+    (message + ``resource:``/``file:``/``hint:``), so interpolating the full str
+    into an outer error that also carries a hint renders two out-of-order
+    ``hint:`` lines. For any other exception, ``str(exc)`` is already one-line.
+    """
+    return exc.message if isinstance(exc, MbtError) else str(exc)
+
+
 class ConfigError(MbtError):
     """Invalid project, profile, or resource configuration (parse/validation)."""
 
@@ -52,7 +63,7 @@ class AdapterError(MbtError):
     @classmethod
     def wrap(cls, exc: Exception, *, adapter: str, resource: str | None = None) -> "AdapterError":
         return cls(
-            f"adapter '{adapter}' failed: {exc}",
+            f"adapter '{adapter}' failed: {cause_message(exc)}",
             resource=resource,
             hint="run with --log-format json for the full event stream",
         )

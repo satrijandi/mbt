@@ -39,6 +39,9 @@ class CLIContext:
     cli_vars: dict[str, Any] = field(default_factory=dict)
     log_format: str = "text"
     quiet: bool = False
+    #: Surface debug-level events in text mode (ConsoleSink drops them by
+    #: default); no effect in json/quiet modes, which are unconditional.
+    verbose: bool = False
 
     def resolve_cli_path(self, value: str | None) -> str | None:
         """Absolutize a path the user typed on the command line.
@@ -109,7 +112,7 @@ def setup_bus(ctx: CLIContext) -> None:
     elif ctx.log_format == "json":
         sinks = [JsonLinesSink(stream=sys.stderr)]
     else:
-        sinks = [ConsoleSink(console=err_console)]
+        sinks = [ConsoleSink(console=err_console, verbose=ctx.verbose)]
     set_bus(EventBus(sinks=sinks))
 
 

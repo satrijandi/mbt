@@ -12,6 +12,7 @@ from typing import Any
 
 from mbt.contracts import CONTRACT_VERSION, AdapterPlugin, TaskType
 from mbt.exceptions import ConfigError
+from mbt.utils import did_you_mean
 
 
 def _parse_version(version: str) -> tuple[int, int]:
@@ -61,10 +62,12 @@ class AdapterRegistry:
         """Load a plugin by name; a missing adapter names its pip package."""
         entry = self._entries.get(name)
         if entry is None:
+            suggestion = did_you_mean(name, self.available)
+            lead = f"did you mean {suggestion!r}? " if suggestion else ""
             raise ConfigError(
                 f"adapter {name!r} is not installed",
                 hint=(
-                    f"pip install mbt-{name} (installed adapters: "
+                    f"{lead}pip install mbt-{name} (installed adapters: "
                     f"{', '.join(self.available) or 'none'})"
                 ),
             )

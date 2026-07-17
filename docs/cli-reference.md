@@ -8,7 +8,12 @@ command data.
 
 Common flags behave identically everywhere they appear:
 `--project-dir`, `--profiles-dir`, `--target/-t`, `--vars`, `--select/-s`,
-`--exclude`, `--threads`, `--state`, `--manifest`, `--anchor`, `--quiet`.
+`--exclude`, `--threads`, `--state`, `--manifest`, `--anchor`, `--quiet`,
+`--verbose/-v`.
+
+`--verbose/-v` surfaces debug-level events in the default text output (they
+are dropped otherwise); it has no effect under `--log-format json` (which
+always carries every event) or `--quiet` (which suppresses all events).
 
 Path semantics: paths you type on the command line (`--state`,
 `--manifest`, `--from-file`, `--profiles-dir`) are relative to where you

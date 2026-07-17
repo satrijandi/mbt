@@ -52,3 +52,10 @@ def test_metric_direction_falls_back_to_sugar_and_defaults() -> None:
     assert metric_direction("recall_at_precision_0.9", []) is True
     assert metric_direction("logloss", []) is False
     assert metric_direction("pr_auc", []) is True
+
+
+def test_unknown_metric_suggests_a_close_candidate() -> None:
+    outcome = resolve_metric("pr_au", {}, SCHEMA, has_hooks=False)
+    assert isinstance(outcome, str)
+    assert "did you mean 'pr_auc'" in outcome
+    assert "unknown metric" in outcome

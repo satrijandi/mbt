@@ -133,3 +133,9 @@ def test_set_registry_swaps_the_process_registry(fake_registry: AdapterRegistry)
     finally:
         set_registry(original)
     assert registry_module._registry is original
+
+
+def test_missing_adapter_suggests_a_close_installed_name(fake_registry: AdapterRegistry) -> None:
+    fake_registry.register(_plugin("nulladapter"))
+    with pytest.raises(ConfigError, match="did you mean 'nulladapter'"):
+        fake_registry.get("nulladaptr")

@@ -457,6 +457,25 @@ def test_run_operation_unknown_macro(demo_project: Path) -> None:
     assert "unknown macro" in result.stderr
 
 
+def test_verbose_flag_wires_debug_sink() -> None:
+    from mbt.cli.common import CLIContext, setup_bus
+    from mbt.events import ConsoleSink, get_bus
+
+    setup_bus(CLIContext(verbose=True))
+    sink = get_bus()._sinks[0]
+    assert isinstance(sink, ConsoleSink) and sink.verbose is True
+
+    setup_bus(CLIContext(verbose=False))
+    sink = get_bus()._sinks[0]
+    assert isinstance(sink, ConsoleSink) and sink.verbose is False
+
+
+def test_command_accepts_verbose_flag(demo_project: Path) -> None:
+    # -v threads through make_ctx on a real command (FR-CLI-04 parity).
+    result = invoke(["parse", "-v", "--project-dir", str(demo_project)])
+    assert result.exit_code == 0, debug(result)
+
+
 # -- main() entry point (TSD §17 exit-code semantics) -------------------------------
 
 

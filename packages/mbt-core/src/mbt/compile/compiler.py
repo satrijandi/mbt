@@ -30,7 +30,7 @@ from mbt.contracts import DatasetSpec, ManifestNode, ModelSpec, ScoringSpec, Spl
 from mbt.dag.graph import topological_order
 from mbt.events import get_bus
 from mbt.events.models import AdapterWarning, CompileCompleted, CompileStarted
-from mbt.exceptions import CompilationError, ConfigError
+from mbt.exceptions import CompilationError, ConfigError, cause_message
 from mbt.gitinfo import collect_git_info
 from mbt.jinja.environment import ResolveContext, TargetContext
 from mbt.parsing.errors import ParseReport
@@ -362,7 +362,8 @@ def _pin_snapshots(
             return uid, adapter.snapshot_id(entry.table, deep=deep)
         except Exception as exc:
             raise CompilationError(
-                f"snapshot pinning failed for source '{entry.group}.{entry.table.name}': {exc}",
+                f"snapshot pinning failed for source "
+                f"'{entry.group}.{entry.table.name}': {cause_message(exc)}",
                 resource=uid,
                 hint="check the source path and the data adapter config in profiles.yml",
             ) from exc

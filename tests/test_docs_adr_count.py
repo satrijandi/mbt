@@ -31,6 +31,8 @@ def test_doc_adr_counts_match_actual_files() -> None:
             for claim in _CLAIM_RE.finditer(line):
                 if int(claim.group(1)) != actual:
                     rel = md.relative_to(REPO_ROOT)
-                    mismatches.append(f"{rel}:{line_no} claims {claim.group(1)} ADRs, actual is {actual}")
+                    mismatches.append(
+                        f"{rel}:{line_no} claims {claim.group(1)} ADRs, actual is {actual}"
+                    )
 
     assert not mismatches, "stale ADR counts in docs:\n" + "\n".join(mismatches)

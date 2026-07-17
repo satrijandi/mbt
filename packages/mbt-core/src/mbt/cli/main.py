@@ -87,6 +87,9 @@ TargetOpt = Annotated[
 VarsOpt = Annotated[str | None, typer.Option("--vars", help="YAML/JSON dict overriding vars.")]
 LogFormatOpt = Annotated[str, typer.Option("--log-format", help="text | json (events, on stderr).")]
 QuietOpt = Annotated[bool, typer.Option("--quiet", "-q", help="Suppress event output.")]
+VerboseOpt = Annotated[
+    bool, typer.Option("--verbose", "-v", help="Show debug-level events (text mode).")
+]
 SelectOpt = Annotated[
     list[str] | None, typer.Option("--select", "-s", help="Node selector(s); space = union.")
 ]
@@ -132,6 +135,7 @@ def make_ctx(
     vars_: str | None,
     log_format: str,
     quiet: bool,
+    verbose: bool = False,
     chdir: bool = True,
 ) -> CLIContext:
     """Build the per-command context and enter the project directory.
@@ -162,6 +166,7 @@ def make_ctx(
         cli_vars=parse_vars(vars_),
         log_format=log_format,
         quiet=quiet,
+        verbose=verbose,
     )
     setup_bus(ctx)
     return ctx
@@ -190,12 +195,13 @@ def init(
     project_dir: ProjectDirOpt = Path("."),
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Scaffold a golden-path project (FR-PROJ-01)."""
     from mbt.cli.scaffold import scaffold_project
 
     # chdir=False: project_dir is the parent to scaffold into, not a project
-    cli = make_ctx(project_dir, None, None, None, log_format, quiet, chdir=False)
+    cli = make_ctx(project_dir, None, None, None, log_format, quiet, verbose, chdir=False)
     destination = scaffold_project(name, cli.project_dir)
     out_console.print(f"Created [bold]{destination}[/bold]")
     out_console.print(
@@ -210,11 +216,12 @@ def deps(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print, do not install.")] = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Install adapter packages pinned in packages.yml (FR-PROJ-04)."""
     from mbt.deps import install_packages, load_packages
 
-    cli = make_ctx(project_dir, None, None, None, log_format, quiet)
+    cli = make_ctx(project_dir, None, None, None, log_format, quiet, verbose)
     pinned = cli.project_dir / "requirements.txt"
     requirements = install_packages(
         load_packages(cli.project_dir),
@@ -316,11 +323,12 @@ def parse(
     ] = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Validate all configs and build the DAG; no execution (FR-PARSE-01)."""
     from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     print_warnings(parsed)
     out_console.print(
@@ -346,12 +354,13 @@ def compile(
     deep_snapshot: DeepSnapshotOpt = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Resolve Jinja + profiles + snapshots into target/manifest.json (FR-COMP-01)."""
     from mbt.compile.compiler import CompileOptions, compile_project
     from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     print_warnings(parsed)
     profiles = cli.profiles(parsed)
@@ -393,10 +402,11 @@ def _register_execution_command(command: str, help_text: str) -> None:
         deep_snapshot: DeepSnapshotOpt = False,
         log_format: LogFormatOpt = "text",
         quiet: QuietOpt = False,
+        verbose: VerboseOpt = False,
     ) -> None:
         from mbt.execute.orchestrator import run_command
 
-        cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+        cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
         results = run_command(
             cli.invocation(
                 command,
@@ -450,11 +460,12 @@ def evaluate(
     anchor: AnchorOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Re-evaluate a registered artifact on freshly built data (FR-RUN-07)."""
     from mbt.execute.orchestrator import run_evaluate
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     results = run_evaluate(
         cli.invocation(
             "evaluate",
@@ -492,11 +503,12 @@ def monitor(
     deep_snapshot: DeepSnapshotOpt = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Evaluate matured predictions against arrived labels; never trains (ADR-21)."""
     from mbt.execute.monitor import run_monitor
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     results = run_monitor(
         cli.invocation(
             "monitor",
@@ -534,6 +546,7 @@ def promote(
     ] = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Transition a registered version, verifying recorded gate passes (FR-REG-03)."""
     from mbt.adapters.registry import get_registry
@@ -543,7 +556,7 @@ def promote(
     from mbt.promote import load_promotions_file, promote_model
     from mbt.runtime import registry_adapter as build_registry_adapter
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
@@ -595,12 +608,13 @@ def ls(
     output: OutputOpt = "table",
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """List resources with selector support (FR-PARSE-05)."""
     from mbt.dag.selector import SelectableNode, select_nodes
     from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     nodes: dict[str, SelectableNode] = {}
     paths: dict[str, str] = {}
@@ -660,6 +674,7 @@ def show(
     output: OutputOpt = "yaml",
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Print one resource's compile-rendered config (FR-PARSE-05)."""
     from mbt.compile.compiler import compile_project
@@ -667,7 +682,7 @@ def show(
     from mbt.parsing import parse_project
     from mbt.utils import did_you_mean
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     manifest = compile_project(parsed, profiles, cli_vars=cli.cli_vars)
@@ -712,6 +727,7 @@ def state_diff(
     deep_snapshot: DeepSnapshotOpt = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """What changed vs a previous manifest, with components (FR-STATE-02)."""
     from mbt.artifacts.manifest import read_manifest
@@ -719,7 +735,7 @@ def state_diff(
     from mbt.parsing import parse_project
     from mbt.state.diff import diff_manifests, load_state
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     manifest = cli.resolve_cli_path(manifest)
     state = cli.resolve_cli_path(state) or state
     if manifest is not None:
@@ -768,6 +784,7 @@ def docs_generate(
     manifest: ManifestOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Render model cards + lineage into target/docs (FR-DOCS-01)."""
     from mbt.artifacts.manifest import read_manifest
@@ -776,7 +793,7 @@ def docs_generate(
     from mbt.docsgen import generate_docs
     from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     manifest = cli.resolve_cli_path(manifest)
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
@@ -827,13 +844,14 @@ def run_operation(
     ] = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Render a macro with the full compile context (FR-RUN-08)."""
     from mbt.compile.compiler import _build_resolve_context
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet)
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     if macro not in parsed.renderer.macro_names:

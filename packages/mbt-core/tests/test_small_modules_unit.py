@@ -207,3 +207,12 @@ def test_canonical_json_rejects_non_serializable_values() -> None:
 def test_slugify_normalizes_to_snake_case() -> None:
     assert slugify("Hello, World!") == "hello_world"
     assert slugify("  churn-model v2  ") == "churn_model_v2"
+
+
+def test_cause_message_uses_only_the_inner_message_for_mbt_errors() -> None:
+    from mbt.exceptions import ConfigError, cause_message
+
+    inner = ConfigError("bad thing", resource="x", hint="do y")
+    assert "hint:" in str(inner)  # full str is multi-line: would inject a 2nd hint
+    assert cause_message(inner) == "bad thing"
+    assert cause_message(ValueError("plain")) == "plain"
