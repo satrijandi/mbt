@@ -7,7 +7,7 @@ from core_helpers import TEST_ANCHOR, write
 from parse_unit_helpers import ListSink
 
 from mbt.adapters.registry import AdapterRegistry
-from mbt.compile.compiler import CompileOptions, _build_resolve_context, compile_project
+from mbt.compile.compiler import CompileOptions, build_resolve_context, compile_project
 from mbt.config.profiles import load_profiles
 from mbt.events import AdapterWarning, EventBus, get_bus, set_bus
 from mbt.exceptions import CompilationError
@@ -86,7 +86,7 @@ def test_resolver_errors_name_the_unknown_resource(
 ) -> None:
     parsed = parse_project(demo_project, registry=fake_registry)
     profiles = load_profiles("demo", demo_project, project_vars=parsed.project.vars)
-    ctx = _build_resolve_context(parsed, profiles, {})
+    ctx = build_resolve_context(parsed, profiles, {})
     assert ctx.ref_resolver("churn_training") == DS
     assert ctx.source_resolver("lakehouse", "subscribers") == "source.demo.lakehouse.subscribers"
     with pytest.raises(CompilationError, match="ref\\('ghost'\\) does not resolve"):

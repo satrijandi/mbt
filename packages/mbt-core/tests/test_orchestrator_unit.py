@@ -12,8 +12,8 @@ from test_execution import invoke
 from mbt.adapters.registry import AdapterRegistry
 from mbt.exceptions import ConfigError, StateError
 from mbt.execute.orchestrator import (
-    _require_scoring_capability,
     prepare,
+    require_scoring_capability,
     run_evaluate,
 )
 
@@ -100,7 +100,7 @@ def test_require_scoring_capability_rejects_old_data_adapter() -> None:
         profiles=SimpleNamespace(target=SimpleNamespace(data=SimpleNamespace(adapter="ancient"))),
     )
     with pytest.raises(ConfigError, match="does not support"):
-        _require_scoring_capability(ctx)
+        require_scoring_capability(ctx)
 
 
 # -- mbt evaluate (FR-RUN-07) ---------------------------------------------------------

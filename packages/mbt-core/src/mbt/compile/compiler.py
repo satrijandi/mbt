@@ -70,7 +70,7 @@ def compile_project(
     anchor = (options.anchor or _now_anchor()).astimezone(UTC).replace(microsecond=0)
     anchor_iso = format_ts(anchor)
 
-    resolve_ctx = _build_resolve_context(parsed, profiles, cli_vars)
+    resolve_ctx = build_resolve_context(parsed, profiles, cli_vars)
     report = ParseReport()
 
     # 1. resolve-render every node against the target
@@ -211,7 +211,7 @@ def compile_project(
 # -- rendering ----------------------------------------------------------------
 
 
-def _build_resolve_context(
+def build_resolve_context(
     parsed: ParsedProject, profiles: LoadedProfiles, cli_vars: dict[str, Any]
 ) -> ResolveContext:
     dataset_by_name = {r.name: r.unique_id for r in parsed.datasets.values()}

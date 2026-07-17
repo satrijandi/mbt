@@ -11,7 +11,7 @@ import pytest
 from mbt.adapters.local.data import LocalDataAdapter
 from mbt.contracts import ManifestNode, ScoringInputSpec, SourceTable
 from mbt.exceptions import AdapterError
-from mbt.execute.runners import _BuildContext
+from mbt.execute.runners import BuildContext
 from mbt_adapter_base.compliance import PredictionStoreCompliance
 from mbt_adapter_base.predictions import LocalPredictionStore, PredictionStoreError
 
@@ -59,7 +59,7 @@ def _ctx(
     *,
     windows: dict[str, tuple[str, str]] | None = None,
     snapshot_override: str | None = None,
-) -> tuple[_BuildContext, _CapturingSink]:
+) -> tuple[BuildContext, _CapturingSink]:
     from mbt_adapter_base.materialization import combine_snapshots
 
     snapshot = snapshot_override or combine_snapshots(
@@ -74,7 +74,7 @@ def _ctx(
         snapshot_id=snapshot,
     )
     events = _CapturingSink()
-    ctx = _BuildContext(
+    ctx = BuildContext(
         node=node,
         source=next(iter(tables.values())),
         source_tables=tables,

@@ -32,15 +32,20 @@ from mbt.contracts import (
     ScoringSpec,
 )
 from mbt.events import get_bus
-from mbt.events.models import LogMessage, NodeFinished, NodeStarted, RunFinished, RunStarted
-from mbt.exceptions import ConfigError, MbtError
+from mbt.events.models import LogMessage, RunFinished, RunStarted
+from mbt.exceptions import ConfigError
 from mbt.execute.orchestrator import (
     InvocationOptions,
-    _require_scoring_capability,
     prepare,
+    require_scoring_capability,
 )
 from mbt.execute.planner import plan_execution
-from mbt.execute.runners import ExecutionContext, _BuildContext, materialization_key
+from mbt.execute.runners import (
+    BuildContext,
+    ExecutionContext,
+    materialization_key,
+    run_with_lifecycle,
+)
 from mbt.execute.scheduler import execute_plan
 from mbt.quality.metrics import resolve_metric
 from mbt.quality.monitors import all_monitors_passed, evaluate_ground_truth_gates
@@ -78,33 +83,12 @@ def run_monitor(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
         python_tests=[],
         total_nodes=len(plan.execution_set),
     )
-    _require_scoring_capability(ctx)
+    require_scoring_capability(ctx)
     anchor = _parse_ts(manifest.metadata.anchor)
 
     def run_one(uid: str) -> NodeResult:
         node = manifest.nodes[uid]
-        index = ctx.next_index()
-        bus.emit(
-            NodeStarted(unique_id=uid, resource_type="scoring", index=index, total=ctx.total_nodes)
-        )
-        node_started = time.monotonic()
-        try:
-            result = _monitor_node(ctx, node, anchor)
-        except MbtError as exc:
-            result = NodeResult(unique_id=uid, status="error", message=str(exc))
-        result.execution_time_s = time.monotonic() - node_started
-        bus.emit(
-            NodeFinished(
-                unique_id=uid,
-                resource_type="scoring",
-                status=result.status,
-                execution_time_s=result.execution_time_s,
-                index=index,
-                total=ctx.total_nodes,
-                message=result.message,
-            )
-        )
-        return result
+        return run_with_lifecycle(ctx, uid, "scoring", lambda: _monitor_node(ctx, node, anchor))
 
     # Scoring nodes are independent of each other, so monitoring parallelizes
     # exactly like the other execution commands (--threads, --fail-fast).
@@ -246,7 +230,7 @@ def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: Scoring
         )
     label_node = node.model_copy(update={"snapshot_id": source.snapshot_id, "resolved": {}})
     key = materialization_key(label_node)
-    build_ctx = _BuildContext(
+    build_ctx = BuildContext(
         node=label_node,
         source=source.config,
         source_tables={label_uid: source.config},

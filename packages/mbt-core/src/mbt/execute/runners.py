@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -196,7 +197,7 @@ def materialization_key(node: ManifestNode, sample_fraction: float = 1.0) -> str
 
 
 @dataclass(frozen=True)
-class _BuildContext:
+class BuildContext:
     """DataBuildContext implementation handed to DataAdapters."""
 
     node: ManifestNode
@@ -209,6 +210,43 @@ class _BuildContext:
     events: Any
 
 
+def run_with_lifecycle(
+    ctx: "ExecutionContext",
+    uid: str,
+    resource_type: str,
+    inner: Callable[[], NodeResult],
+) -> NodeResult:
+    """Wrap a node's work in the shared node-lifecycle event protocol.
+
+    Emits NodeStarted/NodeFinished with a monotonic index, times the body, and
+    turns an MbtError into an ``error`` NodeResult. Every runner (and the
+    monitor) shares this so the event contract lives in exactly one place.
+    """
+    bus = get_bus()
+    index = ctx.next_index()
+    bus.emit(
+        NodeStarted(unique_id=uid, resource_type=resource_type, index=index, total=ctx.total_nodes)
+    )
+    started = time.monotonic()
+    try:
+        result = inner()
+    except MbtError as exc:
+        result = NodeResult(unique_id=uid, status="error", message=str(exc))
+    result.execution_time_s = time.monotonic() - started
+    bus.emit(
+        NodeFinished(
+            unique_id=uid,
+            resource_type=resource_type,
+            status=result.status,
+            execution_time_s=result.execution_time_s,
+            index=index,
+            total=ctx.total_nodes,
+            message=result.message,
+        )
+    )
+    return result
+
+
 class DatasetRunner:
     """Materialize (or reuse) a dataset, then run its checks and data tests."""
 
@@ -216,53 +254,28 @@ class DatasetRunner:
         self.ctx = ctx
 
     def run(self, uid: str) -> NodeResult:
-        ctx = self.ctx
-        node = ctx.manifest.nodes[uid]
-        bus = get_bus()
-        index = ctx.next_index()
-        bus.emit(
-            NodeStarted(unique_id=uid, resource_type="dataset", index=index, total=ctx.total_nodes)
+        node = self.ctx.manifest.nodes[uid]
+        return run_with_lifecycle(self.ctx, uid, "dataset", lambda: self._run_inner(uid, node))
+
+    def _run_inner(self, uid: str, node: ManifestNode) -> NodeResult:
+        spec = DatasetSpec.model_validate(node.config)
+        handle = self._materialize(node, spec)
+        self.ctx.store_dataset_handle(uid, handle)
+        tests = self._run_quality(uid, node, spec, handle)
+        failed = [t for t in tests if not t.passed]
+        status = "test_failed" if failed else "success"
+        message = (
+            f"{len(failed)} check/test failure(s): "
+            + "; ".join(f"{t.name}: {t.message}" for t in failed)
+            if failed
+            else None
         )
-        started = time.monotonic()
-        try:
-            spec = DatasetSpec.model_validate(node.config)
-            handle = self._materialize(node, spec)
-            ctx.store_dataset_handle(uid, handle)
-            tests = self._run_quality(uid, node, spec, handle)
-            failed = [t for t in tests if not t.passed]
-            status = "test_failed" if failed else "success"
-            message = (
-                f"{len(failed)} check/test failure(s): "
-                + "; ".join(f"{t.name}: {t.message}" for t in failed)
-                if failed
-                else None
-            )
-            result = NodeResult(
-                unique_id=uid,
-                status=status,  # type: ignore[arg-type]
-                execution_time_s=time.monotonic() - started,
-                tests=[TestResultEntry(**t.model_dump()) for t in tests],
-                message=message,
-            )
-        except MbtError as exc:
-            result = NodeResult(
-                unique_id=uid,
-                status="error",
-                execution_time_s=time.monotonic() - started,
-                message=str(exc),
-            )
-        bus.emit(
-            NodeFinished(
-                unique_id=uid,
-                resource_type="dataset",
-                status=result.status,
-                execution_time_s=result.execution_time_s,
-                index=index,
-                total=ctx.total_nodes,
-                message=result.message,
-            )
+        return NodeResult(
+            unique_id=uid,
+            status=status,  # type: ignore[arg-type]
+            tests=[TestResultEntry(**t.model_dump()) for t in tests],
+            message=message,
         )
-        return result
 
     def _materialize(self, node: ManifestNode, spec: DatasetSpec) -> Any:
         ctx = self.ctx
@@ -301,7 +314,7 @@ class DatasetRunner:
             split: (bounds[0], bounds[1])
             for split, bounds in node.resolved.get("windows", {}).items()
         }
-        build_ctx = _BuildContext(
+        build_ctx = BuildContext(
             node=node,
             source=source_tables[spine_uid],
             source_tables=source_tables,
@@ -348,31 +361,8 @@ class ModelRunner:
         self.ctx = ctx
 
     def run(self, uid: str) -> NodeResult:
-        ctx = self.ctx
-        node = ctx.manifest.nodes[uid]
-        bus = get_bus()
-        index = ctx.next_index()
-        bus.emit(
-            NodeStarted(unique_id=uid, resource_type="model", index=index, total=ctx.total_nodes)
-        )
-        started = time.monotonic()
-        try:
-            result = self._run_inner(uid, node)
-        except MbtError as exc:
-            result = NodeResult(unique_id=uid, status="error", message=str(exc))
-        result.execution_time_s = time.monotonic() - started
-        bus.emit(
-            NodeFinished(
-                unique_id=uid,
-                resource_type="model",
-                status=result.status,
-                execution_time_s=result.execution_time_s,
-                index=index,
-                total=ctx.total_nodes,
-                message=result.message,
-            )
-        )
-        return result
+        node = self.ctx.manifest.nodes[uid]
+        return run_with_lifecycle(self.ctx, uid, "model", lambda: self._run_inner(uid, node))
 
     # -- helpers -------------------------------------------------------------
 
@@ -650,31 +640,8 @@ class ScoringRunner:
         self.ctx = ctx
 
     def run(self, uid: str) -> NodeResult:
-        ctx = self.ctx
-        node = ctx.manifest.nodes[uid]
-        bus = get_bus()
-        index = ctx.next_index()
-        bus.emit(
-            NodeStarted(unique_id=uid, resource_type="scoring", index=index, total=ctx.total_nodes)
-        )
-        started = time.monotonic()
-        try:
-            result = self._run_inner(uid, node)
-        except MbtError as exc:
-            result = NodeResult(unique_id=uid, status="error", message=str(exc))
-        result.execution_time_s = time.monotonic() - started
-        bus.emit(
-            NodeFinished(
-                unique_id=uid,
-                resource_type="scoring",
-                status=result.status,
-                execution_time_s=result.execution_time_s,
-                index=index,
-                total=ctx.total_nodes,
-                message=result.message,
-            )
-        )
-        return result
+        node = self.ctx.manifest.nodes[uid]
+        return run_with_lifecycle(self.ctx, uid, "scoring", lambda: self._run_inner(uid, node))
 
     # -- helpers -------------------------------------------------------------
 
@@ -775,7 +742,7 @@ class ScoringRunner:
             split: (bounds[0], bounds[1])
             for split, bounds in node.resolved.get("windows", {}).items()
         }
-        build_ctx = _BuildContext(
+        build_ctx = BuildContext(
             node=node,
             source=source_tables[spine_uid],
             source_tables=source_tables,
@@ -896,31 +863,8 @@ class ModelTestRunner:
         self._model_runner = ModelRunner(ctx)
 
     def run(self, uid: str) -> NodeResult:
-        ctx = self.ctx
-        node = ctx.manifest.nodes[uid]
-        started = time.monotonic()
-        index = ctx.next_index()
-        bus = get_bus()
-        bus.emit(
-            NodeStarted(unique_id=uid, resource_type="model", index=index, total=ctx.total_nodes)
-        )
-        try:
-            result = self._run_inner(uid, node)
-        except MbtError as exc:
-            result = NodeResult(unique_id=uid, status="error", message=str(exc))
-        result.execution_time_s = time.monotonic() - started
-        bus.emit(
-            NodeFinished(
-                unique_id=uid,
-                resource_type="model",
-                status=result.status,
-                execution_time_s=result.execution_time_s,
-                index=index,
-                total=ctx.total_nodes,
-                message=result.message,
-            )
-        )
-        return result
+        node = self.ctx.manifest.nodes[uid]
+        return run_with_lifecycle(self.ctx, uid, "model", lambda: self._run_inner(uid, node))
 
     def _run_inner(self, uid: str, node: ManifestNode) -> NodeResult:
         ctx = self.ctx

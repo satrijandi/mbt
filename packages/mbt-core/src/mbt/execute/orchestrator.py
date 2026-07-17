@@ -349,7 +349,7 @@ def _execute(
     model_runner = ModelRunner(ctx) if opts.command in ("run", "build") else ModelTestRunner(ctx)
     scoring_runner = ScoringRunner(ctx)
     if opts.command == "score":
-        _require_scoring_capability(ctx)
+        require_scoring_capability(ctx)
 
     def run_node(uid: str) -> NodeResult:
         node = manifest.nodes[uid]
@@ -370,7 +370,7 @@ def _execute(
     )
 
 
-def _require_scoring_capability(ctx: ExecutionContext) -> None:
+def require_scoring_capability(ctx: ExecutionContext) -> None:
     """Fail before any job runs when the data adapter predates contract 1.1."""
     adapter = ctx.data_adapter
     if not (hasattr(adapter, "build_scoring_input") and hasattr(adapter, "open_predictions")):

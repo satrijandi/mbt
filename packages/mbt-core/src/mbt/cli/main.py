@@ -847,7 +847,7 @@ def run_operation(
     verbose: VerboseOpt = False,
 ) -> None:
     """Render a macro with the full compile context (FR-RUN-08)."""
-    from mbt.compile.compiler import _build_resolve_context
+    from mbt.compile.compiler import build_resolve_context
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 
@@ -861,7 +861,7 @@ def run_operation(
             "Adapter-invoking operations are out of scope in v0 (TSD §10.7).",
         )
     macro_args = parse_vars(args)
-    resolve_ctx = _build_resolve_context(parsed, profiles, cli.cli_vars)
+    resolve_ctx = build_resolve_context(parsed, profiles, cli.cli_vars)
     arg_list = ", ".join(f"{k}={json.dumps(v)}" for k, v in macro_args.items())
     rendered = parsed.renderer.resolve(
         {"result": f"{{{{ {macro}({arg_list}) }}}}"},

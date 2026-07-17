@@ -11,7 +11,7 @@ from misc_unit_helpers import RecordingSink, make_node
 from mbt.adapters.local.data import LocalDataAdapter, _uri_to_path
 from mbt.contracts import DatasetLocator, DatasetSpec, ManifestNode, ScoringInputSpec, SourceTable
 from mbt.exceptions import AdapterError
-from mbt.execute.runners import _BuildContext
+from mbt.execute.runners import BuildContext
 
 ANCHOR = datetime(2026, 7, 1)
 ROWS_UID = "source.demo.lakehouse.rows"
@@ -44,8 +44,8 @@ def _ctx(
     node: ManifestNode | None = None,
     windows: dict[str, tuple[str, str]] | None = None,
     sample_fraction: float = 1.0,
-) -> _BuildContext:
-    return _BuildContext(
+) -> BuildContext:
+    return BuildContext(
         node=node or make_node("dataset.demo.churn_random"),
         source=next(iter(tables.values()), SourceTable(name="dummy", path="unused")),
         source_tables=tables,
