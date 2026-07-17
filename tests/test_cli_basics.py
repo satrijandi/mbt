@@ -94,7 +94,13 @@ def test_scaffold_ci_installs_are_pinned(scaffold: Path) -> None:
         pins = (scaffold / name).read_text()
         assert "__MBT_VERSION__" not in pins, f"{name} kept the version token"
         for package in ("mbt-core", "mbt-xgboost", "mbt-mlflow"):
-            assert f"{package}=={mbt.__version__}" in pins, f"{name}: {package} not pinned"
+            # Pinned to an immutable release tag (reproducible, non-floating) yet
+            # installable from a fresh checkout without a private index.
+            ref = (
+                f"{package} @ git+https://github.com/satrijandi/mbt"
+                f"@v{mbt.__version__}#subdirectory=packages/{package}"
+            )
+            assert ref in pins, f"{name}: {package} not pinned to the release tag"
 
 
 def test_scaffold_operational_guardrails(scaffold: Path) -> None:

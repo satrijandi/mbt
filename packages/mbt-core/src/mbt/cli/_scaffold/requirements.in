@@ -1,6 +1,8 @@
 # Direct toolchain dependencies for this project's CI workflows.
-# After editing, regenerate the fully pinned, hash-verified lock:
+# Git refs pin mbt to an immutable release tag (reproducible + installable from
+# a fresh checkout). Once mbt is on PyPI, switch to plain version pins and
+# regenerate the fully pinned, hash-verified lock:
 #   uv pip compile --generate-hashes requirements.in -o requirements.txt
-mbt-core==__MBT_VERSION__
-mbt-xgboost==__MBT_VERSION__
-mbt-mlflow==__MBT_VERSION__
+mbt-core @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-core
+mbt-xgboost @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-xgboost
+mbt-mlflow @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-mlflow

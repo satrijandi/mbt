@@ -99,3 +99,22 @@ package, so transitive drift (numpy, scipy) is visible even when the
 fingerprinted packages match (ADR-19). Executing a stored manifest verifies
 both: an `env_digest` mismatch is a hard error (`--allow-env-mismatch`
 downgrades it), a freeze-only mismatch warns.
+
+## Installing mbt in CI
+
+The scaffolded workflows install the toolchain from `requirements.txt`, which
+pins the mbt packages to an **immutable release tag** via git refs, e.g.:
+
+```text
+mbt-core @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-core
+```
+
+This is reproducible - a tag is immutable, so the training environment never
+floats and the manifest's `env_digest` stays stable - and installs straight
+from a fresh checkout, with no private package index required.
+
+!!! warning "Your CI will not install until the matching `vX.Y.Z` tag exists"
+    The mbt repo's `release.yml` builds that tag's wheels (and, once Trusted
+    Publishing is configured, publishes them to PyPI) when a version tag is
+    pushed. Once mbt is on PyPI you can switch the pins to plain versions
+    (`mbt-core==0.1.0`) and set `PIP_INDEX_URL` if an internal index serves them.

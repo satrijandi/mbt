@@ -1,0 +1,37 @@
+name: release
+
+# Build wheels + cut a GitHub release when a version tag (vX.Y.Z) is pushed.
+#
+# One-time organizational prerequisites (until then this workflow is inert - it
+# only fires on a `v*` tag): create the PyPI projects and configure Trusted
+# Publishing (https://docs.pypi.org/trusted-publishers/) for this repo and the
+# `release` environment. The scaffold's git-ref pins resolve off the same tag,
+# so a fresh user project's CI installs from the tag even before PyPI exists.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # create the GitHub release
+  id-token: write  # PyPI Trusted Publishing (OIDC) - no long-lived API token
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Build all workspace wheels and sdists
+        run: uv build --all-packages
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

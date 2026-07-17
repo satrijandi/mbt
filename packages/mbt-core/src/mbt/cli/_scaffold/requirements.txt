@@ -1,12 +1,16 @@
 # Pinned install set for the reference CI workflows (.github/workflows/*.yml).
 # A floating training environment invalidates the manifest's env digest, so CI
 # always installs from this file, never from bare package names.
-# For a fully transitively pinned, hash-verified lock, run:
+#
+# These git refs pin mbt to an immutable release tag: reproducible AND
+# installable straight from a fresh checkout, with no private index required.
+# They resolve once the matching vX.Y.Z tag exists on the mbt repo - the repo's
+# release.yml builds that tag's wheels and (once configured) publishes them to
+# PyPI at the same time.
+#
+# Once mbt is on PyPI, switch to plain version pins (mbt-core==X.Y.Z) and, for a
+# fully transitively pinned, hash-verified lock, run:
 #   uv pip compile --generate-hashes requirements.in -o requirements.txt
-# and commit the result.
-# NOTE: the mbt packages are not on PyPI yet - until they are, point pip at
-# the index that serves them (e.g. an internal index via PIP_INDEX_URL), or
-# swap these pins for git refs: mbt-core @ git+https://github.com/satrijandi/mbt@<tag>#subdirectory=packages/mbt-core
-mbt-core==__MBT_VERSION__
-mbt-xgboost==__MBT_VERSION__
-mbt-mlflow==__MBT_VERSION__
+mbt-core @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-core
+mbt-xgboost @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-xgboost
+mbt-mlflow @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-mlflow
