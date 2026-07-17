@@ -294,6 +294,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - airflow-dags:/gitsync:ro
+      # LocalExecutor tasks write logs to the scheduler's disk; the
+      # api-server serves them to the UI/REST from the same shared volume -
+      # without it every log request degrades to a secret_key warning.
+      - airflow-logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -312,6 +316,7 @@ services:
     command: dag-processor
     volumes:
       - airflow-dags:/gitsync:ro
+      - airflow-logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -324,6 +329,7 @@ services:
     command: api-server
     volumes:
       - airflow-dags:/gitsync:ro
+      - airflow-logs:/opt/airflow/logs
     ports:
       - "${SHOWCASE_AIRFLOW_PORT:-8280}:8080"
     depends_on:
@@ -383,3 +389,4 @@ volumes:
   seaweed-data:
   mlflow-data:
   airflow-dags:
+  airflow-logs:
