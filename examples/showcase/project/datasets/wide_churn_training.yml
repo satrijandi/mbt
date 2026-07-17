@@ -1,0 +1,41 @@
+# The wide multi-table shape (ADR-22): the population table defines the
+# examples and carries the customer_id-to-safe_id crosswalk, three feature
+# histories join by DIFFERENT keys (transactions only match through the
+# crosswalk), and the outcome joins from one calendar month AFTER each
+# snapshot (time_offset) instead of being pre-aligned upstream.
+datasets:
+  - name: wide_churn_training
+    description: Monthly churn panel joined from population + labels + three feature histories.
+    inputs:
+      population: source('lake', 'monthly_population')
+      label:
+        source: source('lake', 'monthly_labels')
+        using: [customer_id, snapshot_date]
+        time_offset: "1mo"       # outcome recorded at snapshot + 1 month
+      features:
+        - source: source('lake', 'demographic_history')
+          using: [customer_id, snapshot_date]
+        - source: source('lake', 'login_history')
+          using: [customer_id, snapshot_date]
+        - source: source('lake', 'transaction_history')
+          using: [safe_id, snapshot_date]
+    label:
+      column: is_churn
+      definition: "churned during the month after snapshot_date"
+    # Panel sampling: hashing customer_id keeps or drops every snapshot of a
+    # customer together, so `--vars '{sample_fraction: 0.25}'` on the dev
+    # inner loop trains on a coherent quarter of the population.
+    sample_key: customer_id
+    split:
+      strategy: temporal
+      time_column: snapshot_date
+      # Explicit ISO date ranges (the DS pins exact cohort boundaries).
+      # The 2026-06-01 cohort stays out on purpose: it is the scoring batch.
+      train: "2025-07-01:2026-04-01"
+      test: "2026-04-01:2026-06-01"
+    checks:
+      - class_balance_report
+      - no_future_columns
+      - not_null:
+          columns: [is_churn, snapshot_date, customer_id, safe_id]
+    tags: [churn, wide]

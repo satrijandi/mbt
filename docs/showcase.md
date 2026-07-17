@@ -35,6 +35,7 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 `make inject-drift` poisons the scoring batch: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert, and `make score` recovers.
 `make score` and `make monitor` also work standalone: they rerun just the daily scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
 `make monthly` runs the second, cluster-free cadence: the `tag:monthly` churn pipeline trains, promotes, and scores entirely on the DuckDB batch plane over the synced S3 parquet lake.
+`make wide` runs the third, wide multi-table cadence (ADR-22): a monthly population spine with an entity crosswalk, three feature histories joined by different keys, a one-calendar-month label offset, LightGBM feature selection committed as a reviewable diff, sparkling H2O AutoML on the selected columns, and an Evidently drift report beside mbt's own enforcing monitors.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
 The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); phases P1-P6 of its plan are implemented (the k3d/ArgoCD fidelity profile local-only behind its own gate), and a P7 Snowflake warehouse variant is scoped but deliberately parked.
 
@@ -50,6 +51,7 @@ The demo narrative exercises mbt's differentiators against real service boundari
 - CD that promotion never touches: two scheduled score runs straddling a promotion serve different champions while the deploy repo HEAD and the pinned image digest stay byte-identical.
 - Run-time champion resolution (ADR-20): a promotion changes the next scoring run with zero redeploy.
 - Adapter portability on one lake: the monthly cadence trains, scores, and ground-truth-monitors the same project's `tag:monthly` pipeline on the DuckDB local adapter - no cluster - while the daily/weekly cadences use Spark, from the same `sources.yml`.
+- Real training-set topology (ADR-22): the wide cadence declares a population spine whose crosswalk feeds per-table join keys, joins the label from one calendar month after each snapshot, panel-samples by `customer_id` with pushdown hash sampling, prunes ~65 joined columns to a committed LightGBM-selected top-K, and scores the newest cohort through the same multi-table shape - identical declarations on the Spark and DuckDB planes.
 - Prediction-store idempotency (ADR-21): same-anchor re-runs overwrite one `run_key`, new anchors partition.
 - Ground-truth monitoring: realized metrics are evaluated exactly once per prediction run, and a realized-gate breach exits 2, never 1.
 - Observability: `run_results.json` becomes Pushgateway gauges, and injected shift makes the provisioned Prometheus rule actually fire.

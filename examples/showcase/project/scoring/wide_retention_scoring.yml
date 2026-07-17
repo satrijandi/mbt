@@ -1,0 +1,54 @@
+scoring:
+  - name: wide_retention_scoring
+    description: Month-start churn scores for the wide multi-table cadence.
+    owner: lifecycle-eng@example.com
+    tags: [wide]
+
+    model: ref('churn_wide_automl')
+    stage: production              # champion resolved from the registry at run time (ADR-20)
+
+    input:
+      # The same population spine the training dataset declares, minus the
+      # label: the newest month-start cohort joined to its feature histories
+      # (per-table keys, ADR-22) at scoring time.
+      inputs:
+        spine: source('lake', 'monthly_population')
+        features:
+          - source: source('lake', 'demographic_history')
+            using: [customer_id, snapshot_date]
+          - source: source('lake', 'login_history')
+            using: [customer_id, snapshot_date]
+          - source: source('lake', 'transaction_history')
+            using: [safe_id, snapshot_date]
+      time_column: snapshot_date
+      window: "-31d:now"           # exactly the newest month-start cohort
+      sample_key: customer_id
+
+    checks:
+      - not_null:
+          columns: [customer_id, safe_id, snapshot_date]
+
+    monitors:
+      feature_shift:
+        threshold: 0.25
+      prediction_shift:
+        threshold: 0.25
+
+    # Maturity counts from scored_at (the scoring run's anchor, 2026-06-30).
+    # The cohort's outcomes are recorded one month after its snapshot
+    # (2026-07-01), so 14d models label-arrival lag and matures inside the
+    # pinned monitor anchor (2026-07-14 <= 2026-07-20).
+    ground_truth:
+      label:
+        source: source('lake', 'wide_churn_outcomes')
+        column: is_churn
+      join_key: customer_id
+      maturity: "14d"
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('wide_pr_auc_floor') }}"
+
+    output:
+      path: predictions/wide_retention_scores
+      columns: [customer_id, snapshot_date]

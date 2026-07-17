@@ -34,7 +34,7 @@ WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 
-.PHONY: help image workspace up seed down clean urls demo score monthly monitor ci
+.PHONY: help image workspace up seed down clean urls demo score monthly wide monitor ci
 .DEFAULT_GOAL := help
 
 help:
@@ -43,6 +43,7 @@ help:
 	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
 	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
 	@echo "  make monthly       the cluster-free monthly cadence on the DuckDB plane"
+	@echo "  make wide          the wide multi-table cadence (feature selection + sparkling AutoML)"
 	@echo "  make score         rerun daily scoring (lake sync, mbt score, metric push)"
 	@echo "  make monitor       rerun ground-truth monitoring at the pinned anchor"
 	@echo "  make inject-drift  poison the scoring batch and watch MbtShiftBreach fire"
@@ -132,6 +133,7 @@ demo:
 	@echo "==> [3/6] Gate-verified promotion of the freshest staging champions to production"
 	$(EXEC) bash -c 'mbt promote --model churn_automl --to production'
 	$(EXEC) bash -c 'mbt promote --model churn_monthly_xgb --to production'
+	$(EXEC) bash -c 'mbt promote --model churn_wide_automl --to production'
 	@echo "==> [4/6] Sync the lake to the scoring plane"
 	$(EXEC) python /workspace/bootstrap/sync_lake.py
 	@echo "==> [5/6] Batch scoring with the production champion (run-time resolution)"
@@ -162,6 +164,23 @@ monthly:
 monitor:
 	$(EXEC) mbt monitor --target prod_score --anchor $(MONITOR_ANCHOR) --deep-snapshot
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
+
+# The wide multi-table cadence (SHOW-19, ADR-22): population spine + three
+# feature histories joined by different keys, LightGBM feature selection as
+# a committed diff, sparkling AutoML on the selected columns, then the
+# population-form scoring input. `make monitor` evaluates its one-month
+# -later outcomes once they mature.
+wide:
+	$(EXEC) python /workspace/bootstrap/sync_lake.py
+	$(EXEC) mbt build --target dev --select churn_wide_probe --anchor $(ANCHOR)
+	$(EXEC) python scripts/select_features.py
+	$(EXEC) git -C /workspace/project diff --stat -- models/churn_wide_automl.yml || true
+	$(EXEC) mbt build --target prod --select churn_wide_automl --anchor $(ANCHOR)
+	$(EXEC) bash -c 'mbt promote --model churn_wide_automl --to production'
+	$(EXEC) mbt score --target prod_score --select tag:wide --anchor $(ANCHOR) --deep-snapshot
+	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
+	$(EXEC) python scripts/evidently_report.py
+	@echo "drift report: $(SHOWCASE_WORKSPACE)/project/drift_report.html"
 
 # Break the model in production on purpose, then watch the alert fire:
 # shift the scoring batch, score (exit 2 tolerated), push, check Grafana.

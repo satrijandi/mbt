@@ -162,6 +162,7 @@ def test_collection_hygiene_and_double_gate() -> None:
         "test_showcase_obs",
         "test_showcase_provenance",
         "test_showcase_scheduling",
+        "test_showcase_wide",
     ):
         module = importlib.import_module(module_name)
         reasons = [

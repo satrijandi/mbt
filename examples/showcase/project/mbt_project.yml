@@ -9,6 +9,10 @@ vars:
   # snapshots runs a ~9% positive rate (random baseline ~0.09), so the
   # daily/weekly floor would be unreachable there.
   monthly_pr_auc_floor: 0.15
+  # The wide multi-table cadence runs a ~6.5% positive rate (random
+  # baseline ~0.065); 0.15 is meaningfully above it without demanding
+  # heroics from a 3-model AutoML budget.
+  wide_pr_auc_floor: 0.15
 
 model_defaults:
   adapter: xgboost

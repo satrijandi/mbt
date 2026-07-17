@@ -11,9 +11,9 @@ FROM python:3.11-slim-bookworm
 # JRE 17 satisfies Spark 3.5 and H2O; procps because Spark scripts call ps;
 # curl for healthchecks, the s3a jar fetch below, and CI alert webhooks; git
 # for the CI state-branch scripts (fetch_state/publish_state) and the DS
-# clone loop.
+# clone loop; libgomp1 is LightGBM's OpenMP runtime (absent from -slim).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openjdk-17-jre-headless curl procps git \
+    && apt-get install -y --no-install-recommends openjdk-17-jre-headless curl procps git libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY dist/ /opt/mbt/dist/
@@ -23,11 +23,15 @@ COPY constraints.txt /opt/mbt/constraints.txt
 # constraints.txt pins everything else to uv.lock versions. The cache mount
 # survives rebuilds so the ~800MB of JVM sdists download once; timeouts are
 # generous because pypi serves those sdists slowly.
+# mbt-lightgbm powers the wide cadence's feature-selection probe; evidently
+# (pinned here - it is a showcase-image dep, never an mbt dep) renders the
+# DS-facing drift report in scripts/evidently_report.py.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout 300 --retries 10 \
     --find-links /opt/mbt/dist \
     --constraint /opt/mbt/constraints.txt \
-    "mbt-core[s3]" "mbt-h2o[sparkling]" mbt-spark mbt-xgboost mbt-mlflow \
+    "mbt-core[s3]" "mbt-h2o[sparkling]" mbt-spark mbt-xgboost mbt-lightgbm \
+    mbt-mlflow evidently==0.7.20 \
     jupyterlab
 
 # s3a support for the SeaweedFS lake: hadoop-aws must match the hadoop client

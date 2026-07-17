@@ -138,8 +138,8 @@ def test_runbook_golden_path(runbook) -> None:
     runner.make("up")
     assert (ws / "project" / "mbt_project.yml").exists(), "workspace was not staged"
 
-    # The narrated lifecycle: dev + prod builds, both champions promoted,
-    # both cadences scored, ground truth monitored.
+    # The narrated lifecycle: dev + prod builds, all champions promoted,
+    # every cadence scored, ground truth monitored.
     runner.make("demo")
     daily_runs = list((ws / "lake_local" / "predictions" / "retention_scores").glob("*/_SUCCESS"))
     assert daily_runs, "demo left no daily prediction runs"
@@ -147,6 +147,15 @@ def test_runbook_golden_path(runbook) -> None:
         (ws / "lake_local" / "predictions" / "monthly_retention_scores").glob("*/_SUCCESS")
     )
     assert monthly_runs, "demo left no monthly prediction runs"
+    wide_runs = list(
+        (ws / "lake_local" / "predictions" / "wide_retention_scores").glob("*/_SUCCESS")
+    )
+    assert wide_runs, "demo left no wide-cadence prediction runs"
+
+    # The wide cadence's own runbook target: probe -> committed selection
+    # diff -> sparkling AutoML -> score -> Evidently report.
+    runner.make("wide")
+    assert (ws / "project" / "drift_report.html").exists(), "make wide left no drift report"
 
     # The CI seeding target, then the two things its output tells a human
     # to do: open the repo URL and log into Woodpecker with the Gitea

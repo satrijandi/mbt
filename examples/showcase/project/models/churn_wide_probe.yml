@@ -1,0 +1,37 @@
+# The feature-selection probe: a fast LightGBM over ALL ~65 joined columns
+# whose normalized gain importance (exported into target/run_results.json)
+# feeds scripts/select_features.py. The script distills the top-K into
+# churn_wide_automl's committed include list, so the AutoML model never has
+# to chew through the filler columns - and the selection itself is a
+# reviewable diff, not a hidden training-time step.
+models:
+  - name: churn_wide_probe
+    description: "LightGBM importance probe over the full wide feature set (selection tool, not a serving model)"
+    task: binary_classification
+    adapter: lightgbm
+    owner: growth-ds@example.com
+    tags: [churn, wide]
+
+    dataset: ref('wide_churn_training')
+
+    target: is_churn
+    features:
+      include: ["*"]
+      exclude: [customer_id, safe_id]   # entity ids are join keys, not features
+
+    hyperparameters:
+      n_estimators: 120
+      num_leaves: 31
+      learning_rate: 0.1
+      scale_pos_weight: "{{ auto }}"
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('wide_pr_auc_floor') }}"
+
+    # No registration: the probe exists for its feature_importance export.
+
+    seed: 42
