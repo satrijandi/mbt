@@ -33,6 +33,7 @@ from mbt.execute.runners import (
     ModelRunner,
     ModelTestRunner,
     ScoringRunner,
+    evaluation_node_result,
 )
 from mbt.execute.scheduler import execute_plan
 from mbt.parsing import ParsedProject, parse_project
@@ -470,29 +471,16 @@ def run_evaluate(
         job_result, gates = model_runner.evaluate_artifact(
             node, spec, resolved_version.artifact, apply_gates=apply_gates
         )
-        if job_result.status == "error" or job_result.metrics is None:
-            results.append(
-                NodeResult(
-                    unique_id=model_uid,
-                    status="error",
-                    message=job_result.error or "no metrics",
-                )
+        results.append(
+            evaluation_node_result(
+                model_uid,
+                job_result,
+                gates,
+                pass_status="success",
+                fail_status="gate_failed",
+                gated=apply_gates and bool(spec.evaluation.gates),
             )
-        else:
-            status = "success"
-            if apply_gates and spec.evaluation.gates:
-                from mbt.quality.gates import all_gates_passed
-
-                status = "success" if all_gates_passed(gates) else "gate_failed"
-            results.append(
-                NodeResult(
-                    unique_id=model_uid,
-                    status=status,  # type: ignore[arg-type]
-                    metrics=dict(job_result.metrics.metrics),
-                    slices=dict(job_result.metrics.slices),
-                    gates=gates,
-                )
-            )
+        )
 
     run_results = RunResults(
         metadata=RunResultsMetadata(

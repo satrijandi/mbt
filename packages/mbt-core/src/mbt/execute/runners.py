@@ -82,6 +82,41 @@ def _gate_failure_summary(gates: list[GateResult]) -> str:
     return "gate breach: " + "; ".join(parts) if parts else "one or more gates failed"
 
 
+def evaluation_node_result(
+    uid: str,
+    job_result: JobResult,
+    gates: list[GateResult],
+    *,
+    pass_status: str,
+    fail_status: str,
+    gated: bool = True,
+    include_feature_importance: bool = False,
+    include_message: bool = False,
+) -> NodeResult:
+    """Assemble a NodeResult from an ``evaluate_artifact`` outcome.
+
+    Shared by ``mbt test`` (ModelTestRunner) and ``mbt evaluate`` (run_evaluate)
+    so the two cannot drift on error handling or the metrics/slices/gates shape.
+    Callers own only what genuinely differs: the pass/fail status names, whether
+    gates apply (evaluate can skip them), and whether feature importance and a
+    gate-failure message are surfaced (test surfaces both; evaluate neither).
+    """
+    if job_result.status == "error" or job_result.metrics is None:
+        return NodeResult(unique_id=uid, status="error", message=job_result.error or "no metrics")
+    passed = all_gates_passed(gates) if gated else True
+    return NodeResult(
+        unique_id=uid,
+        status=(pass_status if passed else fail_status),  # type: ignore[arg-type]
+        metrics=dict(job_result.metrics.metrics),
+        slices=dict(job_result.metrics.slices),
+        gates=gates,
+        feature_importance=(
+            dict(job_result.feature_importance) if include_feature_importance else {}
+        ),
+        message=_gate_failure_summary(gates) if include_message and not passed else None,
+    )
+
+
 @dataclass
 class ExecutionContext:
     """Everything runners need for one invocation."""
@@ -888,17 +923,12 @@ class ModelTestRunner:
             return NodeResult(unique_id=uid, status="skipped", message="no registered version")
 
         job_result, gates = self._model_runner.evaluate_artifact(node, spec, version.artifact)
-        if job_result.status == "error" or job_result.metrics is None:
-            return NodeResult(
-                unique_id=uid, status="error", message=job_result.error or "no metrics"
-            )
-        passed = all_gates_passed(gates)
-        return NodeResult(
-            unique_id=uid,
-            status="success" if passed else "test_failed",
-            metrics=dict(job_result.metrics.metrics),
-            slices=dict(job_result.metrics.slices),
-            gates=gates,
-            feature_importance=dict(job_result.feature_importance),
-            message=None if passed else _gate_failure_summary(gates),
+        return evaluation_node_result(
+            uid,
+            job_result,
+            gates,
+            pass_status="success",
+            fail_status="test_failed",
+            include_feature_importance=True,
+            include_message=True,
         )
