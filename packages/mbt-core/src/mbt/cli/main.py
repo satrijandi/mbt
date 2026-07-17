@@ -875,6 +875,25 @@ def main() -> None:
     except (click.Abort, typer_click_exc.Abort):
         err_console.print("aborted")
         sys.exit(1)
+    except Exception as exc:
+        # Coordinator-side safety net: the job subprocess already wraps any
+        # non-MbtError crash into a structured error row (execute/job.py), but
+        # the coordinator half had no equivalent, so a stray assert/ValueError
+        # in parse/compile surfaced as a raw traceback. Redact (the error path
+        # is a serialization path too) and point at a bug report; MBT_DEBUG=1
+        # re-raises so that report can capture the full traceback.
+        if os.environ.get("MBT_DEBUG"):
+            raise
+        from mbt.secrets import redact
+
+        err_console.print(
+            f"[bold red]Internal error:[/bold red] {redact(f'{type(exc).__name__}: {exc}')}"
+        )
+        err_console.print(
+            "  [yellow]hint:[/yellow] this is a bug in mbt; please report it with the "
+            "command you ran. Set MBT_DEBUG=1 to see the full traceback."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

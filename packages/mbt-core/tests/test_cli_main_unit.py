@@ -526,6 +526,39 @@ def test_main_handles_abort(
     assert "aborted" in capsys.readouterr().err
 
 
+def test_main_wraps_unexpected_errors_as_internal_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mbt.cli import main as cli_main
+
+    def raise_unexpected(standalone_mode: bool = True) -> None:
+        raise ValueError("kaboom")  # a non-MbtError from the coordinator
+
+    monkeypatch.delenv("MBT_DEBUG", raising=False)
+    monkeypatch.setattr(cli_main, "app", raise_unexpected)
+    monkeypatch.setattr(sys, "argv", ["mbt"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.main()
+    assert excinfo.value.code == 1  # hard error, not a raw traceback
+    err = capsys.readouterr().err
+    assert "Internal error" in err
+    assert "ValueError: kaboom" in err
+    assert "MBT_DEBUG=1" in err
+
+
+def test_main_debug_env_reraises_unexpected_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mbt.cli import main as cli_main
+
+    def raise_unexpected(standalone_mode: bool = True) -> None:
+        raise ValueError("kaboom")
+
+    monkeypatch.setenv("MBT_DEBUG", "1")
+    monkeypatch.setattr(cli_main, "app", raise_unexpected)
+    monkeypatch.setattr(sys, "argv", ["mbt"])
+    with pytest.raises(ValueError, match="kaboom"):  # re-raised for the traceback
+        cli_main.main()
+
+
 # re-running an already-imported module is the point here, so runpy's
 # "found in sys.modules" warning is expected noise
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")

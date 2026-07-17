@@ -314,6 +314,10 @@ def _check_class_balance_report(
     return TestResult(name="class_balance_report", passed=True, message=message)
 
 
+#: Name -> implementation. Its keys must match BUILTIN_CHECK_NAMES exactly
+#: (pinned by test_check_names_match_dispatch_table); the names live in the
+#: import-light check_names module so the parser can validate against them
+#: without importing this module's duckdb/pyarrow dependencies.
 _CHECKS = {
     "schema": _check_schema,
     "not_null": _check_not_null,
@@ -321,5 +325,3 @@ _CHECKS = {
     "label_leakage_scan": _check_label_leakage_scan,
     "class_balance_report": _check_class_balance_report,
 }
-
-BUILTIN_CHECK_NAMES = frozenset(_CHECKS)

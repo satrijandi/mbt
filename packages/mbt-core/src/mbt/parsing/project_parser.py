@@ -41,6 +41,7 @@ from mbt.parsing.loader import (
     load_yaml_mapping,
     validate_resource,
 )
+from mbt.quality.check_names import BUILTIN_CHECK_NAMES, SCORING_CHECK_NAMES
 from mbt.quality.metrics import resolve_metric, resolve_model_metrics
 from mbt.quality.python_tests import PythonTestFile, discover_python_tests
 from mbt.utils import did_you_mean
@@ -58,17 +59,15 @@ _ROOT_FILES = (
     "exposures.yaml",
 )
 
-_BUILTIN_CHECKS = {
-    "no_future_columns",
-    "label_leakage_scan",
-    "class_balance_report",
-    "schema",
-    "not_null",
-}
+#: Built-in checks a user may declare, from the single authoritative source
+#: (mbt.quality.check_names). Importing the names - not the implementations -
+#: keeps duckdb/pyarrow off the parse path (ADR-14) while making the parser and
+#: the check registry impossible to drift apart.
+_BUILTIN_CHECKS = BUILTIN_CHECK_NAMES
 
 #: Checks valid on a scoring input: no label exists, so label-dependent
 #: checks are rejected (ADR-20).
-_SCORING_CHECKS = {"schema", "not_null", "no_future_columns"}
+_SCORING_CHECKS = SCORING_CHECK_NAMES
 
 
 @dataclass(frozen=True)

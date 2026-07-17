@@ -52,3 +52,25 @@ def test_no_future_columns_skips_absent_splits() -> None:
     results = {r.name: r for r in run_checks(spec, _handle(), windows, resource="dataset.unit")}
     check = results["no_future_columns"]
     assert check.passed and check.message == ""
+
+
+def test_check_names_match_dispatch_table() -> None:
+    """The name registry and the impl dispatch table are one source of truth:
+    every declared name has an implementation and vice versa, so a check added
+    to only one side fails loudly here instead of becoming a confusing
+    'unknown dataset check' at parse time."""
+    from mbt.quality.check_names import BUILTIN_CHECK_NAMES, SCORING_CHECK_NAMES
+    from mbt.quality.checks import _CHECKS
+
+    assert set(_CHECKS) == set(BUILTIN_CHECK_NAMES)
+    assert SCORING_CHECK_NAMES <= BUILTIN_CHECK_NAMES
+
+
+def test_parser_validates_against_shared_check_names() -> None:
+    """The parser derives its valid-check sets from the authoritative module
+    rather than re-listing them (the drift the shared source removes)."""
+    from mbt.parsing import project_parser
+    from mbt.quality.check_names import BUILTIN_CHECK_NAMES, SCORING_CHECK_NAMES
+
+    assert project_parser._BUILTIN_CHECKS is BUILTIN_CHECK_NAMES
+    assert project_parser._SCORING_CHECKS is SCORING_CHECK_NAMES
