@@ -33,7 +33,7 @@ After `make demo`, look at:
 - **Lake browser** (SeaweedFS filer UI, no login): the seeded gold tables under `/buckets/mbt-lake/` and the MLflow artifacts under `/buckets/mbt-artifacts/`.
   The raw S3 API port accepts signed requests only (`mbtadmin`/`mbtsecret`), so a bare browser GET there returns `AccessDenied` by design - browse through the filer UI instead.
 - **Grafana** (`admin`/`admin`): the "mbt Model Health" dashboard - gate margins, realized metrics, shift-vs-threshold.
-- **Predictions** on disk: `~/.cache/mbt-showcase/workspace/lake_local/predictions/retention_scores/<run_key>/`.
+- **Predictions** on disk, one directory per cadence under `~/.cache/mbt-showcase/workspace/lake_local/predictions/`: `retention_scores/<run_key>/` (daily), `monthly_retention_scores/` and `wide_retention_scores/` likewise.
 - `make inject-drift` then Grafana/Prometheus: the scoring batch is poisoned, `mbt score` exits 2 (mbt enforces), and the pushed breach fires the `MbtShiftBreach` alert (observability observes). `make score` recovers.
 
 `make score` and `make monitor` also work standalone: they rerun just the daily scoring stage (lake sync, `mbt score --select tag:daily`, metric push) or just the ground-truth monitoring stage (all matured cadences), with the same pinned anchors as the demo.

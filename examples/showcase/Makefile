@@ -143,7 +143,7 @@ demo:
 	$(EXEC) mbt monitor --target prod_score --anchor $(MONITOR_ANCHOR) --deep-snapshot
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
 	@echo ""
-	@echo "Predictions: $(SHOWCASE_WORKSPACE)/lake_local/predictions/retention_scores/"
+	@echo "Predictions (one dir per cadence): $(SHOWCASE_WORKSPACE)/lake_local/predictions/"
 	@$(MAKE) urls
 
 score:
