@@ -143,6 +143,32 @@ def test_multi_table_spine_join(tmp_path: Path) -> None:
     assert "monthly_usage" in table.column_names
 
 
+def test_per_table_using_columns_on_scoring_features(tmp_path: Path) -> None:
+    """Feature entries with their own join columns (ADR-22) at scoring time."""
+    _write_batch(tmp_path)
+    _write_features(tmp_path)
+    adapter = LocalDataAdapter({"root": str(tmp_path)})
+    tables = {
+        "source.demo.lakehouse.batch": SourceTable(name="batch", path="data/batch/*.parquet"),
+        "source.demo.lakehouse.usage": SourceTable(name="usage", path="data/usage/*.parquet"),
+    }
+    spec = ScoringInputSpec.model_validate(
+        {
+            "inputs": {
+                "spine": "source.demo.lakehouse.batch",
+                "features": [{"source": "source.demo.lakehouse.usage", "using": ["user_id"]}],
+            }
+        }
+    )
+    assert spec.inputs is not None
+    assert spec.inputs.feature_sources == ["source.demo.lakehouse.usage"]
+    ctx, _ = _ctx(adapter, tables, tmp_path / "target/scoring_inputs/batch_scoring/k5")
+    handle = adapter.build_scoring_input(spec, ctx)
+    table = handle.read("score")
+    assert table.num_rows == 30
+    assert "monthly_usage" in table.column_names
+
+
 def test_zero_rows_warns_instead_of_failing(tmp_path: Path) -> None:
     _write_batch(tmp_path)
     adapter = LocalDataAdapter({"root": str(tmp_path)})

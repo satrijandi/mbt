@@ -139,6 +139,52 @@ datasets:
   query. Same fraction -> same rows; smaller fractions are subsets of
   larger ones. Strongly recommended on wide tables.
 
+### Population spines, per-table join keys, and label offsets (ADR-22)
+
+When the examples are defined by a population/cohort table rather than the
+label table - and feature tables join by different keys - declare a
+`population` spine:
+
+```yaml
+datasets:
+  - name: wide_churn_training
+    inputs:
+      population: source('lake', 'monthly_population')  # spine: defines examples
+      label:
+        source: source('lake', 'monthly_labels')
+        using: [customer_id, snapshot_date]
+        time_offset: "1mo"      # label.snapshot_date = spine's + 1 calendar month
+      features:
+        - source: source('lake', 'demographic_history')
+          using: [customer_id, snapshot_date]
+        - source: source('lake', 'transaction_history')
+          using: [safe_id, snapshot_date]   # key introduced by the population
+    sample_key: [customer_id]   # panel sampling: keeps whole customers
+    label:
+      column: is_churn
+    split:
+      strategy: temporal
+      time_column: snapshot_date
+      train: "2025-07-01:2026-04-01"    # explicit ISO date ranges work too
+      test: "2026-04-01:2026-06-02"
+```
+
+- Feature entries are bare `source()` strings (joined by `join_key`) or
+  `{source, using}` mappings with their own USING-style columns, applied in
+  declaration order - so a column introduced by an earlier join (the
+  population's `safe_id`) is usable by a later one. The field is named
+  `using`, not `on`: bare `on` is a YAML 1.1 boolean.
+- The label join is always **inner** when a population is present: an
+  example without an observed outcome is not a training example, so
+  population rows whose labels have not matured yet drop out.
+- `time_offset` (`1mo`, `-28d`, `2w`, `12h`; `mo` is a calendar month)
+  shifts the spine's `split.time_column` when matching the label's
+  same-named column, declaring the outcome's observation delay instead of
+  pre-aligning dates upstream. The label's join columns are projected away;
+  the spine's prediction date is the one true `time_column`.
+- Scoring inputs mirror this shape with `spine:` (the same population
+  table, no label) and the same per-table `using` support.
+
 ### Warehouse sources (Snowflake)
 
 ```yaml
@@ -253,6 +299,7 @@ scoring:
       source: source('lakehouse', 'scoring_batch')
       # or multi-table, like dataset inputs but with a spine instead of a label:
       # inputs: {spine: source(...), features: [source(...)], join_key: user_id}
+      # feature entries may carry their own columns: {source: ..., using: [...]}
       filters: ["is_active = true"]     # SQL WHERE fragments, ANDed
       time_column: snapshot_date        # optional
       window: "-7d:now"                 # optional; resolved against the anchor

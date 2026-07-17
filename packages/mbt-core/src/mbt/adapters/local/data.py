@@ -41,6 +41,16 @@ from mbt_adapter_base.materialization import (
     write_materialization_metadata,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore
+from mbt_adapter_base.specs import parse_time_offset
+
+#: time_offset units -> SQL interval keywords (calendar month included).
+_INTERVAL_UNITS = {"mo": "MONTH", "d": "DAY", "w": "WEEK", "h": "HOUR"}
+
+
+def _interval_sql(count: int, unit: str) -> str:
+    """``(1, "mo")`` -> ``+ INTERVAL 1 MONTH`` (sign as the operator)."""
+    operator = "-" if count < 0 else "+"
+    return f"{operator} INTERVAL {abs(count)} {_INTERVAL_UNITS[unit]}"
 
 
 def _uri_to_path(uri: str) -> Path:
@@ -65,35 +75,53 @@ class LocalDatasetHandle(MaterializedDatasetHandle):
 
 
 @dataclass(frozen=True)
+class _LabelJoin:
+    """The label table joined onto a population spine (ADR-22)."""
+
+    uid: str
+    using: list[str]
+    time_offset: tuple[int, str] | None  # parsed (count, unit)
+    time_column: str | None  # the join column the offset shifts
+
+
+@dataclass(frozen=True)
 class _RelationSpec:
     """The FROM-clause shape shared by datasets and scoring inputs."""
 
-    spine: str  # uid of the single source, or of the spine/label table
-    features: list[str]  # feature table uids; empty for single-source
-    join_columns: list[str]
+    spine: str  # uid of the single source, or of the spine table
+    features: list[tuple[str, list[str]]]  # (uid, on-columns), declaration order
     join: str  # "left" | "inner"
+    label: _LabelJoin | None = None  # only for population-spine datasets
 
 
 def _dataset_relation(spec: DatasetSpec) -> _RelationSpec:
     if spec.inputs is None:
         assert spec.source is not None
-        return _RelationSpec(spine=spec.source, features=[], join_columns=[], join="left")
+        return _RelationSpec(spine=spec.source, features=[], join="left")
+    label: _LabelJoin | None = None
+    if spec.inputs.population is not None:
+        offset = spec.inputs.label_time_offset
+        label = _LabelJoin(
+            uid=spec.inputs.label_source,
+            using=spec.inputs.label_join_columns,
+            time_offset=parse_time_offset(offset) if offset is not None else None,
+            time_column=spec.split.time_column,
+        )
     return _RelationSpec(
-        spine=spec.inputs.label,
-        features=list(spec.inputs.features),
-        join_columns=spec.inputs.join_columns,
+        spine=spec.inputs.spine,
+        features=spec.inputs.feature_entries,
         join=spec.inputs.join,
+        label=label,
     )
 
 
 def _scoring_relation(spec: ScoringInputSpec) -> _RelationSpec:
     if spec.inputs is None:
         assert spec.source is not None
-        return _RelationSpec(spine=spec.source, features=[], join_columns=[], join="left")
+        return _RelationSpec(spine=spec.source, features=[], join="left")
     return _RelationSpec(
         spine=spec.inputs.spine,
-        features=list(spec.inputs.features),
-        join_columns=spec.inputs.join_columns,
+        features=spec.inputs.feature_entries,
         join=spec.inputs.join,
     )
 
@@ -219,18 +247,44 @@ class LocalDataAdapter:
         files = ", ".join(_sql_str(str(f)) for f in self._matching_files(table))
         return f"read_parquet([{files}])"
 
-    def _base_relation(self, rel: _RelationSpec, ctx: DataBuildContext) -> str:
-        """FROM clause: the single source, or spine + feature joins."""
-        if not rel.features:
-            return self._table_relation(ctx, rel.spine)
-        using = ", ".join(_quote(c) for c in rel.join_columns)
+    def _base_relation(self, rel: _RelationSpec, ctx: DataBuildContext) -> tuple[str, list[str]]:
+        """FROM clause plus columns to project away afterwards.
+
+        The single source, or spine + feature USING joins in declaration
+        order; a population-spine label joins last via a rename-project
+        subquery (its join columns cannot merge through USING when the
+        time offset shifts them, so they are renamed, matched with ON, and
+        excluded from the output - ADR-22).
+        """
+        if not rel.features and rel.label is None:
+            return self._table_relation(ctx, rel.spine), []
         join_kind = "LEFT JOIN" if rel.join == "left" else "JOIN"
         sql = f"{self._table_relation(ctx, rel.spine)} AS mbt_spine"
-        for i, feature_uid in enumerate(rel.features):
+        for i, (feature_uid, on) in enumerate(rel.features):
+            using = ", ".join(_quote(c) for c in on)
             sql += (
                 f" {join_kind} {self._table_relation(ctx, feature_uid)} AS mbt_f{i} USING ({using})"
             )
-        return sql
+        if rel.label is None:
+            return sql, []
+        renames = {c: f"__mbt_lbl{i}" for i, c in enumerate(rel.label.using)}
+        rename_sql = ", ".join(f"{_quote(c)} AS {alias}" for c, alias in renames.items())
+        conditions = []
+        for column, alias in renames.items():
+            if rel.label.time_offset is not None and column == rel.label.time_column:
+                count, unit = rel.label.time_offset
+                interval = _interval_sql(count, unit)
+                conditions.append(
+                    f"CAST({alias} AS TIMESTAMP) = CAST({_quote(column)} AS TIMESTAMP) {interval}"
+                )
+            else:
+                conditions.append(f"{alias} = {_quote(column)}")
+        sql += (
+            f" JOIN (SELECT * RENAME ({rename_sql}) FROM "
+            f"{self._table_relation(ctx, rel.label.uid)}) AS mbt_label "
+            f"ON {' AND '.join(conditions)}"
+        )
+        return sql, list(renames.values())
 
     def _digest_columns(
         self, con: "duckdb.DuckDBPyConnection", sample_keys: list[str], relation: str
@@ -254,7 +308,7 @@ class LocalDataAdapter:
         filters: list[str],
         sample_keys: list[str],
     ) -> None:
-        relation = self._base_relation(rel, ctx)
+        relation, exclude = self._base_relation(rel, ctx)
         where: list[str] = [f"({f})" for f in filters]
         sample_fraction = ctx.sample_fraction
         if not 0.0 < sample_fraction <= 1.0:
@@ -267,7 +321,8 @@ class LocalDataAdapter:
             threshold = int(sample_fraction * SAMPLE_MODULUS)
             where.append(f"({digest} % {SAMPLE_MODULUS}) < {threshold}")
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-        con.execute(f"CREATE TEMP VIEW mbt_base AS SELECT * FROM {relation}{where_sql}")
+        select = f"* EXCLUDE ({', '.join(exclude)})" if exclude else "*"
+        con.execute(f"CREATE TEMP VIEW mbt_base AS SELECT {select} FROM {relation}{where_sql}")
 
     def _write_temporal_splits(
         self,

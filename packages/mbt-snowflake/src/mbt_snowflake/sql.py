@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime
 
-from mbt_adapter_base import DatasetSpec
+from mbt_adapter_base import DatasetSpec, parse_time_offset
 from mbt_adapter_base.materialization import SAMPLE_MODULUS
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -78,17 +78,60 @@ def sampling_predicate(key_columns: list[str], fraction: float) -> str:
     return f"{key_hash_expr(key_columns)} < {threshold}"
 
 
-def base_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> str:
-    """FROM clause: single table, or label spine + feature joins by key."""
+#: time_offset units -> SQL interval keywords (calendar month included).
+_INTERVAL_UNITS = {"mo": "MONTH", "d": "DAY", "w": "WEEK", "h": "HOUR"}
+
+
+def _interval_sql(count: int, unit: str) -> str:
+    """``(1, "mo")`` -> ``+ INTERVAL '1 MONTH'`` (sign as the operator).
+
+    The quoted-interval spelling is shared by Snowflake and DuckDB, so the
+    emulation tests run the generated SQL verbatim.
+    """
+    operator = "-" if count < 0 else "+"
+    return f"{operator} INTERVAL '{abs(count)} {_INTERVAL_UNITS[unit]}'"
+
+
+def base_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> tuple[str, list[str]]:
+    """FROM clause plus columns to project away afterwards.
+
+    Single table, or spine + feature USING joins in declaration order; a
+    population-spine label joins last through a rename-project subquery
+    (ADR-22): its join columns are renamed, matched with ON so the
+    time_offset can shift the spine's time column, and excluded from the
+    output by the caller.
+    """
     if spec.inputs is None:
         assert spec.source is not None
-        return table_refs[spec.source]
-    using = ", ".join(validate_column(c) for c in spec.inputs.join_columns)
+        return table_refs[spec.source], []
     join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
-    sql = f"{table_refs[spec.inputs.label]} AS mbt_label"
-    for i, feature_uid in enumerate(spec.inputs.features):
+    sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
+    for i, (feature_uid, using_cols) in enumerate(spec.inputs.feature_entries):
+        using = ", ".join(validate_column(c) for c in using_cols)
         sql += f" {join_kind} {table_refs[feature_uid]} AS mbt_f{i} USING ({using})"
-    return sql
+    if spec.inputs.population is None:
+        return sql, []
+    renames = {
+        validate_column(c): f"__mbt_lbl{i}" for i, c in enumerate(spec.inputs.label_join_columns)
+    }
+    rename_sql = ", ".join(f"{c} AS {alias}" for c, alias in renames.items())
+    offset = spec.inputs.label_time_offset
+    conditions = []
+    for column, alias in renames.items():
+        if offset is not None and column == spec.split.time_column:
+            count, unit = parse_time_offset(offset)
+            conditions.append(
+                f"CAST({alias} AS TIMESTAMP) = "
+                f"CAST({column} AS TIMESTAMP) {_interval_sql(count, unit)}"
+            )
+        else:
+            conditions.append(f"{alias} = {column}")
+    sql += (
+        f" JOIN (SELECT * RENAME ({rename_sql}) FROM "
+        f"{table_refs[spec.inputs.label_source]}) AS mbt_label "
+        f"ON {' AND '.join(conditions)}"
+    )
+    return sql, list(renames.values())
 
 
 def _iso_to_ntz(iso: str) -> str:
@@ -102,10 +145,12 @@ def split_queries(
     relation: str,
     where: list[str],
     resolved_windows: Mapping[str, tuple[str, str]],
+    exclude: list[str] | None = None,
 ) -> dict[str, str]:
     """One SELECT per split, filters/sampling/split predicates pushed down."""
     queries: dict[str, str] = {}
     base_where = list(where)
+    select = f"* EXCLUDE ({', '.join(exclude)})" if exclude else "*"
 
     if spec.split.strategy.value == "temporal":
         assert spec.split.time_column is not None
@@ -116,7 +161,7 @@ def split_queries(
                 f"{time_sql} >= TO_TIMESTAMP_NTZ('{_iso_to_ntz(start)}')",
                 f"{time_sql} < TO_TIMESTAMP_NTZ('{_iso_to_ntz(end)}')",
             ]
-            queries[split] = f"SELECT * FROM {relation} WHERE {' AND '.join(predicates)}"
+            queries[split] = f"SELECT {select} FROM {relation} WHERE {' AND '.join(predicates)}"
         return queries
 
     # random strategy: deterministic hash buckets over the sample key.
@@ -139,6 +184,6 @@ def split_queries(
         lo = int(low * SAMPLE_MODULUS)
         hi = int((low + fraction) * SAMPLE_MODULUS)
         predicates = [*base_where, f"{bucket} >= {lo}", f"{bucket} < {hi}"]
-        queries[split] = f"SELECT * FROM {relation} WHERE {' AND '.join(predicates)}"
+        queries[split] = f"SELECT {select} FROM {relation} WHERE {' AND '.join(predicates)}"
         low += fraction
     return queries

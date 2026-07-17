@@ -56,6 +56,13 @@ def test_multi_table_inputs_need_features_and_join_key() -> None:
         )
 
 
+def test_feature_entries_need_join_columns_from_somewhere() -> None:
+    with pytest.raises(ValidationError, match="has no join columns"):
+        ScoringInputSpec.model_validate(
+            {"inputs": {"spine": "source('a', 'c')", "features": ["source('a', 'd')"]}}
+        )
+
+
 def test_ground_truth_gate_metric_must_be_declared() -> None:
     with pytest.raises(ValidationError, match=r"must appear in ground_truth\.metrics"):
         ScoringSpec.model_validate(

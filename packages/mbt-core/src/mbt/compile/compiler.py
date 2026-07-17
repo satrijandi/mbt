@@ -388,7 +388,7 @@ def _scoring_snapshot(spec: ScoringSpec, snapshots: dict[str, str | None]) -> st
         uids = [spec.input.source]
     else:
         assert spec.input.inputs is not None  # source XOR inputs, validated
-        uids = [spec.input.inputs.spine, *spec.input.inputs.features]
+        uids = [spec.input.inputs.spine, *spec.input.inputs.feature_sources]
     return combine_snapshots({uid: snapshots[uid] for uid in uids if uid in snapshots})
 
 

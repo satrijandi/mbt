@@ -185,6 +185,108 @@ def test_build_dataset_joins_windows_and_reproducible_sampling(
     assert reopened.read("test").num_rows == handle.read("test").num_rows
 
 
+def test_population_spine_with_label_offset_on_spark(tmp_path: Path) -> None:
+    """ADR-22 on the Spark plane: population spine, per-table using columns,
+    and the calendar-month label offset via an expression join."""
+    months = [datetime(2026, m, 1) for m in range(1, 8)]
+    root = _mk(tmp_path / "src")
+    population_rows = [(cid, f"sf-{cid}", when) for when in months[:-1] for cid in range(40)]
+    pq.write_table(
+        pa.table(
+            {
+                "customer_id": [r[0] for r in population_rows],
+                "safe_id": [r[1] for r in population_rows],
+                "snapshot_date": [r[2] for r in population_rows],
+            }
+        ),
+        _mk(root / "population") / "part-000.parquet",
+    )
+    label_rows = [
+        (cid, months[i + 1], (cid + i) % 2) for i in range(len(months) - 1) for cid in range(40)
+    ]
+    pq.write_table(
+        pa.table(
+            {
+                "customer_id": [r[0] for r in label_rows],
+                "snapshot_date": [r[1] for r in label_rows],
+                "churned": [r[2] for r in label_rows],
+            }
+        ),
+        _mk(root / "monthly_labels") / "part-000.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "safe_id": [r[1] for r in population_rows],
+                "snapshot_date": [r[2] for r in population_rows],
+                "txn_total": [float(r[0] % 300) for r in population_rows],
+            }
+        ),
+        _mk(root / "txn") / "part-000.parquet",
+    )
+    pop_uid = "source.p.lake.population"
+    lbl_uid = "source.p.lake.monthly_labels"
+    txn_uid = "source.p.lake.txn"
+    sources = {
+        pop_uid: FakeSourceTable("population", str(root / "population" / "*.parquet")),
+        lbl_uid: FakeSourceTable("monthly_labels", str(root / "monthly_labels" / "*.parquet")),
+        txn_uid: FakeSourceTable("txn", str(root / "txn" / "*.parquet")),
+    }
+    spec = DatasetSpec.model_validate(
+        {
+            "name": "wide_spark",
+            "inputs": {
+                "population": pop_uid,
+                "label": {
+                    "source": lbl_uid,
+                    "using": ["customer_id", "snapshot_date"],
+                    "time_offset": "1mo",
+                },
+                "features": [{"source": txn_uid, "using": ["safe_id", "snapshot_date"]}],
+            },
+            "sample_key": ["customer_id"],
+            "label": {"column": "churned"},
+            "split": {
+                "strategy": "temporal",
+                "time_column": "snapshot_date",
+                "train": "2026-01-01:2026-05-01",
+                "test": "2026-05-01:2026-07-01",
+            },
+        }
+    )
+    adapter = SparkDataAdapter({"master": "local[2]"})
+    pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
+    node = ManifestNode(
+        unique_id="dataset.p.wide_spark",
+        resource_type="dataset",
+        name="wide_spark",
+        path="datasets/wide_spark.yml",
+        config={},
+        snapshot_id=pinned,
+    )
+    ctx = FakeBuildContext(node, sources, pop_uid, tmp_path / "mat")
+    ctx.resolved_windows = {
+        "train": ("2026-01-01T00:00:00Z", "2026-05-01T00:00:00Z"),
+        "test": ("2026-05-01T00:00:00Z", "2026-07-01T00:00:00Z"),
+    }
+    handle = adapter.build_dataset(spec, ctx)
+    month_index = {when: i for i, when in enumerate(months)}
+    for split in ("train", "test"):
+        table = handle.read(split)
+        # spine + feature + label columns, label join columns projected away
+        assert set(table.column_names) == {
+            "customer_id",
+            "safe_id",
+            "snapshot_date",
+            "txn_total",
+            "churned",
+        }
+        assert table.num_rows > 0
+        for row in table.to_pylist():
+            expected = (row["customer_id"] + month_index[row["snapshot_date"]]) % 2
+            assert row["churned"] == expected
+
+
 def test_snapshot_changes_when_source_files_change(source_root: Path) -> None:
     adapter = SparkDataAdapter({})
     table = _sources(source_root)[LABEL_UID]

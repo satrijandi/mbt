@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mbt_adapter_base import DatasetLocator, DatasetSpec
+from mbt_adapter_base import DatasetLocator, DatasetSpec, parse_time_offset
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
     MaterializationError,
@@ -45,6 +45,16 @@ class SparkAdapterError(RuntimeError):
 
 def _quote(column: str) -> str:
     return "`" + column.replace("`", "``") + "`"
+
+
+#: time_offset units -> SQL interval keywords (calendar month included).
+_INTERVAL_UNITS = {"mo": "MONTH", "d": "DAY", "w": "WEEK", "h": "HOUR"}
+
+
+def _interval_sql(count: int, unit: str) -> str:
+    """``(1, "mo")`` -> ``+ INTERVAL 1 MONTH`` (sign as the operator)."""
+    operator = "-" if count < 0 else "+"
+    return f"{operator} INTERVAL {abs(count)} {_INTERVAL_UNITS[unit]}"
 
 
 def key_hash_sql(key_columns: list[str], salt: str = "") -> str:
@@ -205,11 +215,35 @@ class SparkDataAdapter:
         if spec.inputs is None:
             assert spec.source is not None
             return tables[spec.source]
-        frame = tables[spec.inputs.label]
+        frame = tables[spec.inputs.spine]
         how = "left" if spec.inputs.join == "left" else "inner"
-        for feature_uid in spec.inputs.features:
-            frame = frame.join(tables[feature_uid], on=spec.inputs.join_columns, how=how)
-        return frame
+        for feature_uid, using in spec.inputs.feature_entries:
+            frame = frame.join(tables[feature_uid], on=using, how=how)
+        if spec.inputs.population is None:
+            return frame
+        # The label joins the population spine last (always inner - an example
+        # without an observed outcome is not a training example, ADR-22): its
+        # join columns are renamed, matched with an expression join so the
+        # time_offset can shift the spine's time column, then dropped.
+        from pyspark.sql import functions as F
+
+        label = tables[spec.inputs.label_source]
+        renames = {c: f"__mbt_lbl{i}" for i, c in enumerate(spec.inputs.label_join_columns)}
+        for column, alias in renames.items():
+            label = label.withColumnRenamed(column, alias)
+        offset = spec.inputs.label_time_offset
+        conditions = []
+        for column, alias in renames.items():
+            if offset is not None and column == spec.split.time_column:
+                count, unit = parse_time_offset(offset)
+                conditions.append(
+                    f"CAST({_quote(alias)} AS TIMESTAMP) = "
+                    f"CAST({_quote(column)} AS TIMESTAMP) {_interval_sql(count, unit)}"
+                )
+            else:
+                conditions.append(f"{_quote(alias)} = {_quote(column)}")
+        frame = frame.join(label, on=F.expr(" AND ".join(conditions)), how="inner")
+        return frame.drop(*renames.values())
 
     def _write_splits(
         self,

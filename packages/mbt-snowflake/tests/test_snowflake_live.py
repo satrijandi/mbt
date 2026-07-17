@@ -269,7 +269,7 @@ def _ctx(
     sample_fraction: float = 1.0,
 ) -> BuildContext:
     pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
-    spine_uid = spec.inputs.label if spec.inputs is not None else spec.source
+    spine_uid = spec.inputs.spine if spec.inputs is not None else spec.source
     assert spine_uid is not None
     node = ManifestNode(
         unique_id=f"dataset.live_snowflake.{spec.name}",

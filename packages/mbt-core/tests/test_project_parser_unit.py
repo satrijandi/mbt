@@ -566,8 +566,9 @@ def test_scoring_inputs_form_parses(demo_project: Path, fake_registry: AdapterRe
             input:
               inputs:
                 spine: source('lakehouse', 'subscribers')
-                features: ["source('lakehouse', 'extra_features')"]
-                join_key: user_id
+                features:
+                  - source: source('lakehouse', 'extra_features')
+                    using: [user_id]
             output: {path: predictions/a, columns: [user_id]}
         """,
     )

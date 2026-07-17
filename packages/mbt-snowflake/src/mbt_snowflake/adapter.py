@@ -200,8 +200,8 @@ class SnowflakeDataAdapter:
             where.append(sampling_predicate(keys, ctx.sample_fraction))
 
         try:
-            relation = base_relation(spec, table_refs)
-            queries = split_queries(spec, relation, where, ctx.resolved_windows)
+            relation, exclude = base_relation(spec, table_refs)
+            queries = split_queries(spec, relation, where, ctx.resolved_windows, exclude)
         except SnowflakeSQLError as exc:
             raise SnowflakeAdapterError(str(exc)) from exc
 

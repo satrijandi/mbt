@@ -177,13 +177,21 @@ class ExecutionContext:
         return self._selectable
 
 
-def materialization_key(node: ManifestNode) -> str:
+def materialization_key(node: ManifestNode, sample_fraction: float = 1.0) -> str:
     """sha256(input_hash + canonical resolved windows) - two anchors may slice
-    the same snapshot differently (TSD §10.4)."""
+    the same snapshot differently (TSD §10.4).
+
+    A non-default ``sample_fraction`` partitions its own key: sampling is
+    pushed into the source query, so a sampled materialization holds
+    different rows and must never satisfy a full build's cache probe (or
+    vice versa). The default contributes nothing, keeping every existing
+    fraction-1.0 key stable."""
     windows = node.resolved.get("windows", {})
     digest = hashlib.sha256()
     digest.update(node.input_hash.encode())
     digest.update(canonical_json(windows).encode())
+    if sample_fraction != 1.0:
+        digest.update(f"sample_fraction={sample_fraction!r}".encode())
     return digest.hexdigest()[:16]
 
 
@@ -258,7 +266,8 @@ class DatasetRunner:
 
     def _materialize(self, node: ManifestNode, spec: DatasetSpec) -> Any:
         ctx = self.ctx
-        key = materialization_key(node)
+        sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
+        key = materialization_key(node, sample_fraction)
         output_dir = ctx.project_dir / "target" / "datasets" / node.name / key
         if (output_dir / "_SUCCESS").is_file():
             get_bus().emit(LogMessage(unique_id=node.unique_id, message=f"cache hit ({key})"))
@@ -279,8 +288,9 @@ class DatasetRunner:
                 f"dataset {node.name!r} has no source in the manifest",
                 resource=node.unique_id,
             )
-        # The spine: the label table for multi-table inputs, else the source.
-        spine_uid = spec.inputs.label if spec.inputs is not None else spec.source
+        # The spine: population or label table for multi-table inputs (ADR-22),
+        # else the single source.
+        spine_uid = spec.inputs.spine if spec.inputs is not None else spec.source
         if spine_uid not in source_tables:
             raise ConfigError(
                 f"dataset {node.name!r} spine source {spine_uid!r} missing from the manifest",
@@ -291,7 +301,6 @@ class DatasetRunner:
             split: (bounds[0], bounds[1])
             for split, bounds in node.resolved.get("windows", {}).items()
         }
-        sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
         build_ctx = _BuildContext(
             node=node,
             source=source_tables[spine_uid],
@@ -731,7 +740,8 @@ class ScoringRunner:
 
     def _materialize_input(self, node: ManifestNode, spec: ScoringSpec) -> Any:
         ctx = self.ctx
-        key = materialization_key(node)
+        sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
+        key = materialization_key(node, sample_fraction)
         output_dir = ctx.project_dir / "target" / "scoring_inputs" / node.name / key
         if (output_dir / "_SUCCESS").is_file():
             get_bus().emit(LogMessage(unique_id=node.unique_id, message=f"cache hit ({key})"))
@@ -748,7 +758,7 @@ class ScoringRunner:
         else:
             assert spec.input.inputs is not None
             spine_uid = spec.input.inputs.spine
-            input_uids = [spine_uid, *spec.input.inputs.features]
+            input_uids = [spine_uid, *spec.input.inputs.feature_sources]
         source_tables = {
             uid: ctx.manifest.sources[uid].config
             for uid in input_uids
@@ -770,7 +780,7 @@ class ScoringRunner:
             source=source_tables[spine_uid],
             source_tables=source_tables,
             resolved_windows=windows,
-            sample_fraction=float(ctx.merged_vars.get("sample_fraction", 1.0)),
+            sample_fraction=sample_fraction,
             deep_snapshot=ctx.manifest.metadata.deep_snapshot,
             output_dir=output_dir,
             events=get_bus(),

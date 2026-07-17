@@ -322,6 +322,115 @@ def test_push_down_sampling_is_reproducible_and_monotone(tmp_path: Path) -> None
     assert any("MD5_NUMBER_LOWER64" in q for q in stub.executed if q.startswith("SELECT"))
 
 
+def test_population_spine_with_label_offset_joins_in_duckdb(tmp_path: Path) -> None:
+    """ADR-22 through the generated SQL: population spine, per-table using
+    columns, and the calendar-month label offset, executed in DuckDB."""
+    months = [datetime(2026, m, 1) for m in range(1, 8)]
+    population_rows = [(cid, f"sf-{cid}", when) for when in months[:-1] for cid in range(40)]
+    population = pa.table(
+        {
+            "CUSTOMER_ID": [r[0] for r in population_rows],
+            "SAFE_ID": [r[1] for r in population_rows],
+            "SNAPSHOT_DATE": [r[2] for r in population_rows],
+        }
+    )
+    # outcome for snapshot m lives at m+1, value encodes the SPINE month index
+    label_rows = [
+        (cid, months[i + 1], (cid + i) % 2) for i in range(len(months) - 1) for cid in range(40)
+    ]
+    labels = pa.table(
+        {
+            "CUSTOMER_ID": [r[0] for r in label_rows],
+            "SNAPSHOT_DATE": [r[1] for r in label_rows],
+            "CHURNED": [r[2] for r in label_rows],
+        }
+    )
+    txn = pa.table(
+        {
+            "SAFE_ID": [r[1] for r in population_rows],
+            "SNAPSHOT_DATE": [r[2] for r in population_rows],
+            "TXN_TOTAL": [float(r[0] % 300) for r in population_rows],
+        }
+    )
+    stub = StubConnection(
+        tables={
+            "ANALYTICS.GOLD.POPULATION": population,
+            "ANALYTICS.GOLD.MONTHLY_LABELS": labels,
+            "ANALYTICS.GOLD.TXN_FEATURES": txn,
+        }
+    )
+    adapter = _adapter(stub)
+    pop_uid = "source.p.snowflake.population"
+    lbl_uid = "source.p.snowflake.monthly_labels"
+    txn_uid = "source.p.snowflake.txn_features"
+    spec = DatasetSpec.model_validate(
+        {
+            "name": "wide_churn",
+            "inputs": {
+                "population": pop_uid,
+                "label": {
+                    "source": lbl_uid,
+                    "using": ["customer_id", "snapshot_date"],
+                    "time_offset": "1mo",
+                },
+                "features": [{"source": txn_uid, "using": ["safe_id", "snapshot_date"]}],
+            },
+            "sample_key": ["customer_id"],
+            "label": {"column": "churned"},
+            "split": {
+                "strategy": "temporal",
+                "time_column": "snapshot_date",
+                "train": "2026-01-01:2026-05-01",
+                "test": "2026-05-01:2026-07-01",
+            },
+        }
+    )
+    sources = {
+        pop_uid: FakeSourceTable(name="population", identifier="POPULATION"),
+        lbl_uid: FakeSourceTable(name="monthly_labels", identifier="MONTHLY_LABELS"),
+        txn_uid: FakeSourceTable(name="txn_features", identifier="TXN_FEATURES"),
+    }
+    pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
+    node = ManifestNode(
+        unique_id="dataset.p.wide_churn",
+        resource_type="dataset",
+        name=spec.name,
+        path="datasets/wide_churn.yml",
+        config={},
+        snapshot_id=pinned,
+    )
+    ctx = FakeBuildContext(
+        node=node,
+        source=sources[pop_uid],
+        source_tables=sources,
+        resolved_windows={
+            "train": ("2026-01-01T00:00:00Z", "2026-05-01T00:00:00Z"),
+            "test": ("2026-05-01T00:00:00Z", "2026-07-01T00:00:00Z"),
+        },
+        sample_fraction=1.0,
+        deep_snapshot=False,
+        output_dir=tmp_path / "mat",
+    )
+    handle = adapter.build_dataset(spec, ctx)
+    month_index = {when: i for i, when in enumerate(months)}
+    for split in ("train", "test"):
+        table = handle.read(split)
+        # spine + feature + label columns, label join columns projected away
+        assert set(table.column_names) == {
+            "customer_id",
+            "safe_id",
+            "snapshot_date",
+            "txn_total",
+            "churned",
+        }
+        for row in table.to_pylist():
+            expected = (row["customer_id"] + month_index[row["snapshot_date"]]) % 2
+            assert row["churned"] == expected
+    # the offset join went into the warehouse query, not client-side
+    joined = [q for q in stub.executed if "INTERVAL '1 MONTH'" in q]
+    assert joined and all("SELECT * RENAME" in q for q in joined)
+
+
 def test_sampling_without_a_key_is_an_actionable_error(tmp_path: Path) -> None:
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
@@ -411,7 +520,8 @@ def test_key_hash_requires_a_non_empty_key() -> None:
 def test_base_relation_single_source_is_the_table_ref() -> None:
     spec = _spec(inputs=None, source=LABEL_UID, sample_key=["customer_id"])
     assert base_relation(spec, {LABEL_UID: "ANALYTICS.GOLD.CHURN_LABELS"}) == (
-        "ANALYTICS.GOLD.CHURN_LABELS"
+        "ANALYTICS.GOLD.CHURN_LABELS",
+        [],
     )
 
 

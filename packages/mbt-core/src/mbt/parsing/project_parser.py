@@ -914,10 +914,17 @@ def _check_dataset_source_syntax(dataset: ParsedResource, report: ParseReport) -
     if spec.source is not None:
         entries.append(("/source", spec.source))
     if spec.inputs is not None:
-        entries.append(("/inputs/label", spec.inputs.label))
-        entries.extend(
-            (f"/inputs/features/{i}", value) for i, value in enumerate(spec.inputs.features)
-        )
+        if isinstance(spec.inputs.label, str):
+            entries.append(("/inputs/label", spec.inputs.label))
+        else:
+            entries.append(("/inputs/label/source", spec.inputs.label.source))
+        if spec.inputs.population is not None:
+            entries.append(("/inputs/population", spec.inputs.population))
+        for i, value in enumerate(spec.inputs.features):
+            if isinstance(value, str):
+                entries.append((f"/inputs/features/{i}", value))
+            else:
+                entries.append((f"/inputs/features/{i}/source", value.source))
     for field_path, value in entries:
         if not _SOURCE_RE.match(value):
             report.error(
@@ -1134,10 +1141,11 @@ def _check_scoring_source_syntax(sc: ParsedResource, report: ParseReport) -> Non
         entries.append(("/input/source", spec.input.source))
     if spec.input.inputs is not None:
         entries.append(("/input/inputs/spine", spec.input.inputs.spine))
-        entries.extend(
-            (f"/input/inputs/features/{i}", value)
-            for i, value in enumerate(spec.input.inputs.features)
-        )
+        for i, value in enumerate(spec.input.inputs.features):
+            if isinstance(value, str):
+                entries.append((f"/input/inputs/features/{i}", value))
+            else:
+                entries.append((f"/input/inputs/features/{i}/source", value.source))
     if spec.ground_truth is not None:
         entries.append(("/ground_truth/label/source", spec.ground_truth.label.source))
     for field_path, value in entries:

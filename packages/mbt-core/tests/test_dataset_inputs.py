@@ -191,6 +191,36 @@ def test_key_based_sampling_is_reproducible_and_monotone(
     assert 0 < len(fifth) < len(half_a) < 300
 
 
+def test_sample_fractions_partition_their_own_materializations(
+    joined_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A sampled build must never cache-hit a full build's materialization
+    (or vice versa): the fraction is part of the cache key. Regression for
+    the live-showcase failure where fraction 0.5 reused fraction 1.0 rows."""
+
+    root = joined_project / "target/datasets/churn_joined"
+
+    def build_at(fraction: float) -> None:
+        results = invoke(
+            joined_project,
+            fake_registry,
+            select=["churn_model_joined"],
+            cli_vars={"sample_fraction": fraction},
+        )
+        assert results.exit_code() == 0
+
+    build_at(1.0)  # no rmtree: later fractions must not reuse this
+    build_at(0.5)
+    counts = sorted(
+        pq.read_table(path, columns=["customer_id"]).num_rows
+        for path in root.glob("*/train.parquet")
+    )
+    assert len(counts) == 2 and 0 < counts[0] < counts[1]
+    # and a repeat full build cache-hits its own key (still two dirs)
+    build_at(1.0)
+    assert len(list(root.glob("*/train.parquet"))) == 2
+
+
 def test_source_xor_inputs_is_enforced(joined_project: Path) -> None:
     with pytest.raises(Exception, match="exactly one of 'source'"):
         DatasetSpec.model_validate(
