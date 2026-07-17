@@ -88,8 +88,15 @@ ci:
 down:
 	$(COMPOSE) down -v --remove-orphans
 
+# Containers write into the bind-mounted workspace as root on native Linux
+# (Docker Desktop maps writes to the host user), so a plain rm can hit
+# Permission denied - fall back to wiping the contents through a container.
 clean: down
-	rm -rf $(SHOWCASE_WORKSPACE)
+	rm -rf $(SHOWCASE_WORKSPACE) 2>/dev/null || { \
+	  docker run --rm -v $(SHOWCASE_WORKSPACE):/workspace $(SHOWCASE_RUNNER_IMAGE) \
+	    bash -c 'rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null || true'; \
+	  rm -rf $(SHOWCASE_WORKSPACE); \
+	}
 
 # The whole lifecycle, narrated. Anchors are pinned to the seeded data range
 # (2026-01..06); MONITOR_ANCHOR sits past the 14d ground-truth maturity.
