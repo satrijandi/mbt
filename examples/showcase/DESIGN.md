@@ -65,8 +65,8 @@ The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `
 |---|---|---|
 | runner (built, not run) | `zot:5000/mbt/runner:<tag>` from `python:3.11-slim@<digest>` + JDK 17 + Spark 3.5.8 + hadoop-aws jars + workspace wheels + `mbt-h2o[sparkling]` + `mbt-core[s3]` + `mbt-mlflow` + jupyterlab | Universal environment; env_digest identity by construction |
 | gitea | `gitea/gitea:1.27.0-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
-| woodpecker server + agent | `woodpeckerci/woodpecker-*:v3.16.0` | CI: pr-check, prod-build, promote pipelines; agent mounts docker socket; repo marked trusted for the `/workspace` volume |
-| seaweedfs | `chrislusf/seaweedfs:4.39` (`weed server -s3`) | S3-compatible object store: `lake` bucket (feature store parquet, read via s3a://) and `mbt` bucket (artifact store `s3://mbt/churn/artifacts`) |
+| woodpecker server + agent | `woodpeckerci/woodpecker-*:v3.16.0` | CI: pr-check, prod-build, promote pipelines; agent mounts docker socket; repo marked trusted for the `/workspace` volume; split-horizon URLs (public WOODPECKER_HOST + forge OAuth host, in-network webhook host) so the Gitea OAuth login works from a host browser |
+| seaweedfs | `chrislusf/seaweedfs:4.39` (`weed server -s3`) | S3-compatible object store: `lake` bucket (feature store parquet, read via s3a://) and `mbt` bucket (artifact store `s3://mbt/churn/artifacts`); the filer UI is published for humans to browse the lake |
 | spark-master, spark-worker | runner image running `start-master.sh` / `start-worker.sh` | Standalone cluster: pushdown joins/sampling/windows + sparkling H2O training |
 | mlflow | runner image (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode, needs >= 2.9); champion source of truth |
 | jupyterlab | runner image + `jupyter lab` | DS workbench; terminal runs the same `mbt` as CI |

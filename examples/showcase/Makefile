@@ -7,6 +7,13 @@ REPO_ROOT := $(abspath $(SHOWCASE_DIR)/../..)
 
 export SHOWCASE_WORKSPACE ?= $(HOME)/.cache/mbt-showcase/workspace
 export SHOWCASE_RUNNER_IMAGE ?= mbt-showcase-runner:dev
+# Overrides read from .env must reach docker compose's ${...:-default}
+# interpolation (make does not export include'd variables by itself).
+# Undefined names export as empty, which :- treats the same as unset.
+export SHOWCASE_S3_PORT SHOWCASE_FILER_PORT SHOWCASE_MLFLOW_PORT SHOWCASE_SPARK_UI_PORT \
+  SHOWCASE_JUPYTER_PORT SHOWCASE_PUSHGW_PORT SHOWCASE_PROMETHEUS_PORT SHOWCASE_GRAFANA_PORT \
+  SHOWCASE_GITEA_PORT SHOWCASE_WOODPECKER_PORT SHOWCASE_WEBHOOK_PORT SHOWCASE_ZOT_PORT \
+  SHOWCASE_AIRFLOW_PORT SHOWCASE_S3_KEY SHOWCASE_S3_SECRET
 # Compose project name: override for a parallel stack (the runbook test
 # tier boots its own isolated copy this way). Woodpecker step containers
 # join the project's default network, hence the derived SHOWCASE_NETWORK.
@@ -27,7 +34,21 @@ WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 
-.PHONY: image workspace up seed down clean urls demo score monthly monitor ci
+.PHONY: help image workspace up seed down clean urls demo score monthly monitor ci
+.DEFAULT_GOAL := help
+
+help:
+	@echo "mbt showcase (see README.md for the full runbook):"
+	@echo "  make up            build the runner image, boot the stack, seed the lake"
+	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
+	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
+	@echo "  make monthly       the cluster-free monthly cadence on the DuckDB plane"
+	@echo "  make score         rerun daily scoring (lake sync, mbt score, metric push)"
+	@echo "  make monitor       rerun ground-truth monitoring at the pinned anchor"
+	@echo "  make inject-drift  poison the scoring batch and watch MbtShiftBreach fire"
+	@echo "  make urls          print every UI URL and its login"
+	@echo "  make down          stop and remove containers, volumes, and the network"
+	@echo "  make clean         down, then also remove the workspace"
 
 image:
 	$(SHOWCASE_DIR)/scripts/build_image.sh
@@ -48,17 +69,19 @@ seed:
 
 urls:
 	@echo ""
-	@echo "  JupyterLab   http://localhost:$${SHOWCASE_JUPYTER_PORT:-8899}"
-	@echo "  MLflow       http://localhost:$${SHOWCASE_MLFLOW_PORT:-5501}"
-	@echo "  Spark UI     http://localhost:$${SHOWCASE_SPARK_UI_PORT:-8380}"
-	@echo "  S3 (lake)    http://localhost:$${SHOWCASE_S3_PORT:-8333}"
-	@echo "  Grafana      http://localhost:$${SHOWCASE_GRAFANA_PORT:-3390} (admin/admin)"
-	@echo "  Prometheus   http://localhost:$${SHOWCASE_PROMETHEUS_PORT:-9490}"
-	@echo "  Pushgateway  http://localhost:$${SHOWCASE_PUSHGW_PORT:-9491}"
-	@echo "  Gitea        http://localhost:$(GITEA_PORT) (after make ci: mbtops / mbtops-showcase-password)"
-	@echo "  Woodpecker   http://localhost:$(WOODPECKER_PORT) (log in via Gitea OAuth)"
-	@echo "  Zot          http://localhost:$(ZOT_PORT)/v2/_catalog"
-	@echo "  Airflow      http://localhost:$(AIRFLOW_PORT) (admin/admin; DAGs appear after make ci)"
+	@echo "  JupyterLab    http://localhost:$${SHOWCASE_JUPYTER_PORT:-8899}"
+	@echo "  MLflow        http://localhost:$${SHOWCASE_MLFLOW_PORT:-5501}"
+	@echo "  Spark UI      http://localhost:$${SHOWCASE_SPARK_UI_PORT:-8380}"
+	@echo "  Lake browser  http://localhost:$${SHOWCASE_FILER_PORT:-8388}/buckets/ (SeaweedFS filer UI)"
+	@echo "  Lake S3 API   http://localhost:$${SHOWCASE_S3_PORT:-8333} (signed clients only: mbtadmin/mbtsecret;"
+	@echo "                a bare browser GET returns AccessDenied - browse via the filer UI instead)"
+	@echo "  Grafana       http://localhost:$${SHOWCASE_GRAFANA_PORT:-3390} (admin / admin)"
+	@echo "  Prometheus    http://localhost:$${SHOWCASE_PROMETHEUS_PORT:-9490}"
+	@echo "  Pushgateway   http://localhost:$${SHOWCASE_PUSHGW_PORT:-9491}"
+	@echo "  Gitea         http://localhost:$(GITEA_PORT) (after make ci: mbtops / mbtops-showcase-password)"
+	@echo "  Woodpecker    http://localhost:$(WOODPECKER_PORT) (after make ci: click login, use the Gitea account)"
+	@echo "  Zot           http://localhost:$(ZOT_PORT)/v2/_catalog"
+	@echo "  Airflow       http://localhost:$(AIRFLOW_PORT) (admin / admin; DAGs appear after make ci)"
 	@echo ""
 
 # The P2 CI loop: seed Gitea (org, churn repo, OAuth app), re-up Woodpecker
@@ -69,6 +92,7 @@ ci:
 	@set -euo pipefail; \
 	pre=$$(cd $(REPO_ROOT) && uv run python examples/showcase/scripts/ci_bootstrap.py pre \
 	  --gitea-url http://localhost:$(GITEA_PORT) --gitea-container $(SHOWCASE_PROJECT)-gitea-1 \
+	  --woodpecker-url http://localhost:$(WOODPECKER_PORT) \
 	  --project-dir $(SHOWCASE_WORKSPACE)/project \
 	  --network $(SHOWCASE_NETWORK) --workspace $(SHOWCASE_WORKSPACE)); \
 	jsonval() { printf '%s' "$$pre" | python3 -c "import json,sys;print(json.loads(sys.stdin.read().splitlines()[-1])[sys.argv[1]])" "$$1"; }; \
@@ -76,13 +100,13 @@ ci:
 	export SHOWCASE_WOODPECKER_SECRET=$$(jsonval client_secret); \
 	$(COMPOSE) up -d --wait --force-recreate woodpecker-server woodpecker-agent; \
 	cd $(REPO_ROOT) && uv run python examples/showcase/scripts/ci_bootstrap.py post \
-	  --gitea-url http://localhost:$(GITEA_PORT) --gitea-container $(SHOWCASE_PROJECT)-gitea-1 \
+	  --gitea-url http://localhost:$(GITEA_PORT) \
 	  --woodpecker-url http://localhost:$(WOODPECKER_PORT) --gitea-token $$(jsonval gitea_token) \
 	  --zot-ref localhost:$(ZOT_PORT)/mbt/churn >/dev/null; \
 	echo ""; \
 	echo "  CI ready:"; \
 	echo "  Gitea        http://localhost:$(GITEA_PORT)  (mbtops / mbtops-showcase-password)"; \
-	echo "  Woodpecker   http://localhost:$(WOODPECKER_PORT)  (log in via Gitea OAuth)"; \
+	echo "  Woodpecker   http://localhost:$(WOODPECKER_PORT)  (click login, use the Gitea account)"; \
 	echo "  Repo         http://localhost:$(GITEA_PORT)/mbt-showcase/churn"
 
 down:

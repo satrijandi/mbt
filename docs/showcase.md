@@ -5,7 +5,7 @@ Where the [tutorial](tutorial.md) walks a team through the concepts, the showcas
 
 | Service | Role |
 |---|---|
-| SeaweedFS | S3-compatible object store: the data lake of gold-layer feature tables (read via `s3a://`) and the MLflow artifact store |
+| SeaweedFS | S3-compatible object store: the data lake of gold-layer feature tables (read via `s3a://`) and the MLflow artifact store; its filer UI is published so humans can browse the lake (the raw S3 port takes signed requests only) |
 | MLflow (HTTP server) | Tracking + model registry; champion source of truth |
 | Spark standalone cluster | Dataset pushdown; H2O AutoML training inside the executors via Sparkling Water |
 | JupyterLab | The DS workbench; its terminal runs the same `mbt` as everything else |
@@ -30,8 +30,8 @@ make down      # stop and remove containers, volumes, and the network (the works
 make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/workspace)
 ```
 
-`make up` prints the UI URLs (JupyterLab, MLflow, Spark, Grafana, Prometheus, Gitea, Woodpecker, Zot, Airflow).
-`make ci` seeds the CI loop headlessly; then clone the printed repo URL and open a PR - Woodpecker runs the state-diff check and posts the mbt build report comment, and merges to main bake the deployable unit, pin its digest in the deploy repo, and feed the Airflow DAGs via git-sync.
+`make up` prints every UI URL with its login (JupyterLab, MLflow, Spark, the SeaweedFS lake browser, Grafana, Prometheus, Gitea, Woodpecker, Zot, Airflow).
+`make ci` seeds the CI loop headlessly; then log into Woodpecker from the browser with the Gitea account (the compose file gives Woodpecker split-horizon URLs so the OAuth dance works from the host), clone the printed repo URL, and open a PR - Woodpecker runs the state-diff check and posts the mbt build report comment, and merges to main bake the deployable unit, pin its digest in the deploy repo, and feed the Airflow DAGs via git-sync.
 `make inject-drift` poisons the scoring batch: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert, and `make score` recovers.
 `make score` and `make monitor` also work standalone: they rerun just the daily scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
 `make monthly` runs the second, cluster-free cadence: the `tag:monthly` churn pipeline trains, promotes, and scores entirely on the DuckDB batch plane over the synced S3 parquet lake.

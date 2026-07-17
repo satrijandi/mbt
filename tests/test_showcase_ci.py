@@ -13,23 +13,26 @@ Deliberate order within this module (each test builds on the previous):
 1. Bootstrap: first push to main -> prod-build honors fetch_state exit 3,
    trains everything, registers to the SHARED registry, publishes the
    mbt-state baseline (SHOW-06).
-2. No-change PR -> "Nothing modified" comment; merge -> baseline
+2. Browser OAuth login: the host-side login path `make urls` documents,
+   driven for the non-admin persona (first consent + open registration).
+3. No-change PR -> "Nothing modified" comment; merge -> baseline
    republished with identical nodes, registry untouched (SHOW-06).
-3. One-gate-edit PR -> slim CI: the comment shows exactly the edited model
+4. One-gate-edit PR -> slim CI: the comment shows exactly the edited model
    as modified (config) plus its downstream scoring node (upstream) - and
    NO dataset churn across fresh clones (URI snapshot stability, SHOW-05).
-4. Merge -> state economy: only the modified model retrains (SHOW-05/06).
-5. Impossible-gate PR -> quality failure: pipeline fails with mbt's exit 2
+5. Merge -> state economy: only the modified model retrains (SHOW-05/06).
+6. Impossible-gate PR -> quality failure: pipeline fails with mbt's exit 2
    classified as such (never 1), the comment shows gate_failed, the shared
    registry is untouched, and webhook-sink holds exactly one
    owner-classified alert (SHOW-07).
-6. Protected promotion: branch protection + CODEOWNERS gate promotions.yml,
+7. Protected promotion: branch protection + CODEOWNERS gate promotions.yml,
    an unauthorized direct push is rejected, and the owner-approved merge
    runs the promote pipeline, moving the production alias (SHOW-10).
 """
 
 import pytest
 from showcase_utils import (
+    DS_PASSWORD,
     DS_USER,
     GITEA_USER,
     ORG,
@@ -82,6 +85,23 @@ def test_bootstrap_full_build_publishes_baseline(ci) -> None:
     conf = ci.images_env()
     assert "@sha256:" in conf["IMAGE"], conf
     _state["bootstrap_image"] = conf["IMAGE"]
+
+
+def test_browser_oauth_login_works_from_the_host(ci) -> None:
+    """The login path `make urls` tells a human to use: the Gitea OAuth
+    dance against the HOST-published localhost ports (exactly what a
+    browser does), here as the non-admin DS persona whose first login also
+    exercises Gitea's consent page and Woodpecker's open registration."""
+    import requests
+
+    token = ci.oauth_login(DS_USER, DS_PASSWORD)
+    me = requests.get(
+        f"{ci.stack.woodpecker_url()}/api/user",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    assert me.ok, f"/api/user -> {me.status_code}: {me.text[:500]}"
+    assert me.json()["login"] == DS_USER
 
 
 def test_no_change_pr_and_republish(ci) -> None:

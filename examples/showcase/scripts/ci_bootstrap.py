@@ -1,36 +1,45 @@
 """Headless bootstrap for the showcase CI tier (Gitea + Woodpecker v3).
 
-Runs on the HOST (the dev venv has `requests` via mlflow) against the
-published compose ports; the one flow that must happen in-network - the
-OAuth login dance that mints the first Woodpecker API token - executes
-inside the gitea container via `docker exec` (the rootless image ships bash
-and curl), where gitea:3000 and woodpecker-server:8000 resolve natively.
+Runs entirely on the HOST (the dev venv has `requests` via mlflow) against
+the published compose ports. That includes the OAuth login dance that mints
+the first Woodpecker API token: woodpecker-server's split-horizon config
+(WOODPECKER_HOST and WOODPECKER_EXPERT_FORGE_OAUTH_HOST are localhost URLs,
+see docker-compose.yml) means the dance drives the EXACT flow a human
+browser performs - so bootstrapping doubles as proof that the documented
+"log in via Gitea OAuth" path works.
 
-Two phases, because Woodpecker needs OAuth app credentials at boot:
+Three phases, because Woodpecker needs OAuth app credentials at boot:
 
   pre   - create the Gitea admin (mbtops), an API token, the mbt-showcase
           org and churn repo, push the project source, and create the OAuth2
-          app. Prints JSON {gitea_token, client_id, client_secret}; the
-          caller re-ups woodpecker-server(+agent) with those credentials.
-  post  - scripted OAuth dance (Woodpecker v3 signs the `state` as a JWT, so
-          the flow must START at Woodpecker's /authorize; the first login
-          always renders Gitea's grant page), then mint the API token, then
+          app with the browser-facing redirect URI. Prints JSON
+          {gitea_token, client_id, client_secret}; the caller re-ups
+          woodpecker-server(+agent) with those credentials.
+  post  - OAuth dance as mbtops (Woodpecker v3 signs the `state` as a JWT,
+          so the flow must START at Woodpecker's /authorize; the first login
+          renders Gitea's grant page), then mint the API token, then
           activate the repo (creates the Gitea webhook) and provision the
           gitea_token secret for push + pull_request events. Prints JSON
           {woodpecker_token, repo_id}.
+  login - the dance alone, for any user: prints {woodpecker_token}. The
+          test tier uses it to pin the human login path per persona.
 
 Usage:
-  ci_bootstrap.py pre  --gitea-url URL --gitea-container NAME --project-dir DIR
-  ci_bootstrap.py post --gitea-url URL --gitea-container NAME \
-      --woodpecker-url URL --gitea-token TOKEN
+  ci_bootstrap.py pre   --gitea-url URL --gitea-container NAME \
+      --woodpecker-url URL --project-dir DIR
+  ci_bootstrap.py post  --gitea-url URL --woodpecker-url URL --gitea-token TOKEN
+  ci_bootstrap.py login --gitea-url URL --woodpecker-url URL \
+      --user NAME --password PASS
 """
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -45,51 +54,106 @@ PASSWORD = "mbtops-showcase-password"
 # owner - branch protection must stop their direct pushes to main.
 DS_USER = "mbtds"
 DS_PASSWORD = "mbtds-showcase-password"
-REDIRECT_URI = "http://woodpecker-server:8000/authorize"
 
-# The OAuth dance, run inside the gitea container (bash + curl + in-network
-# DNS). Woodpecker v3 validates `state` as a signed JWT, so step 2 asks
-# Woodpecker to build the authorize URL; the grant POST is session-pinned to
-# that exact authorize request (client_id/state/redirect_uri must match).
-DANCE = r"""
-set -eu
-# gitea:3000, not localhost: the authorize URL Woodpecker builds points at
-# WOODPECKER_GITEA_URL's host, and curl's cookie jar is host-scoped - a
-# localhost login session would never accompany the authorize request.
-GITEA=http://gitea:3000
-WP=http://woodpecker-server:8000
-JAR=$(mktemp)
-PAGE=$(mktemp)
 
-CSRF=$(curl -sf -c "$JAR" "$GITEA/user/login" \
-  | grep -m1 'name="_csrf"' | sed 's/.*value="\([^"]*\)".*/\1/')
-curl -sf -b "$JAR" -c "$JAR" "$GITEA/user/login" \
-  --data-urlencode "_csrf=$CSRF" \
-  --data-urlencode "user_name=$BOOTSTRAP_USER" \
-  --data-urlencode "password=$BOOTSTRAP_PASS" >/dev/null
+def _hidden_fields(html: str) -> dict:
+    """Hidden inputs of the page's form, posted back exactly like a browser
+    submit. Gitea 1.27 dropped the _csrf field from the login and grant
+    forms (the session cookie carries the protection); older versions still
+    render it - either way, the form itself says what to send."""
+    fields = {}
+    for tag in re.findall(r'<input[^>]*type="hidden"[^>]*>', html):
+        name = re.search(r'name="([^"]+)"', tag)
+        value = re.search(r'value="([^"]*)"', tag)
+        if name:
+            fields[name.group(1)] = value.group(1) if value else ""
+    return fields
 
-AUTH_URL=$(curl -sf -o /dev/null -w '%{redirect_url}' -c "$JAR" -b "$JAR" "$WP/authorize")
-STATE=$(printf '%s' "$AUTH_URL" | sed 's/.*[?&]state=\([^&]*\).*/\1/')
-CLIENT_ID=$(printf '%s' "$AUTH_URL" | sed 's/.*[?&]client_id=\([^&]*\).*/\1/')
 
-REDIR=$(curl -sf -b "$JAR" -c "$JAR" -o "$PAGE" -w '%{redirect_url}' "$AUTH_URL")
-if [ -z "$REDIR" ]; then
-  GCSRF=$(grep -m1 'name="_csrf"' "$PAGE" | sed 's/.*value="\([^"]*\)".*/\1/')
-  REDIR=$(curl -sf -b "$JAR" -c "$JAR" -o /dev/null -w '%{redirect_url}' \
-    "$GITEA/login/oauth/grant" \
-    --data-urlencode "_csrf=$GCSRF" \
-    --data-urlencode "client_id=$CLIENT_ID" \
-    --data-urlencode "redirect_uri=$WP/authorize" \
-    --data-urlencode "state=$STATE" \
-    --data "scope=" --data "nonce=" --data "granted=true")
-fi
+def _wait_http_ok(url: str, timeout_s: int = 60) -> None:
+    deadline = time.time() + timeout_s
+    while True:
+        try:
+            if requests.get(url, timeout=5).ok:
+                return
+        except requests.RequestException:
+            pass
+        if time.time() > deadline:
+            raise SystemExit(f"{url} not answering within {timeout_s}s")
+        time.sleep(1)
 
-curl -sfL -b "$JAR" -c "$JAR" "$REDIR" >/dev/null
 
-WPCSRF=$(curl -sf -b "$JAR" "$WP/web-config.js" \
-  | grep 'WOODPECKER_CSRF' | sed 's/.*WOODPECKER_CSRF = "\(.*\)".*/\1/')
-curl -sf -X POST -b "$JAR" -H "X-CSRF-TOKEN: $WPCSRF" "$WP/api/user/token"
-"""
+def oauth_login(gitea_url: str, woodpecker_url: str, username: str, password: str) -> str:
+    """Log into Woodpecker through Gitea OAuth and mint an API token.
+
+    Performs the browser flow verbatim against the host-published ports:
+    Gitea form login, Woodpecker /authorize (it builds the authorize URL
+    and signs `state` as a JWT), Gitea's grant page on first consent, the
+    code callback, then the CSRF-guarded token mint. The grant POST sends
+    back exactly the hidden fields of the rendered grant form (client_id,
+    state, redirect_uri, ...), which Gitea pins to the authorize request.
+    """
+    _wait_http_ok(f"{woodpecker_url}/web-config.js")
+    sess = requests.Session()
+
+    login_page = sess.get(f"{gitea_url}/user/login", timeout=30)
+    login_page.raise_for_status()
+    login = sess.post(
+        f"{gitea_url}/user/login",
+        data={
+            **_hidden_fields(login_page.text),
+            "user_name": username,
+            "password": password,
+        },
+        timeout=30,
+    )
+    login.raise_for_status()
+    # A failed login re-renders the form with 200; a success redirects away.
+    if login.url.rstrip("/").endswith("/user/login"):
+        raise SystemExit(f"gitea login failed for {username}")
+
+    start = sess.get(f"{woodpecker_url}/authorize", allow_redirects=False, timeout=30)
+    auth_url = start.headers.get("Location", "")
+    if not auth_url:
+        raise SystemExit(f"woodpecker /authorize did not redirect: {start.status_code}")
+
+    consent = sess.get(auth_url, allow_redirects=False, timeout=30)
+    if consent.is_redirect:
+        # Re-authorization: Gitea auto-grants and redirects immediately.
+        callback = consent.headers["Location"]
+    else:
+        # First consent for this user+app: Gitea renders the grant page.
+        fields = _hidden_fields(consent.text)
+        if "client_id" not in fields:
+            raise SystemExit(f"expected the grant page, got:\n{consent.text[:1000]}")
+        grant = sess.post(
+            f"{gitea_url}/login/oauth/grant",
+            data={**fields, "granted": "true"},
+            allow_redirects=False,
+            timeout=30,
+        )
+        if not grant.is_redirect:
+            raise SystemExit(
+                f"gitea grant did not redirect: {grant.status_code} {grant.text[:500]}"
+            )
+        callback = grant.headers["Location"]
+
+    # Woodpecker exchanges the code with Gitea server-side and starts the
+    # session; requests follows the final redirect into the logged-in UI.
+    done = sess.get(callback, timeout=60)
+    done.raise_for_status()
+
+    config = sess.get(f"{woodpecker_url}/web-config.js", timeout=30)
+    csrf = re.search(r'WOODPECKER_CSRF = "([^"]+)"', config.text)
+    if csrf is None:
+        raise SystemExit(f"no WOODPECKER_CSRF in web-config.js:\n{config.text[:500]}")
+    token = sess.post(
+        f"{woodpecker_url}/api/user/token",
+        headers={"X-CSRF-TOKEN": csrf.group(1)},
+        timeout=30,
+    )
+    token.raise_for_status()
+    return token.text.strip().strip('"')
 
 
 def sh(*cmd: str, check: bool = True, **kwargs: object) -> subprocess.CompletedProcess:
@@ -205,6 +269,9 @@ def phase_pre(args: argparse.Namespace) -> dict:
         },
     )
 
+    # The redirect URI must be the browser-facing Woodpecker URL: Gitea
+    # validates it on BOTH the authorize request and the server-side token
+    # exchange (woodpecker-server sends WOODPECKER_HOST + /authorize).
     app = gitea_api(
         args.gitea_url,
         "POST",
@@ -212,7 +279,7 @@ def phase_pre(args: argparse.Namespace) -> dict:
         auth=(USER, PASSWORD),
         payload={
             "name": f"woodpecker-{uuid.uuid4().hex[:8]}",
-            "redirect_uris": [REDIRECT_URI],
+            "redirect_uris": [f"{args.woodpecker_url.rstrip('/')}/authorize"],
             "confidential_client": True,
         },
     )
@@ -275,22 +342,9 @@ def _seed_repo(
 
 
 def phase_post(args: argparse.Namespace) -> dict:
-    dance = sh(
-        "docker",
-        "exec",
-        "-i",
-        "-e",
-        f"BOOTSTRAP_USER={USER}",
-        "-e",
-        f"BOOTSTRAP_PASS={PASSWORD}",
-        args.gitea_container,
-        "bash",
-        "-s",
-        input=DANCE,
-    )
-    woodpecker_token = dance.stdout.strip().splitlines()[-1]
+    woodpecker_token = oauth_login(args.gitea_url, args.woodpecker_url, USER, PASSWORD)
     if not woodpecker_token:
-        raise SystemExit(f"OAuth dance produced no token:\n{dance.stdout}\n{dance.stderr}")
+        raise SystemExit("OAuth dance produced no token")
 
     forge_repo = gitea_api(args.gitea_url, "GET", f"/repos/{ORG}/{REPO}", token=args.gitea_token)
     assert forge_repo is not None
@@ -349,9 +403,10 @@ def phase_post(args: argparse.Namespace) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=["pre", "post"])
+    parser.add_argument("phase", choices=["pre", "post", "login"])
     parser.add_argument("--gitea-url", required=True)
-    parser.add_argument("--gitea-container", required=True)
+    parser.add_argument("--gitea-container", help="pre only: gitea CLI runs via docker exec")
+    parser.add_argument("--woodpecker-url", required=True, help="browser-facing Woodpecker URL")
     parser.add_argument("--project-dir")
     parser.add_argument(
         "--deploy-dir", default=str(Path(__file__).resolve().parent.parent / "deploy")
@@ -361,18 +416,24 @@ def main() -> int:
     parser.add_argument(
         "--zot-ref", help="daemon-perspective zot repo, e.g. localhost:15000/mbt/churn"
     )
-    parser.add_argument("--woodpecker-url")
     parser.add_argument("--gitea-token")
+    parser.add_argument("--user", help="login only: the persona to log in as")
+    parser.add_argument("--password", help="login only: the persona's password")
     args = parser.parse_args()
 
     if args.phase == "pre":
-        if not args.project_dir:
-            parser.error("pre needs --project-dir")
+        if not (args.project_dir and args.gitea_container):
+            parser.error("pre needs --project-dir and --gitea-container")
         result = phase_pre(args)
-    else:
-        if not (args.woodpecker_url and args.gitea_token):
-            parser.error("post needs --woodpecker-url and --gitea-token")
+    elif args.phase == "post":
+        if not args.gitea_token:
+            parser.error("post needs --gitea-token")
         result = phase_post(args)
+    else:
+        if not (args.user and args.password):
+            parser.error("login needs --user and --password")
+        token = oauth_login(args.gitea_url, args.woodpecker_url, args.user, args.password)
+        result = {"woodpecker_token": token}
     print(json.dumps(result))
     return 0
 

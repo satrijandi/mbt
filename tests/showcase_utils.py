@@ -93,6 +93,7 @@ class ComposeStack:
         self.workspace = workspace
         self.ports = {
             "SHOWCASE_S3_PORT": free_port(),
+            "SHOWCASE_FILER_PORT": free_port(),
             "SHOWCASE_MLFLOW_PORT": free_port(),
             "SHOWCASE_SPARK_UI_PORT": free_port(),
             "SHOWCASE_JUPYTER_PORT": free_port(),
@@ -216,6 +217,12 @@ class ComposeStack:
     def mlflow_url(self) -> str:
         return f"http://localhost:{self.ports['SHOWCASE_MLFLOW_PORT']}"
 
+    def s3_url(self) -> str:
+        return f"http://localhost:{self.ports['SHOWCASE_S3_PORT']}"
+
+    def filer_url(self) -> str:
+        return f"http://localhost:{self.ports['SHOWCASE_FILER_PORT']}"
+
     def gitea_url(self) -> str:
         return f"http://localhost:{self.ports['SHOWCASE_GITEA_PORT']}"
 
@@ -231,10 +238,11 @@ class ComposeStack:
     def airflow_url(self) -> str:
         return f"http://localhost:{self.ports['SHOWCASE_AIRFLOW_PORT']}"
 
-    def http_json(self, url: str) -> dict:
+    def http_json(self, url: str, headers: dict | None = None) -> dict:
         import urllib.request
 
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        request = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(request, timeout=30) as resp:
             return json.loads(resp.read().decode())
 
 
@@ -280,7 +288,9 @@ ORG = "mbt-showcase"
 REPO = "churn"
 DEPLOY_REPO = "deploy"
 GITEA_USER = "mbtops"
+GITEA_PASSWORD = "mbtops-showcase-password"
 DS_USER = "mbtds"
+DS_PASSWORD = "mbtds-showcase-password"
 PR_COMMENT_MARKER = "<!-- mbt-pr-comment -->"
 PIPELINE_TERMINAL = {"success", "failure", "error", "killed", "declined", "canceled"}
 
@@ -419,6 +429,25 @@ class CiHarness:
         return conf
 
     # -- woodpecker --------------------------------------------------------------
+    def oauth_login(self, user: str, password: str) -> str:
+        """The human login path: complete the Gitea OAuth dance against the
+        HOST-published ports (exactly what a browser does) and mint a
+        Woodpecker API token for the given persona."""
+        result = _run_ci_bootstrap(
+            [
+                "login",
+                "--gitea-url",
+                self.stack.gitea_url(),
+                "--woodpecker-url",
+                self.stack.woodpecker_url(),
+                "--user",
+                user,
+                "--password",
+                password,
+            ]
+        )
+        return result["woodpecker_token"]
+
     def wp_api(self, path: str):
         import requests
 
@@ -673,6 +702,8 @@ def bootstrap_ci(stack: ComposeStack, workdir: Path) -> CiHarness:
             stack.gitea_url(),
             "--gitea-container",
             f"{stack.project_name}-gitea-1",
+            "--woodpecker-url",
+            stack.woodpecker_url(),
             "--project-dir",
             str(stack.workspace / "project"),
             "--network",
@@ -703,8 +734,6 @@ def bootstrap_ci(stack: ComposeStack, workdir: Path) -> CiHarness:
             "post",
             "--gitea-url",
             stack.gitea_url(),
-            "--gitea-container",
-            f"{stack.project_name}-gitea-1",
             "--woodpecker-url",
             stack.woodpecker_url(),
             "--gitea-token",

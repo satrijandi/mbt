@@ -8,6 +8,8 @@
 #           Woodpecker boots with placeholder OAuth credentials;
 #           scripts/ci_bootstrap.py creates the Gitea OAuth app, then re-ups
 #           woodpecker-server with SHOWCASE_WOODPECKER_CLIENT/SECRET set.
+#           Woodpecker's URLs are split-horizon (see its env block) so the
+#           OAuth login works from a host browser, not just in-network.
 #   orch  - Airflow (LocalExecutor + postgres) + git-sync (the P4
 #           scheduling/CD half): DAGs live in the Gitea `deploy` repo,
 #           git-sync reconciles them, tasks run the pinned deployable unit.
@@ -59,7 +61,11 @@ services:
       - seaweed-data:/data
       - ./seaweedfs/s3_config.json:/etc/seaweedfs/s3_config.json:ro
     ports:
+      # 8333 is the S3 API: signed requests only - a bare browser GET
+      # returns AccessDenied. Humans browse the lake through the filer UI
+      # on 8888 instead (-s3 rides on the filer, so it is always running).
       - "${SHOWCASE_S3_PORT:-8333}:8333"
+      - "${SHOWCASE_FILER_PORT:-8388}:8888"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9333/cluster/healthz"]
       interval: 3s
@@ -166,7 +172,20 @@ services:
     profiles: [ci]
     environment:
       WOODPECKER_OPEN: "true"
-      WOODPECKER_HOST: http://woodpecker-server:8000
+      # Split-horizon URLs so a HUMAN BROWSER on the host can complete the
+      # Gitea OAuth login (the scripted bootstrap drives the exact same
+      # flow). The port defaults must match the published ports below.
+      #   WOODPECKER_HOST                     browser-facing Woodpecker: UI
+      #     links and the OAuth redirect_uri (the Gitea app registers it).
+      #   WOODPECKER_EXPERT_WEBHOOK_HOST      what Gitea's webhooks call -
+      #     in-network, or push/PR events never reach Woodpecker.
+      #   WOODPECKER_EXPERT_FORGE_OAUTH_HOST  browser-facing Gitea: where
+      #     /authorize sends the user's browser to log in and grant.
+      #   WOODPECKER_GITEA_URL                server-side forge API + OAuth
+      #     token exchange + CI_FORGE_URL in steps - stays in-network.
+      WOODPECKER_HOST: http://localhost:${SHOWCASE_WOODPECKER_PORT:-8305}
+      WOODPECKER_EXPERT_WEBHOOK_HOST: http://woodpecker-server:8000
+      WOODPECKER_EXPERT_FORGE_OAUTH_HOST: http://localhost:${SHOWCASE_GITEA_PORT:-3305}
       WOODPECKER_AGENT_SECRET: mbt-showcase-agent-secret
       WOODPECKER_ADMIN: mbtops
       WOODPECKER_GITEA: "true"

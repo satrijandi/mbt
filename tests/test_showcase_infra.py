@@ -63,6 +63,36 @@ def test_services_healthy_and_s3_round_trip(showcase_stack) -> None:
         )
 
 
+def test_lake_is_browsable_from_the_host(showcase_stack) -> None:
+    """The two host-facing faces of the lake, as `make urls` documents them:
+    the filer UI browses the seeded buckets without credentials, while the
+    raw S3 port refuses unsigned requests (the AccessDenied a bare browser
+    GET gets is correct behavior, not an outage)."""
+    import urllib.error
+    import urllib.request
+
+    stack = showcase_stack
+
+    # SeaweedFS filer UI (the `-s3` gateway rides on the filer): the bucket
+    # tree and the seeded tables are one JSON listing away for a human.
+    buckets = stack.http_json(
+        f"{stack.filer_url()}/buckets/", headers={"Accept": "application/json"}
+    )
+    names = {entry["FullPath"].rsplit("/", 1)[-1] for entry in buckets.get("Entries") or []}
+    assert {"mbt-lake", "mbt-artifacts"} <= names, f"filer UI misses buckets: {names}"
+
+    tables = stack.http_json(
+        f"{stack.filer_url()}/buckets/mbt-lake/", headers={"Accept": "application/json"}
+    )
+    table_names = {entry["FullPath"].rsplit("/", 1)[-1] for entry in tables.get("Entries") or []}
+    assert "subscribers" in table_names, f"filer UI misses seeded tables: {table_names}"
+
+    # The S3 API port: anonymous requests are denied by s3_config.json.
+    with pytest.raises(urllib.error.HTTPError) as denied:
+        urllib.request.urlopen(f"{stack.s3_url()}/mbt-lake", timeout=30)
+    assert denied.value.code == 403, f"expected AccessDenied, got {denied.value.code}"
+
+
 def test_runner_env_sanity_and_sparkling_version_matrix(showcase_stack) -> None:
     """SHOW-02: mbt runs; the h2o client matches the pysparkling-embedded H2O.
 

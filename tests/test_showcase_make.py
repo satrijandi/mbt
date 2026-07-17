@@ -20,7 +20,14 @@ import uuid
 from pathlib import Path
 
 import pytest
-from showcase_utils import SHOWCASE_DIR, SHOWCASE_MARKS, docker_sock_gid, free_port
+from showcase_utils import (
+    GITEA_PASSWORD,
+    GITEA_USER,
+    SHOWCASE_DIR,
+    SHOWCASE_MARKS,
+    docker_sock_gid,
+    free_port,
+)
 
 pytestmark = [
     *SHOWCASE_MARKS,
@@ -32,6 +39,7 @@ pytestmark = [
 
 PORT_VARS = (
     "SHOWCASE_S3_PORT",
+    "SHOWCASE_FILER_PORT",
     "SHOWCASE_MLFLOW_PORT",
     "SHOWCASE_SPARK_UI_PORT",
     "SHOWCASE_JUPYTER_PORT",
@@ -139,6 +147,40 @@ def test_runbook_golden_path(runbook) -> None:
         (ws / "lake_local" / "predictions" / "monthly_retention_scores").glob("*/_SUCCESS")
     )
     assert monthly_runs, "demo left no monthly prediction runs"
+
+    # The CI seeding target, then the two things its output tells a human
+    # to do: open the repo URL and log into Woodpecker with the Gitea
+    # account (the OAuth dance against the host-published ports).
+    runner.make("ci")
+    import json
+    import sys
+
+    import requests
+
+    gitea_port = runner.env["SHOWCASE_GITEA_PORT"]
+    repo_page = requests.get(f"http://localhost:{gitea_port}/mbt-showcase/churn", timeout=30)
+    assert repo_page.ok, f"churn repo page -> {repo_page.status_code}"
+    login = subprocess.run(
+        [
+            sys.executable,
+            str(SHOWCASE_DIR / "scripts" / "ci_bootstrap.py"),
+            "login",
+            "--gitea-url",
+            f"http://localhost:{gitea_port}",
+            "--woodpecker-url",
+            f"http://localhost:{runner.env['SHOWCASE_WOODPECKER_PORT']}",
+            "--user",
+            GITEA_USER,
+            "--password",
+            GITEA_PASSWORD,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert login.returncode == 0, f"browser login failed:\n{login.stdout}\n{login.stderr}"
+    assert json.loads(login.stdout.strip().splitlines()[-1])["woodpecker_token"]
 
     # Standalone cadence targets rerun cleanly on the same anchors.
     runner.make("monthly")
