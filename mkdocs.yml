@@ -28,6 +28,7 @@ nav:
   - Troubleshooting: troubleshooting.md
   - Adapter authoring: adapter-authoring.md
   - Adapter API reference: api-reference.md
+  - Architecture: architecture.md
   - Roadmap: roadmap.md
   - v0.1 status: v0.1-status.md
   - MLOps alignment: mlops-alignment.md

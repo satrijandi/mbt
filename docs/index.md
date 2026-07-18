@@ -16,6 +16,7 @@ State-aware selection (`state:modified+`) retrains only what changed, making ML-
 - Setting up CI? See [GitOps & CI](gitops.md) for the PR check / prod build / promotion loop.
 - Want to see the whole platform running? The [Showcase](showcase.md) boots an S3 lake, Spark cluster, MLflow, a CI forge, an OCI registry, Airflow, and Grafana with docker compose - and runs the full lifecycle on them.
 - Building an adapter? The [Adapter authoring guide](adapter-authoring.md) plus the compliance suite is everything you need - no mbt-core knowledge required.
+- Hacking on the engine? [Architecture](architecture.md) maps `mbt-core` internals: the compile pipeline, the coordinator/job process split, and where every design decision lives.
 - Evaluating mbt against MLOps best practices? [MLOps alignment](mlops-alignment.md) audits the tool against the ml-ops.org catalogue, gaps included.
 
 ## Design principles

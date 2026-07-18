@@ -34,6 +34,7 @@ The fast suite enforces 100% line coverage on the coordinator-process packages; 
 
 ## Conventions that will save you time
 
+- **Get the lay of the land.** [`docs/architecture.md`](docs/architecture.md) maps the `mbt-core` engine end to end - the compile pipeline, the coordinator/job process split, and the module layout - so you know where a change belongs before you make it.
 - **Read the ADRs first.** Design history lives in `docs/adr/`.
   Several things that look wrong (lazy imports, duplicate except tuples, two pyspark versions in the lock) are deliberate and documented; a PR "cleaning them up" will be declined with a pointer to the ADR.
 - **Tests write only under pytest tmp dirs.**
