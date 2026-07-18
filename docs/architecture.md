@@ -266,4 +266,4 @@ Start with the decision, not the code:
 | Scoring & monitoring | ADR-20 (scoring resource & runtime champion), ADR-21 (prediction store & ground-truth ledger), ADR-23 (warehouse batch scoring) |
 | Task verticals | ADR-24 (regression as a second vertical) |
 
-The pre-implementation sketches under `design-history/` (`PLAN.md`, `PRD.md`, `TSD.md`, `TASK.md`) are kept for provenance and for the `FR-*`/`NFR-*` requirement IDs still cited in the code, but the ADRs supersede them (ADR-15 explicitly supersedes the `TSD.md` sketch).
+The pre-implementation sketches under `design-history/` (`PRD.md` and `TSD.md`) are kept as glossaries for the `FR-*`/`NFR-*` requirement IDs and the `TSD §N` anchors still cited throughout the code; the ADRs supersede their design decisions (ADR-15 explicitly supersedes the `TSD.md` sketch).

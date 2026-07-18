@@ -3,7 +3,7 @@
 **Product:** mbt (Model Build Tool) - "dbt for machine learning models"
 **Version:** 0.1 · **Status:** implemented in v0.1 (historical design document; requirement IDs remain cited from code) · **Last updated:** 2026-07-06
 **Audience:** the building team (2 engineers + 1 DS design partner)
-**Related documents:** [PLAN.md](PLAN.md) (vision, rationale, roadmap) · [TSD.md](TSD.md) (technical design)
+**Related documents:** [TSD.md](TSD.md) (technical design)
 
 ---
 
@@ -11,7 +11,7 @@
 
 This document turns the vision in PLAN.md into concrete, testable product requirements.
 It covers the full product vision (v0 through v1+), with every requirement tagged by delivery phase so the team can plan, build, and verify incrementally.
-PLAN.md remains the source of truth for *why*; this PRD is the source of truth for *what*; TSD.md is the source of truth for *how*.
+This PRD is the source of truth for *what*; TSD.md is the source of truth for *how*.
 
 ## 2. Product summary
 
