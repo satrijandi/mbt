@@ -63,6 +63,7 @@ def test_init_scaffold_is_complete_and_parses(scaffold: Path, tmp_path: Path) ->
         ".github/workflows/prod_build.yml",
         ".github/workflows/promote.yml",
         ".github/workflows/scheduled_retrain.yml",
+        ".github/workflows/scheduled_retrain_monthly.yml",
         ".github/workflows/scheduled_score.yml",
         ".github/workflows/scheduled_monitor.yml",
         "scripts/generate_sample_data.py",
@@ -107,7 +108,12 @@ def test_scaffold_operational_guardrails(scaffold: Path) -> None:
     """Scheduled retrain and prod build alert on failure; the prod manifest
     persists as a durable state baseline out of the box (FR-STATE-03)."""
     workflows_dir = scaffold / ".github" / "workflows"
-    for scheduled in ("scheduled_retrain.yml", "scheduled_score.yml", "scheduled_monitor.yml"):
+    for scheduled in (
+        "scheduled_retrain.yml",
+        "scheduled_retrain_monthly.yml",
+        "scheduled_score.yml",
+        "scheduled_monitor.yml",
+    ):
         text = (workflows_dir / scheduled).read_text()
         assert "if: failure()" in text and "MBT_ALERT_WEBHOOK" in text, scheduled
     prod = (workflows_dir / "prod_build.yml").read_text()

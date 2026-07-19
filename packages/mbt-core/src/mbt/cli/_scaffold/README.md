@@ -32,8 +32,8 @@ mbt show churn_classifier
 - `profiles.yml` - environments (dev/prod); keep secrets in `{{ env_var(...) }}`
 - `requirements.in` / `requirements.txt` - pinned toolchain for CI; regenerate
   with hashes via `uv pip compile --generate-hashes requirements.in -o requirements.txt`
-- `.github/workflows/` - PR check, prod build, promotion, weekly retrain,
-  daily scoring, weekly ground-truth monitor
+- `.github/workflows/` - PR check, prod build, promotion, weekly + monthly
+  retrain, daily scoring, weekly ground-truth monitor
 - `scripts/publish_state.sh` / `fetch_state.sh` - the durable prod-state
   baseline: prod builds append the manifest to the `mbt-state` branch,
   PR checks fetch it for `--state` (first run bootstraps with a full build)

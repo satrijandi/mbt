@@ -1,0 +1,36 @@
+# mbt scheduled retraining (FR-STATE-06): CI cron + tag selection.
+# The monthly companion to scheduled_retrain.yml, for slow-moving models.
+# Tag such models `monthly` in their spec; selecting a tag no model carries
+# yet is a clean no-op (exit 0), so this is safe to ship before you use it.
+name: mbt monthly retrain
+
+on:
+  schedule:
+    - cron: "0 4 1 * *"  # 1st of month 04:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project
+        run: |
+          pip install -r requirements.txt
+          python scripts/generate_sample_data.py
+      - name: Retrain monthly models (prod target)
+        run: mbt build --target prod --select tag:monthly
+      - name: Alert on failure
+        # A silently failed scheduled retrain violates continuous training;
+        # set the MBT_ALERT_WEBHOOK secret (Slack/Teams/PagerDuty webhook).
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.MBT_ALERT_WEBHOOK }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "MBT_ALERT_WEBHOOK not set; skipping alert"; exit 0; }
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\":\"mbt scheduled retrain failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            "$WEBHOOK"

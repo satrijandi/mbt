@@ -22,9 +22,11 @@ snapshot ↔ model version.
 3. **Promotion** (`promote.yml`): a reviewed `promotions.yml` change (pure
    GitOps) or a manually approved `workflow_dispatch` runs
    `mbt promote`, which refuses versions without recorded gate passes.
-4. **Scheduled retraining** (`scheduled_retrain.yml`): CI cron +
-   `mbt build --select tag:weekly` - freshness arrives as new snapshots;
-   no orchestrator concept needed.
+4. **Scheduled retraining** (`scheduled_retrain.yml`, `scheduled_retrain_monthly.yml`):
+   CI cron + `mbt build --select tag:weekly` (Mondays) and
+   `mbt build --select tag:monthly` (the 1st) - freshness arrives as new
+   snapshots; no orchestrator concept needed. Tag each model with the cadence
+   it should retrain on; add more workflows (daily, quarterly) the same way.
 5. **Scheduled scoring** (`scheduled_score.yml`): CI cron +
    `mbt score --target prod --select tag:daily` - each pipeline loads its
    model's current production champion from the registry, so promotions
