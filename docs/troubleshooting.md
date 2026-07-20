@@ -96,6 +96,24 @@ A feature this associated with the label is almost always leakage (a post-outcom
 **Fix:** if it is leakage, exclude the column in the dataset/model spec - do not widen the threshold.
 If it is a genuine, available-at-prediction-time signal, declare the check with `exclude: [column]` (the exception is then visible in the spec diff) or tune `max_abs_correlation`; `enabled: false` opts out loudly (recorded as "check disabled").
 
+## A build exits 2 with `check <name>: FAIL` or `test <name>: FAIL`
+
+**Symptom (exit 2):**
+
+```text
+check not_null: FAIL - train.churned: 3 null(s)
+test test_row_count: FAIL - raised AssertionError()
+TEST_FAILED dataset dataset.churn_demo.churn_training_set - 1 check/test failure(s): not_null: train.churned: 3 null(s)
+```
+
+**Why:** every built-in check and every Python data test emits its own PASS/FAIL event as it runs, so a failing build names the exact check or test on its own line instead of only in the aggregated node status.
+The `TEST_FAILED` line that follows is the node summary; the per-check and per-test lines above it pinpoint which one failed and why.
+`PASS` lines are normal and confirm each check and test actually ran.
+
+**Fix:** read the message on the `FAIL` line - it carries the specific reason (a null column, a raised assertion, a schema mismatch).
+The same failures are in `target/run_results.json` under each node's `tests`.
+For label-association failures see the `label_leakage_scan` entry above; an explicitly disabled check reads `check <name>: PASS - check disabled`.
+
 ## `champion gate: no champion in 'production' yet - passing with a warning`
 
 **Symptom:**
@@ -255,3 +273,20 @@ The kept job payload is the exact serialized job for reproduction: `python -m mb
 **Fix:** if the job was genuinely making progress, raise `job_timeout_seconds` in `profiles.yml` (or remove it for no limit).
 If it was hung, the payload plus the tail of the event log tells you where.
 The same key works for the Spark compute adapter (`spark-submit` wording in the message).
+
+## Informational event lines you may now see
+
+These lines are normal observability output on stderr (or the `--log-format json` stream), not failures.
+They were added so paths that used to run silently now report progress; an operator grepping the event log should not mistake them for problems.
+
+| Line (verbatim rendering) | Emitted by |
+|---|---|
+| `Parsing project 'churn_demo'` / `Parsed 6 resources in 0.14s [OK]` | `mbt parse` start and finish (a parse error renders `[N error(s)]` in place of `[OK]`) |
+| `state diff: 1 added, 0 removed, 2 modified` | `mbt state diff` (appends `; env digest CHANGED` when the environment digest moved) |
+| `evaluate: 2 node(s) selected on target 'dev'` / `evaluate finished [success]: 2 ok, 0 failed, 0 skipped in 1.2s` | `mbt evaluate` run brackets, matching the other commands |
+| `check schema: PASS` / `test test_row_count: PASS` | each built-in check and Python data test (the `FAIL` variant is a symptom - see its entry above) |
+| `materialized 1000 rows: test=200, train=800` | a dataset build's per-split row counts (local, snowflake, and spark data adapters; the warehouse adapters prefix the node id) |
+| `scoring input materialized 340 rows to score` | a scoring-input build (an empty batch warns `scoring input materialized 0 rows; nothing to score` instead) |
+| `tuning complete: 10 trial(s), 2 pruned, best pr_auc=0.8300` | a tuning search summary; per-trial `tuning trial 0: pr_auc=0.8300` lines are debug-level, shown only under `--verbose` or `--log-format json` |
+
+`--quiet` suppresses all of these; `--log-format json` emits them as structured event objects instead of the rendered text shown here.
