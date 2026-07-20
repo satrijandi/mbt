@@ -8,12 +8,11 @@ Snapshot queries return scriptable tokens.
 
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import pyarrow as pa
 import pytest
 from mbt_snowflake.adapter import SnowflakeAdapterError, SnowflakeDataAdapter
@@ -26,6 +25,13 @@ from mbt_snowflake.sql import (
     scoring_query,
     scoring_relation,
     split_queries,
+)
+from snowflake_stub_helpers import (
+    CapturingSink,
+    FakeBuildContext,
+    FakeSourceTable,
+    StubConnection,
+    StubCursor,
 )
 
 from mbt_adapter_base import (
@@ -43,75 +49,6 @@ WINDOWS = {
     "train": ("2026-01-02T00:00:00Z", "2026-06-03T00:00:00Z"),
     "test": ("2026-06-03T00:00:00Z", "2026-07-01T00:00:00Z"),
 }
-
-
-# -- the stub connection -------------------------------------------------------
-
-
-class StubCursor:
-    def __init__(self, connection: "StubConnection") -> None:
-        self._connection = connection
-        self._scalar: Any = None
-        self._table: pa.Table | None = None
-
-    def execute(self, sql: str) -> "StubCursor":
-        self._connection.executed.append(sql)
-        if "SYSTEM$LAST_CHANGE_COMMIT_TIME" in sql or "HASH_AGG" in sql:
-            self._scalar = self._connection.snapshot_token(sql)
-            return self
-        self._table = self._connection.run_in_duckdb(sql)
-        return self
-
-    def fetchone(self) -> tuple[Any] | None:
-        return (self._scalar,)
-
-    def fetch_arrow_batches(self):
-        assert self._table is not None
-        # two chunks to exercise the streaming writer
-        half = max(1, self._table.num_rows // 2)
-        yield self._table.slice(0, half)
-        yield self._table.slice(half)
-
-    def close(self) -> None:
-        pass
-
-
-@dataclass
-class StubConnection:
-    """Emulates enough of a Snowflake session to run the adapter's SQL."""
-
-    tables: dict[str, pa.Table]  # qualified ref -> data (UPPERCASE columns)
-    tokens: dict[str, str] = field(default_factory=dict)
-    executed: list[str] = field(default_factory=list)
-
-    def cursor(self) -> StubCursor:
-        return StubCursor(self)
-
-    def snapshot_token(self, sql: str) -> str:
-        for ref, token in self.tokens.items():
-            if ref in sql:
-                return token
-        return "token-default"
-
-    def run_in_duckdb(self, sql: str) -> pa.Table:
-        con = duckdb.connect()
-        try:
-            con.execute(
-                "CREATE MACRO MD5_NUMBER_LOWER64(s) AS "
-                "(md5_number(s) % 9223372036854775807)::BIGINT"
-            )
-            con.execute("CREATE MACRO TO_TIMESTAMP_NTZ(s) AS CAST(s AS TIMESTAMP)")
-            for i, (ref, table) in enumerate(self.tables.items()):
-                view = f"stub_table_{i}"
-                con.register(view, table)
-                sql = sql.replace(ref, view)
-            sql = sql.replace("AS TIMESTAMP_NTZ)", "AS TIMESTAMP)")
-            # con.sql(...).to_arrow_table() (the Relation API) exists at the
-            # duckdb>=1.0 floor and is not deprecated; Connection.fetch_arrow_table
-            # warns on current duckdb.
-            return con.sql(sql).to_arrow_table()
-        finally:
-            con.close()
 
 
 # -- fixtures ---------------------------------------------------------------------
@@ -137,36 +74,6 @@ def _make_tables(n: int = 200) -> dict[str, pa.Table]:
         "ANALYTICS.GOLD.CHURN_LABELS": labels,
         "ANALYTICS.GOLD.USAGE_FEATURES": usage,
     }
-
-
-@dataclass
-class FakeSourceTable:
-    name: str
-    identifier: str
-    path: str | None = None
-    format: str = "snowflake"
-
-
-class _CapturingSink:
-    def __init__(self) -> None:
-        self.messages: list[Any] = []
-
-    def emit(self, event: Any) -> None:
-        self.messages.append(event)
-
-
-@dataclass
-class FakeBuildContext:
-    node: ManifestNode
-    source: FakeSourceTable
-    source_tables: dict[str, FakeSourceTable]
-    resolved_windows: dict[str, tuple[str, str]]
-    sample_fraction: float
-    deep_snapshot: bool
-    output_dir: Path
-    # The real BuildContext always carries a live sink; default to a capturing
-    # one so success-path emits (row counts) have somewhere to go.
-    events: Any = field(default_factory=_CapturingSink)
 
 
 LABEL_UID = "source.p.snowflake.churn_labels"
@@ -803,7 +710,7 @@ def _scoring_ctx(
         sample_fraction=sample_fraction,
         deep_snapshot=False,
         output_dir=tmp_path / "score",
-        events=events or _CapturingSink(),
+        events=events or CapturingSink(),
     )
 
 
@@ -936,7 +843,7 @@ def test_build_scoring_input_zero_rows_warns_not_errors(tmp_path: Path) -> None:
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
     spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
-    events = _CapturingSink()
+    events = CapturingSink()
     future = ("2030-01-01T00:00:00Z", "2030-02-01T00:00:00Z")  # matches no rows
     ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), window=future, events=events)
     handle = adapter.build_scoring_input(spec, ctx)
