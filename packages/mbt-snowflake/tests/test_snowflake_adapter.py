@@ -147,6 +147,14 @@ class FakeSourceTable:
     format: str = "snowflake"
 
 
+class _CapturingSink:
+    def __init__(self) -> None:
+        self.messages: list[Any] = []
+
+    def emit(self, event: Any) -> None:
+        self.messages.append(event)
+
+
 @dataclass
 class FakeBuildContext:
     node: ManifestNode
@@ -156,7 +164,9 @@ class FakeBuildContext:
     sample_fraction: float
     deep_snapshot: bool
     output_dir: Path
-    events: Any = None
+    # The real BuildContext always carries a live sink; default to a capturing
+    # one so success-path emits (row counts) have somewhere to go.
+    events: Any = field(default_factory=_CapturingSink)
 
 
 LABEL_UID = "source.p.snowflake.churn_labels"
@@ -289,7 +299,8 @@ def test_build_dataset_joins_streams_and_normalizes_case(tmp_path: Path) -> None
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
     spec = _spec()
-    handle = adapter.build_dataset(spec, _ctx(tmp_path, spec, adapter))
+    ctx = _ctx(tmp_path, spec, adapter)
+    handle = adapter.build_dataset(spec, ctx)
 
     assert handle.splits() == {"train", "test"}
     train = handle.read("train")
@@ -307,6 +318,10 @@ def test_build_dataset_joins_streams_and_normalizes_case(tmp_path: Path) -> None
     selects = [q for q in stub.executed if q.startswith("SELECT *")]
     assert len(selects) == 2
     assert all("LEFT JOIN" in q and "USING (customer_id, snapshot_date)" in q for q in selects)
+    # the successful build reports its per-split row counts on the bus
+    row_logs = [str(m) for m in ctx.events.messages if "materialized" in str(m)]
+    assert len(row_logs) == 1
+    assert "train=" in row_logs[0] and "test=" in row_logs[0]
 
 
 def test_push_down_sampling_is_reproducible_and_monotone(tmp_path: Path) -> None:
@@ -752,14 +767,6 @@ def test_from_locator_wraps_missing_materializations(tmp_path: Path) -> None:
 # -- batch scoring (contract 1.1, ADR-20/21/23) ---------------------------------------
 
 
-class _CapturingSink:
-    def __init__(self) -> None:
-        self.messages: list[Any] = []
-
-    def emit(self, event: Any) -> None:
-        self.messages.append(event)
-
-
 SCORE_WINDOW = ("2026-06-03T00:00:00Z", "2026-07-01T00:00:00Z")
 
 
@@ -796,7 +803,7 @@ def _scoring_ctx(
         sample_fraction=sample_fraction,
         deep_snapshot=False,
         output_dir=tmp_path / "score",
-        events=events,
+        events=events or _CapturingSink(),
     )
 
 
@@ -832,12 +839,15 @@ def test_build_scoring_input_streams_windowed_single_source(tmp_path: Path) -> N
     adapter = _adapter(stub)
     sources = _scoring_sources()
     spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
-    handle = adapter.build_scoring_input(spec, _scoring_ctx(tmp_path, adapter, sources))
+    ctx = _scoring_ctx(tmp_path, adapter, sources)
+    handle = adapter.build_scoring_input(spec, ctx)
 
     assert handle.splits() == {"score"}
     score = handle.read("score")
     assert "monthly_usage" in score.column_names  # normalized to lowercase
     assert 0 < score.num_rows < 200  # the score window pruned the batch
+    # positive-path scoring row count reaches the bus
+    assert any("rows to score" in str(m) for m in ctx.events.messages)
     selects = [q for q in stub.executed if q.startswith("SELECT *")]
     assert len(selects) == 1 and "TO_TIMESTAMP_NTZ" in selects[0]
 

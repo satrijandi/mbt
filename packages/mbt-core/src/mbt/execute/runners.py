@@ -377,7 +377,7 @@ class DatasetRunner:
         results = []
         for test_file in bound:
             only = set(spec.tests) & set(test_file.test_names) if spec.tests else None
-            results.extend(run_python_tests(test_file, table, spec, only=only))
+            results.extend(run_python_tests(test_file, table, spec, only=only, resource=uid))
         return results
 
     def _binds(self, test_file: PythonTestFile, uid: str, spec: DatasetSpec) -> bool:

@@ -148,6 +148,16 @@ def test_parse_reports_counts(demo_project: Path) -> None:
     assert "Parsed" in result.output
 
 
+def test_parse_emits_parse_started_and_completed(demo_project: Path) -> None:
+    """parse brackets its work with ParseStarted/ParseCompleted on the bus
+    (rendered to stderr), symmetric with compile's Compile* events - the
+    command was previously silent on the event stream."""
+    result = invoke(["parse", "--project-dir", str(demo_project)])
+    assert result.exit_code == 0, debug(result)
+    assert "Parsing project" in result.stderr
+    assert "resources in" in result.stderr
+
+
 def test_profiles_dir_override_is_honored(demo_project: Path) -> None:
     # profiles.yml only exists in --profiles-dir; compile succeeds only if the
     # override is resolved and used
@@ -363,6 +373,24 @@ def test_state_diff_outputs_and_modified_detection(demo_project: Path) -> None:
     assert modified.exit_code == 0, debug(modified)
     assert "churn_model" in modified.output
     assert "no node changes" not in modified.output
+
+
+def test_state_diff_emits_state_diffed_event(demo_project: Path) -> None:
+    """state-diff puts a StateDiffed on the bus (rendered to stderr) so the
+    command is not silent on the event stream - the counts track the diff."""
+    compiled = invoke(["compile", "--project-dir", str(demo_project), "--anchor", ANCHOR])
+    assert compiled.exit_code == 0, debug(compiled)
+    reference = demo_project / "target" / "manifest.json"
+    base = ["state", "diff", "--state", str(reference), "--project-dir", str(demo_project)]
+
+    clean = invoke([*base, "--anchor", ANCHOR])
+    assert clean.exit_code == 0, debug(clean)
+    assert "state diff: 0 added, 0 removed, 0 modified" in clean.stderr
+
+    # a CLI var flips the gate threshold -> the model's config hash changes
+    modified = invoke([*base, "--anchor", ANCHOR, "--vars", "default_threshold: 0.9"])
+    assert modified.exit_code == 0, debug(modified)
+    assert "1 modified" in modified.stderr
 
 
 def test_state_diff_manifest_input_and_env_change(demo_project: Path) -> None:

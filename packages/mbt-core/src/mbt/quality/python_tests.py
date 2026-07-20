@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from mbt.contracts import DatasetSpec, TestResult
+from mbt.events import get_bus
+from mbt.events.models import TestEvaluated
 from mbt.exceptions import MbtError
 
 if TYPE_CHECKING:
@@ -86,8 +88,10 @@ def run_python_tests(
     dataset: pa.Table,
     spec: DatasetSpec,
     only: set[str] | None = None,
+    resource: str | None = None,
 ) -> list[TestResult]:
     """Import a test module and run its test functions against a dataset."""
+    bus = get_bus()
     module_name = f"_mbt_data_test_{test_file.path.stem}"
     spec_obj = importlib.util.spec_from_file_location(module_name, test_file.path)
     if spec_obj is None or spec_obj.loader is None:  # pragma: no cover - importlib guards
@@ -104,22 +108,31 @@ def run_python_tests(
             try:
                 outcome = func(dataset, spec)
             except Exception as exc:
-                results.append(TestResult(name=name, passed=False, message=f"raised {exc!r}"))
-                continue
-            if isinstance(outcome, TestResult):
-                results.append(outcome)
-            elif isinstance(outcome, bool) or outcome is None:
-                # Bare asserts / boolean returns are accepted for ergonomics.
-                passed = bool(outcome) if isinstance(outcome, bool) else True
-                results.append(TestResult(name=name, passed=passed))
+                result = TestResult(name=name, passed=False, message=f"raised {exc!r}")
             else:
-                results.append(
-                    TestResult(
+                if isinstance(outcome, TestResult):
+                    result = outcome
+                elif isinstance(outcome, bool) or outcome is None:
+                    # Bare asserts / boolean returns are accepted for ergonomics.
+                    passed = bool(outcome) if isinstance(outcome, bool) else True
+                    result = TestResult(name=name, passed=passed)
+                else:
+                    result = TestResult(
                         name=name,
                         passed=False,
                         message=f"returned {type(outcome).__name__}, expected TestResult",
                     )
+            results.append(result)
+            # One event per test so the pass/fail stream is visible on the bus,
+            # mirroring the built-in checks' CheckEvaluated.
+            bus.emit(
+                TestEvaluated(
+                    unique_id=resource,
+                    test=result.name,
+                    passed=result.passed,
+                    message=result.message,
                 )
+            )
         return results
     finally:
         sys.modules.pop(module_name, None)

@@ -75,6 +75,14 @@ class FakeSourceTable:
         self.format = "parquet"
 
 
+class _CapturingSink:
+    def __init__(self) -> None:
+        self.messages: list[Any] = []
+
+    def emit(self, event: Any) -> None:
+        self.messages.append(event)
+
+
 class FakeBuildContext:
     def __init__(
         self,
@@ -91,7 +99,9 @@ class FakeBuildContext:
         self.sample_fraction = sample_fraction
         self.deep_snapshot = False
         self.output_dir = output_dir
-        self.events = None
+        # The real BuildContext always carries a live sink; capture so
+        # success-path emits (row counts) have somewhere to go.
+        self.events = _CapturingSink()
 
 
 def _spec(**overrides: Any) -> DatasetSpec:
@@ -153,8 +163,12 @@ def test_build_dataset_joins_windows_and_reproducible_sampling(
 ) -> None:
     adapter = SparkDataAdapter({"master": "local[2]"})
     spec = _spec()
-    handle = adapter.build_dataset(spec, _ctx(source_root, tmp_path / "full", adapter))
+    ctx = _ctx(source_root, tmp_path / "full", adapter)
+    handle = adapter.build_dataset(spec, ctx)
     assert handle.splits() == {"train", "test"}
+    # the successful build reports its per-split row counts on the bus
+    row_logs = [str(m) for m in ctx.events.messages if "materialized" in str(m)]
+    assert len(row_logs) == 1 and "train=" in row_logs[0] and "test=" in row_logs[0]
     train = handle.read("train")
     assert {
         "customer_id",

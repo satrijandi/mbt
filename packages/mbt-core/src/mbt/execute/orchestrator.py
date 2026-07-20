@@ -264,6 +264,27 @@ def build_state_index(opts: InvocationOptions, manifest: Manifest) -> StateIndex
     return index
 
 
+def _emit_run_finished(command: str, run_results: RunResults) -> None:
+    """Emit the terminal ``RunFinished`` for a completed run.
+
+    Shared by ``run_command`` and ``run_evaluate`` so the two entry points
+    cannot drift on the status mapping or the succeeded/failed/skipped tallies.
+    """
+    statuses = [r.status for r in run_results.results]
+    get_bus().emit(
+        RunFinished(
+            command=command,
+            status={0: "success", 1: "error", 2: "quality_failure"}[run_results.exit_code()],
+            succeeded=statuses.count("success"),
+            failed=sum(
+                statuses.count(s) for s in ("error", "gate_failed", "test_failed", "monitor_failed")
+            ),
+            skipped=statuses.count("skipped"),
+            elapsed_s=run_results.metadata.elapsed_s,
+        )
+    )
+
+
 def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = None) -> RunResults:
     """Execute run/build/test and write run_results.json (FR-RUN-04)."""
     started_monotonic = time.monotonic()
@@ -313,19 +334,7 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
     )
     run_results.write(opts.project_dir / "target" / "run_results.json")
 
-    statuses: list[str] = [r.status for r in ordered]
-    bus.emit(
-        RunFinished(
-            command=opts.command,
-            status={0: "success", 1: "error", 2: "quality_failure"}[run_results.exit_code()],
-            succeeded=statuses.count("success"),
-            failed=sum(
-                statuses.count(s) for s in ("error", "gate_failed", "test_failed", "monitor_failed")
-            ),
-            skipped=statuses.count("skipped"),
-            elapsed_s=run_results.metadata.elapsed_s,
-        )
-    )
+    _emit_run_finished(opts.command, run_results)
     return run_results
 
 
@@ -432,12 +441,24 @@ def run_evaluate(
         total_nodes=len(node.depends_on) + 1,
     )
 
-    # Build (or reuse) the model's dataset first.
+    dataset_deps = [
+        dep
+        for dep in node.depends_on
+        if manifest.nodes.get(dep) is not None and manifest.nodes[dep].resource_type == "dataset"
+    ]
+    bus.emit(
+        RunStarted(
+            command="evaluate",
+            target=manifest.metadata.target,
+            selected=len(dataset_deps) + 1,  # the model plus its dataset(s)
+        )
+    )
+
+    # Build (or reuse) the model's dataset(s) first.
     dataset_runner = DatasetRunner(ctx)
     results: list[NodeResult] = []
-    for dep in node.depends_on:
-        if manifest.nodes.get(dep) is not None and manifest.nodes[dep].resource_type == "dataset":
-            results.append(dataset_runner.run(dep))
+    for dep in dataset_deps:
+        results.append(dataset_runner.run(dep))
     failed_datasets = [r for r in results if r.status == "error"]
     if failed_datasets:
         # The model still gets a row (matching the scheduler's skip semantics);
@@ -497,4 +518,6 @@ def run_evaluate(
         results=results,
     )
     run_results.write(opts.project_dir / "target" / "run_results.json")
+
+    _emit_run_finished("evaluate", run_results)
     return run_results

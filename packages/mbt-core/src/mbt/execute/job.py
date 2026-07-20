@@ -504,6 +504,15 @@ def _run_tuning(
         value = float(results.metrics[tuning.objective.metric])
         index = trial_counter["index"]
         trial_counter["index"] += 1
+        # Per-trial progress on the bus at debug (visible under --verbose or
+        # --log-format json) so a long search is not opaque while it runs.
+        get_bus().emit(
+            LogMessage(
+                level="debug",
+                unique_id=job.node.unique_id,
+                message=f"tuning trial {index}: {tuning.objective.metric}={value:.4f}",
+            )
+        )
         # Trial history as nested tracking runs where the adapter supports it
         # (FR-TUNE-03); optional so simple trackers keep working.
         if tracking is not None and run_handle is not None and hasattr(tracking, "log_trial"):
@@ -559,6 +568,20 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
 
     # 2. tuning (never sees the test split, ADR-8)
     spec, tuning_result = _run_tuning(runtime, spec, tracking, run_handle)
+    tuning_cfg = runtime.spec.tuning
+    if tuning_result is not None and tuning_cfg is not None:
+        # A tuning search is otherwise silent on success (trial history goes
+        # only to the tracking backend); surface a one-line summary.
+        bus.emit(
+            LogMessage(
+                unique_id=job.node.unique_id,
+                message=(
+                    f"tuning complete: {tuning_result.n_trials} trial(s), "
+                    f"{tuning_result.n_pruned} pruned, best "
+                    f"{tuning_cfg.objective.metric}={tuning_result.best_value:.4f}"
+                ),
+            )
+        )
 
     # 3. final fit on the declared train window
     model = runtime.adapter.train(spec, runtime.handle, runtime.ctx)

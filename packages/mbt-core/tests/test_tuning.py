@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from exec_unit_helpers import recording_bus
 from test_execution import MODEL, invoke
 
 from mbt.adapters.registry import AdapterRegistry
@@ -81,6 +82,23 @@ def test_tuning_never_reads_the_test_split(
     assert splits_evaluated.count("validation") == 4  # one per trial
     assert splits_evaluated.count("test") == 1  # final evaluation only
     assert splits_evaluated.index("test") == len(splits_evaluated) - 1
+
+
+def test_tuning_emits_progress_and_summary_on_the_bus(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A tuning search is not silent on success: every trial emits a debug
+    line and a one-line summary lands on the bus (was tracking-only)."""
+    _add_tuning(demo_project)
+    with recording_bus() as sink:
+        results = invoke(demo_project, fake_registry, cli_vars={"max_tuning_trials": 3})
+    assert results.exit_code() == 0
+    messages = sink.messages()
+    trial_lines = [m for m in messages if m.startswith("tuning trial ")]
+    assert len(trial_lines) == 3  # one per capped trial
+    (summary,) = [m for m in messages if m.startswith("tuning complete:")]
+    assert "3 trial(s), 0 pruned" in summary
+    assert "pr_auc=" in summary
 
 
 def test_pruner_spec_plumbs_through_the_job(

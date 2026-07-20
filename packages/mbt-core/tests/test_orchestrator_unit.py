@@ -10,6 +10,7 @@ from exec_unit_helpers import DATASET_UID, MODEL_UID, make_options, recording_bu
 from test_execution import invoke
 
 from mbt.adapters.registry import AdapterRegistry
+from mbt.events.models import RunFinished, RunStarted
 from mbt.exceptions import ConfigError, StateError
 from mbt.execute.orchestrator import (
     prepare,
@@ -129,6 +130,42 @@ def test_run_evaluate_reevaluates_registered_version(
 
     by_stage = _evaluate(demo_project, fake_registry, model_name="churn_model", stage="staging")
     assert {r.unique_id: r for r in by_stage.results}[MODEL_UID].status == "success"
+
+
+def test_run_evaluate_emits_run_started_and_finished(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """evaluate brackets its work with RunStarted/RunFinished like every other
+    command, so a monitored run is never silent on the bus (was asymmetric)."""
+    assert invoke(demo_project, fake_registry).exit_code() == 0
+    with recording_bus() as sink:
+        results = _evaluate(demo_project, fake_registry, model_name="churn_model")
+    assert results.exit_code() == 0
+    started = [e for e in sink.events if isinstance(e, RunStarted)]
+    finished = [e for e in sink.events if isinstance(e, RunFinished)]
+    assert len(started) == 1 and len(finished) == 1
+    assert started[0].command == "evaluate"
+    assert started[0].selected == 2  # the model plus its one dataset
+    assert finished[0].command == "evaluate"
+    assert finished[0].status == "success"
+    assert finished[0].succeeded == 2  # dataset (cache hit) + model
+    assert finished[0].failed == 0 and finished[0].skipped == 0
+
+
+def test_run_evaluate_finished_reports_quality_failure(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A gate failure surfaces as RunFinished status=quality_failure with the
+    model counted in `failed` (the shared tally with run_command)."""
+    assert invoke(demo_project, fake_registry).exit_code() == 0
+    model_yml = demo_project / "models/churn_model.yml"
+    model_yml.write_text(model_yml.read_text().replace(OLD_GATE, "threshold: 0.99"))
+    with recording_bus() as sink:
+        results = _evaluate(demo_project, fake_registry, model_name="churn_model", apply_gates=True)
+    assert results.exit_code() == 2
+    (finished,) = [e for e in sink.events if isinstance(e, RunFinished)]
+    assert finished.status == "quality_failure"
+    assert finished.failed == 1  # the gate_failed model
 
 
 def test_run_evaluate_unknown_model_errors(

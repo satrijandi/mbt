@@ -99,7 +99,7 @@ def test_single_source_build_with_window_and_filters(tmp_path: Path) -> None:
             "window": "-5d:now",
         }
     )
-    ctx, _ = _ctx(
+    ctx, events = _ctx(
         adapter,
         tables,
         tmp_path / "target/scoring_inputs/batch_scoring/k1",
@@ -107,6 +107,8 @@ def test_single_source_build_with_window_and_filters(tmp_path: Path) -> None:
     )
     handle = adapter.build_scoring_input(spec, ctx)
     assert handle.splits() == {"score"}
+    # the positive path reports its row count on the bus (not just 0-row warns)
+    assert any("materialized" in getattr(e, "message", "") for e in events.events)
     table = handle.read("score")
     assert table.num_rows > 0
     dates = table.column("snapshot_date").to_pylist()

@@ -223,6 +223,16 @@ class LocalDataAdapter:
                     hint="check the split windows/fractions against the data's time range",
                 )
 
+        ctx.events.emit(
+            LogMessage(
+                unique_id=ctx.node.unique_id,
+                message=(
+                    f"materialized {sum(written.values())} rows: "
+                    + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
+                ),
+            )
+        )
+
         write_materialization_metadata(
             output_dir,
             snapshot_id=ctx.node.snapshot_id,
@@ -432,6 +442,13 @@ class LocalDataAdapter:
                     level="warn",
                     unique_id=ctx.node.unique_id,
                     message="scoring input materialized 0 rows; nothing to score",
+                )
+            )
+        else:
+            ctx.events.emit(
+                LogMessage(
+                    unique_id=ctx.node.unique_id,
+                    message=f"scoring input materialized {count} rows to score",
                 )
             )
         write_materialization_metadata(

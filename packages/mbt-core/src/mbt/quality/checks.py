@@ -13,7 +13,7 @@ import pyarrow as pa
 
 from mbt.contracts import CheckSpec, DatasetSpec, ScoringSpec, TestResult
 from mbt.events import get_bus
-from mbt.events.models import LogMessage
+from mbt.events.models import CheckEvaluated, LogMessage
 
 _TIMESTAMP_TYPES = ("timestamp", "date")
 
@@ -71,17 +71,29 @@ def _run_named_checks(
     resolved_windows: dict[str, Any],
     resource: str,
 ) -> list[TestResult]:
+    bus = get_bus()
     results: list[TestResult] = []
     for check in checks:
         name, params = _normalize(check)
         if not params.get("enabled", True):
-            results.append(TestResult(name=name, passed=True, message="check disabled"))
-            continue
-        runner = _CHECKS[name]
-        try:
-            results.append(runner(spec, handle, resolved_windows, params, resource))
-        except Exception as exc:
-            results.append(TestResult(name=name, passed=False, message=f"check raised: {exc!r}"))
+            result = TestResult(name=name, passed=True, message="check disabled")
+        else:
+            runner = _CHECKS[name]
+            try:
+                result = runner(spec, handle, resolved_windows, params, resource)
+            except Exception as exc:
+                result = TestResult(name=name, passed=False, message=f"check raised: {exc!r}")
+        results.append(result)
+        # One event per check so the pass/fail stream is visible on the bus,
+        # mirroring GateEvaluated (a check with no message renders "PASS").
+        bus.emit(
+            CheckEvaluated(
+                unique_id=resource,
+                check=result.name,
+                passed=result.passed,
+                message=result.message,
+            )
+        )
     return results
 
 

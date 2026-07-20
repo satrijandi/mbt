@@ -44,6 +44,7 @@ def _ctx(
     node: ManifestNode | None = None,
     windows: dict[str, tuple[str, str]] | None = None,
     sample_fraction: float = 1.0,
+    events: RecordingSink | None = None,
 ) -> BuildContext:
     return BuildContext(
         node=node or make_node("dataset.demo.churn_random"),
@@ -53,7 +54,7 @@ def _ctx(
         sample_fraction=sample_fraction,
         deep_snapshot=False,
         output_dir=output_dir,
-        events=RecordingSink(),
+        events=events or RecordingSink(),
     )
 
 
@@ -112,6 +113,21 @@ def test_random_split_build_partitions_all_rows(tmp_path: Path) -> None:
     assert sorted(all_ids) == list(range(60))  # disjoint and exhaustive
     assert all(t.num_rows > 0 for t in split_rows.values())
     assert "__mbt_rank" not in split_rows["train"].column_names
+
+
+def test_build_emits_materialized_row_counts(tmp_path: Path) -> None:
+    """A successful dataset build reports per-split row counts on the bus, so
+    the positive path is no longer silent (only 0-row raised before)."""
+    _write_rows(tmp_path)
+    adapter = LocalDataAdapter({"root": str(tmp_path)})
+    sink = RecordingSink()
+    output_dir = tmp_path / "target" / "datasets" / "churn_random" / "k1"
+    adapter.build_dataset(_random_spec(), _ctx(adapter, _tables(), output_dir, events=sink))
+    materialized = [
+        m for e in sink.events if (m := getattr(e, "message", "")).startswith("materialized ")
+    ]
+    assert len(materialized) == 1
+    assert "train=" in materialized[0] and "test=" in materialized[0]
 
 
 def test_random_split_is_deterministic_for_a_seed(tmp_path: Path) -> None:

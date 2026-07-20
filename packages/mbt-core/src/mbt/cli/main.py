@@ -326,10 +326,21 @@ def parse(
     verbose: VerboseOpt = False,
 ) -> None:
     """Validate all configs and build the DAG; no execution (FR-PARSE-01)."""
+    from mbt.events import get_bus
+    from mbt.events.models import ParseCompleted, ParseStarted
     from mbt.parsing import parse_project
 
     cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    bus = get_bus()
+    bus.emit(ParseStarted(project=cli.project_dir.name))
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
+    bus.emit(
+        ParseCompleted(
+            resources=len(parsed.nodes) + len(parsed.sources) + len(parsed.exposures),
+            errors=len(parsed.report.errors),
+            elapsed_s=parsed.elapsed_s,
+        )
+    )
     print_warnings(parsed)
     out_console.print(
         f"Parsed [bold]{len(parsed.nodes)}[/bold] nodes, "
@@ -732,6 +743,8 @@ def state_diff(
     """What changed vs a previous manifest, with components (FR-STATE-02)."""
     from mbt.artifacts.manifest import read_manifest
     from mbt.compile.compiler import CompileOptions, compile_project
+    from mbt.events import get_bus
+    from mbt.events.models import StateDiffed
     from mbt.parsing import parse_project
     from mbt.state.diff import diff_manifests, load_state
 
@@ -751,6 +764,16 @@ def state_diff(
         )
     reference = load_state(state)
     diff = diff_manifests(current, reference)
+    # Surface the diff on the event stream (independent of the --output data
+    # format) so a machine watching --log-format json sees what changed.
+    get_bus().emit(
+        StateDiffed(
+            added=len(diff.added),
+            removed=len(diff.removed),
+            modified=len(diff.modified),
+            env_changed=diff.env_changed,
+        )
+    )
 
     if output == "json":
         typer.echo(json.dumps(diff.to_dict(), indent=2))

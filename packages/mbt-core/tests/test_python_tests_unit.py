@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pyarrow as pa
 from core_helpers import write
+from exec_unit_helpers import recording_bus
 
 from mbt.contracts import DatasetSpec
 from mbt.parsing.errors import ParseReport
@@ -97,3 +98,32 @@ def test_run_python_tests_only_filter(tmp_path: Path) -> None:
     table = pa.table({"y": [0, 1]})
     results = run_python_tests(test_file, table, _dataset_spec(), only={"test_kept"})
     assert [r.name for r in results] == ["test_kept"]
+
+
+def test_run_python_tests_emits_test_evaluated_per_test(tmp_path: Path) -> None:
+    """Each data test run puts a TestEvaluated on the bus carrying the dataset
+    uid, the test name, and its pass/fail - one event per returned result."""
+    write(
+        tmp_path / "tests" / "emit_shapes.py",
+        """
+        def test_ok(dataset, spec):
+            return True
+
+        def test_bad(dataset, spec):
+            return False
+        """,
+    )
+    # Imported here, not at module level: a module-level "Test*" name trips
+    # pytest class collection (same guard as test_events_unit.py).
+    from mbt.events.models import TestEvaluated as TestEvaluatedEvent
+
+    report = ParseReport()
+    (test_file,) = discover_python_tests(tmp_path, ["tests"], report)
+    table = pa.table({"y": [0, 1]})
+    with recording_bus() as sink:
+        results = run_python_tests(test_file, table, _dataset_spec(), resource="dataset.unit_ds")
+    evaluated = [e for e in sink.events if isinstance(e, TestEvaluatedEvent)]
+    assert len(evaluated) == len(results)
+    assert all(e.unique_id == "dataset.unit_ds" for e in evaluated)
+    outcomes = {e.test: e.passed for e in evaluated}
+    assert outcomes == {"test_ok": True, "test_bad": False}

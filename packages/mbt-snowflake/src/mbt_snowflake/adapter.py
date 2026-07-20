@@ -221,6 +221,12 @@ class SnowflakeDataAdapter:
                     f"split {split!r} materialized 0 rows",
                     hint="check the split windows/fractions and filters against the data",
                 )
+        # Positive-path row counts on the bus (a plain string the EventSink
+        # wraps in a LogMessage); mirrors the local adapter.
+        ctx.events.emit(
+            f"dataset {ctx.node.unique_id}: materialized {sum(written.values())} rows: "
+            + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
+        )
 
         write_materialization_metadata(
             output_dir,
@@ -334,6 +340,10 @@ class SnowflakeDataAdapter:
             # import core event models); mirrors the local adapter's warning.
             ctx.events.emit(
                 f"scoring input {ctx.node.unique_id}: materialized 0 rows; nothing to score"
+            )
+        else:
+            ctx.events.emit(
+                f"scoring input {ctx.node.unique_id}: materialized {count} rows to score"
             )
         write_materialization_metadata(
             output_dir,

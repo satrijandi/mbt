@@ -1,8 +1,10 @@
 """Unit tests for built-in dataset checks (mbt/quality/checks.py)."""
 
 import pyarrow as pa
+from exec_unit_helpers import recording_bus
 
 from mbt.contracts import DatasetSpec
+from mbt.events.models import CheckEvaluated
 from mbt.quality.checks import run_checks
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
 
@@ -52,6 +54,30 @@ def test_no_future_columns_skips_absent_splits() -> None:
     results = {r.name: r for r in run_checks(spec, _handle(), windows, resource="dataset.unit")}
     check = results["no_future_columns"]
     assert check.passed and check.message == ""
+
+
+def test_run_checks_emits_check_evaluated_per_check() -> None:
+    """Every check evaluated puts a CheckEvaluated on the bus - a failing one,
+    a passing one, and an explicitly disabled one - carrying the dataset uid."""
+    spec = _spec(
+        [
+            {"schema": {"columns": ["absent"]}},  # fails: missing column
+            "not_null",  # passes: label 'y' has no nulls
+            {"label_leakage_scan": {"enabled": False}},  # disabled
+        ]
+    )
+    with recording_bus() as sink:
+        results = run_checks(spec, _handle(), {}, resource="dataset.unit")
+    evaluated = [e for e in sink.events if isinstance(e, CheckEvaluated)]
+    # One event per result (the leakage scan is not auto-appended a second time
+    # because it is declared here).
+    assert len(evaluated) == len(results)
+    assert all(e.unique_id == "dataset.unit" for e in evaluated)
+    outcomes = {e.check: e.passed for e in evaluated}
+    assert outcomes["schema"] is False
+    assert outcomes["not_null"] is True
+    disabled = next(e for e in evaluated if e.check == "label_leakage_scan")
+    assert disabled.passed and disabled.message == "check disabled"
 
 
 def test_check_names_match_dispatch_table() -> None:

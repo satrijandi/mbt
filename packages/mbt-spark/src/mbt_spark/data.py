@@ -197,6 +197,12 @@ class SparkDataAdapter:
                     f"split {split!r} materialized 0 rows",
                     hint="check the split windows/fractions and filters",
                 )
+        # Positive-path row counts on the bus (a plain string the EventSink
+        # wraps in a LogMessage); mirrors the local and snowflake adapters.
+        ctx.events.emit(
+            f"dataset {ctx.node.unique_id}: materialized {sum(written.values())} rows: "
+            + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
+        )
         write_materialization_metadata(
             output_dir,
             snapshot_id=ctx.node.snapshot_id,
