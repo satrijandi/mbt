@@ -1,0 +1,26 @@
+models:
+  - name: churn_wide
+    description: XGBoost churn model over the wide multi-table Snowflake panel.
+    task: binary_classification
+    adapter: xgboost
+    owner: ml-team@example.com
+    tags: [churn, wide, snowflake]
+
+    dataset: ref('wide_churn_training')
+
+    target: is_churn
+    features:
+      include: ["*"]
+      exclude: [customer_id, snapshot_date]   # join keys are not features
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+
+    registration:
+      name: churn_wide
+      stage_on_pass: staging
+    seed: 42

@@ -1,0 +1,33 @@
+datasets:
+  # The wide multi-table shape (ADR-22): a population spine, a label table, and
+  # three feature tables, ALL joined on [customer_id, snapshot_date]. mbt turns
+  # this into ONE Snowflake query per split (a LEFT JOIN chain onto the spine;
+  # the label joins inner and its join columns are projected away).
+  - name: wide_churn_training
+    description: Monthly churn panel from population + labels + three feature tables.
+    inputs:
+      population: source('snowflake', 'customer_population')
+      label:
+        source: source('snowflake', 'churn_labels')
+        using: [customer_id, snapshot_date]
+      features:
+        - source: source('snowflake', 'demographic_features')
+          using: [customer_id, snapshot_date]
+        - source: source('snowflake', 'engagement_features')
+          using: [customer_id, snapshot_date]
+        - source: source('snowflake', 'billing_features')
+          using: [customer_id, snapshot_date]
+      # The shared default key (every table above joins on it).
+      join_key: [customer_id, snapshot_date]
+    label:
+      column: is_churn
+    split:
+      strategy: temporal
+      time_column: snapshot_date
+      train: "2026-01-01:2026-03-01"
+      test: "2026-03-01:2026-05-01"
+    checks:
+      - class_balance_report
+      - not_null:
+          columns: [is_churn, customer_id, snapshot_date]
+    tags: [churn, wide, snowflake]

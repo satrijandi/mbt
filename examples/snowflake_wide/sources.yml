@@ -1,0 +1,22 @@
+sources:
+  # One source group ("snowflake"); each table uses `identifier:` (not `path:`),
+  # qualified as [DB.][SCHEMA.]TABLE - bare names inherit database/schema from
+  # the profile's snowflake config (ANALYTICS.GOLD here).
+  - name: snowflake
+    description: Gold-layer population, label, and feature tables in Snowflake.
+    tables:
+      - name: customer_population
+        identifier: CUSTOMER_POPULATION
+        description: One row per active customer per monthly snapshot - the spine (ADR-22).
+      - name: churn_labels
+        identifier: CHURN_LABELS
+        description: Churn outcome per (customer_id, snapshot_date).
+      - name: demographic_features
+        identifier: DEMOGRAPHIC_FEATURES
+        description: Demographic attributes per (customer_id, snapshot_date).
+      - name: engagement_features
+        identifier: ENGAGEMENT_FEATURES
+        description: Product-engagement metrics per (customer_id, snapshot_date).
+      - name: billing_features
+        identifier: BILLING_FEATURES
+        description: Billing and plan metrics per (customer_id, snapshot_date).

@@ -1,0 +1,25 @@
+# The profile key must match `name` in mbt_project.yml.
+# Credentials come from the environment (never commit them) - see README.md.
+snowflake_wide:
+  target: prod
+  outputs:
+    prod:
+      data:
+        adapter: snowflake
+        config:
+          account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+          user: "{{ env_var('SNOWFLAKE_USER') }}"
+          password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+          warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+          database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+          schema: "{{ env_var('SNOWFLAKE_SCHEMA') }}"
+          # role: ML_ROLE          # optional; add if your account needs it
+      # Tracking + registry stay local so the example runs without extra infra.
+      tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      compute: {adapter: local}
+      artifact_store: file://./target/artifacts
+      threads: 2
+      vars:
+        sample_fraction: 1.0
+        max_tuning_trials: 3
