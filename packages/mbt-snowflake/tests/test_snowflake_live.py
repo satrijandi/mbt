@@ -24,6 +24,7 @@ and drops them at teardown.
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -35,6 +36,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import pytest
+import yaml
 from mbt_snowflake.adapter import _CONNECT_KEYS, SnowflakeAdapterError, SnowflakeDataAdapter
 
 from mbt_adapter_base import DatasetSpec, ManifestNode
@@ -519,3 +521,148 @@ def test_full_local_training_loop_from_live_snowflake(live: LiveWarehouse, tmp_p
     rerun = json.loads((project / "target" / "run_results.json").read_text())
     reproduced = {r["unique_id"]: r for r in rerun["results"]}
     assert reproduced["model.live_snowflake.churn_classifier"]["metrics"] == baseline
+
+
+# -- the wide multi-table example (examples/snowflake_wide) -----------------------------
+
+EXAMPLE_WIDE = Path(__file__).resolve().parents[3] / "examples" / "snowflake_wide"
+WIDE_WINDOWS = {
+    "train": ("2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z"),
+    "test": ("2026-03-01T00:00:00Z", "2026-05-01T00:00:00Z"),
+}
+WIDE_TEST_WINDOW_START = date(2026, 3, 1)
+
+
+def _seed_wide_rows(n_customers: int = 120) -> list[dict[str, Any]]:
+    """One row per customer per month-start (Jan-Apr 2026), for all five wide
+    tables; every table shares (customer_id, snapshot_date)."""
+    months = [date(2026, m, 1) for m in (1, 2, 3, 4)]
+    rows: list[dict[str, Any]] = []
+    for c in range(n_customers):
+        signal = ((c * 37) % 100) / 100.0
+        for month in months:
+            rows.append(
+                {
+                    "customer_id": c,
+                    "snapshot_date": month,
+                    "is_churn": 1 if signal > 0.6 else 0,
+                    "age": 20 + (c % 50),
+                    "tenure_months": c % 36,
+                    "logins_30d": (c * 3) % 40,
+                    "avg_session_min": float((c % 25) + 1),
+                    "monthly_spend": float(10 + (c % 90)),
+                    "plan_tier": ["basic", "pro", "enterprise"][c % 3],
+                }
+            )
+    return rows
+
+
+#: logical name (as used in examples/snowflake_wide/sources.yml) -> (DDL, row->values)
+_WIDE_TABLES: dict[str, tuple[str, Any]] = {
+    "customer_population": (
+        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE",
+        lambda r: (r["customer_id"], r["snapshot_date"]),
+    ),
+    "churn_labels": (
+        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, IS_CHURN INTEGER",
+        lambda r: (r["customer_id"], r["snapshot_date"], r["is_churn"]),
+    ),
+    "demographic_features": (
+        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, AGE INTEGER, TENURE_MONTHS INTEGER",
+        lambda r: (r["customer_id"], r["snapshot_date"], r["age"], r["tenure_months"]),
+    ),
+    "engagement_features": (
+        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, LOGINS_30D INTEGER, AVG_SESSION_MIN FLOAT",
+        lambda r: (r["customer_id"], r["snapshot_date"], r["logins_30d"], r["avg_session_min"]),
+    ),
+    "billing_features": (
+        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, MONTHLY_SPEND FLOAT, PLAN_TIER STRING",
+        lambda r: (r["customer_id"], r["snapshot_date"], r["monthly_spend"], r["plan_tier"]),
+    ),
+}
+
+
+@pytest.fixture(scope="session")
+def wide_tables(live: LiveWarehouse) -> dict[str, str]:
+    """Seed the five wide-example tables (population + label + three features),
+    all keyed on (customer_id, snapshot_date); dropped by the `live` teardown."""
+    rows = _seed_wide_rows()
+    names: dict[str, str] = {}
+    for logical, (ddl, to_values) in _WIDE_TABLES.items():
+        table = f"{live.prefix}_{logical.upper()}"
+        live.create_table(table, ddl)
+        placeholders = ", ".join(["%s"] * len(to_values(rows[0])))
+        live.execute(
+            f"INSERT INTO {live.qualified(table)} VALUES ({placeholders})",
+            [to_values(r) for r in rows],
+        )
+        names[logical] = table
+    return names
+
+
+def test_wide_example_multi_table_join_live(
+    live: LiveWarehouse, wide_tables: dict[str, str], tmp_path: Path
+) -> None:
+    """The committed examples/snowflake_wide dataset spec against real Snowflake:
+    a population spine, a label table, and three feature tables (all joined on
+    [customer_id, snapshot_date]) push down to one query per split, with the
+    label's join columns projected away."""
+    doc = yaml.safe_load((EXAMPLE_WIDE / "datasets" / "wide_churn_training.yml").read_text())
+    spec = DatasetSpec.model_validate(doc["datasets"][0])
+
+    # Remap the example's source() refs onto the uniquely-named seeded tables.
+    refs = [
+        spec.inputs.spine,
+        spec.inputs.label_source,
+        *[src for src, _ in spec.inputs.feature_entries],
+    ]
+    sources: dict[str, SourceTable] = {}
+    for ref in refs:
+        logical = re.findall(r"'([^']*)'", ref)[1]
+        sources[ref] = SourceTable(name=logical, identifier=wide_tables[logical])
+
+    adapter = SnowflakeDataAdapter(live.config)
+    pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
+    node = ManifestNode(
+        unique_id="dataset.snowflake_wide.wide_churn_training",
+        resource_type="dataset",
+        name="wide_churn_training",
+        path="datasets/wide_churn_training.yml",
+        config={},
+        snapshot_id=pinned,
+    )
+    ctx = BuildContext(
+        node=node,
+        source=sources[spec.inputs.spine],
+        source_tables=sources,
+        resolved_windows=WIDE_WINDOWS,
+        sample_fraction=1.0,
+        deep_snapshot=False,
+        output_dir=tmp_path / "mat",
+    )
+    handle = adapter.build_dataset(spec, ctx)
+
+    train = pq.read_table(ctx.output_dir / "train.parquet")
+    test = pq.read_table(ctx.output_dir / "test.parquet")
+    # Join keys merged, every feature column present, label projected in, and
+    # the label's join columns projected away - identifiers normalized to lower.
+    expected_columns = {
+        "customer_id",
+        "snapshot_date",
+        "age",
+        "tenure_months",
+        "logins_30d",
+        "avg_session_min",
+        "monthly_spend",
+        "plan_tier",
+        "is_churn",
+    }
+    assert set(train.column_names) == expected_columns
+    assert set(test.column_names) == expected_columns
+    # Every (customer, snapshot) in the population joined its label + features,
+    # split exactly by the example's temporal windows.
+    all_rows = _seed_wide_rows()
+    expected_test = sum(1 for r in all_rows if r["snapshot_date"] >= WIDE_TEST_WINDOW_START)
+    assert test.num_rows == expected_test
+    assert train.num_rows == len(all_rows) - expected_test
+    assert handle.snapshot_id == ctx.node.snapshot_id

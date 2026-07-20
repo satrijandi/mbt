@@ -145,7 +145,7 @@ config:
 ## Live integration tests
 
 The unit tests run the adapter's generated SQL in DuckDB and need no account.
-`tests/test_snowflake_live.py` additionally proves the dialect surfaces (`MD5_NUMBER_LOWER64` sampling, snapshot tokens, Arrow streaming, case rules) and the full local-training loop against a real Snowflake account.
+`tests/test_snowflake_live.py` additionally proves the dialect surfaces (`MD5_NUMBER_LOWER64` sampling, snapshot tokens, Arrow streaming, case rules), the wide multi-table join from `examples/snowflake_wide` (a population spine, a label table, and three feature tables joined on `[customer_id, snapshot_date]`), and the full local-training loop against a real Snowflake account.
 It is double-gated: every test skips unless `MBT_LIVE_SNOWFLAKE=1`, and once opted in, incomplete configuration fails loudly instead of skipping.
 
 Credentials live in environment variables, never in `profiles.yml` (it is committed and secret-free; values flow in through `env_var()`).
