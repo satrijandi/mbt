@@ -44,6 +44,23 @@ def test_publish_is_idempotent_on_reruns() -> None:
     assert (publish.get("with") or {}).get("skip-existing") is True, publish
 
 
+def test_github_release_precedes_the_pypi_publish_and_publish_is_opt_in() -> None:
+    """The v0.1.0 tag proved two things at once: an unconfigured PyPI publisher
+    fails `invalid-publisher`, and ordered first it blocked the GitHub release
+    behind it - the artifact users actually consume via the tag pins. So the
+    GitHub release must come before the publish, and the publish must be
+    gated on the explicit opt-in variable so the workflow is genuinely inert
+    (green, release created) until the PyPI side exists."""
+    steps = _load("release.yml")["jobs"]["release"]["steps"]
+    index = {
+        kind: next(i for i, s in enumerate(steps) if kind in str(s.get("uses", "")))
+        for kind in ("gh-release", "pypi-publish")
+    }
+    assert index["gh-release"] < index["pypi-publish"], index
+    publish = steps[index["pypi-publish"]]
+    assert "PYPI_TRUSTED_PUBLISHING" in str(publish.get("if", "")), publish
+
+
 def _declared_permissions(spec: dict) -> dict[str, str]:
     """Every permission the workflow declares anywhere (top level or any job),
     at the highest level requested for each key."""

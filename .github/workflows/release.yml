@@ -2,11 +2,16 @@ name: release
 
 # Build wheels + cut a GitHub release when a version tag (vX.Y.Z) is pushed.
 #
-# One-time organizational prerequisites (until then this workflow is inert - it
-# only fires on a `v*` tag): create the PyPI projects and configure Trusted
-# Publishing (https://docs.pypi.org/trusted-publishers/) for this repo and the
-# `release` environment. The scaffold's git-ref pins resolve off the same tag,
-# so a fresh user project's CI installs from the tag even before PyPI exists.
+# The PyPI publish is an explicit opt-in: it runs only when the repo variable
+# PYPI_TRUSTED_PUBLISHING is set to 'enabled'. One-time organizational
+# prerequisites before flipping it: create the PyPI projects and configure
+# Trusted Publishing (https://docs.pypi.org/trusted-publishers/) for this repo
+# and the `release` environment. Until then a tag still produces a fully green
+# run with the GitHub release + wheels attached (the v0.1.0 tag proved that an
+# unconfigured publisher otherwise fails `invalid-publisher` and, ordered
+# first, blocks the GitHub release behind it). The scaffold's git-ref pins
+# resolve off the same tag, so a fresh user project's CI installs from the tag
+# even before PyPI exists.
 on:
   push:
     tags:
@@ -47,15 +52,22 @@ jobs:
           python-version: "3.11"
       - name: Build all workspace wheels and sdists
         run: uv build --all-packages
+      # The GitHub release comes FIRST: it needs nothing but the wheels, and a
+      # failed (or gated-off) PyPI publish must never block the artifact users
+      # actually consume today - the tag's release with wheels attached.
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
       - name: Publish to PyPI (Trusted Publishing)
+        # Opt-in switch (see header): flipping the repo variable to 'enabled'
+        # is the same one-time act as configuring the PyPI side, so a real
+        # publish failure after that fails the run loudly - no silent skips.
+        if: vars.PYPI_TRUSTED_PUBLISHING == 'enabled'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           # 10 wheels do not upload atomically; if a publish fails partway, a
           # re-run must skip the packages that already landed instead of
           # hard-failing on "file already exists". Makes the publish idempotent.
           skip-existing: true
-      - name: Create the GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
