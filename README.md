@@ -159,7 +159,12 @@ sources).
 
 ## Status
 
-v0.1: the full PR -> CI -> registry -> promotion -> batch scoring -> ground-truth monitoring loop works end-to-end for binary classification and regression (ADR-20/21).
-Data comes from local Parquet, Snowflake, or a Spark lakehouse; training covers XGBoost, LightGBM, SparkML, and H2O AutoML (optionally distributed via Sparkling Water); MLflow tracks and registers.
-The dockerized showcase (`examples/showcase`) proves the loop nightly in CI against real services: S3 lake, HTTP MLflow, a Spark cluster, Gitea + Woodpecker CI, Zot provenance, Airflow CD, and Prometheus/Grafana observability.
-See `docs/roadmap.md` for what lands in v1 (sklearn/PyTorch, Feast, ensembles, warehouse prediction sinks, Iceberg sources).
+**v0.1 is released** (GitHub release; PyPI publication pending).
+The loop is proven by tests, not promises:
+
+- **Loop**: PR check -> CI build -> registry -> gate-verified promotion -> batch scoring -> ground-truth monitoring, for binary classification and regression.
+- **Backends**: Parquet/DuckDB, Snowflake, or Spark lakehouse data; XGBoost, LightGBM, SparkML, and H2O AutoML training (Sparkling Water for distributed); MLflow tracking + registry.
+- **Proof**: an enforced 100% coverage gate on the fast suite, a JVM e2e tier, and a dockerized showcase (`examples/showcase`) that runs the loop nightly against real services (S3 lake, MLflow, Spark cluster, Gitea + Woodpecker CI, Airflow CD, Grafana).
+
+Goal-by-goal evidence: [docs/v0.1-status.md](docs/v0.1-status.md).
+What lands in v1 (sklearn/PyTorch, Feast, ensembles, warehouse prediction sinks, Iceberg): [docs/roadmap.md](docs/roadmap.md).
