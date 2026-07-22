@@ -1,9 +1,12 @@
-# The feature-selection probe: a fast LightGBM over ALL ~65 joined columns
-# whose normalized gain importance (exported into target/run_results.json)
-# feeds scripts/select_features.py. The script distills the top-K into
-# churn_wide_automl's committed include list, so the AutoML model never has
-# to chew through the filler columns - and the selection itself is a
-# reviewable diff, not a hidden training-time step.
+# The feature-selection probe: a fast LightGBM over ALL ~66 joined columns.
+# Its build materializes the full-width dataset splits under target/, which
+# is what scripts/select_features.py's ds-helper funnel (missing / unique /
+# correlation filters + seeded LightGBM search) actually selects from; the
+# probe's exported gain importance stays in target/run_results.json as a
+# cross-check. The funnel commits the winners into churn_wide_automl's
+# include list, so the AutoML model never has to chew through the filler
+# columns - and the selection itself is a reviewable diff, not a hidden
+# training-time step.
 models:
   - name: churn_wide_probe
     description: "LightGBM importance probe over the full wide feature set (selection tool, not a serving model)"
@@ -17,7 +20,13 @@ models:
     target: is_churn
     features:
       include: ["*"]
-      exclude: [customer_id, safe_id]   # entity ids are join keys, not features
+      # Mirrors churn_wide_automl's exclude (see the comment there):
+      # entity ids plus the time-anchored tenure_months.
+      exclude: [customer_id, safe_id, tenure_months]
+
+    # Shared with churn_wide_automl: casts DS-declared numeric-coded
+    # categoricals (contract_code) to string before feature filtering.
+    hooks: models/wide_hooks.py
 
     hyperparameters:
       n_estimators: 120

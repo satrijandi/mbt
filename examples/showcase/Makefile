@@ -43,7 +43,7 @@ help:
 	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
 	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
 	@echo "  make monthly       the cluster-free monthly cadence on the DuckDB plane"
-	@echo "  make wide          the wide multi-table cadence (feature selection + sparkling AutoML)"
+	@echo "  make wide          the batch-monthly wide cadence (selection funnel + evidently gates + sparkling AutoML)"
 	@echo "  make score         rerun daily scoring (lake sync, mbt score, metric push)"
 	@echo "  make monitor       rerun ground-truth monitoring at the pinned anchor"
 	@echo "  make inject-drift  poison the scoring batch and watch MbtShiftBreach fire"
@@ -165,22 +165,27 @@ monitor:
 	$(EXEC) mbt monitor --target prod_score --anchor $(MONITOR_ANCHOR) --deep-snapshot
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
 
-# The wide multi-table cadence (SHOW-19, ADR-22): population spine + three
-# feature histories joined by different keys, LightGBM feature selection as
-# a committed diff, sparkling AutoML on the selected columns, then the
-# population-form scoring input. `make monitor` evaluates its one-month
-# -later outcomes once they mature.
+# The wide multi-table batch-monthly cadence (SHOW-19/SHOW-20, ADR-22):
+# population spine + three feature histories joined by different keys, the
+# ds-helper selection funnel as a committed diff, an Evidently stability
+# gate before promotion (train vs test on the selected features; a breach
+# exits 2 and stops this recipe before promote), sparkling AutoML on the
+# selected columns, the population-form scoring input, and a second
+# Evidently gate on the scored batch. `make monitor` evaluates the
+# one-month-later outcomes once they mature.
 wide:
 	$(EXEC) python /workspace/bootstrap/sync_lake.py
 	$(EXEC) mbt build --target dev --select churn_wide_probe --anchor $(ANCHOR)
 	$(EXEC) python scripts/select_features.py
 	$(EXEC) git -C /workspace/project diff --stat -- models/churn_wide_automl.yml || true
 	$(EXEC) mbt build --target prod --select churn_wide_automl --anchor $(ANCHOR)
+	$(EXEC) python scripts/evidently_gate.py --phase train --export-reference /workspace/monitoring/wide_reference.parquet
 	$(EXEC) bash -c 'mbt promote --model churn_wide_automl --to production'
 	$(EXEC) mbt score --target prod_score --select tag:wide --anchor $(ANCHOR) --deep-snapshot
+	$(EXEC) python scripts/evidently_gate.py --phase serving --reference /workspace/monitoring/wide_reference.parquet
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
-	$(EXEC) python scripts/evidently_report.py
 	@echo "drift report: $(SHOWCASE_WORKSPACE)/project/drift_report.html"
+	@echo "selection report: $(SHOWCASE_WORKSPACE)/project/target/feature_selection_report.json"
 
 # Break the model in production on purpose, then watch the alert fire:
 # shift the scoring batch, score (exit 2 tolerated), push, check Grafana.

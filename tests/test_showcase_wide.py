@@ -1,11 +1,13 @@
-"""The wide multi-table cadence (SHOW-19, ADR-22).
+"""The wide multi-table batch-monthly cadence (SHOW-19/SHOW-20, ADR-22).
 
 The realistic churn shape end to end: a population spine with the entity
 crosswalk, three feature histories joined by DIFFERENT keys (transactions
 only reach the panel through the population's safe_id), the label joined
-from one calendar month after each snapshot, LightGBM feature selection as
-a committed reviewable diff, sparkling H2O AutoML on the selected columns,
-and the population-form scoring input with shift monitors and ground truth.
+from one calendar month after each snapshot, the ds-helper selection
+funnel as a committed reviewable diff, the shared hooks categorical cast,
+sparkling H2O AutoML on the selected columns, the Evidently stability
+gates around promotion and scoring, and the population-form scoring input
+with shift monitors and ground truth.
 
 Sparkling lives here and in the lifecycle module only (flake isolation):
 a cluster hiccup fails this module without poisoning the CI/promotion/
@@ -44,14 +46,15 @@ def _sidecars(stack) -> list[dict]:
 
 
 def test_probe_selects_the_committed_feature_list(wide) -> None:
-    """LightGBM importance over the pushdown multi-table join reproduces the
-    committed include list exactly (exact-determinism tier + ADR-22 joins)."""
+    """The ds-helper funnel over the probe's full-width materialization
+    reproduces the committed include list byte for byte, and documents
+    every stage in the selection report."""
     stack = wide
     stack.mbt("build", "--target", "dev", "--select", "churn_wide_probe", "--anchor", ANCHOR)
     probe = stack.result_for(PROBE_NODE)
     assert probe["status"] == "success", probe
     assert all(g["passed"] for g in probe["gates"]), probe["gates"]
-    # the two engineered churn drivers dominate the ~65-column importance
+    # the two engineered churn drivers dominate the ~66-column importance
     importance = probe["feature_importance"]
     top = sorted(importance, key=importance.get, reverse=True)[:4]
     assert {"login_days_30d", "txn_cnt_30d"} <= set(top), top
@@ -60,8 +63,19 @@ def test_probe_selects_the_committed_feature_list(wide) -> None:
     committed = (SHOWCASE_DIR / "project" / "models" / "churn_wide_automl.yml").read_text()
     stack.exec("python", "scripts/select_features.py")
     assert model_file.read_text() == committed, (
-        "select_features.py produced a different top-K than the committed list"
+        "select_features.py produced a different selection than the committed list"
     )
+    # the numeric-coded categorical (cast by wide_hooks.py) must survive
+    assert "        - contract_code\n" in committed
+
+    report = json.loads(
+        (stack.workspace / "project" / "target" / "feature_selection_report.json").read_text()
+    )
+    assert all(row["importance"] > 0 for row in report["selected"]), report["selected"]
+    # the funnel's model-based stage demonstrably prunes the noise columns
+    assert report["stages"]["lgbm"]["zero_importance_dropped"], report["stages"]
+    assert report["stages"]["lgbm"]["best_cv_roc_auc"] > 0.6, report["stages"]
+    assert report["seed"] == 42  # one committed seed governs the whole chain
 
 
 def test_panel_sampling_is_reproducible_and_monotone(wide) -> None:
@@ -126,6 +140,37 @@ def test_wide_automl_trains_on_the_cluster(wide) -> None:
     assert champion.tags.get("mbt.gates_passed") == "true"
 
 
+def test_train_gate_passes_and_exports_reference(wide) -> None:
+    """The Evidently train-phase gate (train vs test on exactly the selected
+    features) passes on the stable panel, renders the DS-facing report, and
+    persists the serving baseline that outlives the ephemeral DAG containers."""
+    stack = wide
+    stack.exec(
+        "python",
+        "scripts/evidently_gate.py",
+        "--phase",
+        "train",
+        "--export-reference",
+        "/workspace/monitoring/wide_reference.parquet",
+    )
+    report = stack.workspace / "project" / "drift_report.html"
+    assert report.is_file() and report.stat().st_size > 100_000
+
+    reference = stack.workspace / "monitoring" / "wide_reference.parquet"
+    committed = (
+        (SHOWCASE_DIR / "project" / "models" / "churn_wide_automl.yml").read_text().splitlines()
+    )
+    begin = committed.index(next(x for x in committed if "BEGIN selected-features" in x))
+    end = committed.index(next(x for x in committed if "END selected-features" in x))
+    selected = [
+        line.strip().removeprefix("- ")
+        for line in committed[begin:end]
+        if line.strip().startswith("- ")
+    ]
+    exported = pq.read_table(reference)
+    assert set(exported.column_names) == set(selected), (exported.column_names, selected)
+
+
 def test_population_scoring_input_and_monitors(wide) -> None:
     """The newest cohort scores through the population-form input (per-table
     keys at scoring time) and passes both shift monitors."""
@@ -147,6 +192,16 @@ def test_population_scoring_input_and_monitors(wide) -> None:
     assert len(sidecars) == before + 1
     assert sidecars[-1]["row_count"] > 0, sidecars[-1]
 
+    # the Evidently serving-phase gate agrees with mbt's own shift monitors
+    stack.exec(
+        "python",
+        "scripts/evidently_gate.py",
+        "--phase",
+        "serving",
+        "--reference",
+        "/workspace/monitoring/wide_reference.parquet",
+    )
+
 
 def test_ground_truth_matures_and_evaluates_once(wide) -> None:
     """The cohort's one-month-later outcomes evaluate exactly once (ADR-21)."""
@@ -163,7 +218,7 @@ def test_ground_truth_matures_and_evaluates_once(wide) -> None:
     )
     result = stack.result_for(SCORING_NODE)
     assert result["status"] == "success", result
-    assert result["metrics"]["pr_auc"] > 0.15, result["metrics"]
+    assert result["metrics"]["pr_auc"] > 0.2, result["metrics"]
     assert result["metrics"]["roc_auc"] > 0.5, result["metrics"]
 
     proc = stack.mbt(
@@ -179,10 +234,31 @@ def test_ground_truth_matures_and_evaluates_once(wide) -> None:
     assert "0 matured prediction runs" in proc.stdout + proc.stderr, (proc.stdout, proc.stderr)
 
 
-def test_evidently_report_renders(wide) -> None:
-    """The DS-facing Evidently drift report renders from the same
-    materializations mbt's native monitors enforce on."""
+def test_serving_gate_breaches_on_poisoned_batch(wide) -> None:
+    """A shifted monthly batch trips the Evidently serving gate with the
+    quality exit code (2), naming the drifted features - the same verdict
+    the DAG routes to AirflowFailException."""
     stack = wide
-    stack.exec("python", "scripts/evidently_report.py")
-    report = stack.workspace / "project" / "drift_report.html"
-    assert report.is_file() and report.stat().st_size > 100_000
+    reference_path = stack.workspace / "monitoring" / "wide_reference.parquet"
+    reference = pq.read_table(reference_path).to_pandas()
+    poisoned = reference.copy()
+    for column in poisoned.columns:
+        if poisoned[column].dtype.kind == "f":
+            poisoned[column] = poisoned[column] * 3.0  # inject_drift.py's arithmetic
+    poisoned_path = stack.workspace / "monitoring" / "wide_poisoned.parquet"
+    poisoned.to_parquet(poisoned_path)
+
+    proc = stack.exec(
+        "python",
+        "scripts/evidently_gate.py",
+        "--phase",
+        "serving",
+        "--reference",
+        "/workspace/monitoring/wide_reference.parquet",
+        "--current",
+        "/workspace/monitoring/wide_poisoned.parquet",
+        expect_exit=2,
+    )
+    output = proc.stdout + proc.stderr
+    assert "BREACH" in output, output
+    assert "drift score" in output, output  # the per-feature summary names the features

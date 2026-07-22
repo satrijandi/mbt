@@ -13,6 +13,13 @@ after the prediction snapshot.
     wide_churn_outcomes   customer_id, is_churn - the matured outcomes of the
                           newest snapshot's cohort, for `mbt monitor` (ADR-21)
 
+demographic_history carries one NUMERIC-CODED categorical on purpose:
+contract_code (int8, 0 = month-to-month ... 3 = two-year). Its churn effect
+is deliberately non-monotone (highest hazard at 0, second-highest at 3), so
+treating the code as a number costs real signal - the wide models' shared
+hooks file (project/models/wide_hooks.py) casts it to string before
+training, which is the showcase's DS-declared-categorical pattern.
+
 Signal lives in a handful of named columns (low login/transaction activity
 and rising inactivity churn); every `*_f##` filler column is pure noise, so
 LightGBM gain importance demonstrably prunes them during feature selection.
@@ -75,6 +82,9 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
     income_band = INCOME_BANDS[rng.integers(0, len(INCOME_BANDS), pool)]
     plan_tier = PLAN_TIERS[rng.integers(0, len(PLAN_TIERS), pool)]
     top_category = TOP_CATEGORIES[rng.integers(0, len(TOP_CATEGORIES), pool)]
+    # Numeric-coded contract term (0 = month-to-month ... 3 = two-year): the
+    # DS-declared categorical that wide_hooks.py casts to string at train time.
+    contract_code = rng.integers(0, 4, pool).astype(np.int8)
     login_base = np.clip(rng.normal(16.0, 7.0, pool), 0.5, 30.0)
     txn_base = np.clip(rng.normal(28.0, 14.0, pool), 1.0, 120.0)
 
@@ -108,12 +118,16 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
         # churn hazard: inactivity dominates; income adds a mild tilt. The
         # contrasts are deliberately strong so demo models clear their
         # PR-AUC gates comfortably (same reasoning as the monthly tables).
+        # contract_code's effect is NON-monotone by design (see docstring):
+        # month-to-month (0) churns most, two-year (3) second-most.
         hazard = (
             0.015
             + 0.30 * (login_days < 8.0)
             + 0.15 * (days_since_login > 10.0)
             + 0.24 * (txn_cnt < 14.0)
             + 0.03 * (income_band[idx] == "low")
+            + 0.12 * (contract_code[idx] == 0)
+            + 0.06 * (contract_code[idx] == 3)
         )
         churned = rng.random(n) < hazard
 
@@ -132,6 +146,7 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
                 "region": region[idx],
                 "income_band": income_band[idx],
                 "plan_tier": plan_tier[idx],
+                "contract_code": contract_code[idx],
                 "household_size": rng.integers(1, 6, n),
                 "tenure_months": np.full(n, month_idx) + rng.integers(1, 60, n),
                 **_filler(rng, "dem", filler_columns, n),

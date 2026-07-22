@@ -152,10 +152,17 @@ def test_runbook_golden_path(runbook) -> None:
     )
     assert wide_runs, "demo left no wide-cadence prediction runs"
 
-    # The wide cadence's own runbook target: probe -> committed selection
-    # diff -> sparkling AutoML -> score -> Evidently report.
+    # The wide cadence's own runbook target: probe -> ds-helper funnel as a
+    # committed selection diff -> Evidently train gate -> sparkling AutoML
+    # -> score -> Evidently serving gate.
     runner.make("wide")
     assert (ws / "project" / "drift_report.html").exists(), "make wide left no drift report"
+    assert (ws / "project" / "target" / "feature_selection_report.json").exists(), (
+        "make wide left no selection report"
+    )
+    assert (ws / "monitoring" / "wide_reference.parquet").exists(), (
+        "make wide exported no stability reference"
+    )
 
     # The CI seeding target, then the two things its output tells a human
     # to do: open the repo URL and log into Woodpecker with the Gitea

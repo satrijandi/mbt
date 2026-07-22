@@ -18,7 +18,11 @@ unit pinned by digest in images.env. This module proves:
   before failing;
 - SHOW-17's scheduled path: the monthly cadence's score DAG runs the
   tag:monthly batch on the DuckDB plane from Airflow, inside the same
-  pinned unit.
+  pinned unit;
+- SHOW-20's scheduled path: the batch-monthly wide DAG scores the
+  tag:wide cohort and runs the Evidently serving gate against the
+  persisted reference (task containers are ephemeral, so the score task
+  copies the batch out to /workspace/monitoring in the same container).
 """
 
 import pytest
@@ -26,7 +30,7 @@ from showcase_utils import ANCHOR, SHOWCASE_MARKS
 
 pytestmark = SHOWCASE_MARKS
 
-DAGS = ("mbt_retrain", "mbt_score", "mbt_score_monthly", "mbt_monitor")
+DAGS = ("mbt_retrain", "mbt_score", "mbt_score_monthly", "mbt_monitor", "mbt_score_wide")
 _state: dict = {}
 
 
@@ -226,3 +230,54 @@ def test_monitor_dag_routes_exit_codes(sched) -> None:
     monitored = {str(v) for v in _state.get("scored_versions", ())}
     sidecar_versions = {str(doc["model_version"]) for doc in _sidecars(ci.stack)}
     assert monitored <= sidecar_versions
+
+
+def test_score_wide_dag_gates_monthly_batch(sched) -> None:
+    """SHOW-20's scheduled path: the 1st-of-month wide cadence scores from
+    Airflow and the Evidently serving gate passes against the persisted
+    reference. Kept last: its prediction run stays unevaluated, out of the
+    monitor DAG assertions above. Dev (h2o local) bootstrap only, per the
+    flake-isolation rule: sparkling-on-cluster stays out of scheduled paths."""
+    import json
+
+    ci = sched
+    client = _client(ci.stack)
+    try:
+        client.get_model_version_by_alias("churn_wide_automl", "production")
+    except Exception:
+        ci.stack.mbt(
+            "build",
+            "--target",
+            "dev",
+            "--select",
+            "churn_wide_automl",
+            "--anchor",
+            ANCHOR,
+            timeout=1800,
+        )
+        ci.stack.mbt("promote", "--model", "churn_wide_automl", "--to", "production", timeout=300)
+
+    reference = ci.stack.workspace / "monitoring" / "wide_reference.parquet"
+    if not reference.is_file():
+        ci.stack.exec(
+            "python",
+            "scripts/evidently_gate.py",
+            "--phase",
+            "train",
+            "--export-reference",
+            "/workspace/monitoring/wide_reference.parquet",
+        )
+
+    run_id = ci.trigger_dag("mbt_score_wide")
+    assert ci.wait_dag_run("mbt_score_wide", run_id) == "success"
+
+    root = ci.stack.workspace / "lake_local" / "predictions" / "wide_retention_scores"
+    sidecars = [
+        json.loads(path.read_text())
+        for path in sorted(root.glob("*/predictions.json"), key=lambda p: p.stat().st_mtime)
+    ]
+    assert sidecars, "no wide prediction runs after the DAG"
+    assert sidecars[-1]["row_count"] > 0, sidecars[-1]
+    # the gate ran inside the unit and left its artifacts on the mount
+    assert (ci.stack.workspace / "monitoring" / "wide_current.parquet").is_file()
+    assert (ci.stack.workspace / "monitoring" / "wide_drift_report.html").is_file()

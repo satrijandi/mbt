@@ -251,6 +251,7 @@ Scoring through different feature transforms than the champion learned on is sil
 
 **Fix:** retrain and promote so the champion matches the current hooks, or run the scoring pipeline from the commit the champion was built from (`--manifest` keeps that reproducible).
 A champion registered before this release has no `mbt.hooks_hash` tag; scoring then proceeds with a warning that parity cannot be verified.
+ADDING a hooks file to a model that had none triggers this too (the hash goes from empty to set): for example, a long-lived showcase stack whose wide champion predates `models/wide_hooks.py` fails wide scoring until `make wide` retrains and promotes.
 
 ## `WARN champion has no monitoring baseline (registered by an older mbt)`
 
@@ -308,6 +309,40 @@ One malformed sidecar is skipped rather than allowed to fail the whole monitor n
 
 **Fix:** repair or remove that run directory (`scored_at` must be an ISO-8601 timestamp); the next `mbt monitor` then picks the run up.
 If an external store produced it, fix the store's `scored_at` serialization.
+
+## `BREACH: drifted share 0.88 > max 0.30` from the showcase Evidently gate
+
+**Symptom (quality verdict, exit 2):**
+
+```text
+  dem_f02                  drift score 1.5929
+  log_f09                  drift score 1.5905
+  days_since_login         drift score 1.4475
+  ...
+BREACH: drifted share 0.88 > max 0.30 (phase serving)
+```
+
+**Why:** the showcase's wide batch-monthly cadence runs `scripts/evidently_gate.py` on exactly the features `churn_wide_automl` trains on (the committed include list).
+The train phase compares the train window against the test window and blocks `mbt promote` on a breach; the serving phase compares each scored batch against the baseline the train phase exported.
+Exit 2 is the same quality-verdict semantics as mbt's own gates, so the Airflow DAG fails the task without retries and notifies the owner.
+
+**Fix:** open `drift_report.html` to see the per-feature comparison.
+A train-phase breach means the features were already unstable inside the training window: revisit the split boundaries or rerun `scripts/select_features.py` so selection sees the shifted period.
+A serving-phase breach means the incoming month shifted (as `make inject-drift` demonstrates for the daily cadence): fix the upstream data or retrain on the new distribution before promoting again.
+Raising `--max-drift-share` is a deliberate policy change, not a fix.
+
+## `error: no exported reference at /workspace/monitoring/wide_reference.parquet`
+
+**Symptom (hard error, exit 1):**
+
+```text
+error: no exported reference at /workspace/monitoring/wide_reference.parquet; run the train-phase gate first
+```
+
+**Why:** the serving-phase gate needs the baseline the train-phase gate exports on a pass.
+DAG task containers are ephemeral (`target/` dies with each one), so the baseline must live on the shared `/workspace` mount; a fresh stack that never ran the train phase has nothing there.
+
+**Fix:** run the train phase once after a wide build - `python scripts/evidently_gate.py --phase train --export-reference /workspace/monitoring/wide_reference.parquet` (or simply `make wide`, which does this between the AutoML build and promotion).
 
 ## A mistyped flag prints `No such option`
 

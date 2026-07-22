@@ -26,9 +26,10 @@ COPY constraints.txt /opt/mbt/constraints.txt
 # constraints.txt pins everything else to uv.lock versions. The cache mount
 # survives rebuilds so the ~800MB of JVM sdists download once; timeouts are
 # generous because pypi serves those sdists slowly.
-# mbt-lightgbm powers the wide cadence's feature-selection probe; evidently
-# (pinned here - it is a showcase-image dep, never an mbt dep) renders the
-# DS-facing drift report in scripts/evidently_report.py.
+# mbt-lightgbm powers the wide cadence's feature-selection probe and the
+# ds-helper funnel in scripts/select_features.py; evidently (pinned here -
+# it is a showcase-image dep, never an mbt dep) drives the feature-stability
+# gates in scripts/evidently_gate.py.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout 300 --retries 10 \
     --find-links /opt/mbt/dist \
