@@ -58,7 +58,12 @@ jobs:
       - name: Create the GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          # wheels + sdists only: uv build drops a .gitignore into dist/,
+          # which a bare dist/* glob attached to v0.1.0 as a stray
+          # "default.gitignore" asset (removed by hand there)
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           generate_release_notes: true
       - name: Publish to PyPI (Trusted Publishing)
         # Opt-in switch (see header): flipping the repo variable to 'enabled'
