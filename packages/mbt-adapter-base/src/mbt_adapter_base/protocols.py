@@ -186,16 +186,23 @@ class TrainingAdapter(Protocol):
         ...
 
 
+# The optional-capability protocols below describe methods core probes with
+# ``hasattr`` (never ``isinstance`` on the hot path). ``@runtime_checkable`` lets
+# a test assert an adapter *has* the method - but only verifies the NAME, never
+# the signature. The signature teeth are static: each adapter that implements a
+# capability adds a ``_: SupportsX = TheAdapter(...)`` conformance variable that
+# this repo's strict mypy checks (the opaque ``model`` is typed ``Any`` so an
+# adapter may narrow it to its own concrete model type). ``model`` is opaque to
+# core, so ``Any`` here is the honest type, not a widening.
 @runtime_checkable
 class SupportsTrainWithReport(Protocol):
     """OPTIONAL TrainingAdapter capability: per-round tuning progress.
 
-    Core probes for the method with ``hasattr``; this protocol pins the
-    signature so adapters cannot drift apart. ``report(step, value)`` takes a
-    HIGHER-IS-BETTER validation value each round (the tuning engine flips the
-    sign for minimize objectives) and may raise to abort the trial (pruning);
-    let that exception propagate out of the framework's training loop.
-    Adapters without the method fall back to full trials with a warning.
+    ``report(step, value)`` takes a HIGHER-IS-BETTER validation value each round
+    (the tuning engine flips the sign for minimize objectives) and may raise to
+    abort the trial (pruning); let that exception propagate out of the
+    framework's training loop. Adapters without the method fall back to full
+    trials with a warning.
     """
 
     def train_with_report(
@@ -217,7 +224,35 @@ class SupportsFeatureImportance(Protocol):
     cannot attribute importance (e.g. an AutoML ensemble leader) return {}.
     """
 
-    def feature_importance(self, model: TrainedModel) -> dict[str, float]: ...
+    def feature_importance(self, model: Any) -> dict[str, float]: ...
+
+
+@runtime_checkable
+class SupportsShapImportance(Protocol):
+    """OPTIONAL TrainingAdapter capability: SHAP-based global importance.
+
+    Probed with ``hasattr``; the model card prefers this over
+    ``feature_importance`` when present, because mean-|SHAP| over a split is
+    additive and not cardinality-biased like split-gain. Data-grounded, hence
+    the ``split`` argument. Return importances normalized to fractions keyed by
+    feature name.
+    """
+
+    def shap_importance(self, model: Any, data: DatasetHandle, split: str) -> dict[str, float]: ...
+
+
+@runtime_checkable
+class SupportsExplain(Protocol):
+    """OPTIONAL TrainingAdapter capability: per-row local attribution.
+
+    REQUIRED when a scoring node sets ``output.explain_top_k`` (core raises a
+    ``ConfigError`` at score time otherwise). Returns one JSON string per row -
+    that row's ``top_k`` features by |SHAP| as ``[[feature, contribution], ...]``
+    ordered by descending |contribution| (``training_helpers.top_k_explanations``
+    builds it).
+    """
+
+    def explain(self, model: Any, data: DatasetHandle, split: str, top_k: int) -> list[str]: ...
 
 
 class PredictionStore(Protocol):
@@ -242,7 +277,9 @@ class PredictionStore(Protocol):
         """A named ledger marker for a run, or None if absent."""
         ...
 
-    def write_marker(self, run_key: str, name: str, payload: dict[str, Any]) -> None: ...
+    def write_marker(self, run_key: str, name: str, payload: dict[str, Any]) -> bool:
+        """Record a marker atomically; False if one already existed (R2-11)."""
+        ...
 
 
 class DataAdapter(Protocol):
@@ -375,6 +412,14 @@ class DataBuildContext(Protocol):
 
     @property
     def events(self) -> EventSink: ...
+
+    @property
+    def build_parallelism(self) -> int:
+        """The DAG pool size (--threads): the max number of builds that may run
+        concurrently. An in-process compute backend (e.g. the local adapter's
+        DuckDB) should divide its core/RAM budget by this so N parallel builds do
+        not each grab the whole machine (F22). Defaults to 1 (a lone build)."""
+        ...
 
 
 @dataclass(frozen=True)

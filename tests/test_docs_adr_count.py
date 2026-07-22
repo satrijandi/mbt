@@ -12,8 +12,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Numbered ADR files (0001-*.md ...); the index page is not an ADR.
 _ADR_RE = re.compile(r"^\d{4}-.*\.md$")
-#: Prose claims like "22 ADRs".
-_CLAIM_RE = re.compile(r"(\d+)\s+ADRs\b")
+#: Prose claims like "22 ADRs" AND the markdown-link form "22 [ADRs](...)".
+#: The optional ``[`` is what a bare ``\s+ADRs`` missed, so a stale link-form
+#: count silently passed CI (the very drift this guard claims to prevent).
+_CLAIM_RE = re.compile(r"(\d+)\s+\[?ADRs\b")
 
 
 def _actual_adr_count() -> int:

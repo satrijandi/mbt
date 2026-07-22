@@ -6,7 +6,10 @@
 # wheels (uv build --all-packages) and a constraints file derived from uv.lock
 # with the sparkling fork's pins (pyspark 3.5.x + h2o matched to the
 # h2o-pysparkling embedded backend) into the build context.
-FROM python:3.11-slim-bookworm
+# Digest-pinned (not a floating tag) so the runner base is reproducible, the
+# way DESIGN.md's runner row claims; the tag stays for humans. Re-pin with
+#   docker buildx imagetools inspect python:3.11-slim-bookworm
+FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
 
 # JRE 17 satisfies Spark 3.5 and H2O; procps because Spark scripts call ps;
 # curl for healthchecks, the s3a jar fetch below, and CI alert webhooks; git

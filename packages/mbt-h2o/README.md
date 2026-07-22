@@ -26,6 +26,10 @@ models:
 Rules of the road:
 
 - **No `tuning:` block** - AutoML is the tuner (rejected at parse).
+- **Both tasks**: `binary_classification` (score = P(class 1)) and `regression`
+  (target-scale predictions). AutoML detects the task from the target - a
+  numeric target trains a regressor - so leave `sort_metric` at `AUTO` for
+  regression (`auc`/`aucpr`/`logloss` are classification-only).
 - **Models-bounded runs are repeatable** (`max_models` + `seed`, tolerance
   determinism tier); `max_runtime_secs*` budgets are time-dependent and
   trigger nondeterminism warnings (FR-RUN-06).

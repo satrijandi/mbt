@@ -105,6 +105,54 @@ def test_execution_context_warms_tracking_backends(
     assert called == [True]
 
 
+def test_execution_context_serializes_shared_state_for_free_threading(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """next_index and the dataset-handle store go through _state_lock, so the
+    coordinator's shared counter and handle map are safe under a free-threaded
+    (no-GIL) build (P3). Verified by the lock's mutual exclusion - holding it
+    blocks a concurrent mutator - and a concurrent stress run with no lost
+    indices."""
+    import threading
+
+    ctx = make_execution_context(demo_project, fake_registry)
+
+    # mutual exclusion: while the lock is held, next_index() cannot complete,
+    # proving it acquires _state_lock (this is what falsifies a missing lock).
+    completed = threading.Event()
+
+    def mutate() -> None:
+        ctx.next_index()
+        completed.set()
+
+    with ctx._state_lock:
+        worker = threading.Thread(target=mutate)
+        worker.start()
+        assert not completed.wait(timeout=0.25), "next_index did not wait on _state_lock"
+    worker.join(timeout=2)
+    assert completed.is_set()  # lock released -> it completes
+
+    # correctness under concurrency: 8 threads, every index unique and gap-free.
+    seen: list[int] = []
+    collect = threading.Lock()
+
+    def hammer() -> None:
+        local = [ctx.next_index() for _ in range(500)]
+        with collect:
+            seen.extend(local)
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(seen) == len(set(seen)) == 8 * 500  # no duplicate / lost updates
+
+    # the dataset-handle map is guarded by the same lock
+    ctx.store_dataset_handle("dataset.x", "handle-x")
+    assert ctx.dataset_handle("dataset.x") == "handle-x"
+
+
 def test_raw_adapter_ref_falls_back_to_rendered_profile(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:
@@ -170,6 +218,43 @@ def test_selectorless_data_test_binds_all_datasets(
 
 
 # -- ModelRunner ----------------------------------------------------------------------
+
+
+def test_assemble_job_threads_profile_tuning_config(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """Tuning-engine ops config (sampler/pruner knobs) comes from the target
+    profile's `tuning` block, not the spec; absent it the engine gets {}."""
+    from mbt_adapter_base import AdapterRef, ModelSpec, TuningSpec
+
+    ctx = make_execution_context(demo_project, fake_registry)
+    assert DatasetRunner(ctx).run(DATASET_UID).status == "success"
+    node = ctx.manifest.nodes[MODEL_UID]
+    spec = ModelSpec.model_validate(node.config).model_copy(
+        update={
+            "tuning": TuningSpec.model_validate(
+                {
+                    "engine": "optuna",
+                    "n_trials": 2,
+                    "search_space": {"max_depth": {"type": "int", "low": 2, "high": 5}},
+                    "objective": {"metric": "pr_auc", "direction": "maximize"},
+                }
+            )
+        }
+    )
+    runner = ModelRunner(ctx)
+    metric_specs = runner._metric_specs(spec, node)
+
+    # no profile tuning block: the engine is named but gets no ops config
+    job = runner._assemble_job(node, spec, metric_specs, None)
+    assert job.tuning_engine is not None
+    assert job.tuning_engine.adapter == "optuna" and job.tuning_engine.config == {}
+
+    # a profile tuning block flows its config into the engine (this is what
+    # makes the sampler/pruner knobs reachable at all)
+    ctx.profiles.target.tuning = AdapterRef(adapter="optuna", config={"multivariate": True})
+    job = runner._assemble_job(node, spec, metric_specs, None)
+    assert job.tuning_engine is not None and job.tuning_engine.config == {"multivariate": True}
 
 
 def test_model_metric_resolution_error_is_a_node_error(
@@ -416,3 +501,26 @@ def test_cancel_active_jobs_terminates_each_handle_and_survives_races() -> None:
     )
     ExecutionContext.cancel_active_jobs(ctx)
     assert [reason for _, reason in calls] == ["cancelled by --fail-fast"] * 2
+
+
+def test_cancel_active_jobs_terminates_handles_concurrently() -> None:
+    import threading
+
+    # A 2-party barrier only releases when BOTH terminates are in flight at
+    # once; a serial sweep would block the first terminate alone until the
+    # barrier times out (BrokenBarrierError, suppressed) and neither records.
+    barrier = threading.Barrier(2, timeout=5)
+    passed: list[object] = []
+
+    class _Compute:
+        def terminate(self, handle: object, reason: str) -> None:
+            barrier.wait()
+            passed.append(handle)
+
+    ctx = SimpleNamespace(
+        compute=_Compute(),
+        _job_handles_lock=threading.Lock(),
+        _active_job_handles=["h1", "h2"],
+    )
+    ExecutionContext.cancel_active_jobs(ctx)
+    assert sorted(passed) == ["h1", "h2"]  # both ran at the same time

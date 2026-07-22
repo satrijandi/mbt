@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:   # release.yml gates publishing on this exact CI passing (R2-1)
 
 # Superseded pushes to the same PR/branch cancel their in-flight runs; main
 # never cancels (a half-cancelled Pages deploy is worse than a queued one).

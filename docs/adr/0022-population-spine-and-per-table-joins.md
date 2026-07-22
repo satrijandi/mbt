@@ -52,8 +52,18 @@ Real feature stores are messier, and the monthly-churn reference scenario
    date is the one true `time_column`); the label join is always **inner**
    - an example without an observed outcome is not a training example.
    Rows the population defines but the label filters out are the outcome
-   coverage; the label join never invents rows (an inner join can only
-   shrink the spine).
+   coverage: every population-spine build now records it as
+   `label_join_coverage` (`spine_rows` vs `matched_rows`, counted before
+   filters/sampling/windows), reports it on the event bus, and the
+   `label_join_coverage: {min_fraction: ...}` check turns a quiet partial
+   drop into an exit-2 failure (F21). An inner join to a table that is
+   **unique on the join key** can only shrink the spine, never invent rows;
+   but a non-unique label or feature table fans the spine out (an inner join
+   to a duplicated key multiplies rows), silently over-weighting that entity.
+   mbt does not dedup for you - declare a `unique` dataset check on the join
+   key, or its pre-join form `unique: {source: <group.table>, columns: [...]}`
+   (the 1:1 join-cardinality contract, checked against the raw table before
+   the join can fan anything out), to guard against it (F2).
 
 4. **Sampling identity is unchanged.** `sample_key` still names the stable
    row identity; its default falls back to `join_key`, then to the label's

@@ -167,6 +167,50 @@ def test_model_test_window_is_resolved(demo_project: Path, fake_registry: Adapte
     ]
 
 
+def test_source_format_the_adapter_cannot_read_is_a_compilation_error(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A referenced 'delta' source must fail compile on a parquet-only adapter (F23)."""
+    sources = demo_project / "sources.yml"
+    sources.write_text(
+        sources.read_text().replace(
+            "path: data/subscribers/*.parquet",
+            "path: data/subscribers/*.parquet\n        format: delta",
+        )
+    )
+    with pytest.raises(CompilationError, match="cannot read") as excinfo:
+        compile_with_vars(demo_project, fake_registry)
+    assert "lakehouse.subscribers" in excinfo.value.message
+    assert "'delta'" in excinfo.value.message
+    assert "spark" in (excinfo.value.hint or "")
+
+
+def test_source_format_the_adapter_supports_compiles(
+    demo_project: Path, fake_registry: AdapterRegistry, monkeypatch
+) -> None:
+    """An adapter declaring delta support accepts a delta source (F23)."""
+
+    class _DeltaCapableAdapter:
+        supported_source_formats = frozenset({"parquet", "delta"})
+
+        def snapshot_id(self, table, deep=False):
+            return "sha256:delta-snap"
+
+    monkeypatch.setattr(
+        "mbt.compile.compiler.build_data_adapter",
+        lambda profiles, project_dir, registry: _DeltaCapableAdapter(),
+    )
+    sources = demo_project / "sources.yml"
+    sources.write_text(
+        sources.read_text().replace(
+            "path: data/subscribers/*.parquet",
+            "path: data/subscribers/*.parquet\n        format: delta",
+        )
+    )
+    manifest = compile_with_vars(demo_project, fake_registry)
+    assert manifest.nodes[DS].snapshot_id == "sha256:delta-snap"
+
+
 def test_snapshot_pinning_failure_is_a_compilation_error(
     demo_project: Path, fake_registry: AdapterRegistry, monkeypatch
 ) -> None:

@@ -212,3 +212,45 @@ def test_class_balance_report_never_fails() -> None:
     result = _run(["class_balance_report"], _handle())
     assert result["class_balance_report"].passed
     assert "label balance" in result["class_balance_report"].message
+
+
+def test_freshness_passes_when_data_is_recent() -> None:
+    # newest snapshot_date is 2026-01-04; the test window ends at 2026-01-05 (the
+    # anchor), so a 2-day max_lag is satisfied.
+    ok = _run([{"freshness": {"max_lag": "2d"}}], _handle())
+    assert ok["freshness"].passed and ok["freshness"].message == ""
+
+
+def test_freshness_fails_when_upstream_is_stale() -> None:
+    # newest is 2026-01-04 00:00, a full day before the 2026-01-05 anchor, so a
+    # 12-hour max_lag flags a stale upstream (a scheduled retrain would otherwise
+    # train on old data silently).
+    bad = _run([{"freshness": {"max_lag": "12h"}}], _handle())
+    assert not bad["freshness"].passed
+    assert "upstream may be stale" in bad["freshness"].message
+
+
+def test_freshness_requires_max_lag_and_a_temporal_split() -> None:
+    err = _run([{"freshness": {}}], _handle())
+    assert not err["freshness"].passed
+    assert "needs 'max_lag'" in err["freshness"].message
+
+
+def test_freshness_covers_a_scoring_input() -> None:
+    # scoring specs carry the time column on input.time_column (no split), and the
+    # 'score' window ends at the anchor - so a stale nightly batch is caught too.
+    from types import SimpleNamespace
+
+    from mbt.quality.checks import _check_freshness
+
+    table = pa.table(
+        {"snapshot_date": [datetime(2026, 1, d) for d in (1, 2, 3, 4)], "x": [1, 2, 3, 4]}
+    )
+    handle = InMemoryDatasetHandle({"score": table}, time_column="snapshot_date")
+    spec = SimpleNamespace(input=SimpleNamespace(time_column="snapshot_date"))
+    windows = {"windows": {"score": ["2026-01-01T00:00:00Z", "2026-01-05T00:00:00Z"]}}
+    # newest 2026-01-04, anchor 2026-01-05: a 12h max_lag flags the stale batch
+    stale = _check_freshness(spec, handle, windows, {"max_lag": "12h"}, "s")
+    assert not stale.passed and "upstream may be stale" in stale.message
+    fresh = _check_freshness(spec, handle, windows, {"max_lag": "2d"}, "s")
+    assert fresh.passed

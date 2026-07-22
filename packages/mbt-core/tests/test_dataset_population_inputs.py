@@ -223,6 +223,124 @@ def test_panel_sampling_keeps_whole_customers(
     assert all(count == len(MONTHS) - 1 for count in counts.values())
 
 
+def test_label_join_coverage_is_recorded_and_reported(
+    population_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """The build records spine-vs-matched counts (F21): 13 months x 40
+    customers = 520 spine rows, of which the newest month's 40 have no labels
+    yet, so the inner label join keeps 480 (92.3%)."""
+    from mbt_adapter_base.materialization import MaterializedDatasetHandle
+
+    results = invoke(population_project, fake_registry, select=["wide_churn_model"])
+    assert results.exit_code() == 0
+    key = next((population_project / "target/datasets/wide_churn").iterdir())
+    handle = MaterializedDatasetHandle(key)
+    assert handle.label_join_coverage == {"spine_rows": 520, "matched_rows": 480}
+
+
+def test_label_join_coverage_check_gates_the_build(
+    population_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A declared floor above the real 92.3% coverage turns the silent drop
+    into a loud quality failure (exit 2), and a floor below it passes."""
+    dataset = population_project / "datasets/wide_churn.yml"
+    original = dataset.read_text()
+    dataset.write_text(
+        original.replace(
+            "sample_key: customer_id",
+            "sample_key: customer_id\n"
+            "    checks:\n"
+            "      - label_join_coverage: {min_fraction: 0.99}\n"
+            "      - label_leakage_scan: {enabled: false}\n",
+        )
+    )
+    results = invoke(population_project, fake_registry, select=["wide_churn_model"])
+    assert results.exit_code() == 2
+    by_id = {r.unique_id: r for r in results.results}
+    assert by_id[DS].status == "test_failed"
+    coverage = next(t for t in by_id[DS].tests if t.name == "label_join_coverage")
+    assert "matched 480 of 520 spine rows (92.3%)" in coverage.message
+
+    dataset.write_text(original.replace("min_fraction: 0.99", "min_fraction: 0.9"))
+    dataset.write_text(
+        original.replace(
+            "sample_key: customer_id",
+            "sample_key: customer_id\n"
+            "    checks:\n"
+            "      - label_join_coverage: {min_fraction: 0.9}\n"
+            "      - label_leakage_scan: {enabled: false}\n",
+        )
+    )
+    results = invoke(population_project, fake_registry, select=["wide_churn_model"])
+    assert results.exit_code() == 0
+
+
+def test_pre_join_unique_source_check_catches_a_fanned_feature_table(
+    population_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """unique with source: fails on the RAW feature table whose duplicated
+    join key would fan out the spine (F2) - blame lands on the table, not on
+    a mysterious row-count inflation post-join."""
+    # duplicate one txn_features row -> (safe_id, snapshot_date) is not unique
+    txn_dir = population_project / "data" / "txn_features"
+    table = pq.read_table(txn_dir / "part-000.parquet")
+    pq.write_table(pa.concat_tables([table, table.slice(0, 1)]), txn_dir / "part-000.parquet")
+    dataset = population_project / "datasets/wide_churn.yml"
+    dataset.write_text(
+        dataset.read_text().replace(
+            "sample_key: customer_id",
+            "sample_key: customer_id\n"
+            "    checks:\n"
+            "      - unique: {source: lakehouse.txn_features, columns: [safe_id, snapshot_date]}\n"
+            "      - label_leakage_scan: {enabled: false}\n",
+        )
+    )
+    results = invoke(population_project, fake_registry, select=["wide_churn_model"])
+    assert results.exit_code() == 2
+    by_id = {r.unique_id: r for r in results.results}
+    unique = next(t for t in by_id[DS].tests if t.name == "unique")
+    assert not unique.passed
+    assert "source lakehouse.txn_features" in unique.message
+    assert "composite key (safe_id, snapshot_date): 1 duplicated key(s)" in unique.message
+
+
+def test_relationships_check_runs_against_a_raw_source(
+    population_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """relationships pulls the parent side from the RAW source through the
+    local adapter (F2/F21): spine safe_ids all exist in the population table
+    (passes); customer_ids checked against safe_id are all orphans (fails)."""
+    dataset = population_project / "datasets/wide_churn.yml"
+    original = dataset.read_text()
+    dataset.write_text(
+        original.replace(
+            "sample_key: customer_id",
+            "sample_key: customer_id\n"
+            "    checks:\n"
+            "      - relationships: {column: safe_id, to: lakehouse.population, field: safe_id}\n"
+            "      - label_leakage_scan: {enabled: false}\n",
+        )
+    )
+    results = invoke(population_project, fake_registry, select=["wide_churn_model"])
+    assert results.exit_code() == 0
+
+    dataset.write_text(
+        original.replace(
+            "sample_key: customer_id",
+            "sample_key: customer_id\n"
+            "    checks:\n"
+            "      - relationships: "
+            "{column: customer_id, to: lakehouse.txn_features, field: safe_id}\n"
+            "      - label_leakage_scan: {enabled: false}\n",
+        )
+    )
+    results = invoke(population_project, fake_registry, select=["wide_churn_model"])
+    assert results.exit_code() == 2
+    by_id = {r.unique_id: r for r in results.results}
+    rel = next(t for t in by_id[DS].tests if t.name == "relationships")
+    assert "not in lakehouse.txn_features.safe_id" in rel.message
+
+
 # -- schema validation ------------------------------------------------------
 
 

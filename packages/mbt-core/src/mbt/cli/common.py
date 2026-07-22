@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import typer
 import yaml
@@ -104,7 +104,17 @@ def parse_anchor(raw: str | None) -> datetime | None:
 
 
 def setup_bus(ctx: CLIContext) -> None:
-    """Events go to stderr; stdout is reserved for command data output."""
+    """Console events go to stderr; stdout is reserved for command data output.
+
+    A durable, machine-readable event timeline is opt-in via the ``MBT_LOG_FILE``
+    environment variable (like ``MBT_DEBUG``): when set, every redacted event is
+    ALSO appended to that file as JSON lines, on top of whatever the console
+    shows. Scheduled jobs get a persistent log without scraping stderr, and -
+    unlike ``--log-format json``, which replaces the console - the human console
+    output is kept intact. The path follows CLI-path semantics (relative to the
+    invocation dir, not the project dir).
+    """
+    import os
     import sys
 
     if ctx.quiet:
@@ -113,7 +123,48 @@ def setup_bus(ctx: CLIContext) -> None:
         sinks = [JsonLinesSink(stream=sys.stderr)]
     else:
         sinks = [ConsoleSink(console=err_console, verbose=ctx.verbose)]
+    log_file = os.environ.get("MBT_LOG_FILE")
+    if log_file:
+        sinks.append(JsonLinesSink(stream=_open_log_file(ctx.resolve_cli_path(log_file))))
+    if os.environ.get("MBT_OTEL"):
+        sinks.append(_otel_sink())
     set_bus(EventBus(sinks=sinks))
+
+
+def _otel_sink() -> Any:
+    """Build the opt-in OpenTelemetry span sink (``MBT_OTEL``).
+
+    Emits one trace per command (root span + a child span per node) against the
+    operator's globally-configured tracer. A missing ``otel`` extra fails loudly,
+    the same stance as ``MBT_LOG_FILE``: explicitly asking for telemetry and then
+    dropping it silently is worse than an error the operator can fix.
+    """
+    try:
+        from mbt.events.otel import make_otel_sink
+
+        return make_otel_sink()
+    except ImportError as exc:
+        raise ConfigError(
+            "MBT_OTEL is set but opentelemetry is not installed",
+            hint="install the tracing extra: pip install 'mbt-core[otel]'",
+        ) from exc
+
+
+def _open_log_file(path: str | None) -> TextIO:
+    """Open the ``MBT_LOG_FILE`` sink target, creating parent dirs and appending
+    so a scheduled job accumulates its timeline across runs (each event carries a
+    ``run_id`` to demultiplex). A bad path fails loudly: a silently dropped
+    durable log is worse than an error the operator can fix."""
+    assert path is not None  # guarded by the truthy check at the call site
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target.open("a", encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(
+            f"MBT_LOG_FILE could not be opened: {exc}",
+            hint="point MBT_LOG_FILE at a writable path (parent dirs are created for you)",
+        ) from exc
 
 
 def fail(exc: MbtError) -> "typer.Exit":

@@ -131,6 +131,40 @@ def prepare(
     )
 
 
+def prepare_readonly(
+    opts: InvocationOptions, manifest_path: Path, *, registry: AdapterRegistry | None = None
+) -> PreparedInvocation:
+    """Read an already-built manifest for a READ-ONLY inspection command
+    (``predictions ls/show``), reusing the compiled artifact instead of
+    recompiling.
+
+    Unlike :func:`prepare`, this never recompiles - so it does not overwrite
+    ``target/manifest.json``, and it does not pin snapshots against the live
+    data system, so a transient source outage cannot fail the read - and it does
+    NOT verify the environment (``env_digest`` verification gates reproducible
+    EXECUTION under ``--manifest`` (ADR-19), not a read-only listing). Profiles
+    still load so the data adapter can open the prediction store.
+    """
+    registry = registry or get_registry()
+    manifest = read_manifest(manifest_path, source=str(manifest_path))
+    parsed = _try_parse(opts, registry)
+    profiles = load_profiles(
+        manifest.metadata.project_name,
+        opts.project_dir,
+        profiles_dir=opts.profiles_dir,
+        target_override=opts.target or manifest.metadata.target,
+        cli_vars=opts.cli_vars,
+        project_vars=parsed.project.vars if parsed else {},
+    )
+    return PreparedInvocation(
+        manifest=manifest,
+        profiles=profiles,
+        parsed=parsed,
+        registry=registry,
+        run_id=_new_run_id(),
+    )
+
+
 def _try_parse(opts: InvocationOptions, registry: AdapterRegistry) -> ParsedProject | None:
     try:
         return parse_project(opts.project_dir, registry=registry, cli_vars=opts.cli_vars)
@@ -370,6 +404,7 @@ def _execute(
         return model_runner.run(uid)
 
     threads = opts.threads if opts.threads is not None else prepared.profiles.target.threads
+    ctx.threads = threads  # so in-process DuckDB builds can divide cores/RAM by it (F22)
     return execute_plan(
         plan,
         ctx.graph(),
@@ -389,7 +424,8 @@ def require_scoring_capability(ctx: ExecutionContext) -> None:
             "batch scoring (contract 1.1 adds build_scoring_input and "
             "open_predictions)",
             hint="upgrade the adapter package, or score against a target whose "
-            "data adapter supports scoring (the local adapter does)",
+            "data adapter supports scoring (the built-in local, snowflake, and "
+            "spark adapters all do)",
         )
 
 

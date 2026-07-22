@@ -58,6 +58,50 @@ def test_no_completed_trials_is_an_actionable_error() -> None:
         OptunaTuningEngine({}).tune(spec, objective, n_trials=3, seed=7)
 
 
+def _quad_spec() -> TuningSpec:
+    return TuningSpec.model_validate(
+        {
+            "engine": "optuna",
+            "n_trials": 12,
+            "search_space": {
+                "x": {"type": "uniform", "low": 0.0, "high": 1.0},
+                "y": {"type": "uniform", "low": 0.0, "high": 1.0},
+            },
+            "objective": {"metric": "pr_auc", "direction": "maximize"},
+        }
+    )
+
+
+def _best(config: dict[str, Any], seed: int = 7) -> dict[str, Any]:
+    # correlated objective: rewards x and y moving together
+    spec = _quad_spec()
+    result = OptunaTuningEngine(config).tune(
+        spec, lambda p: -((p["x"] - p["y"]) ** 2), n_trials=12, seed=seed
+    )
+    return dict(result.best_params)
+
+
+@pytest.mark.filterwarnings("ignore::optuna.exceptions.ExperimentalWarning")
+def test_multivariate_tpe_is_opt_in_and_deterministic() -> None:
+    # multivariate changes the proposals versus the default independent TPE ...
+    assert _best({"multivariate": True}) != _best({})
+    # ... but stays reproducible for a fixed seed + config (the engine's promise)
+    assert _best({"multivariate": True}) == _best({"multivariate": True})
+
+
+def test_random_sampler_is_selectable_and_deterministic() -> None:
+    first = _best({"sampler": "random"})
+    assert first == _best({"sampler": "random"})  # seeded -> reproducible
+    assert first != _best({})  # and genuinely different from TPE
+
+
+def test_unknown_sampler_is_an_actionable_error() -> None:
+    with pytest.raises(ValueError, match="unknown sampler 'bogus'"):
+        OptunaTuningEngine({"sampler": "bogus"}).tune(
+            _quad_spec(), lambda p: p["x"], n_trials=3, seed=7
+        )
+
+
 def test_plugin_descriptor_wires_the_tuning_engine() -> None:
     from mbt_optuna.plugin import PLUGIN
 

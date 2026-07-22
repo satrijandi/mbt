@@ -110,6 +110,24 @@ def test_clean_removes_target_directory(tmp_path: Path) -> None:
     assert "nothing to clean" in again.output
 
 
+def test_clean_ages_out_stale_job_payloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mbt.adapters.local import compute
+
+    # the sweep found stale payload dirs: clean reports how many it aged out
+    monkeypatch.setattr(
+        compute, "sweep_stale_job_payloads", lambda cutoff: [Path("/tmp/mbt-job-old")]
+    )
+    out = invoke(["clean", "--project-dir", str(tmp_path)])
+    assert out.exit_code == 0, debug(out)
+    assert "aged out 1 stale job payload dir" in out.output
+
+    # nothing stale: no age-out line at all
+    monkeypatch.setattr(compute, "sweep_stale_job_payloads", lambda cutoff: [])
+    quiet = invoke(["clean", "--project-dir", str(tmp_path)])
+    assert quiet.exit_code == 0, debug(quiet)
+    assert "aged out" not in quiet.output
+
+
 def test_clean_artifact_gc_rejects_non_duration(tmp_path: Path) -> None:
     absolute_window = "2026-01-01T00:00:00:2026-02-01T00:00:00"
     result = invoke(

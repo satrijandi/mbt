@@ -10,7 +10,6 @@ import pytest
 
 from mbt.adapters.local.data import LocalDataAdapter
 from mbt.contracts import ManifestNode, ScoringInputSpec, SourceTable
-from mbt.exceptions import AdapterError
 from mbt.execute.runners import BuildContext
 from mbt_adapter_base.compliance import PredictionStoreCompliance
 from mbt_adapter_base.predictions import LocalPredictionStore, PredictionStoreError
@@ -184,7 +183,9 @@ def test_zero_rows_warns_instead_of_failing(tmp_path: Path) -> None:
     assert any("0 rows" in getattr(e, "message", "") for e in events.events)
 
 
-def test_snapshot_drift_under_pinned_manifest_fails(tmp_path: Path) -> None:
+def test_scoring_input_ignores_snapshot_drift(tmp_path: Path) -> None:
+    """A scoring input is expected-mutable: a pinned manifest scores the live
+    data instead of hard-failing on drift the way a dataset does (R2-10)."""
     _write_batch(tmp_path)
     adapter = LocalDataAdapter({"root": str(tmp_path)})
     tables = {"source.demo.lakehouse.batch": SourceTable(name="batch", path="data/batch/*.parquet")}
@@ -193,10 +194,10 @@ def test_snapshot_drift_under_pinned_manifest_fails(tmp_path: Path) -> None:
         adapter,
         tables,
         tmp_path / "target/scoring_inputs/batch_scoring/k4",
-        snapshot_override="sha256:pinned-elsewhere",
+        snapshot_override="sha256:pinned-elsewhere",  # a stale pin from an earlier compile
     )
-    with pytest.raises(AdapterError, match="source data changed under the pinned manifest"):
-        adapter.build_scoring_input(spec, ctx)
+    handle = adapter.build_scoring_input(spec, ctx)  # no raise: scores the live batch
+    assert handle.read("score").num_rows > 0
 
 
 def test_open_predictions_roots_under_data_root(tmp_path: Path) -> None:
@@ -249,3 +250,64 @@ def test_list_runs_ignores_incomplete_writes(tmp_path: Path) -> None:
 class TestLocalPredictionStoreCompliance(PredictionStoreCompliance):
     def make_store(self, root: Path) -> LocalPredictionStore:
         return LocalPredictionStore(root / "predictions")
+
+
+def test_write_marker_is_atomic_create_if_absent(tmp_path: Path) -> None:
+    """Overlapping monitors record a run's evaluation exactly once: the first
+    write wins, the second returns False and does not overwrite (R2-11)."""
+    from mbt_adapter_base.interchange import PredictionRunInfo
+
+    store = LocalPredictionStore(tmp_path / "predictions")
+    info = PredictionRunInfo(
+        run_key="k",
+        uri="",
+        scored_at="2026-07-01T00:00:00Z",
+        run_id="r",
+        model_name="m",
+        model_version="1",
+        row_count=1,
+    )
+    store.write_run(pa.table({"prediction": [0.5]}), info)
+
+    assert store.write_marker("k", "ground_truth", {"metrics": {"pr_auc": 0.9}}) is True
+    assert store.write_marker("k", "ground_truth", {"metrics": {"pr_auc": 0.1}}) is False
+    assert store.read_marker("k", "ground_truth") == {"metrics": {"pr_auc": 0.9}}  # loser no-op
+
+
+def test_marker_write_is_content_atomic_and_read_tolerates_a_partial_marker(
+    tmp_path: Path,
+) -> None:
+    """F3: an older non-atomic write could leave a 0-byte marker if a crash
+    landed between its create and its body write, which made ``read_marker``
+    raise ``JSONDecodeError`` (poisoning the monitor node and every later
+    ``predictions`` read) and ``write_marker`` return False forever (so the
+    run's ground truth was never evaluated). ``read_marker`` now treats a
+    partial marker as absent, and a completed ``write_marker`` fsyncs the whole
+    body into a temp file and links it into place, leaving no temp residue."""
+    from mbt_adapter_base.interchange import PredictionRunInfo
+
+    store = LocalPredictionStore(tmp_path / "predictions")
+    info = PredictionRunInfo(
+        run_key="k",
+        uri="",
+        scored_at="2026-07-01T00:00:00Z",
+        run_id="r",
+        model_name="m",
+        model_version="1",
+        row_count=1,
+    )
+    store.write_run(pa.table({"prediction": [0.5]}), info)
+
+    # A 0-byte marker (the crash residue) now reads as absent, not a crash.
+    (store._marker_path("k", "ground_truth")).write_text("")
+    assert store.read_marker("k", "ground_truth") is None
+    # It still blocks a re-record (the path is taken), so an overlapping monitor
+    # does not double-evaluate; the read simply stays graceful.
+    assert store.write_marker("k", "ground_truth", {"m": 1}) is False
+
+    # A normal write on a fresh run lands a complete marker and leaves no temp.
+    store.write_run(pa.table({"prediction": [0.5]}), info.model_copy(update={"run_key": "k2"}))
+    assert store.write_marker("k2", "ground_truth", {"metrics": {"pr_auc": 0.8}}) is True
+    assert store.read_marker("k2", "ground_truth") == {"metrics": {"pr_auc": 0.8}}
+    leftovers = [p.name for p in (store.root / "k2").iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []

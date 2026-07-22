@@ -133,7 +133,7 @@ def _monitor_node(ctx: ExecutionContext, node: ManifestNode, anchor: datetime) -
     ground_truth = spec.ground_truth
 
     store = ctx.data_adapter.open_predictions(spec.output)
-    matured = _matured_unevaluated(store, ground_truth.maturity, anchor)
+    matured = _matured_unevaluated(store, ground_truth.maturity, anchor, uid)
     if not matured:
         return NodeResult(
             unique_id=uid, status="success", message="0 matured prediction runs to evaluate"
@@ -168,16 +168,37 @@ def _monitor_node(ctx: ExecutionContext, node: ManifestNode, anchor: datetime) -
     )
 
 
-def _matured_unevaluated(store: Any, maturity: str, anchor: datetime) -> list[PredictionRunInfo]:
+def _matured_unevaluated(
+    store: Any, maturity: str, anchor: datetime, uid: str
+) -> list[PredictionRunInfo]:
     """Runs whose maturity lag has passed and whose ledger marker is absent."""
-    delta = parse_window(maturity).start.delta
-    assert delta is not None  # validated at parse time
+    # A run is mature once its scored_at is no later than the maturity bound
+    # resolved against the anchor (anchor - |maturity|); resolving through the
+    # window keeps calendar units like 3mo/1y correct (R2-20).
+    mature_by = parse_window(maturity).start.resolve(anchor)
+    bus = get_bus()
     matured: list[PredictionRunInfo] = []
     for run in store.list_runs():
         if run.row_count == 0:
             continue
-        scored_at = _parse_ts(run.scored_at)
-        if scored_at - delta > anchor:  # delta is negative: scored_at + |maturity|
+        try:
+            scored_at = _parse_ts(run.scored_at)
+        except ValueError:
+            # A sidecar written by an external store may carry an unparseable
+            # scored_at; skip that one run instead of letting a bare ValueError
+            # escape MbtError handling and poison the whole node (R2-19).
+            bus.emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=uid,
+                    message=(
+                        f"skipping prediction run {run.run_key!r}: "
+                        f"unparseable scored_at {run.scored_at!r}"
+                    ),
+                )
+            )
+            continue
+        if scored_at > mature_by:  # not yet matured
             continue
         if store.read_marker(run.run_key, GROUND_TRUTH_MARKER) is not None:
             continue
@@ -216,8 +237,10 @@ def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: Scoring
     """Build the matured-label table through the data adapter (no new contract).
 
     The label source is pinned on the manifest's sources (observability),
-    but deliberately not part of the scoring node's identity (ADR-20); the
-    build verifies against the label table's own manifest pin.
+    but deliberately not part of the scoring node's identity (ADR-20). Labels
+    arrive after the scoring compile, so - like the scoring input itself - they
+    are read through the expected-mutable ``build_scoring_input`` path and are
+    NOT verified against the manifest pin (R2-10).
     """
     assert spec.ground_truth is not None
     label_uid = spec.ground_truth.label.source
@@ -344,7 +367,7 @@ def _evaluate_run(
         spec.ground_truth.gates, metrics, metric_specs, run_key=run.run_key
     )
 
-    store.write_marker(
+    recorded = store.write_marker(
         run.run_key,
         GROUND_TRUTH_MARKER,
         {
@@ -357,6 +380,21 @@ def _evaluate_run(
             "coverage": round(coverage, 4),
         },
     )
+    if not recorded:
+        # An overlapping monitor run recorded this evaluation first (the ledger
+        # write is atomic create-if-absent); skip our tracking + gate results so
+        # a breach is not double-alerted - "evaluated exactly once" (R2-11).
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                unique_id=uid,
+                message=(
+                    f"run {run.run_key}: already evaluated by a concurrent monitor run; "
+                    "skipping to avoid a double gate/alert"
+                ),
+            )
+        )
+        return None
 
     _log_tracking(ctx, node, run, metrics, coverage)
     return metrics, gate_results

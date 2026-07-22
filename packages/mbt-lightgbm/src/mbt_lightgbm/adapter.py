@@ -43,6 +43,13 @@ if TYPE_CHECKING:
     import lightgbm as lgb
     import numpy as np
 
+    from mbt_adapter_base import (
+        SupportsExplain,
+        SupportsFeatureImportance,
+        SupportsShapImportance,
+    )
+    from mbt_adapter_base.calibration import Calibrator
+
 ARTIFACT_FORMAT = "lightgbm_json"
 
 
@@ -56,11 +63,14 @@ class LightGBMModel:
         features: list[str],
         target: str,
         categories: dict[str, list[str]] | None = None,
+        calibrator: "Calibrator | None" = None,
     ) -> None:
         self.booster = booster
         self.features = features
         self.target = target
         self.categories = categories or {}
+        #: Optional post-hoc probability calibrator (R2-8); applied in _scores.
+        self.calibrator = calibrator
 
 
 class LightGBMTrainingAdapter:
@@ -73,6 +83,8 @@ class LightGBMTrainingAdapter:
         TaskType.BINARY_CLASSIFICATION,
         TaskType.REGRESSION,
     }
+    #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
+    supports_calibration: ClassVar[bool] = True
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -214,9 +226,32 @@ class LightGBMTrainingAdapter:
             valid_sets=valid_sets,
             callbacks=callbacks or None,
         )
-        return LightGBMModel(
+        model = LightGBMModel(
             booster=booster, features=features, target=spec.target, categories=categories
         )
+        if spec.calibration is not None:
+            self._fit_calibrator(model, spec, data)
+        return model
+
+    def _fit_calibrator(self, model: LightGBMModel, spec: ModelSpec, data: DatasetHandle) -> None:
+        """Fit a post-hoc probability calibrator on the held-out calibration
+        slice (R2-8); the same mechanism as the xgboost adapter, persisted in
+        the lightgbm artifact payload instead of a booster attribute.
+
+        Calibrated scores flow through ``_scores``, so ``evaluate`` (ece/brier),
+        ``predict`` (scoring), and the paired champion delta all see calibrated
+        probabilities - both models carry their own calibrator, so the gate stays
+        apples-to-apples. Fits on the dedicated ``calibration`` slice core
+        carves from train (falling back to ``validation`` for direct calls,
+        F17); without either there is no honest calibration set (fails loudly)."""
+        from mbt_adapter_base.calibration import Calibrator
+        from mbt_adapter_base.training_helpers import calibration_split
+
+        assert spec.calibration is not None  # guarded by the caller
+        val = data.read(calibration_split(data))
+        raw = self._scores(model, val)  # no calibrator attached yet -> raw scores
+        labels = val.column(spec.target).to_numpy(zero_copy_only=False)
+        model.calibrator = Calibrator.fit(raw, labels, spec.calibration)
 
     # -- evaluation ----------------------------------------------------------------------
 
@@ -224,7 +259,12 @@ class LightGBMTrainingAdapter:
         import numpy as np
 
         x = self._features_matrix(table, model.features, model.categories)
-        return np.asarray(model.booster.predict(x))
+        raw = np.asarray(model.booster.predict(x))
+        # Post-hoc calibration is a monotonic transform on the raw score (R2-8),
+        # so it recalibrates probabilities without changing rank ordering.
+        if model.calibrator is not None:
+            return model.calibrator.transform(raw)
+        return raw
 
     def evaluate(
         self,
@@ -253,6 +293,42 @@ class LightGBMTrainingAdapter:
             return dict.fromkeys(model.features, 0.0)
         return {name: round(float(by_name.get(name, 0.0)) / total, 6) for name in model.features}
 
+    def _shap_values(self, model: LightGBMModel, table: "pa.Table") -> "np.ndarray":
+        """Per-feature SHAP contributions ``[n_rows, n_features]`` (the trailing
+        base-value column is dropped). Shared by the global importance and the
+        per-prediction explanation."""
+        import numpy as np
+
+        x = self._features_matrix(table, model.features, model.categories)
+        # pred_contrib: [n_rows, n_features + 1]; the trailing column is the base value
+        contribs = np.asarray(model.booster.predict(x, pred_contrib=True))
+        return contribs[:, :-1]
+
+    def shap_importance(
+        self, model: LightGBMModel, data: DatasetHandle, split: str
+    ) -> dict[str, float]:
+        """Global importance as mean |SHAP| over the split, normalized to
+        fractions - additive and not cardinality-biased like split-gain, so the
+        model card prefers it over gain when eval data is available (see the
+        xgboost adapter for the rationale; explainability)."""
+        import numpy as np
+
+        mean_abs = np.abs(self._shap_values(model, data.read(split))).mean(axis=0)
+        total = float(mean_abs.sum()) or 1.0  # a model that learned nothing -> all zeros
+        return {
+            name: round(float(value) / total, 6)
+            for name, value in zip(model.features, mean_abs, strict=True)
+        }
+
+    def explain(
+        self, model: LightGBMModel, data: DatasetHandle, split: str, top_k: int
+    ) -> list[str]:
+        """Per-prediction local attribution: top_k features by |SHAP| per row as
+        JSON (see the xgboost adapter; explainability)."""
+        from mbt_adapter_base.training_helpers import top_k_explanations
+
+        return top_k_explanations(self._shap_values(model, data.read(split)), model.features, top_k)
+
     # -- artifacts -------------------------------------------------------------------------
 
     def export(self, model: LightGBMModel, format: str, store: ArtifactStore) -> ArtifactRef:
@@ -263,6 +339,7 @@ class LightGBMTrainingAdapter:
             "features": model.features,
             "target": model.target,
             "categories": model.categories,
+            "calibrator": model.calibrator.to_json() if model.calibrator is not None else None,
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model.lgb.json"
@@ -276,9 +353,26 @@ class LightGBMTrainingAdapter:
             raise ValueError(f"lightgbm cannot load artifact format {ref.format!r}")
         payload = json.loads(store.fetch(ref).read_text())
         booster = lgb.Booster(model_str=payload["model_str"])
+        calibrator_blob = payload.get("calibrator")
+        calibrator = None
+        if calibrator_blob:
+            from mbt_adapter_base.calibration import Calibrator
+
+            calibrator = Calibrator.from_json(calibrator_blob)
         return LightGBMModel(
             booster=booster,
             features=list(payload["features"]),
             target=payload["target"],
             categories=dict(payload.get("categories") or {}),
+            calibrator=calibrator,
         )
+
+
+if TYPE_CHECKING:
+    # F27: strict mypy verifies this adapter conforms to each optional-capability
+    # protocol it implements (feature_importance, shap_importance, explain);
+    # ``@runtime_checkable`` alone only checks the method names. No runtime cost.
+    def _capability_conformance(adapter: LightGBMTrainingAdapter) -> None:
+        _feature_importance: SupportsFeatureImportance = adapter
+        _shap_importance: SupportsShapImportance = adapter
+        _explain: SupportsExplain = adapter

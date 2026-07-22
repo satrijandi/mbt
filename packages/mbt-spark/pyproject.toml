@@ -24,11 +24,16 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-adapter-base>=0.1.0,<0.2",
+    # [metrics] carries numpy + scikit-learn: Calibrator.fit imports sklearn and
+    # _scores imports numpy, so a bare mbt-adapter-base crashes a standalone
+    # `pip install mbt-spark` + `calibration:` with ModuleNotFoundError (F7).
+    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
     "mbt-core>=0.1.0,<0.2",  # compute adapter forwards job events through the bus
     # Both majors are e2e-tested; the ceiling tracks what CI has validated.
     # The Spark-3.5 pin for Sparkling Water lives in mbt-h2o[sparkling] (ADR-17).
     "pyspark>=3.5,<4.2",
+    "numpy>=1.26",  # _scores does `import numpy` directly (declared, not just via [metrics])
+    "pandas>=2.0",  # _scores calls DataFrame.toPandas(); pyspark 4.x needs pandas 2.x
 ]
 
 [project.urls]

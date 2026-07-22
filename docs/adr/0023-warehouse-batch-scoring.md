@@ -21,7 +21,7 @@ ADR-21 already anticipated this: "warehouse adapters can reuse [the local layout
 We take both, in sequence.
 
 **v1 (shipped): staged export.**
-`open_predictions` returns a `LocalPredictionStore` rooted at `predictions_root / output.path` (a local or mounted-stage directory, `predictions_root` from adapter config, default the project dir).
+`open_predictions` returns a `LocalPredictionStore` rooted at `predictions_root / output.path` (a local or mounted-stage directory, `predictions_root` from adapter config; unset, it defaults to an ephemeral `<tmpdir>/mbt-predictions`, never the project dir, so a scheduled run does not write into its checkout - F20).
 This reuses the compliance-tested local layout verbatim - per-run directories, idempotent-by-`run_key` writes, `_SUCCESS` and ground-truth markers - so `mbt score`/`mbt monitor` run end to end against a Snowflake input with zero new store code to verify.
 Predictions land as parquet next to the run, not back in Snowflake; that is the honest limit of v1.
 

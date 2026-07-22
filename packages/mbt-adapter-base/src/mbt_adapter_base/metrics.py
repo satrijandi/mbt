@@ -85,18 +85,19 @@ def _expected_calibration_error(
 ) -> float:
     import numpy as np
 
-    bins = np.linspace(0.0, 1.0, n_bins + 1)
-    indices = np.clip(np.digitize(y_score, bins[1:-1]), 0, n_bins - 1)
-    ece = 0.0
+    # Equal-frequency (adaptive) bins: each holds ~total/n_bins samples, taken
+    # as contiguous slices of the score-sorted samples. Fixed-width bins are
+    # noisy on skewed score distributions (typical for churn), piling most
+    # samples into one bin and leaving others empty; equal-mass bins avoid that.
     total = len(y_true)
-    for b in range(n_bins):
-        mask = indices == b
-        count = int(mask.sum())
-        if count == 0:
+    order = np.argsort(y_score, kind="stable")
+    ece = 0.0
+    for chunk in np.array_split(order, n_bins):
+        if chunk.size == 0:  # more bins than samples: the tail bins are empty
             continue
-        confidence = float(y_score[mask].mean())
-        accuracy = float(y_true[mask].mean())
-        ece += (count / total) * abs(confidence - accuracy)
+        confidence = float(y_score[chunk].mean())
+        accuracy = float(y_true[chunk].mean())
+        ece += (chunk.size / total) * abs(confidence - accuracy)
     return float(ece)
 
 
@@ -273,22 +274,53 @@ def compute_results(
     Hook metrics (``kind == "hook"``) are computed by the caller and merged
     afterwards; this function skips them.
     """
-    import numpy as np
-
     builtin = [s for s in metric_specs if s.kind == "builtin"]
     metrics = {s.name: compute_metric(s, y_true, y_score) for s in builtin}
 
     slices: dict[str, dict[str, float]] = {}
     for column, values in (slice_columns or {}).items():
-        for value in sorted({str(v) for v in values.tolist()}):
-            mask = np.asarray([str(v) == value for v in values.tolist()])
+        for label, mask in _slice_groups(values).items():
             if int(mask.sum()) == 0 or len(set(y_true[mask].tolist())) < 2:
                 # Degenerate slice: a single distinct label makes classification
                 # metrics and R^2 undefined; skip it for either task.
                 continue
-            key = f"{column}={value}"
-            slices[key] = {s.name: compute_metric(s, y_true[mask], y_score[mask]) for s in builtin}
+            slices[f"{column}={label}"] = {
+                s.name: compute_metric(s, y_true[mask], y_score[mask]) for s in builtin
+            }
     return MetricResults(metrics=metrics, slices=slices)
+
+
+#: A numeric slice column with more than this many distinct values is binned
+#: into quantile ranges instead of one slice per value (R2-9).
+_MAX_CATEGORICAL_SLICE_VALUES = 12
+_SLICE_QUANTILE_BINS = 4
+
+
+def _slice_groups(values: "np.ndarray") -> "dict[str, np.ndarray]":
+    """Group a slice column into ``label -> row mask`` pairs.
+
+    Categorical (or low-cardinality) columns give one group per distinct value.
+    A high-cardinality numeric column is binned into quantile ranges (e.g.
+    ``[25, 40)``) so slicing by a continuous feature (age, tenure) stays usable
+    instead of exploding into hundreds of one-row slices (R2-9); a distribution
+    too concentrated to yield distinct quantile edges falls back to per-value.
+    """
+    import numpy as np
+
+    strings = [str(v) for v in values.tolist()]
+    distinct = sorted(set(strings))
+    if np.issubdtype(values.dtype, np.number) and len(distinct) > _MAX_CATEGORICAL_SLICE_VALUES:
+        numeric = values.astype(float)
+        edges = np.unique(np.quantile(numeric, np.linspace(0.0, 1.0, _SLICE_QUANTILE_BINS + 1)))
+        if len(edges) >= 3:  # enough distinct quantiles to bin meaningfully
+            bucket = np.digitize(numeric, edges[1:-1], right=False)
+            last = len(edges) - 2
+            return {
+                f"[{edges[b]:g}, {edges[b + 1]:g}{']' if b == last else ')'}": bucket == b
+                for b in range(len(edges) - 1)
+            }
+    array = np.asarray(strings)
+    return {value: array == value for value in distinct}
 
 
 def paired_bootstrap_delta(
@@ -333,3 +365,40 @@ def paired_bootstrap_delta(
         return BootstrapDelta(point=point, lower=point, confidence=confidence, n_resamples=0)
     lower = float(np.quantile(np.asarray(deltas), 1.0 - confidence))
     return BootstrapDelta(point=point, lower=lower, confidence=confidence, n_resamples=len(deltas))
+
+
+def bootstrap_metric_lower_bound(
+    spec: MetricSpec,
+    y_true: "np.ndarray",
+    y_score: "np.ndarray",
+    *,
+    confidence: float,
+    n_resamples: int,
+    seed: int,
+) -> float:
+    """A single model's metric under row resampling, oriented pessimistically
+    (R2-7): the same bootstrap idea ADR-18 applies to the champion delta, used to
+    defend a TUNING selection against validation-window luck.
+
+    Returns the pessimistic bound at ``confidence`` - the lower percentile for a
+    higher-is-better metric, the upper percentile for a lower-is-better one - so
+    the tuning engine, optimizing in the metric's own direction, prefers params
+    that are robustly good rather than merely lucky on the point estimate.
+    Degenerate (single-class) resamples are skipped; if every resample
+    degenerates, falls back to the point estimate.
+    """
+    import numpy as np
+
+    n = len(y_true)
+    point = compute_metric(spec, y_true, y_score)
+    rng = np.random.default_rng(seed)
+    values: list[float] = []
+    for _ in range(n_resamples):
+        indices = rng.integers(0, n, size=n)
+        if np.unique(y_true[indices]).size < 2:
+            continue
+        values.append(compute_metric(spec, y_true[indices], y_score[indices]))
+    if not values:
+        return point
+    quantile = (1.0 - confidence) if spec.greater_is_better else confidence
+    return float(np.quantile(np.asarray(values), quantile))

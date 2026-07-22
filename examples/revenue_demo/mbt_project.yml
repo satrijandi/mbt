@@ -1,0 +1,12 @@
+name: revenue_demo
+version: "0.1.0"
+
+vars:
+  # A mean predictor scores rmse ~28 (the target's own spread); the learnable
+  # signal lets a real regressor reach ~8, so a ceiling of 12 gates a genuinely
+  # bad model without flagging a good one. rmse is lower-is-better, so this
+  # threshold is a ceiling (actual <= threshold), unlike the churn pr_auc floor.
+  rmse_ceiling: 12.0
+
+model_defaults:
+  adapter: xgboost

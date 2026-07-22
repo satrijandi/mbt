@@ -8,9 +8,16 @@ on:
     - cron: "0 6 * * *"  # daily 06:00 UTC
   workflow_dispatch: {}
 
+# Serialize runs: an overlapping scoring run would write predictions for the
+# same window twice, so queue the next run instead of cancelling this one.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   score:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,16 +28,40 @@ jobs:
           pip install -r requirements.txt
           python scripts/generate_sample_data.py
       - name: Score daily pipelines (prod target)
-        run: mbt score --target prod --select tag:daily --deep-snapshot
-      - name: Alert on failure
-        # Exit 2 = shift-monitor breach or input-check failure; exit 1 = hard
-        # error. Either way a silent failure hides broken serving, so set the
-        # MBT_ALERT_WEBHOOK secret (Slack/Teams/PagerDuty webhook).
-        if: failure()
+        id: mbt
+        run: |
+          set +e
+          mbt score --target prod --select tag:daily --deep-snapshot
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Exit 2 = a shift-monitor breach or input-check failure: a completed
+          # run that reached a decision, NOT an outage. The heartbeat below still
+          # pings (the schedule is alive) and the alert pages on the breach; only
+          # a hard error (exit 1) or a crash should trip the dead-man's-switch, so
+          # re-raise just that (F11).
+          [ "$code" -eq 2 ] && exit 0
+          exit "$code"
+      - name: Heartbeat on a completed run
+        # Dead-man's-switch: ping a cron-monitor (healthchecks.io, Cronitor, ...)
+        # so a schedule that silently stops - a mis-set cron, or GitHub disabling
+        # the workflow after 60 days of repo inactivity - is caught by the missing
+        # ping. A quality breach (exit 2) is a completed run, so it still pings;
+        # only exit 1 or a no-show trips the switch. Set MBT_HEARTBEAT_URL.
+        if: success()
+        env:
+          HEARTBEAT_URL: ${{ secrets.MBT_HEARTBEAT_URL }}
+        run: |
+          [ -z "$HEARTBEAT_URL" ] && { echo "MBT_HEARTBEAT_URL not set; skipping heartbeat"; exit 0; }
+          curl -fsS -m 10 --retry 3 "$HEARTBEAT_URL" || echo "heartbeat ping failed; the dead-man's-switch will alert on the missing ping"
+      - name: Alert on a quality breach
+        # Exit 2 = a shift-monitor breach or input-check failure hides broken
+        # serving. A hard error (exit 1) is left to the dead-man's-switch above,
+        # so it is not double-paged here (F11). Set the MBT_ALERT_WEBHOOK secret.
+        if: "steps.mbt.outputs.exit_code == '2'"
         env:
           WEBHOOK: ${{ secrets.MBT_ALERT_WEBHOOK }}
         run: |
           [ -z "$WEBHOOK" ] && { echo "MBT_ALERT_WEBHOOK not set; skipping alert"; exit 0; }
           curl -fsS -X POST -H 'Content-Type: application/json' \
-            -d "{\"text\":\"mbt scheduled scoring failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            -d "{\"text\":\"mbt scheduled scoring breach: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
             "$WEBHOOK"

@@ -12,19 +12,33 @@ from cli_unit_helpers import (  # noqa: F401 - autouse fixture import
     invoke,
 )
 
-from mbt.contracts import ModelVersion, Stage
+from mbt.contracts import ArtifactRef, ModelVersion, Stage
 from mbt.events.models import LogMessage, PromotionApplied
 from mbt.exceptions import ConfigError, StateError
-from mbt.promote import PromotionEntry, load_promotions_file, promote_model
+from mbt.promote import PromotionEntry, load_promotions_file, promote_model, rollback_model
 
 # -- helpers ------------------------------------------------------------------------
 
+#: A rollback target needs an artifact reference, or F12 refuses. The scheme is
+#: deliberately unprobeable so the head probe reports "cannot verify" and the
+#: rollback proceeds with a warning (a file:// path would have to really exist).
+_ARTIFACT = ArtifactRef(
+    uri="memory://m/model.ubj", format="xgboost_ubj", content_hash="sha256:a", size_bytes=1
+)
 
-def version(name: str = "m", number: str = "1", *, gates: str = "true") -> ModelVersion:
+
+def version(
+    name: str = "m",
+    number: str = "1",
+    *,
+    gates: str = "true",
+    artifact: ArtifactRef | None = _ARTIFACT,
+) -> ModelVersion:
     return ModelVersion(
         name=name,
         version=number,
         stage=Stage.STAGING,
+        artifact=artifact,
         tags={"mbt.gates_passed": gates},
     )
 
@@ -49,6 +63,120 @@ class StubRegistry:
 
     def transition(self, resolved: ModelVersion, stage: Stage) -> None:
         self.transitions.append((resolved, stage))
+
+
+# -- rollback_model -----------------------------------------------------------------
+
+
+def _rollback_registry(champion_number: str, prior: dict[str, str]) -> StubRegistry:
+    """A stub whose production champion is ``champion_number`` and whose earlier
+    versions are ``prior`` (number -> gates-passed string)."""
+    versions = {("m", n): version(number=n, gates=g) for n, g in prior.items()}
+    return StubRegistry(versions=versions, champion=version(number=champion_number))
+
+
+def test_rollback_auto_selects_last_gated_version_below_champion() -> None:
+    sink = install_recording_bus()
+    reg = _rollback_registry("3", {"2": "true", "1": "true"})
+    outcome = rollback_model(reg, name="m")
+    assert outcome.version == "2"  # highest gated version below v3
+    assert reg.champion_queries == [("m", Stage.PRODUCTION)]
+    assert reg.transitions[-1][0].version == "2" and reg.transitions[-1][1] is Stage.PRODUCTION
+    warns = [e for e in sink.events if isinstance(e, LogMessage) and "ROLLBACK" in e.message]
+    assert warns and "reverted from v3 to v2" in warns[0].message
+
+
+def test_rollback_skips_ungated_versions() -> None:
+    # v3 is the champion, v2 never passed gates, v1 did -> land on v1.
+    reg = _rollback_registry("3", {"2": "false", "1": "true"})
+    assert rollback_model(reg, name="m").version == "1"
+
+
+def test_rollback_explicit_version() -> None:
+    reg = _rollback_registry("3", {"2": "true", "1": "true"})
+    assert rollback_model(reg, name="m", to_version="1").version == "1"
+
+
+def test_rollback_without_production_champion_is_a_state_error() -> None:
+    reg = StubRegistry(champion=None)
+    with pytest.raises(StateError, match="no production champion"):
+        rollback_model(reg, name="m")
+    assert reg.transitions == []
+
+
+def test_rollback_with_no_earlier_gated_version_is_a_state_error() -> None:
+    reg = _rollback_registry("2", {"1": "false"})  # only prior never passed gates
+    with pytest.raises(StateError, match="no earlier gated version"):
+        rollback_model(reg, name="m")
+    assert reg.transitions == []
+
+
+def test_rollback_to_the_current_champion_is_refused() -> None:
+    reg = _rollback_registry("3", {"3": "true", "2": "true"})
+    with pytest.raises(StateError, match="already the production champion"):
+        rollback_model(reg, name="m", to_version="3")
+
+
+def test_rollback_refuses_a_target_with_no_loadable_artifact() -> None:
+    # v2 is the champion; v1 passed its gates but its artifact was aged out
+    # (artifact=None, e.g. by `mbt clean`). Rollback must refuse rather than move
+    # the alias and leave the next `mbt score` to die with 'no loadable
+    # artifact' (F12).
+    reg = StubRegistry(
+        versions={("m", "1"): version(number="1", artifact=None)},
+        champion=version(number="2"),
+    )
+    with pytest.raises(StateError, match="no loadable artifact"):
+        rollback_model(reg, name="m", to_version="1")
+    assert reg.transitions == []  # the alias never moved
+
+
+def test_rollback_refuses_a_target_whose_artifact_file_is_gone(tmp_path: Path) -> None:
+    # The REF surviving in the registry proves nothing: the file behind it can
+    # be gone (`mbt clean`, a bucket lifecycle rule). F12's head probe refuses
+    # at the rollback command, not at the next `mbt score`.
+    dangling = ArtifactRef(
+        uri=f"file://{tmp_path}/gone.ubj",
+        format="xgboost_ubj",
+        content_hash="sha256:a",
+        size_bytes=1,
+    )
+    reg = StubRegistry(
+        versions={("m", "1"): version(number="1", artifact=dangling)},
+        champion=version(number="2"),
+    )
+    with pytest.raises(StateError, match="no longer exists"):
+        rollback_model(reg, name="m", to_version="1")
+    assert reg.transitions == []  # the alias never moved
+
+    # write the file and the same rollback goes through
+    (tmp_path / "gone.ubj").write_bytes(b"m")
+    outcome = rollback_model(reg, name="m", to_version="1")
+    assert outcome.version == "1" and reg.transitions
+
+
+def test_rollback_warns_but_proceeds_on_an_unprobeable_artifact_scheme() -> None:
+    # An unrecognized scheme (or s3 without the extra) cannot be head-probed;
+    # blocking an incident on that would be worse than proceeding loudly.
+    reg = StubRegistry(
+        versions={("m", "1"): version(number="1")},  # memory:// default fixture
+        champion=version(number="2"),
+    )
+    sink = install_recording_bus()
+    outcome = rollback_model(reg, name="m", to_version="1")
+    assert outcome.version == "1"
+    warns = [
+        e.message
+        for e in sink.events
+        if isinstance(e, LogMessage) and "could not verify the artifact" in e.message
+    ]
+    assert warns and "memory://m/model.ubj" in warns[0]
+
+
+def test_rollback_auto_needs_integer_versions() -> None:
+    reg = StubRegistry(champion=version(number="abc"))
+    with pytest.raises(StateError, match="not an integer"):
+        rollback_model(reg, name="m")
 
 
 # -- promote_model ------------------------------------------------------------------
@@ -223,3 +351,56 @@ def test_promote_cli_applies_a_reviewed_promotions_file(demo_project: Path) -> N
     assert result.exit_code == 0, debug(result)
     assert "applied 1 promotion(s)" in result.output
     assert json.loads(registry_file.read_text())[0]["stage"] == "production"
+
+
+# -- mbt rollback (CLI) -------------------------------------------------------------
+
+
+def _seed_two_versions(demo_project: Path) -> Path:
+    """v1 (archived, gated) below v2 (the current production champion)."""
+    registry_dir = demo_project / "target" / "fake_registry"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    # a serviceable artifact: the rollback target's FILE must really exist,
+    # because F12's head probe refuses a dangling reference
+    artifact_file = registry_dir / "model.ubj"
+    artifact_file.write_bytes(b"m")
+    path = registry_dir / "churn_model.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "version": "1",
+                    "stage": "archived",
+                    "artifact": {
+                        "uri": f"file://{artifact_file}",
+                        "format": "xgboost_ubj",
+                        "content_hash": "sha256:a",
+                        "size_bytes": 1,
+                    },
+                    "tags": {"mbt.gates_passed": "true"},
+                },
+                {
+                    "version": "2",
+                    "stage": "production",
+                    "artifact": None,
+                    "tags": {"mbt.gates_passed": "true"},
+                },
+            ]
+        )
+    )
+    return path
+
+
+def test_rollback_cli_reverts_the_production_champion(demo_project: Path) -> None:
+    registry_file = _seed_two_versions(demo_project)
+    result = invoke(["rollback", "--model", "churn_model", "--project-dir", str(demo_project)])
+    assert result.exit_code == 0, debug(result)
+    assert "rolled back" in result.output
+    stages = {e["version"]: e["stage"] for e in json.loads(registry_file.read_text())}
+    assert stages["1"] == "production" and stages["2"] == "archived"  # champion moved down
+
+
+def test_rollback_cli_requires_model(demo_project: Path) -> None:
+    result = invoke(["rollback", "--project-dir", str(demo_project)])
+    assert result.exit_code == 1, debug(result)
+    assert "needs --model" in result.stderr

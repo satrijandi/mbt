@@ -32,3 +32,10 @@ class TestFakeAdapterCompliance(TrainingAdapterCompliance):
         # behavior lives in predict() (label separation) and is exercised by the
         # paired-bootstrap tests in mbt-core.
         pytest.skip("fake adapter reports scripted metrics, not learned ones")
+
+    def test_learns_from_a_categorical_feature(self) -> None:
+        # Same reason as test_model_actually_learns: the fake reports scripted
+        # metrics, so "learns from the categorical" does not apply. The fake does
+        # train on the string feature without error (it reads the table); the
+        # learning assertion is exercised by the real tree adapters (F25).
+        pytest.skip("fake adapter reports scripted metrics, not learned ones")

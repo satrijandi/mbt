@@ -21,6 +21,7 @@ def _eval(
     bounds=None,
     challenger_slices=None,
     champion_slices=None,
+    backtest=None,
 ):
     return evaluate_gates(
         gates,
@@ -33,7 +34,26 @@ def _eval(
         metric_specs=SPECS,
         determinism=determinism,
         champion_delta_bounds=bounds,
+        backtest_metrics=backtest,
     )
+
+
+def test_backtest_gate_checks_the_walk_forward_mean_not_the_single_split() -> None:
+    """source: backtest gates the walk-forward mean (R2-7); the single-split
+    value is ignored, and the result is labelled backtest_<metric>."""
+    gates = [GateSpec(metric="pr_auc", threshold=0.7, source="backtest")]
+    ok = _eval(gates, {"pr_auc": 0.95}, backtest={"pr_auc": 0.72})[0]
+    assert ok.passed and ok.metric == "backtest_pr_auc" and ok.actual == 0.72
+
+    # a flattering single split cannot rescue a weak backtest mean
+    bad = _eval(gates, {"pr_auc": 0.95}, backtest={"pr_auc": 0.65})[0]
+    assert not bad.passed and bad.actual == 0.65
+
+
+def test_backtest_gate_without_a_backtest_metric_is_a_loud_error() -> None:
+    gates = [GateSpec(metric="pr_auc", threshold=0.7, source="backtest")]
+    with pytest.raises(MbtError, match="source: backtest but no backtest metric"):
+        _eval(gates, {"pr_auc": 0.9})  # backtest not computed -> actionable error
 
 
 def test_threshold_gate_direction_aware() -> None:
@@ -44,6 +64,76 @@ def test_threshold_gate_direction_aware() -> None:
     lower_better = [GateSpec(metric="logloss", threshold=0.5)]
     assert _eval(lower_better, {"logloss": 0.45})[0].passed
     assert not _eval(lower_better, {"logloss": 0.55})[0].passed
+
+
+def test_disparity_gate_higher_is_better() -> None:
+    # pr_auc across `plan`: worst 0.6, best 0.9 -> min/max ratio 0.667.
+    slices = {"plan=basic": {"pr_auc": 0.9}, "plan=pro": {"pr_auc": 0.6}}
+    fail = _eval(
+        [GateSpec(metric="pr_auc", across="plan", min_ratio=0.8)],
+        {"pr_auc": 0.8},
+        challenger_slices=slices,
+    )[0]
+    assert fail.kind == "disparity" and not fail.passed
+    assert fail.actual == pytest.approx(0.6 / 0.9)
+    assert fail.expected == 0.8 and fail.across == "plan"
+    # lower pr_auc is worse for a higher-is-better metric
+    assert fail.worst_slice == "plan=pro" and fail.best_slice == "plan=basic"
+
+    ok = _eval(
+        [GateSpec(metric="pr_auc", across="plan", min_ratio=0.6)],
+        {"pr_auc": 0.8},
+        challenger_slices=slices,
+    )[0]
+    assert ok.passed
+
+
+def test_disparity_gate_lower_is_better_flips_worst_best_not_the_ratio() -> None:
+    # logloss across `plan`: the ratio stays min/max (0.6), but the worst slice
+    # is now the HIGHER-loss one, so labels flip with the metric direction.
+    slices = {"plan=basic": {"logloss": 0.3}, "plan=pro": {"logloss": 0.5}}
+    res = _eval(
+        [GateSpec(metric="logloss", across="plan", min_ratio=0.8)],
+        {"logloss": 0.4},
+        challenger_slices=slices,
+    )[0]
+    assert res.actual == pytest.approx(0.3 / 0.5)
+    assert not res.passed
+    assert res.worst_slice == "plan=pro" and res.best_slice == "plan=basic"
+    assert _eval(
+        [GateSpec(metric="logloss", across="plan", min_ratio=0.5)],
+        {"logloss": 0.4},
+        challenger_slices=slices,
+    )[0].passed
+
+
+def test_disparity_gate_perfect_parity_and_all_zero() -> None:
+    equal = {"plan=basic": {"pr_auc": 0.8}, "plan=pro": {"pr_auc": 0.8}}
+    assert (
+        _eval(
+            [GateSpec(metric="pr_auc", across="plan", min_ratio=1.0)],
+            {"pr_auc": 0.8},
+            challenger_slices=equal,
+        )[0].actual
+        == 1.0
+    )
+    zero = {"plan=basic": {"pr_auc": 0.0}, "plan=pro": {"pr_auc": 0.0}}  # 0/0 -> parity, not crash
+    res = _eval(
+        [GateSpec(metric="pr_auc", across="plan", min_ratio=0.8)],
+        {"pr_auc": 0.0},
+        challenger_slices=zero,
+    )[0]
+    assert res.actual == 1.0 and res.passed
+
+
+def test_disparity_gate_needs_two_slices() -> None:
+    one = {"plan=basic": {"pr_auc": 0.9}}
+    with pytest.raises(MbtError, match="at least two non-degenerate slices"):
+        _eval(
+            [GateSpec(metric="pr_auc", across="plan", min_ratio=0.8)],
+            {"pr_auc": 0.9},
+            challenger_slices=one,
+        )
 
 
 def test_tolerance_widens_thresholds_in_models_favor_only() -> None:

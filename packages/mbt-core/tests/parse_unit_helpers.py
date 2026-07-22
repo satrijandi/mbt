@@ -69,8 +69,16 @@ class FussyAdapter(_UnitTrainingAdapter):
         ]
 
 
+class PathAdapter(_UnitTrainingAdapter):
+    """A path-access adapter (like the JVM adapters); used to check the
+    arrow-only walk-forward backtest gate (R2-7)."""
+
+    name = "pathy"
+    data_access = "path"
+
+
 def register_unit_plugins(registry: AdapterRegistry) -> None:
-    """Register the notrain/reggy/fussy plugins used by parser unit tests."""
+    """Register the notrain/reggy/fussy/pathy plugins used by parser unit tests."""
     registry.register(
         AdapterPlugin(name="notrain", contract_version=CONTRACT_VERSION, training=None)
     )
@@ -81,6 +89,9 @@ def register_unit_plugins(registry: AdapterRegistry) -> None:
     )
     registry.register(
         AdapterPlugin(name="fussy", contract_version=CONTRACT_VERSION, training=FussyAdapter)
+    )
+    registry.register(
+        AdapterPlugin(name="pathy", contract_version=CONTRACT_VERSION, training=PathAdapter)
     )
 
 

@@ -53,12 +53,120 @@ def _run(
     return proc
 
 
+#: Per-package runtime-closure probes (F7): what each package's DOCUMENTED
+#: user-facing paths import lazily at runtime (ADR-14 lazy imports mean a bare
+#: `import <package>` proves nothing). Installing ONE package into its own
+#: clean venv and running its probe catches a missing declared dependency that
+#: the monorepo workspace masks - the exact way mbt-spark shipped without
+#: sklearn/numpy/pandas in its closure. The calibrator probe doubles as the
+#: `mbt-adapter-base[metrics]` extra check for every training adapter.
+_CALIBRATOR_PROBE = (
+    "from mbt_adapter_base.calibration import Calibrator; "
+    "Calibrator.fit([0.2, 0.8, 0.4, 0.6], [0, 1, 0, 1], 'isotonic')"
+)
+CLOSURE_PROBES = {
+    "mbt_core": (
+        "import duckdb, pyarrow, typer; "
+        "from mbt.adapters.local.data import LocalDataAdapter; "
+        "from mbt.cli.main import main"
+    ),
+    "mbt_adapter_base": "import pyarrow, pydantic; import mbt_adapter_base.monitoring",
+    "mbt_testing": "import pyarrow; from mbt_testing.adapters import FakeTrainingAdapter",
+    "mbt_xgboost": f"import xgboost, numpy; {_CALIBRATOR_PROBE}",
+    "mbt_lightgbm": f"import lightgbm, numpy; {_CALIBRATOR_PROBE}",
+    "mbt_mlflow": "import mlflow.tracking; from mbt_mlflow.adapter import MlflowTracking",
+    "mbt_optuna": "import optuna; from mbt_optuna.engine import OptunaTuningEngine",
+    "mbt_snowflake": (
+        "import snowflake.connector, pyarrow.parquet; "
+        "from mbt_snowflake.adapter import SnowflakeDataAdapter"
+    ),
+    # the F7 regression: spark's scoring path imports numpy + pandas and its
+    # calibration path imports sklearn - none arrive without [metrics]+pandas
+    "mbt_spark": f"import pyspark, numpy, pandas; {_CALIBRATOR_PROBE}",
+    "mbt_h2o": f"import h2o, numpy; {_CALIBRATOR_PROBE}",
+}
+
+
+def _clean_env() -> dict[str, str]:
+    # Neither var may leak into the clean venv: PYTHONPATH would shadow the
+    # wheel installs with workspace sources, VIRTUAL_ENV would misdirect uv.
+    return {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "PYTHONPATH")}
+
+
+@pytest.fixture(scope="module")
+def built_dist(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """All workspace wheels + the locked third-party constraints, built once."""
+    uv = shutil.which("uv")
+    assert uv, "uv is required to build the workspace wheels (see README)"
+    root = tmp_path_factory.mktemp("wheelhouse")
+    dist = root / "dist"
+    env = _clean_env()
+    _run([uv, "build", "--all-packages", "--out-dir", str(dist)], cwd=REPO_ROOT, env=env)
+    constraints = root / "constraints.txt"
+    _run(
+        [
+            uv,
+            "export",
+            "--frozen",
+            "--no-emit-workspace",
+            "--no-hashes",
+            "--no-annotate",
+            "--no-header",
+            "-o",
+            str(constraints),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    return dist, constraints
+
+
+@pytest.mark.parametrize("package", sorted(CLOSURE_PROBES))
+def test_each_package_installs_standalone_with_a_complete_closure(
+    package: str, built_dist: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """F7: install ONE package's wheel into its own clean venv (deps resolved
+    only from the package's declared closure) and exercise its lazy runtime
+    imports. The single-venv quickstart test below cannot catch a per-package
+    gap - installing everything together masks a missing declaration."""
+    dist, constraints = built_dist
+    env = _clean_env()
+    uv = shutil.which("uv")
+    assert uv
+    venv = tmp_path / "venv"
+    _run([uv, "venv", str(venv), "--python", sys.executable], cwd=tmp_path, env=env)
+    install = [
+        uv,
+        "pip",
+        "install",
+        "--python",
+        str(venv / "bin" / "python"),
+        "--find-links",
+        str(dist),
+        "--constraint",
+        str(constraints),
+        str(dist / f"{package}-{mbt.__version__}-py3-none-any.whl"),
+    ]
+    offline = _run([*install, "--offline"], cwd=tmp_path, env=env, check=False)
+    if offline.returncode != 0:  # cold uv cache: fall back to the network
+        _run(install, cwd=tmp_path, env=env)
+    probe = _run(
+        [str(venv / "bin" / "python"), "-c", CLOSURE_PROBES[package]],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+    )
+    assert probe.returncode == 0, (
+        f"{package} standalone closure is incomplete: its declared dependencies "
+        f"do not cover its runtime imports\nprobe: {CLOSURE_PROBES[package]}\n"
+        f"stderr:\n{probe.stderr}"
+    )
+
+
 def test_wheels_install_and_run_the_quickstart(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     assert uv, "uv is required to build the workspace wheels (see README)"
-    # Neither var may leak into the clean venv: PYTHONPATH would shadow the
-    # wheel installs with workspace sources, VIRTUAL_ENV would misdirect uv.
-    clean_env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "PYTHONPATH")}
+    clean_env = _clean_env()
 
     # Build every package (wheels are built from the sdists, so this also
     # verifies sdist completeness) and check nothing is missing or misnamed.

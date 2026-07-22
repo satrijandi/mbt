@@ -59,8 +59,15 @@ def write_materialization_metadata(
     windows: Mapping[str, Any],
     sample_fraction: float,
     row_counts: Mapping[str, int],
+    label_join_coverage: Mapping[str, int] | None = None,
 ) -> None:
-    """Write ``materialization.json`` and the ``_SUCCESS`` marker."""
+    """Write ``materialization.json`` and the ``_SUCCESS`` marker.
+
+    ``label_join_coverage`` (population-spine datasets, F21) records
+    ``{"spine_rows": N, "matched_rows": M}`` - how many spine rows survived the
+    inner label join, measured before filters/sampling/windows so the ratio
+    isolates the join drop. The ``label_join_coverage`` check enforces it.
+    """
     metadata = {
         "snapshot_id": snapshot_id,
         "dataset": dataset,
@@ -70,6 +77,8 @@ def write_materialization_metadata(
         "sample_fraction": sample_fraction,
         "row_counts": dict(row_counts),
     }
+    if label_join_coverage is not None:
+        metadata["label_join_coverage"] = dict(label_join_coverage)
     (directory / METADATA_FILE).write_text(json.dumps(metadata, indent=2, sort_keys=True))
     (directory / SUCCESS_FILE).write_text("")
 
@@ -101,6 +110,14 @@ class MaterializedDatasetHandle:
     def time_column(self) -> str | None:
         value = self._metadata.get("time_column")
         return str(value) if value is not None else None
+
+    @property
+    def label_join_coverage(self) -> dict[str, int] | None:
+        """``{"spine_rows": N, "matched_rows": M}`` for a population-spine
+        dataset (F21), or None when the build recorded no coverage (single-table
+        datasets, or a materialization from an older mbt)."""
+        value = self._metadata.get("label_join_coverage")
+        return {k: int(v) for k, v in value.items()} if value is not None else None
 
     def splits(self) -> set[str]:
         return {p.stem for p in self.directory.glob("*.parquet")}

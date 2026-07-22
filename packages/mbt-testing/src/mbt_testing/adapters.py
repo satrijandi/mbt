@@ -164,6 +164,12 @@ class FakeTrainingAdapter:
         """Deterministic stand-in so run_results/model-card plumbing is testable."""
         return {"fake_signal": 0.75, "fake_noise": 0.25}
 
+    def explain(self, model: FakeModel, data: DatasetHandle, split: str, top_k: int) -> list[str]:
+        """Deterministic per-row local-attribution stand-in, so the scoring
+        ``explanation`` plumbing is testable without a real SHAP-capable model."""
+        contributors = [["fake_signal", 0.75], ["fake_noise", -0.25]][:top_k]
+        return [json.dumps(contributors) for _ in range(data.read(split).num_rows)]
+
     def load(self, ref: ArtifactRef, store: ArtifactStore) -> FakeModel:
         payload = json.loads(store.fetch(ref).read_text())
         return FakeModel(value=payload["value"], target=payload.get("target"))
@@ -305,12 +311,20 @@ class FakeRegistryAdapter:
     def transition(self, version: ModelVersion, stage: Stage) -> None:
         with self._lock:
             versions = self._versions(version.name)
+            found = False
             for entry in versions:
                 if str(entry["version"]) == version.version:
                     entry["stage"] = stage.value
-                    self._write(version.name, versions)
-                    return
-        raise LookupError(f"version {version.version} of {version.name!r} not found")
+                    found = True
+                elif stage is Stage.PRODUCTION and entry.get("stage") == Stage.PRODUCTION.value:
+                    # One production champion at a time: archive the version this
+                    # promotion displaces, mirroring the mlflow adapter's
+                    # archive_existing_versions, so get_champion returns the
+                    # single current holder even after a rollback to a lower one.
+                    entry["stage"] = Stage.ARCHIVED.value
+            if not found:
+                raise LookupError(f"version {version.version} of {version.name!r} not found")
+            self._write(version.name, versions)
 
 
 class FakeTuningEngine:

@@ -6,9 +6,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHURN_DEMO = REPO_ROOT / "examples" / "churn_demo"
+REVENUE_DEMO = REPO_ROOT / "examples" / "revenue_demo"
 
 #: Anchor matching the committed demo data range (generated around 2026-01..06).
+#: Both demos share the same generated date range, so they share the anchor.
 DEMO_ANCHOR = "2026-06-30T00:00:00Z"
+REVENUE_ANCHOR = DEMO_ANCHOR
 
 
 def run_mbt(

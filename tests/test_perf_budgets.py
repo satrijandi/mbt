@@ -1,9 +1,11 @@
-"""Performance budgets (NFR-03): parse < 2 s and compile < 10 s at 50
+"""Performance smoke tests (NFR-03): parse < 2 s and compile < 10 s at 50
 resources; per-node execution overhead < 2 s.
 
-Budgets bound achievable speed, so each is measured as the BEST of a few
-runs after a warmup: a single sample on a shared CI runner measures the
-noisy neighbor, not the code (FEEDBACK 2.7). The budget numbers themselves
+These thresholds are deliberately LOOSE - a catastrophic-regression guard (an
+accidental O(n^2), a lost cache), not a tight latency budget - so a healthy
+build never flakes on them. The measurement is still principled: each is the
+BEST of a few runs after a warmup, because a single sample on a shared CI runner
+measures the noisy neighbor, not the code (FEEDBACK 2.7). The threshold numbers
 are the NFR-03 contract and stay untouched.
 """
 

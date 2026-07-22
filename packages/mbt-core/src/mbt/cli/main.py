@@ -48,8 +48,10 @@ app = typer.Typer(
 )
 docs_app = typer.Typer(help="Generate or serve the model cards + lineage site.")
 state_app = typer.Typer(help="Compare manifests (state:modified mechanics).")
+predictions_app = typer.Typer(help="Inspect the prediction store (runs + ground-truth ledger).")
 app.add_typer(docs_app, name="docs")
 app.add_typer(state_app, name="state")
+app.add_typer(predictions_app, name="predictions")
 
 
 def _version_callback(show: bool) -> None:
@@ -261,6 +263,15 @@ def clean(
             out_console.print(f"removed {target_dir}")
         else:
             out_console.print(f"nothing to clean at {target_dir}")
+        # Age out leaked error-payload dirs (kept for debugging, never
+        # self-cleaned); recent ones survive for an in-progress reproduction.
+        from datetime import UTC, datetime, timedelta
+
+        from mbt.adapters.local.compute import sweep_stale_job_payloads
+
+        swept = sweep_stale_job_payloads(datetime.now(tz=UTC) - timedelta(days=7))
+        if swept:
+            out_console.print(f"aged out {len(swept)} stale job payload dir(s) (>7d old)")
         return
 
     from datetime import UTC, datetime
@@ -282,9 +293,9 @@ def clean(
     if window.start.kind != "duration" or window.start.delta is None:
         raise ConfigError(
             f"--artifacts-older-than expects a duration, got {artifacts_older_than!r}",
-            hint="examples: 30d, 2w, 12h",
+            hint="examples: 30d, 2w, 12h, 3mo, 1y",
         )
-    cutoff = datetime.now(tz=UTC) + window.start.delta  # delta is negative
+    cutoff = window.start.resolve(datetime.now(tz=UTC))  # a past duration is negative
 
     cli = make_ctx(project_dir, profiles_dir, target, vars_, "text", False)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
@@ -539,6 +550,97 @@ def monitor(
         raise typer.Exit(code)
 
 
+def _mark(value: bool | None) -> str:
+    return "-" if value is None else ("yes" if value else "no")
+
+
+@predictions_app.command("ls")
+@guard
+def predictions_ls(
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    manifest: ManifestOpt = None,
+    output: OutputOpt = "table",
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
+) -> None:
+    """List prediction runs across scoring nodes (matured/evaluated state)."""
+    from dataclasses import asdict
+
+    from mbt.execute.predictions_view import list_prediction_runs
+
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    runs = list_prediction_runs(
+        cli.invocation("predictions", manifest_path=cli.resolve_cli_path(manifest))
+    )
+    if output == "json":
+        typer.echo(json.dumps([asdict(r) for r in runs], indent=2))
+        return
+    if not runs:
+        out_console.print("no prediction runs found (score first, or check --target)")
+        return
+    table = Table()
+    for column in ("scoring", "run_key", "scored_at", "model", "rows", "matured", "evaluated"):
+        table.add_column(column)
+    for run in runs:
+        table.add_row(
+            run.scoring,
+            run.run_key,
+            run.scored_at,
+            f"{run.model_name} v{run.model_version}",
+            str(run.row_count),
+            _mark(run.matured),
+            _mark(run.evaluated),
+        )
+    out_console.print(table)
+
+
+@predictions_app.command("show")
+@guard
+def predictions_show(
+    run_key: Annotated[str, typer.Argument(help="The prediction run_key to detail.")],
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    manifest: ManifestOpt = None,
+    output: OutputOpt = "table",
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
+) -> None:
+    """Detail one prediction run: run info plus its ground-truth ledger marker."""
+    from dataclasses import asdict
+
+    from mbt.exceptions import StateError
+    from mbt.execute.predictions_view import show_prediction_run
+
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    run = show_prediction_run(
+        cli.invocation("predictions", manifest_path=cli.resolve_cli_path(manifest)), run_key
+    )
+    if run is None:
+        raise StateError(
+            f"no prediction run {run_key!r} found", hint="mbt predictions ls to list runs"
+        )
+    if output == "json":
+        typer.echo(json.dumps(asdict(run), indent=2))
+        return
+    out_console.print(f"[bold]{run.run_key}[/bold]  ({run.scoring})")
+    out_console.print(f"  scored_at   {run.scored_at}")
+    out_console.print(f"  champion    {run.model_name} v{run.model_version}")
+    out_console.print(f"  rows        {run.row_count}")
+    out_console.print(f"  matured     {_mark(run.matured)}")
+    out_console.print(f"  evaluated   {_mark(run.evaluated)}")
+    if run.evaluated:
+        realized = ", ".join(f"{k}={v:.4f}" for k, v in sorted(run.realized.items())) or "(none)"
+        out_console.print(f"  coverage    {run.coverage}")
+        out_console.print(f"  realized    {realized}")
+
+
 @app.command()
 @guard
 def promote(
@@ -601,6 +703,50 @@ def promote(
     )
     out_console.print(
         f"promoted [bold]{outcome.name}[/bold] v{outcome.version} -> {outcome.to_stage.value}"
+    )
+
+
+@app.command()
+@guard
+def rollback(
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    model: Annotated[str | None, typer.Option("--model", help="Model resource name.")] = None,
+    to_version: Annotated[
+        str | None,
+        typer.Option(
+            "--to-version",
+            help="Version to revert to (default: last gated version below the current champion).",
+        ),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Roll back even to a version without recorded gates.")
+    ] = False,
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
+) -> None:
+    """Revert the production champion to a prior version (incident rollback)."""
+    from mbt.adapters.registry import get_registry
+    from mbt.exceptions import ConfigError
+    from mbt.parsing import parse_project
+    from mbt.promote import rollback_model
+    from mbt.runtime import registry_adapter as build_registry_adapter
+
+    if model is None:
+        raise ConfigError(
+            "rollback needs --model",
+            hint="e.g. mbt rollback --model churn_classifier",
+        )
+    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
+    profiles = cli.profiles(parsed)
+    registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
+    outcome = rollback_model(registry_adapter, name=model, to_version=to_version, force=force)
+    out_console.print(
+        f"rolled back [bold]{outcome.name}[/bold] to v{outcome.version} in {outcome.to_stage.value}"
     )
 
 

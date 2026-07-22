@@ -73,6 +73,35 @@ def test_categorical_feature_carries_the_signal() -> None:
     assert importance["plan"] > 0.5  # the categorical dominates, as constructed
 
 
+def test_shap_importance_is_normalized_and_signal_dominant() -> None:
+    """The model card prefers mean-|SHAP| importance (additive, not
+    cardinality-biased) over split-gain when eval data is available."""
+    adapter = LightGBMTrainingAdapter({})
+    data = _categorical_handle()
+    model = adapter.train(_spec(), data, _ctx())
+
+    shap = adapter.shap_importance(model, data, "test")
+    assert set(shap) == {"noise", "plan"}
+    assert all(value >= 0 for value in shap.values())  # mean |SHAP| is non-negative
+    assert sum(shap.values()) == pytest.approx(1.0, abs=1e-3)  # normalized to fractions
+    assert shap["plan"] > 0.5  # SHAP agrees the categorical carries the signal
+
+
+def test_explain_gives_per_row_top_k_contributors() -> None:
+    """Local attribution: each row's top_k features by |SHAP|, ordered, as JSON."""
+    import json
+
+    adapter = LightGBMTrainingAdapter({})
+    data = _categorical_handle()
+    model = adapter.train(_spec(), data, _ctx())
+
+    rows = adapter.explain(model, data, "test", top_k=2)
+    assert len(rows) == data.read("test").num_rows
+    top = json.loads(rows[0])
+    assert len(top) == 2 and all(feature in model.features for feature, _ in top)
+    assert abs(top[0][1]) >= abs(top[1][1])  # ordered by descending |contribution|
+
+
 def test_categories_survive_export_load_and_unseen_levels_predict() -> None:
     adapter = LightGBMTrainingAdapter({})
     data = _categorical_handle()

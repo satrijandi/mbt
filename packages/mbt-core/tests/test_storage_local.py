@@ -70,3 +70,19 @@ def test_read_uri_text_missing_reference_is_a_hard_error(tmp_path: Path) -> None
     # degrade into a silent full retrain.
     with pytest.raises(StateError, match="file not found"):
         read_uri_text(str(tmp_path / "nope.json"))
+
+
+def test_artifact_exists_probes_file_uris_and_reports_unknown_schemes(tmp_path: Path) -> None:
+    """F12's head probe: True/False for file:// by real presence, None for a
+    scheme it cannot probe (the rollback caller then proceeds with a warning)."""
+    from mbt.contracts import ArtifactRef
+    from mbt.storage import artifact_exists
+
+    def ref(uri: str) -> ArtifactRef:
+        return ArtifactRef(uri=uri, format="test_bin", content_hash="sha256:a", size_bytes=1)
+
+    present = tmp_path / "model.bin"
+    present.write_bytes(b"weights")
+    assert artifact_exists(ref(f"file://{present}")) is True
+    assert artifact_exists(ref(f"file://{tmp_path}/gone.bin")) is False
+    assert artifact_exists(ref("memory://somewhere/model.bin")) is None

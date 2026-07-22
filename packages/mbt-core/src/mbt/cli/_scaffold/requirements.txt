@@ -7,6 +7,9 @@
 # They resolve once the matching vX.Y.Z tag exists on the mbt repo - the repo's
 # release.yml builds that tag's wheels and (once configured) publishes them to
 # PyPI at the same time.
+# Until that tag is cut, the install fails at "git checkout -q vX.Y.Z"; as a
+# stopgap, replace @vX.Y.Z in all three refs with the commit SHA you scaffolded
+# from (immutable, so the env digest stays reproducible) and re-run.
 #
 # Once mbt is on PyPI, switch to plain version pins (mbt-core==X.Y.Z) and, for a
 # fully transitively pinned, hash-verified lock, run:

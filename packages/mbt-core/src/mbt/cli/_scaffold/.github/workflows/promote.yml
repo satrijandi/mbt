@@ -19,9 +19,15 @@ on:
         required: true
         default: production
 
+# Promotion mutates the registry; serialize and never cancel a run mid-write.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   promote:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment: production   # require reviewers in repo settings
     steps:
       - uses: actions/checkout@v4

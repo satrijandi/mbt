@@ -115,6 +115,66 @@ def test_registry_alias_exclusivity_and_stage_derivation(uri: str, tmp_path: Pat
     assert resolved is not None and resolved.stage is Stage.PRODUCTION  # from the alias
 
 
+def test_promoting_a_new_champion_archives_the_outgoing_one(uri: str, tmp_path: Path) -> None:
+    """Promoting a new version to production displaces the old champion, which
+    becomes discoverable as archived (queryable for rollback) - identically on
+    the alias and stage backends (archive_existing_versions parity)."""
+    for use_aliases in (True, False):
+        registry = MlflowRegistry({"uri": uri, "use_aliases": use_aliases})
+        name = f"m_{use_aliases}"
+        v1 = registry.register(_artifact(tmp_path), name, {})
+        v2 = registry.register(_artifact(tmp_path), name, {})
+        registry.transition(v1, Stage.PRODUCTION)
+        assert registry.get_champion(name, Stage.ARCHIVED) is None  # nothing displaced yet
+
+        registry.transition(v2, Stage.PRODUCTION)
+        assert registry.get_champion(name, Stage.PRODUCTION).version == v2.version
+        archived = registry.get_champion(name, Stage.ARCHIVED)
+        assert archived is not None and archived.version == v1.version
+
+        # Re-promoting the current champion is idempotent: it does not archive
+        # itself, and the previously displaced version stays the archived one.
+        registry.transition(v2, Stage.PRODUCTION)
+        assert registry.get_champion(name, Stage.PRODUCTION).version == v2.version
+        assert registry.get_champion(name, Stage.ARCHIVED).version == v1.version
+
+
+def test_transition_archives_the_outgoing_champion_even_through_a_lock(
+    uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F8: a transient locked DB mid-transition must not drop the displaced
+    champion's archive. The whole-method retry used to re-read the production
+    alias AFTER it had already moved to the new version, so `outgoing` became
+    the new version and the true previous champion was never archived; retrying
+    each write individually keeps `outgoing` fixed so the archive still lands."""
+    from mlflow.exceptions import MlflowException
+
+    registry = MlflowRegistry({"uri": uri, "use_aliases": True})
+    v1 = registry.register(_artifact(tmp_path), "m", {})
+    v2 = registry.register(_artifact(tmp_path), "m", {})
+    registry.transition(v1, Stage.PRODUCTION)
+
+    client = registry.client()
+    real_set = client.set_registered_model_alias
+    archive_attempts = {"n": 0}
+
+    def flaky_set(name: str, alias: str, version: str) -> None:
+        # Fail the archive write once, mid-transition, with a transient lock.
+        if alias == Stage.ARCHIVED.value:
+            archive_attempts["n"] += 1
+            if archive_attempts["n"] == 1:
+                raise MlflowException("(sqlite3.OperationalError) database is locked")
+        return real_set(name, alias, version)
+
+    monkeypatch.setattr(client, "set_registered_model_alias", flaky_set)
+    registry.transition(v2, Stage.PRODUCTION)
+
+    assert registry.get_champion("m", Stage.PRODUCTION).version == v2.version
+    archived = registry.get_champion("m", Stage.ARCHIVED)
+    assert archived is not None and archived.version == v1.version  # displaced champion archived
+    assert archive_attempts["n"] == 2  # the archive write was retried, not skipped by a re-read
+
+
 def test_registry_legacy_stage_mode(uri: str, tmp_path: Path) -> None:
     """``use_aliases: false`` keeps the stage API for MLflow < 2.9 servers."""
     registry = MlflowRegistry({"uri": uri, "use_aliases": False})

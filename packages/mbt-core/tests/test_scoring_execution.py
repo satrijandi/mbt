@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from core_helpers import TEST_ANCHOR, write
-from mbt_testing import FakeRegistryAdapter
+from mbt_testing import FakeRegistryAdapter, FakeTrainingAdapter
 from test_execution import MODEL, invoke
 
 from mbt.adapters.registry import AdapterRegistry
@@ -39,10 +39,11 @@ scoring:
 """
 
 
-def _write_batch(project_dir: Path, *, tenure_offset: int = 0, null_user_ids: bool = False) -> None:
+def _write_batch(
+    project_dir: Path, *, tenure_offset: int = 0, null_user_ids: bool = False, n: int = 120
+) -> None:
     """A fresh batch drawn from the training generator's value space, so an
     unshifted batch stays under the shift thresholds."""
-    n = 120
     base = TEST_ANCHOR.replace(tzinfo=None)
     spread = [(i * 131) % 400 for i in range(n)]  # 131 coprime to 400: even coverage
     table = pa.table(
@@ -113,6 +114,176 @@ def _prediction_runs(project_dir: Path) -> list[Path]:
 def _build_and_promote(project_dir: Path, registry: AdapterRegistry) -> None:
     assert invoke(project_dir, registry, "build").exit_code() == 0
     _promote(project_dir)
+
+
+def test_scoring_emits_decision_column_for_a_configured_operating_point(
+    scoring_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A configured operating point emits a 0/1 decision column and records the
+    cutoff in the run info, so consumers get a decision rule (R2-5)."""
+    write(
+        scoring_project / "scoring/churn_scoring.yml",
+        SCORING_YML.replace(
+            "path: predictions/churn_scores",
+            "path: predictions/churn_scores\n      decision_threshold: 0.5",
+        ),
+    )
+    _build_and_promote(scoring_project, fake_registry)
+    assert invoke(scoring_project, fake_registry, "score").exit_code() == 0
+
+    run = _prediction_runs(scoring_project)[0]
+    table = pq.read_table(run / "predictions.parquet")
+    assert "decision" in table.column_names
+    pred = table.column("prediction").to_numpy(zero_copy_only=False)
+    dec = table.column("decision").to_numpy(zero_copy_only=False)
+    assert set(dec.tolist()) <= {0, 1}
+    assert all(int(p >= 0.5) == int(d) for p, d in zip(pred, dec, strict=True))  # prob >= threshold
+    info = json.loads((run / "predictions.json").read_text())
+    assert info["meta"]["decision_threshold"] == "0.5"
+
+
+def test_scoring_resolves_decision_threshold_from_the_champion_operating_point(
+    scoring_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A string decision_threshold names a champion operating-point metric,
+    resolved from the registered champion's tags at score time (R2-5), so the
+    deployed cutoff tracks the promoted model instead of a hand-copied constant."""
+    model_yml = scoring_project / "models/churn_model.yml"
+    write(
+        model_yml,
+        model_yml.read_text().replace(
+            "metrics: [pr_auc, roc_auc]",
+            "metrics: [pr_auc, roc_auc, threshold_at_precision_0.5]",
+        ),
+    )
+    write(
+        scoring_project / "scoring/churn_scoring.yml",
+        SCORING_YML.replace(
+            "path: predictions/churn_scores",
+            "path: predictions/churn_scores\n      decision_threshold: threshold_at_precision_0.5",
+        ),
+    )
+    _build_and_promote(scoring_project, fake_registry)
+
+    # registration recorded the operating point on the champion...
+    tags = json.loads(_registry_file(scoring_project).read_text())[0]["tags"]
+    recorded = tags["mbt.operating_point.threshold_at_precision_0.5"]
+
+    assert invoke(scoring_project, fake_registry, "score").exit_code() == 0
+    run = _prediction_runs(scoring_project)[0]
+    info = json.loads((run / "predictions.json").read_text())
+    # ...and scoring resolved the string to that concrete cutoff and applied it
+    assert info["meta"]["decision_threshold"] == str(float(recorded))
+    table = pq.read_table(run / "predictions.parquet")
+    pred = table.column("prediction").to_numpy(zero_copy_only=False)
+    dec = table.column("decision").to_numpy(zero_copy_only=False)
+    thr = float(recorded)
+    assert all(int(p >= thr) == int(d) for p, d in zip(pred, dec, strict=True))
+
+
+def test_resolve_operating_point_requires_a_recorded_champion_tag() -> None:
+    """Resolving a string decision_threshold from a champion missing that
+    operating point is a loud error, not a silent skip; a numeric threshold and
+    a recorded one pass through (R2-5)."""
+    from mbt.contracts import ModelVersion, ScoringOutputSpec
+    from mbt.exceptions import StateError
+    from mbt.execute.runners import ScoringRunner
+
+    op = ScoringOutputSpec(path="predictions/x", decision_threshold="threshold_at_precision_0.9")
+    recorded = ModelVersion(
+        name="m", version="3", tags={"mbt.operating_point.threshold_at_precision_0.9": "0.42"}
+    )
+    resolved = ScoringRunner._resolve_operating_point(op, recorded, "scoring.p.s")
+    assert resolved.decision_threshold == 0.42  # string -> the champion's recorded float
+
+    missing = ModelVersion(name="m", version="3", tags={})
+    with pytest.raises(StateError, match="not a recorded operating point"):
+        ScoringRunner._resolve_operating_point(op, missing, "scoring.p.s")
+
+    numeric = ScoringOutputSpec(path="predictions/x", decision_threshold=0.5)
+    passthrough = ScoringRunner._resolve_operating_point(numeric, missing, "s")
+    assert passthrough.decision_threshold == 0.5  # a numeric cutoff is untouched
+
+
+def test_scoring_emits_per_prediction_explanation_when_configured(
+    scoring_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """explain_top_k emits an `explanation` column - each row's top-k feature
+    contributors as JSON - so a consumer can answer 'why did THIS row score
+    this way' (explainability)."""
+    write(
+        scoring_project / "scoring/churn_scoring.yml",
+        SCORING_YML.replace(
+            "path: predictions/churn_scores",
+            "path: predictions/churn_scores\n      explain_top_k: 2",
+        ),
+    )
+    _build_and_promote(scoring_project, fake_registry)
+    assert invoke(scoring_project, fake_registry, "score").exit_code() == 0
+
+    run = _prediction_runs(scoring_project)[0]
+    table = pq.read_table(run / "predictions.parquet")
+    assert "explanation" in table.column_names
+    top = json.loads(table.column("explanation").to_pylist()[0])
+    assert len(top) == 2 and top[0][0] == "fake_signal"  # the fake adapter's stand-in
+
+
+def test_explain_top_k_without_adapter_support_is_actionable(
+    scoring_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adapter that cannot explain fails with mbt's actionable error, not a
+    silent skip or an AttributeError."""
+    monkeypatch.delattr(FakeTrainingAdapter, "explain", raising=False)  # adapter without support
+    write(
+        scoring_project / "scoring/churn_scoring.yml",
+        SCORING_YML.replace(
+            "path: predictions/churn_scores",
+            "path: predictions/churn_scores\n      explain_top_k: 2",
+        ),
+    )
+    _build_and_promote(scoring_project, fake_registry)
+    result = invoke(scoring_project, fake_registry, "score")
+    assert result.exit_code() == 1  # hard error, not a silent skip
+    errored = [r for r in result.results if r.status == "error"]
+    assert errored and "does not support per-prediction" in (errored[0].message or "")
+
+
+def test_score_with_manifest_tolerates_a_changed_batch(
+    scoring_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """--manifest scoring is usable: the scoring input is expected to change
+    every run, so a drifted batch scores from the pinned manifest instead of a
+    snapshot-mismatch error the way a dataset would (R2-10)."""
+    _build_and_promote(scoring_project, fake_registry)
+    assert invoke(scoring_project, fake_registry, "score").exit_code() == 0  # pins the manifest
+    manifest = scoring_project / "target" / "manifest.json"
+
+    _write_batch(scoring_project, tenure_offset=99)  # fresh batch -> new snapshot
+    result = invoke(scoring_project, fake_registry, "score", manifest_path=str(manifest))
+    assert result.exit_code() == 0  # not a "source data changed under the pinned manifest" error
+    assert {r.unique_id: r for r in result.results}[SCORING].status == "success"
+
+
+def test_score_with_manifest_rebuilds_the_input_not_a_stale_cache(
+    scoring_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """F4: under --manifest the materialization key is fully pinned (input_hash
+    + resolved windows never move), so the scoring-input cache must not be
+    reused - a new batch arriving under the same pinned manifest has to be
+    rebuilt and scored, not served stale from the first run's warm cache."""
+    _build_and_promote(scoring_project, fake_registry)
+    first = invoke(scoring_project, fake_registry, "score")  # pins manifest + warms input cache
+    assert first.exit_code() == 0
+    assert {r.unique_id: r for r in first.results}[SCORING].metrics["rows_scored"] == 120.0
+    manifest = scoring_project / "target" / "manifest.json"
+
+    # A new, larger batch (same value distribution, so shift monitors stay
+    # green) arrives under the SAME pinned manifest.
+    _write_batch(scoring_project, n=240)
+    result = invoke(scoring_project, fake_registry, "score", manifest_path=str(manifest))
+    assert result.exit_code() == 0
+    # The live 240-row batch is scored, not the stale 120 from the pinned-key cache.
+    assert {r.unique_id: r for r in result.results}[SCORING].metrics["rows_scored"] == 240.0
 
 
 def test_score_full_loop(scoring_project: Path, fake_registry: AdapterRegistry) -> None:

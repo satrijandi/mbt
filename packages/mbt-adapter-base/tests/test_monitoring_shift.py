@@ -97,6 +97,56 @@ def test_unseen_categories_pool_into_other() -> None:
     assert stats.feature_shift["plan_type"].value > 0.2
 
 
+def test_significance_switches_categorical_stats_to_chi_square() -> None:
+    """F15: a ``method: ks`` monitor WITH significance computes a categorical
+    feature's Pearson chi-square (df set, judged against the chi-square
+    critical value downstream); without significance the fixed-threshold
+    total-variation stat is unchanged (df absent)."""
+    baseline = _baseline()
+    table = _feature_table(800)
+    scores = _rng().beta(2.0, 5.0, 800)
+    aware = MonitorsSpec(
+        feature_shift=FeatureShiftSpec(method="ks", threshold=0.15, significance=0.05)
+    )
+    stats = compute_monitor_stats(baseline, table, scores, aware)
+    plan = stats.feature_shift["plan_type"]
+    assert plan.kind == "categorical" and plan.df is not None and plan.df >= 1
+    assert plan.value >= 0.0  # a chi-square statistic, not a [0,1] proportion gap
+    # numeric features under the same spec keep the KS stat (df stays absent)
+    assert stats.feature_shift["tenure"].df is None
+    # and the threshold path is untouched
+    fixed = compute_monitor_stats(baseline, table, scores, _monitors("ks"))
+    assert fixed.feature_shift["plan_type"].df is None
+    assert 0.0 <= fixed.feature_shift["plan_type"].value <= 1.0
+
+
+def test_categorical_chi2_is_the_contingency_form() -> None:
+    """The chi-square is the TWO-SAMPLE (2xk contingency) statistic - the
+    baseline shares are estimates from a finite train sample, and judging
+    current counts against them as exact truth was measured ~2x
+    anti-conservative (F15). Hand-checked on a tiny table, df counts the
+    populated categories, and a novel category inflates the statistic."""
+    from mbt_adapter_base.monitoring import FeatureBaseline, _categorical_chi2
+
+    baseline = FeatureBaseline(
+        kind="categorical",
+        categories=["a", "b", "__other__"],
+        proportions=[0.75, 0.25, 0.0],
+        n=100,
+    )
+    # current: 50 a, 50 b -> baseline counts 75/25; totals 125/75; N=200
+    stat, df = _categorical_chi2(baseline, ["a"] * 50 + ["b"] * 50)
+    expected = 0.0
+    for base_count, observed in ((75.0, 50.0), (25.0, 50.0)):
+        total = base_count + observed
+        expected += (base_count - total * 100 / 200) ** 2 / (total * 100 / 200)
+        expected += (observed - total * 100 / 200) ** 2 / (total * 100 / 200)
+    assert stat == expected and df == 1  # __other__ is unpopulated on both sides
+    # a category the training data never saw still lands sharply
+    novel_stat, novel_df = _categorical_chi2(baseline, ["zzz"] * 50 + ["a"] * 50)
+    assert novel_stat > stat and novel_df == 2  # __other__ now populated
+
+
 def test_include_exclude_globs() -> None:
     baseline = _baseline()
     monitors = MonitorsSpec(

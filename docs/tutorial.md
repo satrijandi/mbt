@@ -257,7 +257,7 @@ Operational facts to know:
   Move it to `s3://.../manifests/latest.json` when you outgrow that; `--state` accepts any readable URI.
 - Every compiling step in CI passes `--deep-snapshot`, because fresh checkouts rewrite file mtimes and the default mtime snapshot scheme would silently turn the economy loop into a full retrain (ADR-11).
   Any orchestrator with fresh workspaces needs the same flag.
-- Set the `MBT_ALERT_WEBHOOK` secret so scheduled failures notify instead of failing silently.
+- Set the `MBT_ALERT_WEBHOOK` secret so scheduled failures notify instead of failing silently, and the `MBT_HEARTBEAT_URL` secret (a healthchecks.io/Cronitor ping) so a schedule that stops firing at all - a mis-set cron, or GitHub auto-disabling the workflow after 60 days of inactivity - is caught by the missing heartbeat.
 
 **If you run Airflow**, port only the three scheduled loops (they are time/data events); keep PR check, prod build, and promotion in CI (they are code events).
 Use one task per mbt command rather than one per model (mbt is itself the DAG scheduler), run the same pinned image as CI (manifests verify `env_digest`, ADR-19), and map exit codes: 1 retries then pages on-call, 2 never retries (the verdict is deterministic) and notifies the model owner.
@@ -302,6 +302,8 @@ mbt monitor --anchor <ISO timestamp 15 days from now>
 A realized-metric gate failure is exit 2, the signal that the production model has decayed and the retrain/promote loop should spin.
 
 **Verify:** run `mbt monitor` again with the same anchor; it evaluates nothing new (exactly-once).
+
+**Inspect the ledger:** `mbt predictions ls` lists every scored run with its matured/evaluated state, and `mbt predictions show <run_key>` details one run's realized metrics and coverage - so you can answer "what ran, what matured, what did monitor already evaluate" without reading JSON off disk.
 
 ## Step 14 (MLOps): metrics, dashboards, and the two alerting layers
 

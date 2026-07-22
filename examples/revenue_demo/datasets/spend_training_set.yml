@@ -1,0 +1,20 @@
+datasets:
+  - name: spend_training_set
+    description: Active subscribers labeled with realized next-30-day spend.
+    source: source('lakehouse', 'subscribers')
+    label:
+      column: spend_next_30d
+      definition: "dollars spent in the 30 days after snapshot_date"
+    filters:
+      - "is_active = true"
+      - "tenure_days >= 30"
+    split:
+      strategy: temporal
+      time_column: snapshot_date
+      train: "-150d:-28d"
+      test: "-28d:now"
+    checks:
+      - no_future_columns
+      - not_null:
+          columns: [spend_next_30d, snapshot_date]
+    tags: [revenue]

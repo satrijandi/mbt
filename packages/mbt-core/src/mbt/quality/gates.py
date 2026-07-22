@@ -6,10 +6,24 @@ dependencies and is fully unit-testable (FR-TEST-02/03/06).
 
 from mbt.artifacts.run_results import GateResult
 from mbt.contracts import BootstrapDelta, DeterminismTier, GateSpec, MetricResults, MetricSpec
-from mbt.events import get_bus
+from mbt.events import EventBus, get_bus
 from mbt.events.models import GateEvaluated, LogMessage
 from mbt.exceptions import MbtError
 from mbt.quality.metrics import metric_direction
+
+
+def _backtest_value(
+    backtest_metrics: dict[str, float] | None, gate: GateSpec, *, resource: str
+) -> float:
+    """The walk-forward backtest mean of a gate's metric (R2-7, source: backtest)."""
+    if not backtest_metrics or gate.metric not in backtest_metrics:
+        raise MbtError(
+            f"gate on {gate.metric!r} uses source: backtest but no backtest metric was computed",
+            resource=resource,
+            hint="set evaluation.protocol.backtest_folds and give the training window "
+            "enough rows to form the folds",
+        )
+    return backtest_metrics[gate.metric]
 
 
 def _metric_value(results: MetricResults, gate: GateSpec, *, who: str, resource: str) -> float:
@@ -35,6 +49,60 @@ def _metric_value(results: MetricResults, gate: GateSpec, *, who: str, resource:
     return pool[gate.metric]
 
 
+def _disparity_result(
+    gate: GateSpec, challenger: MetricResults, greater: bool, resource: str
+) -> GateResult:
+    """Fairness/disparity gate: the metric's worst slice must stay within
+    ``min_ratio`` of its best slice across the ``across`` column's values (R2-9).
+
+    The ratio is min/max of the metric over the column's slices - in (0, 1]
+    with 1.0 = perfect parity - which is direction-agnostic: disparity is about
+    the *gap* between the extreme slices, so min/max captures it for both
+    higher-is-better (roc_auc) and lower-is-better (rmse) metrics. Only which
+    extreme is labelled 'worst' depends on the metric direction. The gated
+    metric is non-negative here: r2 (the one signed builtin, whose worst/best
+    ratio would be ill-defined) is rejected on an ``across`` gate at parse
+    (GateSpec validation, F16), so every metric that reaches this ratio is >= 0.
+    """
+    prefix = f"{gate.across}="
+    values = {
+        label: pool[gate.metric]
+        for label, pool in challenger.slices.items()
+        if label.startswith(prefix) and gate.metric in pool
+    }
+    if len(values) < 2:
+        raise MbtError(
+            f"disparity gate on {gate.across!r} needs at least two non-degenerate slices "
+            f"with metric {gate.metric!r}, found {len(values)}",
+            resource=resource,
+            hint=(
+                f"list {gate.across!r} under evaluation.slices and ensure at least two of its "
+                "values survive the test split (degenerate slices are dropped from metrics)"
+            ),
+        )
+    lo_label, lo = min(values.items(), key=lambda kv: kv[1])
+    hi_label, hi = max(values.items(), key=lambda kv: kv[1])
+    ratio = 1.0 if hi == 0.0 else lo / hi
+    (worst_label, worst), (best_label, best) = (
+        ((lo_label, lo), (hi_label, hi)) if greater else ((hi_label, hi), (lo_label, lo))
+    )
+    return GateResult(
+        metric=gate.metric,
+        kind="disparity",
+        across=gate.across,
+        passed=ratio >= gate.min_ratio,
+        expected=gate.min_ratio,
+        actual=round(ratio, 12),
+        worst_slice=worst_label,
+        best_slice=best_label,
+        message=(
+            f"{gate.metric} parity across {gate.across}: worst/best ratio {ratio:.4f} "
+            f"(worst {worst_label}={worst:.4f}, best {best_label}={best:.4f}); "
+            f"min_ratio {gate.min_ratio}"
+        ),
+    )
+
+
 def evaluate_gates(
     gates: list[GateSpec],
     *,
@@ -45,13 +113,29 @@ def evaluate_gates(
     metric_specs: list[MetricSpec],
     determinism: DeterminismTier | None = None,
     champion_delta_bounds: dict[str, BootstrapDelta] | None = None,
+    backtest_metrics: dict[str, float] | None = None,
 ) -> list[GateResult]:
     """Evaluate all gates for one model; emits GateEvaluated events."""
     bus = get_bus()
     results: list[GateResult] = []
     for gate in gates:
         greater = metric_direction(gate.metric, metric_specs)
-        actual = _metric_value(challenger, gate, who="the challenger", resource=resource)
+
+        if gate.across is not None:
+            result = _disparity_result(gate, challenger, greater, resource)
+            results.append(result)
+            _emit_gate(bus, resource, result)
+            continue
+
+        if gate.source == "backtest":
+            # A backtest gate (validator-guaranteed threshold + whole-split) checks
+            # the walk-forward mean, labelled backtest_<metric> so the card/PR
+            # comment distinguishes it from the single-split gate (R2-7).
+            actual = _backtest_value(backtest_metrics, gate, resource=resource)
+            label = f"backtest_{gate.metric}"
+        else:
+            actual = _metric_value(challenger, gate, who="the challenger", resource=resource)
+            label = gate.metric
 
         if gate.threshold is not None:
             # Tolerance widens threshold comparisons in the model's favor only
@@ -62,7 +146,7 @@ def evaluate_gates(
             else:
                 passed = actual <= gate.threshold + tolerance
             result = GateResult(
-                metric=gate.metric,
+                metric=label,
                 kind="threshold",
                 slice=gate.slice,
                 passed=passed,
@@ -137,19 +221,23 @@ def evaluate_gates(
                     actual_delta=round(delta, 12),
                 )
         results.append(result)
-        bus.emit(
-            GateEvaluated(
-                unique_id=resource,
-                metric=gate.metric,
-                kind=result.kind,
-                passed=result.passed,
-                expected=result.expected,
-                actual=result.actual,
-                champion_version=result.champion_version,
-                message=result.message or "",
-            )
-        )
+        _emit_gate(bus, resource, result)
     return results
+
+
+def _emit_gate(bus: EventBus, resource: str, result: GateResult) -> None:
+    bus.emit(
+        GateEvaluated(
+            unique_id=resource,
+            metric=result.metric,
+            kind=result.kind,
+            passed=result.passed,
+            expected=result.expected,
+            actual=result.actual,
+            champion_version=result.champion_version,
+            message=result.message or "",
+        )
+    )
 
 
 def all_gates_passed(results: list[GateResult]) -> bool:

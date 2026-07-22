@@ -34,6 +34,65 @@ def test_model_card_renders_feature_importance(
     assert "Metrics (latest run)" in card
 
 
+def test_partial_dependence_renders_as_a_sparkline() -> None:
+    """The card shows a per-feature partial-dependence sparkline and a low->high
+    summary (explainability); no PD data yields no section."""
+    from mbt.artifacts.run_results import NodeResult
+    from mbt.docsgen.generator import _partial_dependence_section
+
+    result = NodeResult(
+        unique_id="model.p.m",
+        status="success",
+        partial_dependence={"monthly_usage": [[0.0, 0.6], [50.0, 0.4], [100.0, 0.2]]},
+    )
+    section = _partial_dependence_section(result)
+    assert "Partial dependence" in section and "monthly_usage" in section
+    assert "<polyline" in section and "svg" in section  # the sparkline
+    assert "0.600" in section and "0.200" in section  # low -> high summary
+
+    empty = NodeResult(unique_id="model.p.m", status="success")
+    assert _partial_dependence_section(empty) == ""
+
+
+def test_metric_table_shows_walk_forward_backtest_beside_single_split() -> None:
+    """The card juxtaposes each metric's single-split value with its walk-forward
+    backtest mean +/- fold std (R2-7), so an optimistic single test window and an
+    unstable-across-folds estimate are both obvious."""
+    from mbt.artifacts.run_results import NodeResult
+    from mbt.docsgen.generator import _metric_table
+
+    result = NodeResult(
+        unique_id="model.p.m",
+        status="success",
+        metrics={"pr_auc": 0.81, "logloss": 0.30},
+        backtest_metrics={"pr_auc": 0.72},  # logloss deliberately absent
+        backtest_std={"pr_auc": 0.05},
+    )
+    table = _metric_table(result)
+    assert "backtest (cross-validated mean &pm; std)" in table
+    assert "0.8100" in table and "0.7200" in table  # single-split vs backtest, side by side
+    assert "<td>0.7200 &pm; 0.0500</td>" in table  # the mean carries its fold-to-fold std
+    assert ">-<" in table  # logloss has no backtest value -> a dash cell
+
+    # A backtest mean without a std (older results) still renders, bare (the
+    # header still names std, but the cell carries no `&pm;`).
+    bare = _metric_table(
+        NodeResult(
+            unique_id="model.p.m",
+            status="success",
+            metrics={"pr_auc": 0.81},
+            backtest_metrics={"pr_auc": 0.72},
+        )
+    )
+    assert "<td>0.7200</td>" in bare
+
+    # No backtest -> the extra column is absent (unchanged for existing cards).
+    plain = _metric_table(
+        NodeResult(unique_id="model.p.m", status="success", metrics={"pr_auc": 0.8})
+    )
+    assert "backtest" not in plain
+
+
 def test_model_card_shows_auto_keyword_not_sentinel(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:

@@ -3,21 +3,55 @@
 A window is ``"<start>:<end>"`` where each bound is a signed duration
 relative to the manifest anchor (``-180d``, ``-28d``, ``now``) or an ISO
 date/timestamp; a bare duration ``"28d"`` is sugar for ``"-28d:now"``.
-Durations support ``d``, ``w``, ``h``.
+Durations support the fixed units ``d``, ``w``, ``h`` and the calendar units
+``mo`` (months) and ``y`` (years); calendar units must be whole numbers and
+shift by real calendar months, clamping the day (``Jan 31 + 1mo -> Feb 28``).
 
 Windows are stored and hashed as *expressions*; they resolve to concrete
 ``[start_ts, end_ts)`` UTC ranges against the manifest anchor at compile
 time, stored outside the hashed config.
 """
 
+import calendar
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from mbt.exceptions import ConfigError
 
-_DURATION_RE = re.compile(r"^(?P<sign>[+-])?(?P<value>\d+(?:\.\d+)?)(?P<unit>[dwh])$")
+_DURATION_RE = re.compile(r"^(?P<sign>[+-])?(?P<value>\d+(?:\.\d+)?)(?P<unit>mo|y|d|w|h)$")
 _UNIT_SECONDS = {"d": 86_400.0, "w": 7 * 86_400.0, "h": 3_600.0}
+#: Calendar units are not fixed-length, so they shift months (y == 12 mo) at
+#: resolve time rather than contributing to a timedelta.
+_CALENDAR_MONTHS = {"mo": 1, "y": 12}
+
+
+def _add_months(base: datetime, months: int) -> datetime:
+    """Shift ``base`` by a signed number of calendar months, clamping the day."""
+    if months == 0:
+        return base
+    index = base.month - 1 + months
+    year = base.year + index // 12
+    month = index % 12 + 1
+    day = min(base.day, calendar.monthrange(year, month)[1])
+    return base.replace(year=year, month=month, day=day)
+
+
+def subtract_duration(ts: datetime, offset: str) -> datetime:
+    """Shift ``ts`` earlier by a positive duration (``"7d"``, ``"1mo"``),
+    calendar-aware for months like the window bounds. Used for the split
+    embargo (R2-7): the tail of the train window is dropped so a training row
+    whose label horizon reaches the test window cannot leak."""
+    from mbt_adapter_base import parse_time_offset
+
+    count, unit = parse_time_offset(offset)
+    if unit == "mo":
+        return _add_months(ts, -count)
+    delta = {"d": timedelta(days=count), "w": timedelta(weeks=count), "h": timedelta(hours=count)}[
+        unit
+    ]
+    return ts - delta
+
 
 #: A fixed reference anchor for parse-time validation (never persisted).
 VALIDATION_ANCHOR = datetime(2000, 1, 1, tzinfo=UTC)
@@ -29,6 +63,7 @@ class WindowBound:
 
     kind: str  # "now" | "duration" | "absolute"
     delta: timedelta | None = None
+    months: int = 0  # signed calendar months for mo/y bounds (y == 12)
     ts: datetime | None = None
 
     def resolve(self, anchor: datetime) -> datetime:
@@ -36,7 +71,7 @@ class WindowBound:
             return anchor
         if self.kind == "duration":
             assert self.delta is not None
-            return anchor + self.delta
+            return _add_months(anchor + self.delta, self.months)
         assert self.ts is not None
         return self.ts
 
@@ -67,18 +102,29 @@ def _parse_bound(text: str, expression: str) -> WindowBound:
         return WindowBound(kind="now")
     match = _DURATION_RE.match(text)
     if match:
-        seconds = float(match.group("value")) * _UNIT_SECONDS[match.group("unit")]
-        if match.group("sign") == "-":
-            seconds = -seconds
-        return WindowBound(kind="duration", delta=timedelta(seconds=seconds))
+        unit = match.group("unit")
+        value = float(match.group("value"))
+        sign = -1 if match.group("sign") == "-" else 1
+        if unit in _CALENDAR_MONTHS:
+            if not value.is_integer():
+                raise ConfigError(
+                    f"calendar duration {text!r} in {expression!r} must be a whole "
+                    "number of months/years",
+                    hint="use an integer like '3mo' or '1y', or switch to days (90d)",
+                )
+            months = sign * int(value) * _CALENDAR_MONTHS[unit]
+            return WindowBound(kind="duration", delta=timedelta(0), months=months)
+        return WindowBound(
+            kind="duration", delta=timedelta(seconds=sign * value * _UNIT_SECONDS[unit])
+        )
     try:
         ts = datetime.fromisoformat(text)
     except ValueError:
         raise ConfigError(
             f"invalid window bound {text!r} in {expression!r}",
             hint=(
-                "use a signed duration (-28d, -12h, 2w), 'now', or an ISO "
-                "date/timestamp (2026-01-01, 2026-01-01T00:00:00Z)"
+                "use a signed duration (-28d, -12h, 2w, -3mo, -1y), 'now', or an "
+                "ISO date/timestamp (2026-01-01, 2026-01-01T00:00:00Z)"
             ),
         ) from None
     if ts.tzinfo is None:

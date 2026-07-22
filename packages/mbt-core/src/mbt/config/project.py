@@ -64,6 +64,12 @@ def load_project(project_dir: Path) -> ProjectConfig:
         raw = yaml.safe_load(project_path.read_text()) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {PROJECT_FILE}: {exc}", path=project_path) from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"{PROJECT_FILE} is not valid UTF-8: {exc}",
+            path=project_path,
+            hint="config files must be UTF-8 encoded text",
+        ) from exc
     if not isinstance(raw, dict):
         raise ConfigError(
             f"{PROJECT_FILE} must be a YAML mapping",

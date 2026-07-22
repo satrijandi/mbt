@@ -17,9 +17,16 @@ env:
   # fetch step (FR-STATE-03).
   MBT_STATE_URI: state/prod/latest.json
 
+# A new push to the same PR cancels the in-flight check (matches the mbt repo's
+# own CI hardening). The state-mutating workflows queue instead of cancelling.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pr-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

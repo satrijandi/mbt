@@ -42,12 +42,21 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
     assert churn["metrics"]["lift_at_0.1"] > 1.0  # builtin lift beats random
     assert churn["metrics"]["campaign_capture_100"] > 0  # hook metric computed
     assert churn["metrics"]["pr_auc"] > 0.3  # the gate floor actually gates
-    # calibration is exercised, and the operating point is a usable cutoff:
-    # applying it must be possible (0 < t < 1), i.e. 35% precision is reachable
-    assert 0.0 < churn["metrics"]["brier"] < 0.25
-    assert 0.0 <= churn["metrics"]["ece"] < 0.5
+    # calibration: isotonic (F18) actually fixes the scale_pos_weight
+    # miscalibration - measured on this exact build, the raw model scores
+    # ece=0.208 / brier=0.212, calibrated it scores ece=0.044 / brier=0.158,
+    # so the bars below FAIL without the calibration lever and pass with it.
+    assert 0.0 < churn["metrics"]["brier"] < 0.20
+    assert 0.0 <= churn["metrics"]["ece"] < 0.10
+    # the operating point stays a usable cutoff (0 < t < 1) after calibration
     assert 0.0 < churn["metrics"]["threshold_at_precision_0.35"] < 1.0
     assert "plan_type=pro" in churn["slices"]  # slice reporting
+    # the fairness/disparity gate (R2-9) is evaluated and passes: pro is the
+    # weakest tier but stays within the 60% parity floor of the strongest.
+    disparity = next(g for g in churn["gates"] if g["kind"] == "disparity")
+    assert disparity["across"] == "plan_type" and disparity["passed"]
+    assert disparity["worst_slice"] == "plan_type=pro"
+    assert 0.6 <= disparity["actual"] < 1.0  # a real gap, not perfect parity
     baseline_metrics = {uid: results[uid]["metrics"] for uid in MODELS}
 
     ds = results["dataset.churn_demo.churn_training_set"]
@@ -222,3 +231,29 @@ def test_parallel_threads_and_docs(demo_copy: Path) -> None:
     assert "retention_campaign_job" in index  # exposure in lineage (FR-DOCS-03)
     card = (demo_copy / "target" / "docs" / "model_churn_classifier.html").read_text()
     assert "input_hash" in card and "plan_type" in card
+
+
+def test_rollback_reverts_the_production_champion(demo_copy: Path) -> None:
+    # promote v1 to production, then register + promote a second version...
+    run_mbt(
+        ["build", "--anchor", DEMO_ANCHOR, "--select", "churn_classifier"], demo_copy, timeout=600
+    )
+    run_mbt(["promote", "--model", "churn_classifier", "--to", "production"], demo_copy)
+    model_yml = demo_copy / "models" / "churn_classifier.yml"
+    model_yml.write_text(model_yml.read_text().replace("max_depth: 4", "max_depth: 5"))
+    run_mbt(
+        ["build", "--anchor", DEMO_ANCHOR, "--select", "churn_classifier"], demo_copy, timeout=600
+    )
+    run_mbt(["promote", "--model", "churn_classifier", "--to", "production"], demo_copy)
+
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=f"sqlite:///{demo_copy}/mlflow.db")
+    champ = client.get_model_version_by_alias("churn_classifier", "production")
+    assert str(champ.version) == "2"
+
+    # ...then roll back: production reverts to the last known good (v1), through
+    # the real mlflow alias backend, exit 0 (ADR-20 resolution picks it up next run).
+    run_mbt(["rollback", "--model", "churn_classifier"], demo_copy)
+    reverted = client.get_model_version_by_alias("churn_classifier", "production")
+    assert str(reverted.version) == "1"

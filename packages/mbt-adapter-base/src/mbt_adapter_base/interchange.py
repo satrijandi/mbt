@@ -136,6 +136,16 @@ class ShiftStat(_InterchangeModel):
     value: float
     n_current: int
     n_baseline: int
+    #: The kind of feature the stat was computed on. The n-aware ``significance``
+    #: bar is kind-matched (F15): numeric KS stats get the two-sample Kolmogorov
+    #: critical value; a categorical stat computed under significance is a
+    #: Pearson chi-square (``df`` set) judged against the chi-square critical
+    #: value. Defaults to ``numeric`` (scores, and older stats).
+    kind: Literal["numeric", "categorical"] = "numeric"
+    #: Chi-square degrees of freedom, set only on a categorical stat computed
+    #: under ``significance`` (F15). None (older stats, threshold-path stats)
+    #: falls back to the fixed ``threshold`` with a warning.
+    df: int | None = None
 
 
 class MonitorStats(_InterchangeModel):
@@ -241,6 +251,16 @@ class JobResult(_InterchangeModel):
     #: Normalized per-feature importance from the adapter, when it exposes
     #: ``feature_importance`` (FR-DOCS-02); empty otherwise.
     feature_importance: dict[str, float] = Field(default_factory=dict)
+    #: Partial dependence for the top numeric features (explainability): feature
+    #: -> ``[[grid_value, avg_prediction], ...]``, how the average prediction
+    #: moves as the feature sweeps its range. Empty when unavailable.
+    partial_dependence: dict[str, list[list[float]]] = Field(default_factory=dict)
+    #: Walk-forward backtest (R2-7): builtin metric -> mean value across the
+    #: time-ordered folds. Empty unless ``evaluation.protocol.backtest_folds`` is set.
+    backtest_metrics: dict[str, float] = Field(default_factory=dict)
+    #: The population std of each backtest metric across the folds (R2-7): the
+    #: CV stability signal that accompanies ``backtest_metrics``' mean. Same keys.
+    backtest_std: dict[str, float] = Field(default_factory=dict)
     resolved_auto: dict[str, Any] = Field(default_factory=dict)
     tuning: TuningResult | None = None
     artifact: ArtifactRef | None = None

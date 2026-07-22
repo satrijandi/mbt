@@ -30,6 +30,7 @@ from mbt_adapter_base import (
     DatasetSpec,
     ScoringInputSpec,
     ScoringOutputSpec,
+    retry_with_jitter,
 )
 from mbt_adapter_base.materialization import (
     MaterializationError,
@@ -37,15 +38,17 @@ from mbt_adapter_base.materialization import (
     combine_snapshots,
     write_materialization_metadata,
 )
-from mbt_adapter_base.predictions import LocalPredictionStore
+from mbt_adapter_base.predictions import LocalPredictionStore, resolve_predictions_root
 from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
 from mbt_snowflake.sql import (
     SnowflakeSQLError,
     base_relation,
+    coverage_queries,
     qualify_table,
     sampling_predicate,
     scoring_query,
     split_queries,
+    validate_column,
 )
 
 if TYPE_CHECKING:
@@ -75,10 +78,27 @@ class SnowflakeAdapterError(RuntimeError):
         super().__init__(message)
 
 
+def _is_transient(exc: BaseException) -> bool:
+    """True for a transient warehouse/network blip a retry can clear - an
+    ``OperationalError`` (warehouse resuming, a dropped request, a timeout) - as
+    opposed to a deterministic ``ProgrammingError`` (bad SQL, missing object,
+    insufficient privilege) that fails identically every time. The two are
+    siblings under ``DatabaseError``, so this ``isinstance`` retries the former
+    and never the latter (F14, R2-2)."""
+    from snowflake.connector.errors import OperationalError
+
+    return isinstance(exc, OperationalError)
+
+
 class SnowflakeDataAdapter:
     """DataAdapter over Snowflake tables (see package README for config)."""
 
     name = "snowflake"
+    #: Source formats this adapter can read; the compiler rejects a referenced
+    #: source declaring any other format before anything runs (F23). Snowflake
+    #: sources are warehouse tables, so only the default parquet marker (inert
+    #: for identifier-based sources) is accepted.
+    supported_source_formats = frozenset({"parquet"})
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = dict(config or {})
@@ -123,10 +143,28 @@ class SnowflakeDataAdapter:
             ) from exc
         return self._connection
 
+    def _execute_cursor(self, sql: str) -> Any:
+        """A fresh cursor with ``sql`` executed, retried on a transient warehouse
+        blip (F14). The caller owns closing the returned cursor. ``execute`` is
+        the retryable seam - fetching/streaming *after* it is not, because a
+        partially written result must never be re-run - so both data-plane paths
+        route their execute through here and keep the read that follows outside
+        the retry."""
+
+        def _run() -> Any:
+            cursor = self._connect().cursor()
+            try:
+                cursor.execute(sql)
+            except BaseException:
+                cursor.close()  # do not leak a cursor on a failed/aborted execute
+                raise
+            return cursor
+
+        return retry_with_jitter(_run, is_transient=_is_transient)
+
     def _fetch_one(self, sql: str) -> Any:
-        cursor = self._connect().cursor()
+        cursor = self._execute_cursor(sql)
         try:
-            cursor.execute(sql)
             row = cursor.fetchone()
             return row[0] if row else None
         finally:
@@ -228,6 +266,23 @@ class SnowflakeDataAdapter:
             + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
         )
 
+        coverage: dict[str, int] | None = None
+        pair = coverage_queries(spec, table_refs)
+        if pair is not None:
+            # Label-join coverage (F21): spine rows vs rows surviving the inner
+            # label join, counted in-warehouse before filters/sampling/windows.
+            coverage = {
+                "spine_rows": int(self._fetch_one(pair[0]) or 0),
+                "matched_rows": int(self._fetch_one(pair[1]) or 0),
+            }
+            if coverage["spine_rows"] > 0:
+                fraction = coverage["matched_rows"] / coverage["spine_rows"]
+                ctx.events.emit(
+                    f"dataset {ctx.node.unique_id}: label join matched "
+                    f"{coverage['matched_rows']} of {coverage['spine_rows']} "
+                    f"spine rows ({fraction:.1%})"
+                )
+
         write_materialization_metadata(
             output_dir,
             snapshot_id=ctx.node.snapshot_id,
@@ -237,16 +292,61 @@ class SnowflakeDataAdapter:
             windows=ctx.resolved_windows,
             sample_fraction=ctx.sample_fraction,
             row_counts=written,
+            label_join_coverage=coverage,
         )
         return MaterializedDatasetHandle(output_dir, adapter=self.name)
 
+    # -- source-level checks (F2/F21) -----------------------------------------
+
+    def count_source_duplicates(self, source: SourceTableLike, columns: list[str]) -> int:
+        """Distinct COMPOSITE keys appearing more than once in the raw source
+        (pre-join, push-down; only a scalar returns): the 1:1 join-cardinality
+        contract behind the ``unique`` check's ``source:`` mode (F2)."""
+        ref = self._table_ref(source)
+        try:
+            cols = ", ".join(validate_column(c) for c in columns)
+            not_null = " AND ".join(f"{validate_column(c)} IS NOT NULL" for c in columns)
+        except SnowflakeSQLError as exc:
+            raise SnowflakeAdapterError(str(exc)) from exc
+        value = self._fetch_one(
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM {ref} WHERE {not_null} "
+            f"GROUP BY {cols} HAVING COUNT(*) > 1)"
+        )
+        return int(value or 0)
+
+    def read_source_distinct(self, source: SourceTableLike, column: str) -> pa.Table:
+        """DISTINCT non-null values of one raw source column as a
+        single-column ``value`` table - the parent side of the
+        ``relationships`` check (F2/F21). DISTINCT runs in-warehouse; size the
+        referenced table like a dimension, not a fact table."""
+        ref = self._table_ref(source)
+        try:
+            col = validate_column(column)
+        except SnowflakeSQLError as exc:
+            raise SnowflakeAdapterError(str(exc)) from exc
+        cursor = self._execute_cursor(
+            f"SELECT DISTINCT {col} AS VALUE FROM {ref} WHERE {col} IS NOT NULL"
+        )
+        try:
+            tables = [
+                batch if isinstance(batch, pa.Table) else pa.Table.from_batches([batch])
+                for batch in cursor.fetch_arrow_batches()
+            ]
+        finally:
+            cursor.close()
+        if not tables:
+            return pa.table({"value": pa.array([], type=pa.string())})
+        return pa.concat_tables(tables).rename_columns(["value"])
+
     def _stream_query_to_parquet(self, sql: str, out: Path) -> int:
         """Stream Arrow batches into a parquet file; returns the row count."""
-        cursor = self._connect().cursor()
         writer: pq.ParquetWriter | None = None
+        cursor: Any = None
         rows = 0
         try:
-            cursor.execute(sql)
+            # execute (retried on a transient blip) stays inside this try so a
+            # genuine query error still surfaces as the friendly wrapped message.
+            cursor = self._execute_cursor(sql)
             for batch in cursor.fetch_arrow_batches():
                 table = batch if isinstance(batch, pa.Table) else pa.Table.from_batches([batch])
                 if self.normalize_case:
@@ -273,7 +373,8 @@ class SnowflakeDataAdapter:
         finally:
             if writer is not None:
                 writer.close()
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
         return rows
 
     # -- reopening -------------------------------------------------------------------
@@ -305,8 +406,12 @@ class SnowflakeDataAdapter:
         ``score`` window push down); streams it to ``score.parquet`` via the
         same Arrow path training uses. Zero rows is a warning, not an error - an
         empty nightly batch is legitimate (unlike a training split; ADR-20).
+
+        No snapshot verification: the scoring input (and monitor's arriving
+        labels, read through this same path) is expected to change every run, so
+        a pinned manifest scores the live data instead of hard-failing on drift
+        the way a dataset does (R2-10).
         """
-        self._verify_snapshot(ctx)
         output_dir = ctx.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         for stale in output_dir.glob("*"):
@@ -364,8 +469,10 @@ class SnowflakeDataAdapter:
         shared local layout (ADR-21's sanctioned reuse: "warehouse adapters can
         reuse it for staged exports"). A warehouse-native, Snowflake-table-backed
         store is designed in ADR-23 and gated on live-credential verification.
-        ``predictions_root`` (adapter config, default the project dir) is joined
-        with the scoring node's ``output.path``.
+        ``predictions_root`` (adapter config) is joined with the scoring node's
+        ``output.path``; unset, it defaults to an ephemeral ``<tmpdir>/
+        mbt-predictions`` (never the project dir, so a scheduled run does not
+        write into its checkout - F20).
         """
-        root = Path(str(self.config.get("predictions_root", "."))) / output.path
+        root = resolve_predictions_root(self.config.get("predictions_root")) / output.path
         return LocalPredictionStore(root)

@@ -141,6 +141,31 @@ def test_single_class_labels_are_retried_later(
     assert not list(_prediction_runs(gt_project)[0].glob("*.marker.json"))
 
 
+def test_unparseable_scored_at_is_skipped_not_fatal(
+    gt_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A sidecar with a bad scored_at (e.g. from an external store) must not
+    crash the whole node with a bare ValueError; it is skipped with a warning
+    (R2-19)."""
+    _build_and_promote(gt_project, fake_registry)
+    assert invoke(gt_project, fake_registry, "score").exit_code() == 0
+
+    sidecar = _prediction_runs(gt_project)[0] / "predictions.json"
+    info = json.loads(sidecar.read_text())
+    info["scored_at"] = "not-a-timestamp"
+    sidecar.write_text(json.dumps(info))
+
+    with recording_bus() as sink:
+        results = monitor(gt_project, fake_registry)
+
+    # the bad run is skipped, not fatal: the node stays green and warns
+    assert results.exit_code() == 0
+    node = _node(results)
+    assert node.status == "success"
+    assert node.message == "0 matured prediction runs to evaluate"
+    assert any("unparseable scored_at" in m and "not-a-timestamp" in m for m in sink.messages())
+
+
 def test_monitor_tracking_failure_warns_but_evaluates(
     gt_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -160,3 +185,25 @@ def test_monitor_tracking_failure_warns_but_evaluates(
     # evaluation still landed in the ledger despite the tracking failure
     assert list(_prediction_runs(gt_project)[0].glob("*.marker.json"))
     assert any("could not log monitor metrics" in m for m in sink.messages())
+
+
+def test_overlapping_monitor_does_not_re_evaluate_a_recorded_run(
+    gt_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two overlapping monitor crons must not double-evaluate: even if the
+    second reads the ledger as unevaluated, the atomic marker write loses the
+    race and the run is skipped, not re-recorded or double-alerted (R2-11)."""
+    from mbt_adapter_base.predictions import LocalPredictionStore
+
+    _build_and_promote(gt_project, fake_registry)
+    assert invoke(gt_project, fake_registry, "score").exit_code() == 0
+    monitor(gt_project, fake_registry)  # records the ground_truth marker
+
+    # the second cron reads the marker as absent (stale) while it is on disk
+    monkeypatch.setattr(LocalPredictionStore, "read_marker", lambda self, rk, name: None)
+    with recording_bus() as sink:
+        results = monitor(gt_project, fake_registry)
+    node = _node(results)
+    assert node.status == "success"
+    assert "evaluated 0 of 1" in (node.message or "")  # re-claim lost -> skipped
+    assert any("already evaluated by a concurrent monitor run" in m for m in sink.messages())

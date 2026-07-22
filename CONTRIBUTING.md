@@ -57,6 +57,35 @@ The fast suite enforces 100% line coverage on the coordinator-process packages; 
 `docs/adapter-authoring.md` is the guide.
 The ship bar is the compliance suite in `mbt-adapter-base`: subclass `TrainingAdapterCompliance` (and `PredictionStoreCompliance` where relevant) and keep `test_no_core_imports` green - adapters build against `mbt-adapter-base` only, never `mbt-core` internals.
 
+## Releasing
+
+A release is a version bump plus a tag; the automated PyPI publish is gated on
+the release-readiness work (see `release.yml`).
+
+The one version string lives in **11 `pyproject.toml` files** (the repo root and
+each of the ten `packages/*/`) and in **each package's runtime `__version__`**
+(`packages/*/src/*/__init__.py`) - 21 strings that must stay in lockstep.
+Bump them all with one command:
+
+```bash
+python scripts/bump_version.py 0.2.0
+```
+
+It rewrites every version string (failing loudly if any file does not carry the
+current version exactly once, so a dependency pin is never touched) and prints
+the changed files.
+`tests/test_version_sync.py` then fails the suite until the root `pyproject.toml`,
+all ten package `pyproject.toml`, and every package's `__init__.__version__`
+agree (it also checks each package declares `license = "Apache-2.0"` and ships a
+`LICENSE`), so it is the backstop if a version is ever edited by hand.
+
+After the bump lands green, tag the release commit `vX.Y.Z` - the scaffold pins
+projects to `git+https://github.com/satrijandi/mbt@vX.Y.Z`, so the tag is what
+makes a fresh `mbt init` project installable.
+Pushing the tag runs `release.yml`, which re-runs the whole CI as a gate (it calls `ci.yml` via `workflow_call`) before it builds or publishes anything, so a tag on a red commit cannot ship broken wheels; the publish uses `skip-existing`, so re-running it after a partial upload is safe.
+There is no hand-written `CHANGELOG.md`: it belongs to the deferred release
+pipeline, not a manual edit.
+
 ## License
 
 By contributing, you agree that your contributions are licensed under the [Apache License 2.0](LICENSE) that covers the project.

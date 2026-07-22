@@ -1,5 +1,6 @@
 """Unit tests for the shared CLI plumbing (mbt/cli/common.py)."""
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from mbt.cli.common import (
     setup_bus,
 )
 from mbt.events import get_bus
+from mbt.events.otel import OTelSpanSink
 from mbt.events.sinks import ConsoleSink, JsonLinesSink, NullSink
 from mbt.exceptions import ConfigError
 
@@ -103,6 +105,90 @@ def test_setup_bus_selects_sink_per_flags() -> None:
 
     setup_bus(CLIContext())
     assert isinstance(get_bus()._sinks[0], ConsoleSink)
+
+
+def test_setup_bus_appends_durable_json_log_when_env_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A nested path proves parent dirs are created; relative to invocation cwd.
+    monkeypatch.setenv("MBT_LOG_FILE", "logs/events.jsonl")
+    setup_bus(CLIContext(invocation_cwd=tmp_path))
+
+    bus = get_bus()
+    # Additive: the human console sink is kept, the JSON file sink added on top.
+    assert isinstance(bus._sinks[0], ConsoleSink)
+    assert isinstance(bus._sinks[1], JsonLinesSink)
+
+    bus.emit("hello timeline")
+    lines = (tmp_path / "logs" / "events.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["message"] == "hello timeline"
+
+
+def test_setup_bus_log_file_captures_even_when_console_is_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The scheduled-job shape: silent console, full durable timeline in the file.
+    log = tmp_path / "events.jsonl"
+    monkeypatch.setenv("MBT_LOG_FILE", str(log))
+    setup_bus(CLIContext(quiet=True, invocation_cwd=tmp_path))
+
+    bus = get_bus()
+    assert isinstance(bus._sinks[0], NullSink)  # console suppressed...
+    assert isinstance(bus._sinks[1], JsonLinesSink)  # ...file still captures
+    bus.emit("still logged")
+    assert "still logged" in log.read_text()
+
+
+def test_setup_bus_log_file_appends_across_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Append, not truncate: a nightly job accumulates its timeline (run_id
+    # demultiplexes), rather than each run erasing the last.
+    log = tmp_path / "events.jsonl"
+    monkeypatch.setenv("MBT_LOG_FILE", str(log))
+    for msg in ("run one", "run two"):
+        setup_bus(CLIContext(invocation_cwd=tmp_path))
+        get_bus().emit(msg)
+    body = log.read_text()
+    assert "run one" in body and "run two" in body
+
+
+def test_setup_bus_log_file_bad_path_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A silently dropped durable log is worse than an actionable error: pointing
+    # at a directory (unopenable as a file) must raise, not swallow.
+    monkeypatch.setenv("MBT_LOG_FILE", str(tmp_path))
+    with pytest.raises(ConfigError, match="MBT_LOG_FILE"):
+        setup_bus(CLIContext(invocation_cwd=tmp_path))
+
+
+def test_setup_bus_appends_otel_span_sink_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Additive, like MBT_LOG_FILE: the console sink stays and the span bridge is
+    # added on top so `mbt run` emits a trace alongside the human output.
+    monkeypatch.setenv("MBT_OTEL", "1")
+    setup_bus(CLIContext())
+
+    sinks = get_bus()._sinks
+    assert isinstance(sinks[0], ConsoleSink)
+    assert isinstance(sinks[1], OTelSpanSink)
+
+
+def test_setup_bus_otel_without_extra_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Explicitly asking for telemetry and then dropping it silently is worse than
+    # an actionable error: a missing `otel` extra must raise, not swallow.
+    def _no_opentelemetry() -> OTelSpanSink:
+        raise ImportError("No module named 'opentelemetry'")
+
+    monkeypatch.setenv("MBT_OTEL", "1")
+    monkeypatch.setattr("mbt.events.otel.make_otel_sink", _no_opentelemetry)
+    with pytest.raises(ConfigError, match="opentelemetry is not installed"):
+        setup_bus(CLIContext())
 
 
 # -- fail ---------------------------------------------------------------------------

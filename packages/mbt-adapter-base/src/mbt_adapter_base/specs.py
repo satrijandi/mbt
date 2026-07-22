@@ -55,9 +55,11 @@ class SourceTable(_SpecModel):
     """One external input table/path within a source group (TSD §5.4)."""
 
     name: str = Field(pattern=NAME_PATTERN)
-    path: str | None = None  # for path-based sources (parquet/iceberg)
+    path: str | None = None  # for path-based sources (parquet, delta)
     identifier: str | None = None  # for warehouse/feature-store sources (v1)
-    format: str = "parquet"  # parquet | iceberg
+    #: parquet reads on every adapter; delta is spark-only. iceberg is roadmap,
+    #: not implemented, so it is rejected here rather than silently mis-read (F23).
+    format: Literal["parquet", "delta"] = "parquet"
     description: str = ""
 
     @model_validator(mode="after")
@@ -96,6 +98,10 @@ class SplitSpec(_SpecModel):
     validation: str | None = None  # else carved from train when tuning needs it
     stratify_by: str | None = None  # random strategy only
     seed: int | None = None  # random strategy only; required then
+    #: Temporal only (R2-7): drop this much of the train window's tail (a
+    #: positive duration like "7d"/"1mo"), embargoing the boundary so a training
+    #: row whose label horizon reaches the evaluation window cannot leak.
+    embargo: str | None = None
 
     @model_validator(mode="after")
     def _strategy_requirements(self) -> "SplitSpec":
@@ -109,7 +115,13 @@ class SplitSpec(_SpecModel):
                     "'seed' applies to the random strategy only; "
                     "temporal splits are deterministic by time"
                 )
+            if self.embargo is not None:
+                count, _ = parse_time_offset(self.embargo)
+                if count <= 0:
+                    raise ValueError(f"embargo must be a positive duration, got {self.embargo!r}")
         else:  # RANDOM
+            if self.embargo is not None:
+                raise ValueError("'embargo' applies to the temporal strategy only")
             if self.seed is None:
                 raise ValueError(
                     "random split requires an explicit 'seed' (reproducibility, FR-RES-09)"
@@ -358,19 +370,53 @@ class GateSpec(_SpecModel):
     metric: str
     threshold: float | None = None  # absolute gate
     compare_to: Stage | None = None  # champion gate vs registry stage
+    across: str | None = None  # disparity gate: slice COLUMN to measure parity across
     min_delta: float = 0.0  # only meaningful with compare_to
+    #: Disparity gates: the minimum acceptable worst/best slice ratio (min/max
+    #: of the metric across the ``across`` column's values), in (0, 1] where
+    #: 1.0 is perfect parity. Only meaningful with ``across``.
+    min_ratio: float = 0.8
     slice: str | None = None  # per-slice gate, "column=value" (FR-TEST-04)
     #: Champion gates: one-sided confidence for the paired-bootstrap lower
     #: bound of the delta (ADR-18); ``null`` opts back into point estimates.
     confidence: float | None = 0.95
     bootstrap_resamples: int = 1000
+    #: Metric source (R2-7): ``test`` gates the single held-out test window;
+    #: ``backtest`` gates the walk-forward mean (needs ``protocol.backtest_folds``).
+    #: NOT named ``on`` - that is a YAML 1.1 boolean (see FeatureInput.using).
+    source: Literal["test", "backtest"] = "test"
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> "GateSpec":
-        if (self.threshold is None) == (self.compare_to is None):
-            raise ValueError("a gate must set exactly one of 'threshold' or 'compare_to'")
+        kinds = (self.threshold is not None, self.compare_to is not None, self.across is not None)
+        if sum(kinds) != 1:
+            raise ValueError(
+                "a gate must set exactly one of 'threshold', 'compare_to', or 'across'"
+            )
+        if self.source == "backtest" and (self.threshold is None or self.slice is not None):
+            raise ValueError(
+                "a backtest gate (source: backtest) must be a whole-split threshold gate: "
+                "the walk-forward backtest reports only mean metrics, not champion deltas or slices"
+            )
+        if self.across is not None and self.slice is not None:
+            raise ValueError("a disparity gate ('across') measures a whole column, not a 'slice'")
         if self.min_delta != 0.0 and self.compare_to is None:
             raise ValueError("'min_delta' is only meaningful with 'compare_to'")
+        if self.min_ratio != 0.8 and self.across is None:
+            raise ValueError("'min_ratio' is only meaningful with 'across'")
+        if self.across is not None and not 0.0 < self.min_ratio <= 1.0:
+            raise ValueError("'min_ratio' must be in (0, 1], e.g. 0.8")
+        if self.across is not None and self.metric == "r2":
+            # r2 is the one builtin metric that can be negative, so the disparity
+            # gate's worst/best RATIO is ill-defined: two negative slices invert
+            # it (-0.9 / -0.1 = 9.0 reads as parity) and a mixed-sign pair makes
+            # it negative. Reject at parse rather than gate on a wrong number.
+            raise ValueError(
+                "a disparity gate ('across') on 'r2' is not supported: r2 can be "
+                "negative, so the worst/best ratio is ill-defined; gate a "
+                "non-negative regression metric like 'rmse' or 'mae' across the "
+                "column instead"
+            )
         if self.compare_to is None:
             # Value-based (not fields_set) so dump/re-parse roundtrips, same
             # as the min_delta check above.
@@ -390,6 +436,22 @@ class EvaluationProtocol(_SpecModel):
 
     split: SplitStrategy = SplitStrategy.TEMPORAL
     test_window: str | None = None  # narrows the dataset test window
+    #: Optional cross-validated backtest (R2-7): the training window is split
+    #: into N folds and the model is refit and evaluated on each - time-ordered
+    #: walk-forward for a temporal split, random k-fold for a random split - so a
+    #: single lucky split cannot flatter the reported generalization.
+    backtest_folds: int | None = Field(default=None, ge=2)
+    #: Nested cross-validation (R2-7): re-tune within each backtest fold, so the
+    #: reported fold mean is an UNBIASED estimate of the TUNED model - the tuning
+    #: never sees the fold it is evaluated on (temporal walk-forward or random
+    #: k-fold, per the split). Needs backtest_folds and (on the model) a tuning block.
+    nested_cv: bool = False
+
+    @model_validator(mode="after")
+    def _nested_cv_requirements(self) -> "EvaluationProtocol":
+        if self.nested_cv and self.backtest_folds is None:
+            raise ValueError("nested_cv needs backtest_folds (the outer fold count)")
+        return self
 
 
 class EvaluationSpec(_SpecModel):
@@ -439,6 +501,11 @@ class TuningObjective(_SpecModel):
 
     metric: str
     direction: Literal["maximize", "minimize"]
+    #: Select on the bootstrap lower bound of the validation metric, not the
+    #: point estimate (R2-7): defends the tuning selection against
+    #: validation-window luck, the same idea ADR-18 applies to the champion gate.
+    #: Builtin metric only. Off by default (unchanged single-split selection).
+    robust: bool = False
 
 
 class TuningSpec(_SpecModel):
@@ -488,6 +555,26 @@ class ModelSpec(_SpecModel):
     materialization: Materialization = Materialization.MODEL_ARTIFACT
     seed: int  # mandatory, no default (FR-RES-03)
     hooks: str | None = None  # path to hooks.py; sibling <name>.py auto-detected
+    #: Post-hoc probability calibration (R2-8); binary classification only.
+    #: Fit on a dedicated slice core carves from train (seed+5, F17), so it
+    #: composes with tuning, early stopping, and the walk-forward backtest
+    #: (each fold carves its own slice, F5). Adapter support is probed at parse.
+    calibration: Literal["isotonic", "sigmoid"] | None = None
+
+    @model_validator(mode="after")
+    def _nested_cv_needs_tuning(self) -> "ModelSpec":
+        if self.evaluation.protocol.nested_cv and self.tuning is None:
+            raise ValueError("nested_cv re-tunes within each fold, so it needs a 'tuning' block")
+        return self
+
+    @model_validator(mode="after")
+    def _calibration_is_binary_only(self) -> "ModelSpec":
+        if self.calibration is not None and self.task != TaskType.BINARY_CLASSIFICATION:
+            raise ValueError(
+                "calibration applies to binary_classification only "
+                "(it recalibrates predicted probabilities)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _gate_and_objective_metrics_declared(self) -> "ModelSpec":
@@ -496,6 +583,11 @@ class ModelSpec(_SpecModel):
         for gate in self.evaluation.gates:
             if gate.metric not in declared:
                 raise ValueError(f"gate metric '{gate.metric}' must appear in evaluation.metrics")
+            if gate.source == "backtest" and self.evaluation.protocol.backtest_folds is None:
+                raise ValueError(
+                    f"gate on '{gate.metric}' uses source: backtest but "
+                    "evaluation.protocol.backtest_folds is not set"
+                )
             if gate.slice is not None:
                 column, _, value = gate.slice.partition("=")
                 if not column or not value:
@@ -629,13 +721,48 @@ class ScoringInputSpec(_SpecModel):
         return self
 
 
+def _validate_shift_significance(
+    significance: float | None, method: str, warn_threshold: float | None
+) -> None:
+    """Shared rule for the shift monitors' n-aware significance (R2-6): it
+    rides on ``method: ks`` and is a principled bar that does not combine with
+    an absolute warn band. The bar is kind-matched at evaluation time (F15):
+    numeric features get the two-sample KS critical value, categorical
+    features a two-sample (contingency) chi-square statistic judged at the
+    chi-square critical value."""
+    if significance is None:
+        return
+    if method != "ks":
+        raise ValueError("shift significance requires 'method: ks' (it is a KS critical value)")
+    if warn_threshold is not None:
+        raise ValueError("shift significance and warn_threshold are mutually exclusive")
+
+
 class FeatureShiftSpec(_SpecModel):
     """Feature distribution-shift monitor vs the training baseline (ADR-20)."""
 
     method: Literal["psi", "ks"] = "psi"
-    threshold: float = Field(gt=0)  # per-feature; e.g. 0.2 for psi, 0.15 for ks
+    threshold: float = Field(gt=0)  # per-feature fail bar; e.g. 0.2 psi, 0.15 ks
+    #: Optional warn band: a shift in ``(warn_threshold, threshold]`` logs a
+    #: warning without failing the run - a two-tier bar like label_leakage_scan.
+    warn_threshold: float | None = Field(default=None, gt=0)
+    #: Optional n-aware significance (R2-6): with ``method: ks``, the fail bar
+    #: becomes a critical value at this p-value instead of the fixed
+    #: ``threshold``, so it tightens on large nightly batches and loosens on
+    #: small ones. Kind-matched (F15): numeric features use the two-sample KS
+    #: critical value (sup over the merged baseline-quantile + current points);
+    #: categorical features a two-sample contingency chi-square judged at the
+    #: chi-square critical value. Excludes warn_threshold.
+    significance: float | None = Field(default=None, gt=0.0, lt=1.0)
     include: list[str] = Field(default_factory=lambda: ["*"])
     exclude: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _warn_below_fail(self) -> "FeatureShiftSpec":
+        if self.warn_threshold is not None and self.warn_threshold >= self.threshold:
+            raise ValueError("feature_shift warn_threshold must be below threshold (the fail bar)")
+        _validate_shift_significance(self.significance, self.method, self.warn_threshold)
+        return self
 
 
 class PredictionShiftSpec(_SpecModel):
@@ -643,6 +770,19 @@ class PredictionShiftSpec(_SpecModel):
 
     method: Literal["psi", "ks"] = "psi"
     threshold: float = Field(gt=0)
+    #: Optional warn band, as in FeatureShiftSpec.
+    warn_threshold: float | None = Field(default=None, gt=0)
+    #: Optional n-aware KS significance (R2-6), as in FeatureShiftSpec.
+    significance: float | None = Field(default=None, gt=0.0, lt=1.0)
+
+    @model_validator(mode="after")
+    def _warn_below_fail(self) -> "PredictionShiftSpec":
+        if self.warn_threshold is not None and self.warn_threshold >= self.threshold:
+            raise ValueError(
+                "prediction_shift warn_threshold must be below threshold (the fail bar)"
+            )
+        _validate_shift_significance(self.significance, self.method, self.warn_threshold)
+        return self
 
 
 class MonitorsSpec(_SpecModel):
@@ -712,6 +852,34 @@ class ScoringOutputSpec(_SpecModel):
     #: Extra passthrough columns copied from the RAW input into the output
     #: (identity/audit columns; ground-truth join keys are always included).
     columns: list[str] = Field(default_factory=list)
+    #: The deployable operating point (R2-5): when set, scoring emits a 0/1
+    #: ``decision`` column (``prediction >= decision_threshold``) alongside the
+    #: probability, and records the cutoff in the run info, so consumers get a
+    #: decision rule instead of re-deriving one out of band. A float is used
+    #: verbatim; a string names one of the champion's operating-point metrics
+    #: (``threshold_at_precision_<p>`` / ``threshold_at_recall_<r>``), resolved
+    #: from the registered champion at score time so the cutoff tracks the model.
+    decision_threshold: float | str | None = None
+    #: Per-prediction local explanation (explainability): when set, scoring emits
+    #: an ``explanation`` column naming the top-N features by |SHAP| for each row
+    #: (a JSON ``[[feature, contribution], ...]``), so a consumer can answer "why
+    #: did THIS row score this way". Requires an adapter that supports SHAP
+    #: explanations (the tree adapters); others fail with an actionable error.
+    explain_top_k: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_decision_threshold(self) -> "ScoringOutputSpec":
+        value = self.decision_threshold
+        if isinstance(value, float) and not 0.0 <= value <= 1.0:
+            raise ValueError("a numeric decision_threshold must be in [0, 1]")
+        if isinstance(value, str) and not value.startswith(
+            ("threshold_at_precision_", "threshold_at_recall_")
+        ):
+            raise ValueError(
+                "a string decision_threshold must name a champion operating-point metric "
+                "(threshold_at_precision_<p> or threshold_at_recall_<r>)"
+            )
+        return self
 
 
 class ScoringSpec(_SpecModel):

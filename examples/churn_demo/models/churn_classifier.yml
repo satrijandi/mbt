@@ -19,6 +19,12 @@ models:
       n_estimators: 120
       scale_pos_weight: "{{ auto }}"
 
+    # scale_pos_weight rebalancing miscalibrates the raw probabilities the
+    # brier/ece metrics below measure; isotonic calibration (fit on a dedicated
+    # slice carved from train) is the lever that fixes it. On this demo it
+    # drops ece from ~0.21 to ~0.04 - the before/after the e2e test asserts.
+    calibration: isotonic
+
     evaluation:
       protocol: {split: temporal}
       # brier/ece: interventions consume the probabilities, so calibration
@@ -29,6 +35,12 @@ models:
       gates:
         - metric: pr_auc
           threshold: "{{ var('pr_auc_floor') }}"
+        # Fairness floor (R2-9): the weakest plan tier's pr_auc must stay within
+        # 60% of the strongest. This model sits at ~0.76 (pro is predicted worse
+        # than basic); a model that served one tier far worse would fail here.
+        - metric: pr_auc
+          across: plan_type
+          min_ratio: 0.6
       slices: [plan_type]
 
     registration:

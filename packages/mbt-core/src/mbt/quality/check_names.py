@@ -16,6 +16,12 @@ BUILTIN_CHECK_NAMES = frozenset(
     {
         "schema",
         "not_null",
+        "unique",
+        "accepted_values",
+        "relationships",
+        "row_count",
+        "freshness",
+        "label_join_coverage",
         "no_future_columns",
         "label_leakage_scan",
         "class_balance_report",
@@ -23,5 +29,16 @@ BUILTIN_CHECK_NAMES = frozenset(
 )
 
 #: Checks valid on a scoring input: it has no label, so label-dependent checks
-#: are rejected (ADR-20). A strict subset of :data:`BUILTIN_CHECK_NAMES`.
-SCORING_CHECK_NAMES = frozenset({"schema", "not_null", "no_future_columns"})
+#: are rejected (ADR-20; ``label_join_coverage`` measures the LABEL join, so it
+#: is dataset-only). A strict subset of :data:`BUILTIN_CHECK_NAMES`.
+SCORING_CHECK_NAMES = frozenset(
+    {
+        "schema",
+        "not_null",
+        "unique",
+        "accepted_values",
+        "relationships",
+        "freshness",
+        "no_future_columns",
+    }
+)

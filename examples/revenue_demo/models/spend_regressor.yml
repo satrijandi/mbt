@@ -1,0 +1,37 @@
+models:
+  - name: spend_regressor
+    description: "Next-30-day spend forecast for active subscribers"
+    task: regression
+    adapter: xgboost
+    owner: revenue-ds@example.com
+    tags: [revenue, weekly]
+
+    dataset: ref('spend_training_set')
+
+    target: spend_next_30d
+    features:
+      include: ["*"]
+      exclude: [user_id]   # identifier, no predictive content
+
+    hyperparameters:
+      max_depth: 5
+      learning_rate: 0.1
+      n_estimators: 200
+
+    evaluation:
+      protocol: {split: temporal}
+      # rmse is the headline error; mae is the robust companion; r2 is the
+      # variance-explained sanity check. All three are target-scale.
+      metrics: [rmse, mae, r2]
+      gates:
+        # rmse is lower-is-better, so this threshold is a CEILING: the build
+        # fails (exit 2) if the model's test rmse exceeds it.
+        - metric: rmse
+          threshold: "{{ var('rmse_ceiling') }}"
+      slices: [plan_type]
+
+    registration:
+      name: spend_regressor
+      stage_on_pass: staging
+
+    seed: 42

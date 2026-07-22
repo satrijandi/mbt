@@ -5,6 +5,7 @@ import hashlib
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -30,6 +31,7 @@ from mbt.contracts import (
     MetricSpec,
     ModelSpec,
     ModelVersion,
+    ScoringOutputSpec,
     ScoringSpec,
     SourceTable,
     Stage,
@@ -39,7 +41,7 @@ from mbt.dag.selector import SelectableNode, evaluate_selector
 from mbt.events import get_bus
 from mbt.events.models import ArtifactRegistered, LogMessage, NodeFinished, NodeStarted
 from mbt.exceptions import AdapterError, ConfigError, MbtError, StateError
-from mbt.quality.checks import run_checks, run_scoring_checks
+from mbt.quality.checks import SourceAccess, run_checks, run_scoring_checks
 from mbt.quality.gates import all_gates_passed, evaluate_gates
 from mbt.quality.metrics import resolve_model_metrics
 from mbt.quality.monitors import all_monitors_passed, evaluate_monitors
@@ -113,6 +115,11 @@ def evaluation_node_result(
         feature_importance=(
             dict(job_result.feature_importance) if include_feature_importance else {}
         ),
+        partial_dependence=(
+            dict(job_result.partial_dependence) if include_feature_importance else {}
+        ),
+        backtest_metrics=dict(job_result.backtest_metrics),
+        backtest_std=dict(job_result.backtest_std),
         message=_gate_failure_summary(gates) if include_message and not passed else None,
     )
 
@@ -130,10 +137,19 @@ class ExecutionContext:
     cli_vars: dict[str, Any] = field(default_factory=dict)
     python_tests: list[PythonTestFile] = field(default_factory=list)
     total_nodes: int = 0
+    #: The DAG execution pool size (--threads), i.e. the max number of builds
+    #: that can run concurrently. In-process DuckDB builds divide cores/RAM by it
+    #: so N parallel builds do not each grab all cores and 80% of RAM (F22).
+    threads: int = 1
     _dataset_handles: dict[str, Any] = field(default_factory=dict)
     _counter: list[int] = field(default_factory=lambda: [0])
     _active_job_handles: list[Any] = field(default_factory=list)
     _job_handles_lock: Any = field(default_factory=threading.Lock)
+    #: Guards the coordinator-side shared state touched by pool threads - the
+    #: job-index counter and the dataset-handle map. Their mutations are safe
+    #: under the GIL but genuinely racy under a free-threaded (3.13t/3.14t)
+    #: build, so serialize them here (P3).
+    _state_lock: Any = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         self.data_adapter = build_data_adapter(self.profiles, self.project_dir, self.registry)
@@ -168,14 +184,17 @@ class ExecutionContext:
         return build_registry_adapter(self.profiles, self.project_dir, self.registry)
 
     def dataset_handle(self, uid: str) -> Any:
-        return self._dataset_handles[uid]
+        with self._state_lock:
+            return self._dataset_handles[uid]
 
     def store_dataset_handle(self, uid: str, handle: Any) -> None:
-        self._dataset_handles[uid] = handle
+        with self._state_lock:
+            self._dataset_handles[uid] = handle
 
     def next_index(self) -> int:
-        self._counter[0] += 1
-        return self._counter[0]
+        with self._state_lock:
+            self._counter[0] += 1
+            return self._counter[0]
 
     def run_job(self, job: TrainingJob) -> JobResult:
         """Submit + wait, tracking the handle so --fail-fast can reclaim it."""
@@ -189,14 +208,24 @@ class ExecutionContext:
                 self._active_job_handles.remove(handle)
 
     def cancel_active_jobs(self) -> None:
-        """Terminate in-flight job subprocesses (--fail-fast); best-effort."""
+        """Terminate in-flight job subprocesses (--fail-fast); best-effort.
+
+        Terminations run in parallel: each ``terminate()`` blocks up to its
+        SIGTERM grace period, so a serial sweep of N in-flight jobs would take
+        N * grace (~80s for a full --threads=16 pool). One shared pool lets the
+        grace periods overlap, so reclaiming the pool takes ~one grace period.
+        """
         if not hasattr(self.compute, "terminate"):
             return  # older/remote compute adapters without a kill seam
         with self._job_handles_lock:
             handles = list(self._active_job_handles)
-        for handle in handles:
+
+        def _terminate(handle: object) -> None:
             with contextlib.suppress(Exception):  # the job may have just exited
                 self.compute.terminate(handle, "cancelled by --fail-fast")
+
+        with ThreadPoolExecutor(max_workers=max(1, len(handles))) as pool:
+            list(pool.map(_terminate, handles))
 
     def raw_adapter_ref(self, kind: str) -> AdapterRef:
         raw = self.manifest.metadata.target_config.get(kind)
@@ -231,6 +260,19 @@ def materialization_key(node: ManifestNode, sample_fraction: float = 1.0) -> str
     return digest.hexdigest()[:16]
 
 
+def _source_access(ctx: "ExecutionContext", node: ManifestNode) -> SourceAccess:
+    """Pre-join source reach for the check layer (F2/F21): the node's source
+    tables keyed ``group.name`` plus the resolved data adapter, so
+    source-level checks (``unique`` with ``source:``, ``relationships``) can
+    read the raw tables before any join fans them out."""
+    tables = {
+        f"{entry.group}.{entry.name}": entry.config
+        for uid, entry in ctx.manifest.sources.items()
+        if uid in node.depends_on
+    }
+    return SourceAccess(tables=tables, adapter=ctx.data_adapter)
+
+
 @dataclass(frozen=True)
 class BuildContext:
     """DataBuildContext implementation handed to DataAdapters."""
@@ -243,6 +285,9 @@ class BuildContext:
     deep_snapshot: bool
     output_dir: Path
     events: Any
+    #: The DAG pool size (F22): a data adapter divides its in-process compute
+    #: budget (DuckDB cores/RAM) by this so concurrent builds do not oversubscribe.
+    build_parallelism: int = 1
 
 
 def run_with_lifecycle(
@@ -358,13 +403,15 @@ class DatasetRunner:
             deep_snapshot=ctx.manifest.metadata.deep_snapshot,
             output_dir=output_dir,
             events=get_bus(),
+            build_parallelism=ctx.threads,
         )
         return ctx.data_adapter.build_dataset(spec, build_ctx)
 
     def _run_quality(
         self, uid: str, node: ManifestNode, spec: DatasetSpec, handle: Any
     ) -> list[Any]:
-        results = list(run_checks(spec, handle, node.resolved, resource=uid))
+        sources = _source_access(self.ctx, node)
+        results = list(run_checks(spec, handle, node.resolved, resource=uid, sources=sources))
         if self.ctx.command in ("build", "test"):
             results.extend(self._run_python_tests(uid, spec, handle))
         return results
@@ -466,7 +513,17 @@ class ModelRunner:
             champion=champion.artifact if champion else None,
             artifact=artifact,
             tuning_engine=(
-                AdapterRef(adapter=spec.tuning.engine) if spec.tuning is not None else None
+                # Engine name from the spec; ops config (sampler/pruner knobs)
+                # from the target profile, so tuning knobs stay out of model
+                # identity (same rationale as the pruner defaults).
+                AdapterRef(
+                    adapter=spec.tuning.engine,
+                    config=dict(ctx.profiles.target.tuning.config)
+                    if ctx.profiles.target.tuning is not None
+                    else {},
+                )
+                if spec.tuning is not None
+                else None
             ),
             tuning_cap=int(tuning_cap) if tuning_cap is not None else None,
             artifact_store=resolve_artifact_store_uri(
@@ -502,6 +559,7 @@ class ModelRunner:
             metric_specs=metric_specs,
             determinism=adapter.determinism,
             champion_delta_bounds=job_result.champion_delta_bounds,
+            backtest_metrics=job_result.backtest_metrics,
         )
 
     def _register(
@@ -537,6 +595,13 @@ class ModelRunner:
             metadata["mbt.baseline_format"] = job_result.baseline.format
             metadata["mbt.baseline_content_hash"] = job_result.baseline.content_hash
             metadata["mbt.baseline_size_bytes"] = str(job_result.baseline.size_bytes)
+        # Persist the champion's operating points (R2-5) so a scoring pipeline
+        # can default its decision cutoff from the model (decision_threshold:
+        # threshold_at_precision_0.9) instead of a hand-copied constant.
+        if job_result.metrics is not None:
+            for name, value in job_result.metrics.metrics.items():
+                if name.startswith(("threshold_at_precision_", "threshold_at_recall_")):
+                    metadata[f"mbt.operating_point.{name}"] = str(value)
         version = registry_adapter.register(job_result.artifact, spec.registration.name, metadata)
         registry_adapter.transition(version, spec.registration.stage_on_pass)
         get_bus().emit(
@@ -614,6 +679,9 @@ class ModelRunner:
             tracking_run_id=job_result.tracking_run_id,
             resolved_auto=dict(job_result.resolved_auto),
             feature_importance=dict(job_result.feature_importance),
+            partial_dependence=dict(job_result.partial_dependence),
+            backtest_metrics=dict(job_result.backtest_metrics),
+            backtest_std=dict(job_result.backtest_std),
             message=None if passed else _gate_failure_summary(gates),
         )
 
@@ -745,15 +813,13 @@ class ScoringRunner:
         sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
         key = materialization_key(node, sample_fraction)
         output_dir = ctx.project_dir / "target" / "scoring_inputs" / node.name / key
-        if (output_dir / "_SUCCESS").is_file():
-            get_bus().emit(LogMessage(unique_id=node.unique_id, message=f"cache hit ({key})"))
-            return ctx.data_adapter.from_locator(
-                DatasetLocator(
-                    adapter=ctx.profiles.target.data.adapter,
-                    uri=f"file://{output_dir.resolve()}",
-                    snapshot_id=node.snapshot_id or "",
-                )
-            )
+        # No cache reuse for scoring inputs: a scoring batch is expected-mutable
+        # (fresh unlabeled rows, or the labels `mbt monitor` reads through this
+        # same path, change every run), and under --manifest the key is fully
+        # pinned (input_hash + windows never move), so a warm `_SUCCESS` here
+        # would serve a STALE batch (F4). build_scoring_input wipes and rebuilds
+        # this one cheap batch every call; datasets, which are immutable by
+        # snapshot, still cache in DatasetRunner._materialize.
         if spec.input.source is not None:
             spine_uid = spec.input.source
             input_uids = [spine_uid]
@@ -786,8 +852,31 @@ class ScoringRunner:
             deep_snapshot=ctx.manifest.metadata.deep_snapshot,
             output_dir=output_dir,
             events=get_bus(),
+            build_parallelism=ctx.threads,
         )
         return ctx.data_adapter.build_scoring_input(spec.input, build_ctx)
+
+    @staticmethod
+    def _resolve_operating_point(
+        output: ScoringOutputSpec, champion: ModelVersion, uid: str
+    ) -> ScoringOutputSpec:
+        """A string ``decision_threshold`` names a champion operating-point
+        metric; resolve it to the concrete cutoff from the champion's registered
+        tags (R2-5), so the deployed decision rule tracks the promoted model
+        rather than a constant copied out of the model card by hand."""
+        name = output.decision_threshold
+        if not isinstance(name, str):
+            return output
+        recorded = champion.tags.get(f"mbt.operating_point.{name}")
+        if recorded is None:
+            raise StateError(
+                f"scoring decision_threshold {name!r} is not a recorded operating point of "
+                f"champion v{champion.version}",
+                resource=uid,
+                hint=f"add {name!r} to the model's evaluation.metrics and retrain/promote, "
+                "or set a numeric decision_threshold",
+            )
+        return output.model_copy(update={"decision_threshold": float(recorded)})
 
     def _assemble_job(
         self,
@@ -812,7 +901,7 @@ class ScoringRunner:
             tracking=ctx.raw_adapter_ref("tracking"),
             artifact=champion.artifact,
             baseline=baseline,
-            output=spec.output,
+            output=self._resolve_operating_point(spec.output, champion, node.unique_id),
             model_version=champion.version,
             run_key=scoring_run_key(node, champion.version),
             artifact_store=resolve_artifact_store_uri(
@@ -853,7 +942,9 @@ class ScoringRunner:
 
         handle = self._materialize_input(node, spec)
 
-        checks = run_scoring_checks(spec, handle, node.resolved, resource=uid)
+        checks = run_scoring_checks(
+            spec, handle, node.resolved, resource=uid, sources=_source_access(self.ctx, node)
+        )
         failed = [t for t in checks if not t.passed]
         if failed:
             # Never score on bad input: the job is skipped entirely.

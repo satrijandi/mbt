@@ -18,6 +18,7 @@
 """
 
 import atexit
+import shutil
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -45,16 +46,26 @@ from mbt_h2o.params import H2OAutoMLParams
 if TYPE_CHECKING:
     import numpy as np
 
+    from mbt_adapter_base.calibration import Calibrator
+
 _shutdown_registered = False
 
 
 class H2OModel:
     """Opaque wrapper: the leader (or an imported MOJO) + column context."""
 
-    def __init__(self, model: Any, features: list[str], target: str | None) -> None:
+    def __init__(
+        self,
+        model: Any,
+        features: list[str],
+        target: str | None,
+        calibrator: "Calibrator | None" = None,
+    ) -> None:
         self.model = model
         self.features = features
         self.target = target
+        #: Optional post-hoc probability calibrator (R2-8); applied in _scores.
+        self.calibrator = calibrator
 
 
 class H2OAutoMLAdapter:
@@ -63,7 +74,12 @@ class H2OAutoMLAdapter:
     name = "h2o_automl"
     contract_version = CONTRACT_VERSION
     data_access = "path"
-    supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
+    supported_tasks: ClassVar[set[TaskType]] = {
+        TaskType.BINARY_CLASSIFICATION,
+        TaskType.REGRESSION,
+    }
+    #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
+    supports_calibration: ClassVar[bool] = True
     #: AutoML rankings can flip between near-tied leaders across environments;
     #: metric-level variance stays small when runs are models-bounded.
     determinism = DeterminismTier(kind="tolerance", tolerances={"*": 0.02})
@@ -200,9 +216,14 @@ class H2OAutoMLAdapter:
 
         return staged_split_path(data, split, prefix="mbt-h2o-split-")
 
-    def _frame(self, h2o: Any, data: DatasetHandle, split: str, target: str) -> Any:
+    def _frame(
+        self, h2o: Any, data: DatasetHandle, split: str, target: str, *, classify: bool
+    ) -> Any:
         frame = h2o.import_file(str(self._split_file(data, split)))
-        if target in frame.columns:
+        # A factor target is what makes H2O AutoML pick a classifier; a regression
+        # target must stay numeric. Only matters at train time (predict uses the
+        # model's learned type), so scoring passes classify=False.
+        if classify and target in frame.columns:
             frame[target] = frame[target].asfactor()
         return frame
 
@@ -216,7 +237,8 @@ class H2OAutoMLAdapter:
         from h2o.automl import H2OAutoML
 
         params = self._params(spec)
-        frame = self._frame(h2o, data, "train", spec.target)
+        classify = spec.task is TaskType.BINARY_CLASSIFICATION
+        frame = self._frame(h2o, data, "train", spec.target, classify=classify)
         features = self._feature_columns(frame.columns, spec)
 
         automl = H2OAutoML(**params.automl_kwargs(seed=ctx.seed))
@@ -224,7 +246,28 @@ class H2OAutoMLAdapter:
         if automl.leader is None:
             raise RuntimeError("H2O AutoML produced no models - check algos/budget settings")
         self._emit_leaderboard(automl, ctx)
-        return H2OModel(model=automl.leader, features=features, target=spec.target)
+        model = H2OModel(model=automl.leader, features=features, target=spec.target)
+        if spec.calibration is not None:
+            self._fit_calibrator(model, spec, data)
+        return model
+
+    def _fit_calibrator(self, model: H2OModel, spec: ModelSpec, data: DatasetHandle) -> None:
+        """Fit a post-hoc probability calibrator on the held-out calibration
+        slice (R2-8); the same mechanism as the arrow adapters, persisted in the
+        MOJO bundle sidecar. Calibrated scores flow through ``_scores``, so
+        evaluate/predict/the champion delta all see calibrated probabilities,
+        both models carry their own, and the gate stays apples-to-apples.
+        Fits on the dedicated ``calibration`` slice core carves from train
+        (falling back to ``validation`` for direct calls, F17); without either
+        there is no honest calibration set, so this fails loudly."""
+        from mbt_adapter_base.calibration import Calibrator
+        from mbt_adapter_base.training_helpers import calibration_split
+
+        assert spec.calibration is not None  # guarded by the caller
+        split = calibration_split(data)
+        raw = self._scores(model, data, split)  # no calibrator yet -> raw
+        labels = data.read(split).column(spec.target).to_numpy(zero_copy_only=False)
+        model.calibrator = Calibrator.fit(raw, labels, spec.calibration)
 
     def _emit_leaderboard(self, automl: Any, ctx: RunContext) -> None:
         try:
@@ -244,11 +287,16 @@ class H2OAutoMLAdapter:
 
         h2o = self._h2o()
         target = str(model.target or getattr(data, "label_column", ""))
-        frame = self._frame(h2o, data, split, target)
+        frame = self._frame(h2o, data, split, target, classify=False)
         predictions = model.model.predict(frame)
-        # binomial predictions: [predict, p0, p1] -> positive-class probability
-        p1 = predictions["p1"] if "p1" in predictions.columns else predictions[-1]
-        return np.asarray(p1.as_data_frame(use_multi_thread=True)).ravel()
+        # binomial: [predict, p0, p1] -> P(class 1); regression: [predict] ->
+        # the target-scale value. Dispatch on the presence of a p1 column.
+        col = predictions["p1"] if "p1" in predictions.columns else predictions["predict"]
+        raw = np.asarray(col.as_data_frame(use_multi_thread=True)).ravel()
+        # Post-hoc calibration is a monotonic transform on the raw score (R2-8).
+        if model.calibrator is not None:
+            return model.calibrator.transform(raw)
+        return raw
 
     def evaluate(
         self,
@@ -307,12 +355,35 @@ class H2OAutoMLAdapter:
         if format not in ("native", "h2o_mojo"):
             raise ValueError(f"unsupported export format {format!r}")
         with tempfile.TemporaryDirectory() as tmp:
-            mojo_path = Path(model.model.download_mojo(path=tmp, get_genmodel_jar=False))
-            return store.put_file(mojo_path, "model.mojo.zip", format="h2o_mojo")
+            bundle = Path(tmp) / "bundle"
+            bundle.mkdir()
+            mojo = Path(model.model.download_mojo(path=str(bundle), get_genmodel_jar=False))
+            mojo.rename(bundle / "model.mojo.zip")  # fixed name for load
+            # A columns sidecar (target + features), like the sparkml adapter, so
+            # load() recovers the feature context - otherwise a reloaded MOJO has
+            # no features and its feature_importance/champion card table is empty.
+            sidecar = "\n".join([model.target or "", *model.features])
+            (bundle / "mbt_columns.txt").write_text(sidecar)
+            if model.calibrator is not None:
+                (bundle / "mbt_calibrator.json").write_text(model.calibrator.to_json())
+            archive = shutil.make_archive(str(Path(tmp) / "h2obundle"), "zip", bundle)
+            return store.put_file(Path(archive), "model.h2omojo.zip", format="h2o_mojo")
 
     def load(self, ref: ArtifactRef, store: ArtifactStore) -> H2OModel:
         if ref.format != "h2o_mojo":
             raise ValueError(f"h2o_automl cannot load artifact format {ref.format!r}")
         h2o = self._h2o()
-        imported = h2o.import_mojo(str(store.fetch(ref)))
-        return H2OModel(model=imported, features=[], target=None)
+        extract_dir = Path(tempfile.mkdtemp(prefix="mbt-h2o-load-"))
+        atexit.register(shutil.rmtree, extract_dir, ignore_errors=True)
+        shutil.unpack_archive(store.fetch(ref), extract_dir, "zip")
+        columns = (extract_dir / "mbt_columns.txt").read_text().splitlines()
+        imported = h2o.import_mojo(str(extract_dir / "model.mojo.zip"))
+        calibrator = None
+        calibrator_path = extract_dir / "mbt_calibrator.json"
+        if calibrator_path.exists():
+            from mbt_adapter_base.calibration import Calibrator
+
+            calibrator = Calibrator.from_json(calibrator_path.read_text())
+        return H2OModel(
+            model=imported, features=columns[1:], target=columns[0], calibrator=calibrator
+        )

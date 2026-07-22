@@ -9,9 +9,41 @@ from mbt.contracts import (
     EvaluationSpec,
     GateSpec,
     ModelSpec,
+    ScoringOutputSpec,
     SearchDimension,
     SplitSpec,
 )
+
+
+def test_scoring_decision_threshold_accepts_float_or_operating_point_name() -> None:
+    # a float cutoff must be a probability...
+    with pytest.raises(ValidationError, match=r"in \[0, 1\]"):
+        ScoringOutputSpec(path="p", decision_threshold=1.5)
+    # ...and a string must name a champion operating-point metric (R2-5)
+    with pytest.raises(ValidationError, match="operating-point metric"):
+        ScoringOutputSpec(path="p", decision_threshold="roc_auc")
+    assert ScoringOutputSpec(path="p", decision_threshold=0.5).decision_threshold == 0.5
+    named = ScoringOutputSpec(path="p", decision_threshold="threshold_at_precision_0.9")
+    assert named.decision_threshold == "threshold_at_precision_0.9"
+    # per-prediction explanation count must be a positive integer
+    with pytest.raises(ValidationError):
+        ScoringOutputSpec(path="p", explain_top_k=0)
+    assert ScoringOutputSpec(path="p", explain_top_k=3).explain_top_k == 3
+
+
+def test_shift_significance_requires_ks_and_excludes_a_warn_band() -> None:
+    from mbt.contracts import FeatureShiftSpec
+
+    # the n-aware significance is a KS critical value, so it needs method: ks...
+    with pytest.raises(ValidationError, match="method: ks"):
+        FeatureShiftSpec(method="psi", threshold=0.2, significance=0.05)
+    # ...does not combine with an absolute warn band...
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        FeatureShiftSpec(method="ks", threshold=0.2, significance=0.05, warn_threshold=0.1)
+    # ...and is a p-value in (0, 1)
+    with pytest.raises(ValidationError):
+        FeatureShiftSpec(method="ks", threshold=0.2, significance=1.5)
+    assert FeatureShiftSpec(method="ks", threshold=0.2, significance=0.05).significance == 0.05
 
 
 def _model_kwargs(**overrides: object) -> dict[str, object]:
@@ -49,6 +81,29 @@ def test_gate_requires_exactly_one_kind() -> None:
     with pytest.raises(ValidationError, match="min_delta"):
         GateSpec(metric="pr_auc", threshold=0.4, min_delta=0.1)
     assert GateSpec(metric="pr_auc", compare_to="production", min_delta=0.005).min_delta == 0.005
+
+
+def test_disparity_gate_is_a_third_kind() -> None:
+    # `across` is its own gate kind (disparity), with a default min_ratio.
+    gate = GateSpec(metric="pr_auc", across="plan_type")
+    assert gate.across == "plan_type" and gate.min_ratio == 0.8
+    # ...mutually exclusive with the other two kinds
+    with pytest.raises(ValidationError, match="exactly one"):
+        GateSpec(metric="pr_auc", across="plan_type", threshold=0.4)
+    # min_ratio is across-only, and must be a ratio in (0, 1]
+    with pytest.raises(ValidationError, match="min_ratio"):
+        GateSpec(metric="pr_auc", threshold=0.4, min_ratio=0.9)
+    with pytest.raises(ValidationError, match=r"in \(0, 1\]"):
+        GateSpec(metric="pr_auc", across="plan_type", min_ratio=1.5)
+    # a disparity gate spans a whole column, so it cannot also fix one slice
+    with pytest.raises(ValidationError, match="whole column"):
+        GateSpec(metric="pr_auc", across="plan_type", slice="plan_type=basic")
+    # r2 is the one signed builtin: its worst/best ratio is ill-defined (two
+    # negative slices invert it), so a disparity gate on r2 is rejected at
+    # parse, while a non-negative regression metric is allowed (F16).
+    with pytest.raises(ValidationError, match="r2"):
+        GateSpec(metric="r2", across="segment")
+    assert GateSpec(metric="rmse", across="segment").metric == "rmse"
 
 
 def test_gate_bootstrap_fields_validated() -> None:

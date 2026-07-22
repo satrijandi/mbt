@@ -29,6 +29,13 @@ def load_yaml_mapping(path: Path, rel: str, report: ParseReport) -> dict[str, An
     except yaml.YAMLError as exc:
         report.error(f"invalid YAML: {exc}", file=rel)
         return None
+    except UnicodeDecodeError as exc:
+        report.error(
+            f"file is not valid UTF-8: {exc}",
+            file=rel,
+            hint="spec files must be UTF-8 encoded text",
+        )
+        return None
     except OSError as exc:
         report.error(f"cannot read file: {exc}", file=rel)
         return None

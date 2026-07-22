@@ -42,6 +42,8 @@ if TYPE_CHECKING:
     from pyspark.ml import PipelineModel
     from pyspark.sql import DataFrame
 
+    from mbt_adapter_base.calibration import Calibrator
+
 ARTIFACT_FORMAT = "sparkml_zip"
 
 
@@ -61,10 +63,18 @@ class SparkGBTParams(BaseModel):
 class SparkMLModel:
     """Opaque wrapper: fitted PipelineModel + column context."""
 
-    def __init__(self, model: "PipelineModel", features: list[str], target: str) -> None:
+    def __init__(
+        self,
+        model: "PipelineModel",
+        features: list[str],
+        target: str,
+        calibrator: "Calibrator | None" = None,
+    ) -> None:
         self.model = model
         self.features = features
         self.target = target
+        #: Optional post-hoc probability calibrator (R2-8); applied in _scores.
+        self.calibrator = calibrator
 
 
 class SparkMLTrainingAdapter:
@@ -73,7 +83,12 @@ class SparkMLTrainingAdapter:
     name = "spark"
     contract_version = CONTRACT_VERSION
     data_access = "path"
-    supported_tasks: ClassVar[set[TaskType]] = {TaskType.BINARY_CLASSIFICATION}
+    supported_tasks: ClassVar[set[TaskType]] = {
+        TaskType.BINARY_CLASSIFICATION,
+        TaskType.REGRESSION,
+    }
+    #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
+    supports_calibration: ClassVar[bool] = True
     determinism = DeterminismTier(kind="tolerance", tolerances={"*": 0.01})
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -130,9 +145,70 @@ class SparkMLTrainingAdapter:
 
     # -- training ------------------------------------------------------------------------
 
+    def _assembler_inputs(
+        self, frame: "DataFrame", features: list[str]
+    ) -> tuple[list[Any], list[str]]:
+        """(StringIndexer stages, VectorAssembler input columns).
+
+        String features train natively on the arrow adapters (native
+        categorical); Spark's VectorAssembler instead rejects string columns
+        with a raw ``IllegalArgumentException``, so index them to ordinal codes
+        first. Any other non-numeric type (timestamp, array, ...) gets mbt's
+        actionable error rather than a JVM stack trace. The assembler inputs are
+        built in ``features`` order (indexed name substituted for a string
+        column), so ``feature_importance``'s positional mapping stays aligned.
+        """
+        from pyspark.ml.feature import StringIndexer
+        from pyspark.sql.types import BooleanType, NumericType, StringType
+
+        from mbt_spark.data import SparkAdapterError
+
+        types = {f.name: f.dataType for f in frame.schema.fields}
+        string_features = [c for c in features if isinstance(types[c], StringType)]
+        unsupported = [
+            f"{c} ({types[c].simpleString()})"
+            for c in features
+            if not isinstance(types[c], NumericType | BooleanType | StringType)
+        ]
+        if unsupported:
+            raise SparkAdapterError(
+                f"sparkml cannot train on feature column type(s): {', '.join(unsupported)}",
+                hint="numeric, boolean, and string (auto-indexed) columns are supported; "
+                "exclude others under features.exclude or encode them upstream",
+            )
+        indexers = [
+            StringIndexer(inputCol=c, outputCol=f"{c}__mbt_idx", handleInvalid="keep")
+            for c in string_features
+        ]
+        string_set = set(string_features)
+        inputs = [f"{c}__mbt_idx" if c in string_set else c for c in features]
+        return indexers, inputs
+
+    def _estimator(self, spec: ModelSpec, params: SparkGBTParams, seed: int) -> Any:
+        """GBTClassifier or GBTRegressor - both take the identical GBT knobs, so
+        only the task selects the class (R2-18: the regression vertical reaches
+        the JVM adapters, not just the arrow ones)."""
+        kwargs: dict[str, Any] = {
+            "labelCol": spec.target,
+            "featuresCol": "mbt_features",
+            "maxIter": params.max_iter,
+            "maxDepth": params.max_depth,
+            "stepSize": params.step_size,
+            "subsamplingRate": params.subsampling_rate,
+            "minInstancesPerNode": params.min_instances_per_node,
+            "maxBins": params.max_bins,
+            "seed": seed,
+        }
+        if spec.task is TaskType.REGRESSION:
+            from pyspark.ml.regression import GBTRegressor
+
+            return GBTRegressor(**kwargs)
+        from pyspark.ml.classification import GBTClassifier
+
+        return GBTClassifier(**kwargs)
+
     def train(self, spec: ModelSpec, data: DatasetHandle, ctx: RunContext) -> SparkMLModel:
         from pyspark.ml import Pipeline
-        from pyspark.ml.classification import GBTClassifier
         from pyspark.ml.feature import VectorAssembler
         from pyspark.sql import functions as F
 
@@ -141,25 +217,44 @@ class SparkMLTrainingAdapter:
         frame = self._split_frame(spark, data, "train")
         features = self._feature_columns(frame.columns, spec)
         frame = frame.withColumn(spec.target, F.col(spec.target).cast("double"))
+        indexers, assembler_inputs = self._assembler_inputs(frame, features)
 
         pipeline = Pipeline(
             stages=[
-                VectorAssembler(inputCols=features, outputCol="mbt_features", handleInvalid="keep"),
-                GBTClassifier(
-                    labelCol=spec.target,
-                    featuresCol="mbt_features",
-                    maxIter=params.max_iter,
-                    maxDepth=params.max_depth,
-                    stepSize=params.step_size,
-                    subsamplingRate=params.subsampling_rate,
-                    minInstancesPerNode=params.min_instances_per_node,
-                    maxBins=params.max_bins,
-                    seed=ctx.seed,
+                *indexers,
+                VectorAssembler(
+                    inputCols=assembler_inputs, outputCol="mbt_features", handleInvalid="keep"
                 ),
+                self._estimator(spec, params, ctx.seed),
             ]
         )
         fitted = pipeline.fit(frame)
-        return SparkMLModel(model=fitted, features=features, target=spec.target)
+        model = SparkMLModel(model=fitted, features=features, target=spec.target)
+        if spec.calibration is not None:
+            self._fit_calibrator(model, spec, data)
+        return model
+
+    def _fit_calibrator(self, model: SparkMLModel, spec: ModelSpec, data: DatasetHandle) -> None:
+        """Fit a post-hoc probability calibrator on the held-out calibration
+        slice (R2-8); the same mechanism as the arrow adapters, persisted in the
+        SparkML bundle sidecar. Calibrated scores flow through ``_scores``, so
+        evaluate/predict/the champion delta all see calibrated probabilities,
+        both models carry their own, and the gate stays apples-to-apples.
+        Fits on the dedicated ``calibration`` slice core carves from train
+        (falling back to ``validation`` for direct calls, F17); without either
+        there is no honest calibration set, so this fails loudly."""
+        from mbt_adapter_base.calibration import Calibrator
+        from mbt_adapter_base.training_helpers import calibration_split
+        from mbt_spark.data import SparkAdapterError
+
+        assert spec.calibration is not None  # guarded by the caller
+        try:
+            split = calibration_split(data)
+        except ValueError as exc:
+            raise SparkAdapterError(str(exc)) from exc
+        raw = self._scores(model, data, split)  # no calibrator yet -> raw
+        labels = data.read(split).column(spec.target).to_numpy(zero_copy_only=False)
+        model.calibrator = Calibrator.fit(raw, labels, spec.calibration)
 
     # -- scoring --------------------------------------------------------------------------
 
@@ -170,11 +265,21 @@ class SparkMLTrainingAdapter:
 
         spark = self._spark()
         frame = self._split_frame(spark, data, split)
-        scored = model.model.transform(frame).withColumn(
-            "mbt_p1", vector_to_array(F.col("probability")).getItem(1)
+        scored = model.model.transform(frame)
+        # A classifier emits a `probability` vector (score = P(class 1)); a
+        # regressor emits only a target-scale `prediction` column (score = the
+        # prediction itself). Dispatch on the presence of `probability`.
+        score_col = (
+            vector_to_array(F.col("probability")).getItem(1)
+            if "probability" in scored.columns
+            else F.col("prediction")
         )
-        rows = scored.select("mbt_p1").toPandas()
-        return np.asarray(rows["mbt_p1"], dtype=np.float64)  # type: ignore[index]
+        rows = scored.withColumn("mbt_p1", score_col).select("mbt_p1").toPandas()
+        raw = np.asarray(rows["mbt_p1"], dtype=np.float64)  # type: ignore[index]
+        # Post-hoc calibration is a monotonic transform on the raw score (R2-8).
+        if model.calibrator is not None:
+            return model.calibrator.transform(raw)
+        return raw
 
     def evaluate(
         self,
@@ -226,6 +331,8 @@ class SparkMLTrainingAdapter:
             model_dir = Path(tmp) / "model"
             model.model.write().overwrite().save(str(model_dir))
             (model_dir / "mbt_columns.txt").write_text("\n".join([model.target, *model.features]))
+            if model.calibrator is not None:
+                (model_dir / "mbt_calibrator.json").write_text(model.calibrator.to_json())
             archive = shutil.make_archive(str(Path(tmp) / "sparkml"), "zip", model_dir)
             return store.put_file(Path(archive), "model.sparkml.zip", format=ARTIFACT_FORMAT)
 
@@ -242,4 +349,12 @@ class SparkMLTrainingAdapter:
         shutil.unpack_archive(store.fetch(ref), extract_dir, "zip")
         columns = (extract_dir / "mbt_columns.txt").read_text().splitlines()
         model = PipelineModel.load(str(extract_dir))
-        return SparkMLModel(model=model, features=columns[1:], target=columns[0])
+        calibrator = None
+        calibrator_path = extract_dir / "mbt_calibrator.json"
+        if calibrator_path.exists():
+            from mbt_adapter_base.calibration import Calibrator
+
+            calibrator = Calibrator.from_json(calibrator_path.read_text())
+        return SparkMLModel(
+            model=model, features=columns[1:], target=columns[0], calibrator=calibrator
+        )

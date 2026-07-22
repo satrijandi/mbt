@@ -14,12 +14,37 @@ if TYPE_CHECKING:
 
 
 class OptunaTuningEngine:
-    """Seeded TPE sampling: same seed -> same proposals -> same best params."""
+    """Seeded sampling: same seed + config -> same proposals -> same best params.
+
+    Defaults to independent (per-parameter) TPE; the engine profile config can
+    switch ``sampler`` to ``random`` or enable ``multivariate`` TPE, which models
+    correlated hyperparameters jointly. Sampler knobs live in the profile config,
+    not the spec: they are ops tuning, not model identity (same as the pruner).
+    """
 
     name = "optuna"
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
+
+    def _make_sampler(self, seed: int) -> "optuna.samplers.BaseSampler":
+        import optuna
+
+        kind = str(self.config.get("sampler", "tpe"))
+        if kind == "random":
+            return optuna.samplers.RandomSampler(seed=seed)
+        if kind == "tpe":
+            multivariate = bool(self.config.get("multivariate", False))
+            # `group` (model the whole search space jointly) is only valid with
+            # multivariate; keep it off otherwise so optuna does not raise.
+            # multivariate=False + group=False is byte-identical to the bare
+            # TPESampler(seed=...), so the default path is unchanged.
+            return optuna.samplers.TPESampler(
+                seed=seed,
+                multivariate=multivariate,
+                group=multivariate and bool(self.config.get("group", False)),
+            )
+        raise ValueError(f"unknown sampler {kind!r}; use 'tpe' or 'random'")
 
     def _suggest(self, trial: "optuna.Trial", spec: TuningSpec) -> dict[str, Any]:
         params: dict[str, Any] = {}
@@ -59,7 +84,7 @@ class OptunaTuningEngine:
             )
         study = optuna.create_study(
             direction=spec.objective.direction,
-            sampler=optuna.samplers.TPESampler(seed=seed),
+            sampler=self._make_sampler(seed),
             pruner=pruner,
         )
         maximize = spec.objective.direction == "maximize"

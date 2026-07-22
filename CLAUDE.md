@@ -33,7 +33,7 @@ uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packag
 - Dependency floors are load-bearing metadata: CI's `floors` job installs every direct dependency at its declared lower bound (`uv sync --resolution lowest-direct`) and runs the fast suite. When adding or bumping a dependency, keep the floor honest (test it or raise it, with the reason as a pyproject comment).
 - CI matrixes the fast suite over CPython 3.11-3.14; the JVM e2e tier stays on 3.11 deliberately.
 - Snapshots: one token scheme per pipeline. The scaffold CI workflows pass `--deep-snapshot` on every compiling step because fresh checkouts rewrite mtimes (ADR-11); a deep baseline diffed with the default mtime scheme flags everything.
-- Champion gates use a paired bootstrap lower bound (ADR-18); seed derivation is `spec.seed + 3` (documented; +2 is taken).
+- Champion gates use a paired bootstrap lower bound (ADR-18); the seed ladder is `spec.seed` train, `+1` tuning, `+2` validation carve, `+3` bootstrap, `+4` random k-fold, `+5` calibration carve - a new seeded stage takes the next rung.
 - Path semantics: the CLI coordinator chdirs to `--project-dir` in `make_ctx` (jobs already run with cwd=project), so config-relative paths are project-relative; paths typed on the command line are absolutized against the invocation cwd via `ctx.resolve_cli_path` BEFORE use. New CLI path options must go through `resolve_cli_path`.
 - Manifests verify `env_digest` on `--manifest` execution (ADR-19); `generated_at == anchor` keeps same-anchor compiles byte-identical.
 

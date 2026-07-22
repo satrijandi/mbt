@@ -28,6 +28,14 @@ def test_non_mapping_project_file(tmp_path: Path) -> None:
         load_project(tmp_path)
 
 
+def test_non_utf8_project_file_is_a_config_error(tmp_path: Path) -> None:
+    # A non-UTF-8 byte used to escape as UnicodeDecodeError and hit the CLI's
+    # "Internal error" catch-all; it must surface as a friendly ConfigError.
+    (tmp_path / "mbt_project.yml").write_bytes(b"name: demo\n\xff\xfe broken")
+    with pytest.raises(ConfigError, match=r"mbt_project\.yml is not valid UTF-8"):
+        load_project(tmp_path)
+
+
 def test_schema_violation(tmp_path: Path) -> None:
     write(tmp_path / "mbt_project.yml", 'name: NotSnake\nversion: "1.0"\n')
     with pytest.raises(ConfigError, match=r"invalid mbt_project\.yml"):

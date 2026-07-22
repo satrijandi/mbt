@@ -123,6 +123,7 @@ module = [
     "sklearn.*",
     "jsonschema.*",
     "boto3.*",
+    "botocore.*",
 ]
 ignore_missing_imports = true
 

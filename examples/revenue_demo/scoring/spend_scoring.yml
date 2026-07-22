@@ -1,0 +1,46 @@
+scoring:
+  - name: spend_scoring
+    description: Nightly spend forecasts feeding the revenue-planning dashboard.
+    owner: revenue-eng@example.com
+    tags: [daily]
+
+    model: ref('spend_regressor')
+    stage: production              # champion resolved from the registry at run time
+
+    input:
+      source: source('lakehouse', 'scoring_batch')
+      # Same population the model trained on (see spend_training_set).
+      filters:
+        - "is_active = true"
+        - "tenure_days >= 30"
+      time_column: snapshot_date
+      window: "-7d:now"
+
+    checks:
+      - not_null:
+          columns: [user_id, snapshot_date]
+
+    # Distribution shift vs the champion's training-time baseline (ADR-20);
+    # a breach exits 2, like a failed gate.
+    monitors:
+      feature_shift:
+        threshold: 0.25
+      prediction_shift:
+        threshold: 0.25
+
+    # Realized regression metrics once spend matures: `mbt monitor` joins the
+    # outcomes to the stored forecasts on its own schedule (ADR-21).
+    ground_truth:
+      label:
+        source: source('lakehouse', 'spend_outcomes')
+        column: spend_next_30d
+      join_key: user_id
+      maturity: "14d"
+      metrics: [rmse, mae, r2]
+      gates:
+        - metric: rmse
+          threshold: "{{ var('rmse_ceiling') }}"
+
+    output:
+      path: predictions/spend_forecasts
+      columns: [user_id, snapshot_date]

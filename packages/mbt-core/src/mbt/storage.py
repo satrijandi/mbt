@@ -6,9 +6,24 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 from mbt.contracts import ArtifactRef
 from mbt.exceptions import MbtError, StateError
+
+
+def _s3_client() -> Any:
+    """A boto3 S3 client with bounded retry-with-backoff (R2-2).
+
+    ``standard`` retry mode retries throttling, 5xx, and connection errors with
+    exponential backoff plus jitter (botocore maintains the transient-error
+    set), up to 5 retries - so a single ``503 SlowDown`` or network blip during
+    an artifact upload/download does not fail a node after its GPU-hours.
+    """
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client("s3", config=Config(retries={"max_attempts": 5, "mode": "standard"}))
 
 
 class LocalArtifactStore:
@@ -65,7 +80,7 @@ class S3ArtifactStore:
 
     def __init__(self, uri: str, run_prefix: str | None = None) -> None:
         try:
-            import boto3
+            import boto3  # noqa: F401 - probe the s3 extra before building the client
         except ImportError as exc:  # pragma: no cover - env dependent
             raise MbtError(
                 "s3:// artifact stores require the s3 extra",
@@ -78,7 +93,7 @@ class S3ArtifactStore:
         self._base = base.strip("/")
         self._prefix = run_prefix or uuid.uuid4().hex[:16]
         self._uri = uri
-        self._client = boto3.client("s3")
+        self._client = _s3_client()
         # Download cache: lives as long as the process (fetches reuse it),
         # removed at exit so long-lived runners do not accumulate copies.
         self._cache = Path(tempfile.mkdtemp(prefix="mbt-s3-artifacts-"))
@@ -127,11 +142,42 @@ def artifact_store_for(
     return LocalArtifactStore(uri, run_prefix=run_prefix)
 
 
+def artifact_exists(ref: ArtifactRef) -> bool | None:
+    """Whether the file BEHIND an artifact reference still exists - a cheap
+    head probe, no download.
+
+    The registry can outlive the artifact: ``mbt clean`` ages local files out
+    and bucket lifecycle rules do the same on S3, so a surviving ``ArtifactRef``
+    proves nothing. An incident-response rollback must refuse a destination
+    that cannot serve (F12). Returns None when the probe cannot run (an
+    unrecognized scheme, s3 without the s3 extra, or an S3 error that is not a
+    clean not-found): the caller proceeds with a warning rather than blocking
+    an incident on an unprobeable store.
+    """
+    if ref.uri.startswith("file://"):
+        return Path(ref.uri.removeprefix("file://")).is_file()
+    if ref.uri.startswith("s3://"):
+        try:
+            from botocore.exceptions import ClientError
+        except ImportError:  # pragma: no cover - env dependent
+            return None
+        bucket, _, key = ref.uri.removeprefix("s3://").partition("/")
+        try:
+            _s3_client().head_object(Bucket=bucket, Key=key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in ("404", "NoSuchKey", "NotFound"):
+                return False
+            return None  # permissions / transient after retries: cannot probe
+        return True
+    return None
+
+
 def read_uri_text(uri_or_path: str) -> str:
     """Read text from file://, s3://, or a bare filesystem path (FR-STATE-01)."""
     if uri_or_path.startswith("s3://"):
         try:
-            import boto3
+            import boto3  # noqa: F401 - probe the s3 extra before building the client
         except ImportError as exc:  # pragma: no cover - env dependent
             raise StateError(
                 "reading s3:// URIs requires the s3 extra",
@@ -139,7 +185,7 @@ def read_uri_text(uri_or_path: str) -> str:
             ) from exc
         bucket, _, key = uri_or_path.removeprefix("s3://").partition("/")
         try:
-            body = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+            body = _s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
         except Exception as exc:
             raise StateError(
                 f"cannot read {uri_or_path}: {exc}",

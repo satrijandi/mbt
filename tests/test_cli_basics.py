@@ -115,13 +115,55 @@ def test_scaffold_operational_guardrails(scaffold: Path) -> None:
         "scheduled_monitor.yml",
     ):
         text = (workflows_dir / scheduled).read_text()
-        assert "if: failure()" in text and "MBT_ALERT_WEBHOOK" in text, scheduled
+        # dead-man's-switch heartbeat on success: a schedule that stops firing
+        # (mis-set cron, GitHub auto-disable) is caught by the missing ping
+        assert "if: success()" in text and "MBT_HEARTBEAT_URL" in text, scheduled
+        assert "MBT_ALERT_WEBHOOK" in text, scheduled
+    # monitor/score exit 2 on a quality breach (a completed run): they ping the
+    # heartbeat and page on exit 2 instead of tripping the dead-man's-switch, so
+    # the alert keys off the captured exit code, not if: failure() (F11).
+    for decision in ("scheduled_score.yml", "scheduled_monitor.yml"):
+        text = (workflows_dir / decision).read_text()
+        assert "steps.mbt.outputs.exit_code == '2'" in text, decision
+    # retrain keeps the simpler if: failure() alert: its exit-2 (a non-winning
+    # challenger / no-promotion) semantics differ from a monitor breach.
+    for retrain in ("scheduled_retrain.yml", "scheduled_retrain_monthly.yml"):
+        assert "if: failure()" in (workflows_dir / retrain).read_text(), retrain
     prod = (workflows_dir / "prod_build.yml").read_text()
     assert "if: failure()" in prod and "MBT_ALERT_WEBHOOK" in prod
     # the baseline survives the runner on the mbt-state branch (FR-STATE-03)
     pr = (scaffold / ".github" / "workflows" / "pr_check.yml").read_text()
     assert "publish_state.sh" in prod
     assert "fetch_state.sh" in prod and "fetch_state.sh" in pr
+
+
+def test_scaffold_ci_is_hardened(scaffold: Path) -> None:
+    """Every reference workflow carries a concurrency group and a per-job
+    timeout, matching the mbt repo's own CI hardening (R2-13). PR checks cancel
+    superseded runs; the state-mutating workflows queue instead of cancelling."""
+    import yaml
+
+    workflows_dir = scaffold / ".github" / "workflows"
+    for workflow in sorted(workflows_dir.glob("*.yml")):
+        spec = yaml.safe_load(workflow.read_text())
+        assert spec.get("concurrency", {}).get("group"), f"{workflow.name} has no concurrency group"
+        for job_name, job in spec["jobs"].items():
+            assert isinstance(job.get("timeout-minutes"), int), (
+                f"{workflow.name}:{job_name} has no timeout-minutes"
+            )
+    # PR checks supersede; every mutating workflow never cancels a run mid-write
+    pr_spec = yaml.safe_load((workflows_dir / "pr_check.yml").read_text())
+    assert pr_spec["concurrency"]["cancel-in-progress"] is True
+    for mutating in (
+        "prod_build.yml",
+        "promote.yml",
+        "scheduled_retrain.yml",
+        "scheduled_retrain_monthly.yml",
+        "scheduled_score.yml",
+        "scheduled_monitor.yml",
+    ):
+        spec = yaml.safe_load((workflows_dir / mutating).read_text())
+        assert spec["concurrency"]["cancel-in-progress"] is False, mutating
 
 
 def test_init_template_validates_against_published_schemas(scaffold: Path) -> None:

@@ -4,6 +4,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
 from core_helpers import TEST_ANCHOR, write, write_subscriber_data
 
 from mbt.adapters.registry import AdapterRegistry
@@ -178,3 +179,31 @@ def test_manifest_roundtrip_and_hash(demo_project: Path, fake_registry: AdapterR
     assert loaded.to_json() == manifest.to_json()
     drifted = compile_demo(demo_project, fake_registry, anchor=TEST_ANCHOR + timedelta(days=3))
     assert manifest.manifest_hash() != drifted.manifest_hash()  # resolutions differ
+
+
+def test_embargo_shrinks_the_resolved_train_window(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A temporal embargo drops the tail of the train window in the compiler, so
+    every data adapter's train split excludes it uniformly (R2-7)."""
+    ds = demo_project / "datasets/churn_training.yml"
+    _edit(ds, 'train: "-180d:-28d"', 'train: "-180d:-28d"\n      embargo: 14d')
+    resolved = compile_demo(demo_project, fake_registry).nodes[DS].resolved
+    windows = resolved["windows"]
+    # train end pulled back 14d from -28d (2026-06-03) to 2026-05-20; test unchanged
+    assert windows["train"][1] == "2026-05-20T00:00:00Z"
+    assert windows["test"] == ["2026-06-03T00:00:00Z", "2026-07-01T00:00:00Z"]
+    # the embargo *duration* is also carried through so the walk-forward backtest
+    # can gap each internal fold boundary, not just this outer split (F6)
+    assert resolved["embargo"] == "14d"
+
+
+def test_embargo_larger_than_the_train_window_is_a_compile_error(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    from mbt.exceptions import CompilationError
+
+    ds = demo_project / "datasets/churn_training.yml"
+    _edit(ds, 'train: "-180d:-28d"', 'train: "-180d:-28d"\n      embargo: 999d')
+    with pytest.raises(CompilationError, match="consumes the entire train window"):
+        compile_demo(demo_project, fake_registry)

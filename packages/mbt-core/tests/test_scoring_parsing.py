@@ -112,6 +112,25 @@ def test_label_dependent_check_is_rejected(
         parse_project(scoring_project, registry=fake_registry)
 
 
+def test_label_free_contract_checks_are_accepted_on_scoring(
+    scoring_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """F21: the label-free data-contract checks (unique, accepted_values,
+    freshness) guard a scoring batch - duplicate keys, a drifted category, stale
+    data - just as they guard a dataset, so a scoring input may declare them."""
+    write(
+        scoring_project / "scoring/churn_scoring.yml",
+        SCORING_YML.replace(
+            "- not_null:\n          columns: [user_id]",
+            "- not_null:\n          columns: [user_id]\n"
+            "      - unique:\n          columns: [user_id]\n"
+            "      - accepted_values:\n          column: user_id\n          values: [1, 2, 3]\n"
+            "      - freshness:\n          max_lag: 2d",
+        ),
+    )
+    parse_project(scoring_project, registry=fake_registry)  # parses without error
+
+
 def test_not_null_requires_explicit_columns(
     scoring_project: Path, fake_registry: AdapterRegistry
 ) -> None:

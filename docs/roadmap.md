@@ -2,7 +2,7 @@
 
 ## v0.1 (this release)
 
-A tabular vertical done extremely well: declarative **binary classification and regression** (XGBoost, LightGBM), with the full PR → CI → registry → promotion → batch scoring → ground-truth monitoring loop, exact reproducibility via stored manifests, and state-aware retraining.
+A tabular vertical done extremely well: declarative **binary classification and regression** on all four training adapters, with the full PR → CI → registry → promotion → batch scoring → ground-truth monitoring loop, exact reproducibility via stored manifests, and state-aware retraining.
 Data comes from local Parquet, **Snowflake**, or a **Spark lakehouse**; training adapters cover **XGBoost/LightGBM** plus **SparkML** and **H2O AutoML** (optionally distributed via Sparkling Water); **MLflow** tracks and registers; **Optuna** tunes.
 The dockerized showcase (`examples/showcase`) proves the loop nightly in CI against real services end to end.
 

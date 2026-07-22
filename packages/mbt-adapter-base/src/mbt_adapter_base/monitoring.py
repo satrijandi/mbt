@@ -241,15 +241,30 @@ def _categorical_psi(baseline: FeatureBaseline, current: list[str]) -> float:
 def _numeric_ks(quantiles: list[float], current: "np.ndarray") -> float:
     import numpy as np
 
-    # KS statistic over the stored grid: at baseline quantile q_i the
-    # baseline ECDF is i/(grid-1); compare against the current ECDF.
+    # Two-sample KS sup over the MERGED evaluation points (F15): the stored
+    # baseline quantiles AND every current sample point. The old grid-only sup
+    # missed exceedances between quantiles (measured ~1.6x conservative at
+    # alpha 0.05); evaluating the current ECDF's own jump points - with the
+    # baseline ECDF interpolated from the quantile grid - recovers them, so
+    # the n-aware `significance` bar delivers close to its nominal level.
     ordered = np.sort(current)
-    statistic = 0.0
-    for i, q in enumerate(quantiles):
-        baseline_ecdf = i / (_GRID_POINTS - 1)
-        current_ecdf = float(np.searchsorted(ordered, q, side="right")) / ordered.size
-        statistic = max(statistic, abs(current_ecdf - baseline_ecdf))
-    return float(statistic)
+    n = ordered.size
+    grid = np.linspace(0.0, 1.0, _GRID_POINTS)
+    edges = np.asarray(quantiles, dtype=float)
+    # at each baseline quantile: exact baseline ECDF vs the current ECDF
+    current_at_edges = np.searchsorted(ordered, edges, side="right") / n
+    statistic = float(np.max(np.abs(current_at_edges - grid)))
+    # at each current point: interpolated baseline ECDF vs both sides of the
+    # current ECDF's jump (the sup of a step function lives at its jumps)
+    base_at_points = np.interp(ordered, edges, grid, left=0.0, right=1.0)
+    above = np.arange(1, n + 1) / n
+    below = np.arange(0, n) / n
+    statistic = max(
+        statistic,
+        float(np.max(np.abs(base_at_points - above))),
+        float(np.max(np.abs(base_at_points - below))),
+    )
+    return statistic
 
 
 def _categorical_ks(baseline: FeatureBaseline, current: list[str]) -> float:
@@ -266,10 +281,59 @@ def _categorical_ks(baseline: FeatureBaseline, current: list[str]) -> float:
     )
 
 
+def _categorical_chi2(baseline: FeatureBaseline, current: list[str]) -> tuple[float, int]:
+    """Two-sample (2xk contingency) Pearson chi-square between the baseline
+    counts (shares x baseline n) and the current counts, plus the degrees of
+    freedom - the principled n-aware statistic behind a categorical
+    ``significance`` monitor (F15; the total-variation stat does not follow
+    the Kolmogorov null the numeric bar uses).
+
+    The CONTINGENCY form matters: the baseline shares are themselves estimated
+    from a finite train sample, and judging the current counts against them as
+    if they were exact truth was measured ~2x anti-conservative (empirical
+    false-positive rate 0.098 at alpha 0.05 vs 0.058 for the contingency
+    null). A category unseen at training time pools into the expected counts
+    smoothly and still inflates the statistic sharply.
+    """
+    categories = baseline.categories or []
+    proportions = baseline.proportions or []
+    known = set(categories) - {_OTHER}
+    counts = dict.fromkeys(categories, 0)
+    for value in current:
+        counts[value if value in known else _OTHER] += 1
+    n_current = len(current)
+    n_baseline = baseline.n
+    total_n = n_baseline + n_current
+    statistic = 0.0
+    support = 0
+    for name, share in zip(categories, proportions, strict=True):
+        baseline_count = share * n_baseline
+        observed = counts[name]
+        total = baseline_count + observed
+        if total == 0.0:
+            continue
+        support += 1
+        expected_baseline = total * n_baseline / total_n
+        expected_current = total * n_current / total_n
+        statistic += (baseline_count - expected_baseline) ** 2 / expected_baseline
+        statistic += (observed - expected_current) ** 2 / expected_current
+    return statistic, max(1, support - 1)
+
+
 def _feature_shift(
-    baseline: FeatureBaseline, column: pa.ChunkedArray, method: Literal["psi", "ks"]
+    baseline: FeatureBaseline,
+    column: pa.ChunkedArray,
+    method: Literal["psi", "ks"],
+    *,
+    chi2_significance: bool = False,
 ) -> ShiftStat | None:
-    """One feature's shift statistic; None when the column can't be compared."""
+    """One feature's shift statistic; None when the column can't be compared.
+
+    ``chi2_significance`` (a ``method: ks`` monitor with ``significance`` set)
+    switches a CATEGORICAL feature's statistic from the fixed-threshold
+    total-variation stat to the Pearson chi-square with its df, so the
+    evaluator can apply the matching n-aware critical value (F15).
+    """
     if baseline.kind == "numeric":
         if not _is_numeric(column.type):
             return None
@@ -281,19 +345,32 @@ def _feature_shift(
             _numeric_psi(quantiles, values) if method == "psi" else _numeric_ks(quantiles, values)
         )
         return ShiftStat(
-            method=method, value=value, n_current=int(values.size), n_baseline=baseline.n
+            method=method,
+            value=value,
+            n_current=int(values.size),
+            n_baseline=baseline.n,
+            kind="numeric",
         )
     if not _is_categorical(column.type):
         return None
     strings = _categorical_values(column)
     if not strings:
         return None
-    value = (
-        _categorical_psi(baseline, strings)
-        if method == "psi"
-        else _categorical_ks(baseline, strings)
+    df: int | None = None
+    if method == "psi":
+        value = _categorical_psi(baseline, strings)
+    elif chi2_significance:
+        value, df = _categorical_chi2(baseline, strings)
+    else:
+        value = _categorical_ks(baseline, strings)
+    return ShiftStat(
+        method=method,
+        value=value,
+        n_current=len(strings),
+        n_baseline=baseline.n,
+        kind="categorical",
+        df=df,
     )
-    return ShiftStat(method=method, value=value, n_current=len(strings), n_baseline=baseline.n)
 
 
 def _score_shift(
@@ -340,7 +417,12 @@ def compute_monitor_stats(
             if feature_baseline is None or name not in features.column_names:
                 skipped.append(name)
                 continue
-            stat = _feature_shift(feature_baseline, features.column(name), spec.method)
+            stat = _feature_shift(
+                feature_baseline,
+                features.column(name),
+                spec.method,
+                chi2_significance=spec.significance is not None and spec.method == "ks",
+            )
             if stat is None:
                 skipped.append(name)
             else:

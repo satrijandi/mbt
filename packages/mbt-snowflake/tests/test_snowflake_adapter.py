@@ -253,6 +253,44 @@ def test_push_down_sampling_is_reproducible_and_monotone(tmp_path: Path) -> None
     assert any("MD5_NUMBER_LOWER64" in q for q in stub.executed if q.startswith("SELECT"))
 
 
+def _reference_bucket(preimage: str) -> int:
+    """The canonical cross-adapter bucket (F19): unsigned lower 64 bits of the
+    md5 of the '|'-joined preimage, mod SAMPLE_MODULUS - the same reference the
+    local and spark adapters' tests pin their SQL to."""
+    import hashlib
+
+    return int(hashlib.md5(preimage.encode()).hexdigest()[16:32], 16) % 1_000_000
+
+
+def test_hash_buckets_match_the_cross_adapter_reference() -> None:
+    """F19: the generated MD5_NUMBER_LOWER64 bucket SQL, executed via the
+    true-semantics emulation, lands every key exactly where the shared Python
+    reference says - so split membership is identical across backends."""
+    stub = StubConnection(tables=_make_tables())
+    spec = _spec(
+        inputs=None,
+        source=LABEL_UID,
+        sample_key=["customer_id"],
+        split={"strategy": "random", "train": "0.7", "test": "0.3", "seed": 7},
+    )
+    queries = split_queries(spec, "ANALYTICS.GOLD.CHURN_LABELS", [], {})
+    membership: dict[int, str] = {}
+    for split, sql in queries.items():
+        for cid in stub.run_in_duckdb(sql).column("CUSTOMER_ID").to_pylist():
+            membership[cid] = split
+    assert len(membership) == 200  # exhaustive: the final bucket edge is pinned
+    for cid, split in membership.items():
+        assert split == ("train" if _reference_bucket(f"7|{cid}") < 700_000 else "test")
+    # sampling uses the same digest, unsalted
+    predicate = sampling_predicate(["customer_id"], 0.5)
+    sampled = (
+        stub.run_in_duckdb(f"SELECT * FROM ANALYTICS.GOLD.CHURN_LABELS WHERE {predicate}")
+        .column("CUSTOMER_ID")
+        .to_pylist()
+    )
+    assert set(sampled) == {i for i in range(200) if _reference_bucket(str(i)) < 500_000}
+
+
 def test_population_spine_with_label_offset_joins_in_duckdb(tmp_path: Path) -> None:
     """ADR-22 through the generated SQL: population spine, per-table using
     columns, and the calendar-month label offset, executed in DuckDB."""
@@ -360,6 +398,51 @@ def test_population_spine_with_label_offset_joins_in_duckdb(tmp_path: Path) -> N
     # the offset join went into the warehouse query, not client-side
     joined = [q for q in stub.executed if "INTERVAL '1 MONTH'" in q]
     assert joined and all("SELECT * RENAME" in q for q in joined)
+    # F21: the build recorded label-join coverage, counted in-warehouse (every
+    # spine month here has matured labels, so coverage is complete)
+    assert handle.label_join_coverage == {"spine_rows": 240, "matched_rows": 240}
+    coverage_logs = [m for m in ctx.events.messages if "label join matched" in str(m)]
+    assert len(coverage_logs) == 1 and "100.0%" in str(coverage_logs[0])
+
+
+def test_source_level_checks_push_down_to_the_warehouse() -> None:
+    """count_source_duplicates / read_source_distinct (F2/F21): the pre-join
+    contract queries run in-warehouse and return through the stub's real
+    DuckDB execution."""
+    when = datetime(2026, 1, 1)
+    dup = pa.table(
+        {
+            "CUSTOMER_ID": [1, 1, 2],
+            "SNAPSHOT_DATE": [when, when, when],
+            "PLAN": ["a", "a", None],
+        }
+    )
+    stub = StubConnection(tables={"ANALYTICS.GOLD.DUP_TABLE": dup})
+    adapter = _adapter(stub)
+    table = FakeSourceTable(name="dup_table", identifier="DUP_TABLE")
+    assert adapter.count_source_duplicates(table, ["customer_id", "snapshot_date"]) == 1
+    assert adapter.count_source_duplicates(table, ["customer_id"]) == 1
+    values = adapter.read_source_distinct(table, "plan")
+    assert values.column_names == ["value"]
+    assert values.column("value").to_pylist() == ["a"]  # DISTINCT, nulls dropped
+    # injection guards reuse validate_column on both methods
+    with pytest.raises(SnowflakeAdapterError, match="invalid column identifier"):
+        adapter.count_source_duplicates(table, ["cid; DROP"])
+    with pytest.raises(SnowflakeAdapterError, match="invalid column identifier"):
+        adapter.read_source_distinct(table, "cid; DROP")
+
+    class _EmptyCursor:
+        def fetch_arrow_batches(self):
+            return iter(())
+
+        def close(self) -> None:
+            pass
+
+    # a zero-batch result (a real connector can yield none) degrades to an
+    # empty single-column table, not a concat error
+    adapter._execute_cursor = lambda sql: _EmptyCursor()  # type: ignore[method-assign]
+    empty = adapter.read_source_distinct(table, "plan")
+    assert empty.column_names == ["value"] and empty.num_rows == 0
 
 
 def test_sampling_without_a_key_is_an_actionable_error(tmp_path: Path) -> None:
@@ -411,6 +494,83 @@ def test_missing_identifier_is_actionable(tmp_path: Path) -> None:
     adapter = SnowflakeDataAdapter({"database": "DB", "schema": "S"})
     with pytest.raises(SnowflakeAdapterError, match="identifier"):
         adapter.snapshot_id(FakeSourceTable(name="t", identifier=None))  # type: ignore[arg-type]
+
+
+# -- data-plane retry (F14, R2-2) -----------------------------------------------------
+
+
+def _fail_first_executes(stub: StubConnection, errors: list[BaseException]) -> None:
+    """Wrap ``stub.cursor`` so the next ``len(errors)`` ``execute`` calls raise the
+    given exceptions in order, then normal (DuckDB-backed) behaviour resumes - so a
+    test can inject a transient warehouse blip and assert the retry recovers."""
+    real_cursor = stub.cursor
+    pending = list(errors)
+
+    def cursor() -> StubCursor:
+        cur = real_cursor()
+        real_execute = cur.execute
+
+        def execute(sql: str) -> StubCursor:
+            if pending:
+                raise pending.pop(0)
+            return real_execute(sql)
+
+        cur.execute = execute  # type: ignore[method-assign]
+        return cur
+
+    stub.cursor = cursor  # type: ignore[method-assign]
+
+
+def test_is_transient_retries_operational_but_not_programming_errors() -> None:
+    """The crux of F14: retry an operational/network blip, never a deterministic
+    SQL error (they are siblings under DatabaseError, so neither is caught wrongly)."""
+    from mbt_snowflake.adapter import _is_transient
+    from snowflake.connector.errors import OperationalError, ProgrammingError
+
+    assert _is_transient(OperationalError("warehouse resuming")) is True
+    assert _is_transient(ProgrammingError("SQL compilation error")) is False
+    assert _is_transient(ValueError("unrelated")) is False
+
+
+def test_fetch_one_retries_a_transient_operational_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from snowflake.connector.errors import OperationalError
+
+    monkeypatch.setattr("mbt_adapter_base.retry.time.sleep", lambda _s: None)
+    stub = StubConnection(tables=_make_tables())
+    baseline = _adapter(StubConnection(tables=_make_tables())).snapshot_id(_sources()[LABEL_UID])
+
+    adapter = _adapter(stub)
+    _fail_first_executes(stub, [OperationalError("warehouse resuming")])
+    # snapshot_id -> _fetch_one -> _execute_cursor: the first execute blips, the
+    # retry re-runs it and the pin comes back identical (not a hard failure).
+    assert adapter.snapshot_id(_sources()[LABEL_UID]) == baseline
+
+
+def test_stream_query_wraps_a_non_transient_error_after_no_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from snowflake.connector.errors import ProgrammingError
+
+    monkeypatch.setattr("mbt_adapter_base.retry.time.sleep", lambda _s: None)
+    stub = StubConnection(tables=_make_tables())
+    _fail_first_executes(stub, [ProgrammingError("SQL compilation error: bad column")])
+    adapter = _adapter(stub)
+    # a deterministic query error is NOT retried and still surfaces as the
+    # friendly wrapped message (the retry never swallows a real SQL failure).
+    with pytest.raises(SnowflakeAdapterError, match="Snowflake query failed"):
+        adapter._stream_query_to_parquet("SELECT bad FROM t", tmp_path / "out.parquet")
+
+
+def test_fetch_one_gives_up_after_exhausting_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from snowflake.connector.errors import OperationalError
+
+    monkeypatch.setattr("mbt_adapter_base.retry.time.sleep", lambda _s: None)
+    stub = StubConnection(tables=_make_tables())
+    # every attempt blips: the bounded retry eventually gives up and propagates.
+    _fail_first_executes(stub, [OperationalError("still down")] * 10)
+    adapter = _adapter(stub)
+    with pytest.raises(OperationalError):
+        adapter.snapshot_id(_sources()[LABEL_UID])
 
 
 def test_plugin_import_hygiene() -> None:

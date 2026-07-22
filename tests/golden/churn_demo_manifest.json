@@ -127,6 +127,7 @@
         "snapshot": null,
         "source": "source.churn_demo.lakehouse.subscribers",
         "split": {
+          "embargo": null,
           "seed": null,
           "strategy": "temporal",
           "stratify_by": null,
@@ -140,13 +141,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:cd68993c0d353b0b3069cccaeb5149c88b43ef968ce4288d08c17a2a114c1222",
+      "config_hash": "sha256:a6e993c1bf9e9eb3c40e89451121b613091353cb369f71dc24da51da6959cf2a",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:c2eca9c9869703032094883bf99522520ec5fe743b6e4e71377ff14d10c78346",
+      "input_hash": "sha256:1bf0b2b8ecba4afd821d68220388b49404b2bd21d444a695b57db8b21b73d887",
       "name": "churn_training_set",
       "path": "datasets/churn_training_set.yml",
       "resolved": {
@@ -188,6 +189,7 @@
         "snapshot": null,
         "source": "source.churn_demo.lakehouse.subscribers",
         "split": {
+          "embargo": null,
           "seed": null,
           "strategy": "temporal",
           "stratify_by": null,
@@ -201,13 +203,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:f3c7b33839e4fa75111f046f1649db0f097fd184ceefab6109501fdc9de1e7c5",
+      "config_hash": "sha256:6ea3e25feb46383bab3202cf9d93d88d5755f314c00693ec4c08364af33e2fcd",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:70457639ac0a662bf4a0e2aa0e564ec9614104d2c73e1cbb2925c91329c8e206",
+      "input_hash": "sha256:9080fcd9a83450624b1bfcf1797d7896acf49fbb406a172dea1c8bc65205e68c",
       "name": "upsell_training_set",
       "path": "datasets/upsell_training_set.yml",
       "resolved": {
@@ -232,18 +234,34 @@
       "adapter": "xgboost",
       "config": {
         "adapter": "xgboost",
+        "calibration": "isotonic",
         "dataset": "dataset.churn_demo.churn_training_set",
         "description": "90-day churn prediction for active subscribers",
         "evaluation": {
           "gates": [
             {
+              "across": null,
               "bootstrap_resamples": 1000,
               "compare_to": null,
               "confidence": 0.95,
               "metric": "pr_auc",
               "min_delta": 0.0,
+              "min_ratio": 0.8,
               "slice": null,
+              "source": "test",
               "threshold": 0.3
+            },
+            {
+              "across": "plan_type",
+              "bootstrap_resamples": 1000,
+              "compare_to": null,
+              "confidence": 0.95,
+              "metric": "pr_auc",
+              "min_delta": 0.0,
+              "min_ratio": 0.6,
+              "slice": null,
+              "source": "test",
+              "threshold": null
             }
           ],
           "metrics": [
@@ -257,6 +275,8 @@
             "campaign_capture_100"
           ],
           "protocol": {
+            "backtest_folds": null,
+            "nested_cv": false,
             "split": "temporal",
             "test_window": null
           },
@@ -299,13 +319,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:f9e991cd5f8ddfc78fc0220e0e978d7dd9a50f0918d52f29291141939aac9258",
+      "config_hash": "sha256:55dd910e6b817edf857f128668b20cb8d558766b899dbd011e72ab156854c17a",
       "depends_on": [
         "dataset.churn_demo.churn_training_set"
       ],
       "hooks_hash": "sha256:b69c77c89439a1112e3432f4e582a64be217e42fa4afa8c5f173495bf55954e4",
       "hooks_path": "models/churn_classifier.py",
-      "input_hash": "sha256:1f191e957ba04f87bd1d7369ce1b3289e176ae5c3f205fb58bfb51465b67f6ee",
+      "input_hash": "sha256:b9b065c3b1023f882c4aa981cd1506571af4a798abb3374d3df0391e7d06a12e",
       "name": "churn_classifier",
       "path": "models/churn_classifier.yml",
       "resolved": {},
@@ -319,17 +339,21 @@
       "adapter": "xgboost",
       "config": {
         "adapter": "xgboost",
+        "calibration": null,
         "dataset": "dataset.churn_demo.churn_training_set",
         "description": "Deeper challenger sharing the churn training set",
         "evaluation": {
           "gates": [
             {
+              "across": null,
               "bootstrap_resamples": 1000,
               "compare_to": null,
               "confidence": 0.95,
               "metric": "pr_auc",
               "min_delta": 0.0,
+              "min_ratio": 0.8,
               "slice": null,
+              "source": "test",
               "threshold": 0.3
             }
           ],
@@ -338,6 +362,8 @@
             "roc_auc"
           ],
           "protocol": {
+            "backtest_folds": null,
+            "nested_cv": false,
             "split": "temporal",
             "test_window": null
           },
@@ -373,13 +399,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:6962dad756ea4204ee090a22e17c0dbe74e15a1d3dbeb7e4c64727a5cd30000c",
+      "config_hash": "sha256:901a5eba703a581a050e8fb2fe362c0e02e74303fa6091ad0392a0f592450f8d",
       "depends_on": [
         "dataset.churn_demo.churn_training_set"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:5ff4d11de61777d9020790124e20d270adad6b237513c1dc2b465687357589c9",
+      "input_hash": "sha256:67c6f23b9efc161efff9ab0361d2654fe2d4073ecfc9dcfa281c32f9efef1839",
       "name": "churn_classifier_deep",
       "path": "models/churn_classifier_deep.yml",
       "resolved": {},
@@ -393,17 +419,21 @@
       "adapter": "xgboost",
       "config": {
         "adapter": "xgboost",
+        "calibration": null,
         "dataset": "dataset.churn_demo.upsell_training_set",
         "description": "90-day upsell propensity (independent DAG branch)",
         "evaluation": {
           "gates": [
             {
+              "across": null,
               "bootstrap_resamples": 1000,
               "compare_to": null,
               "confidence": 0.95,
               "metric": "pr_auc",
               "min_delta": 0.0,
+              "min_ratio": 0.8,
               "slice": null,
+              "source": "test",
               "threshold": 0.3
             }
           ],
@@ -412,6 +442,8 @@
             "roc_auc"
           ],
           "protocol": {
+            "backtest_folds": null,
+            "nested_cv": false,
             "split": "temporal",
             "test_window": null
           },
@@ -450,13 +482,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:5edff4298e0e3e0dde7fb5fefd71351f412dd477cba1b4ff18a39d1986256620",
+      "config_hash": "sha256:733d39c119e69923ad50c76886c3b8c4905d4d5e179fdf27152484ab01fb22f8",
       "depends_on": [
         "dataset.churn_demo.upsell_training_set"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:187608fe825f8d3c3223d4de5c5122a31bd3ed5262f39adf7ad807059a37b7bf",
+      "input_hash": "sha256:ca009468cade3d367903371015bce09a569e4962700f215bd4b926b009ac74de",
       "name": "upsell_classifier",
       "path": "models/upsell_classifier.yml",
       "resolved": {},
@@ -518,11 +550,15 @@
               "*"
             ],
             "method": "psi",
-            "threshold": 0.25
+            "significance": null,
+            "threshold": 0.25,
+            "warn_threshold": null
           },
           "prediction_shift": {
             "method": "psi",
-            "threshold": 0.25
+            "significance": null,
+            "threshold": 0.25,
+            "warn_threshold": null
           }
         },
         "name": "retention_scoring",
@@ -531,6 +567,8 @@
             "user_id",
             "snapshot_date"
           ],
+          "decision_threshold": null,
+          "explain_top_k": null,
           "format": "parquet",
           "path": "predictions/retention_scores"
         },
@@ -540,7 +578,7 @@
           "daily"
         ]
       },
-      "config_hash": "sha256:10aae432e5c2e584c3c7e05d7499d21992896ecf5b44b799aae973edab51c901",
+      "config_hash": "sha256:5c0d82aede083fb65374bb23d3b9f01018b1fd4d5bf1b61ca799de8fb16ba17d",
       "depends_on": [
         "model.churn_demo.churn_classifier",
         "source.churn_demo.lakehouse.churn_outcomes",
@@ -548,7 +586,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:7eed9ef25b4f3fb4de536ddc2a01b289d5ff3e2ba80e1b09f5efe8d207157925",
+      "input_hash": "sha256:cdd8d39b4a0f73ee3c551253cf49ecc73b10911ec6b35048fc73b4b530392a98",
       "name": "retention_scoring",
       "path": "scoring/retention_scoring.yml",
       "resolved": {

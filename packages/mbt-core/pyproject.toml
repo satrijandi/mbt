@@ -28,6 +28,13 @@ dependencies = [
     # 0.16: first release that parses PEP 604 unions (Path | None) AND works
     # with click >= 8.2 (make_metavar signature change).
     "typer>=0.16",
+    # cli/main.py imports real click directly (its exception taxonomy is caught
+    # alongside typer's vendored copy); typer >= 0.20 VENDORS click, so it no
+    # longer arrives transitively - undeclared, a standalone install crashes at
+    # `import click` (caught by the per-package wheel closure test, F7).
+    # 8.1: the oldest line whose Exit/UsageError/Abort shapes main() handles;
+    # CI's floors job installs and tests this bound like every other floor.
+    "click>=8.1",
     "rich>=13.7",
     "pydantic>=2.7",
     "jinja2>=3.1",

@@ -117,6 +117,35 @@ def test_slice_gates_evaluate_and_block(demo_project: Path, fake_registry: Adapt
     assert {r.unique_id: r for r in passed.results}[MODEL].gates[0].passed
 
 
+def test_backtest_gate_blocks_on_the_walk_forward_mean(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A source: backtest gate is evaluated against the walk-forward mean and
+    blocks registration end to end (R2-7 part 2), labelled backtest_<metric>."""
+    model_yml = demo_project / "models/churn_model.yml"
+    text = model_yml.read_text().replace(
+        "protocol: {split: temporal}", "protocol: {split: temporal, backtest_folds: 2}"
+    )
+    old_gate = (
+        "gates:\n        - metric: pr_auc\n          threshold: \"{{ var('default_threshold') }}\""
+    )
+    new_gate = (
+        "gates:\n        - metric: pr_auc\n          threshold: 0.99\n          source: backtest"
+    )
+    model_yml.write_text(text.replace(old_gate, new_gate))
+
+    blocked = invoke(demo_project, fake_registry)
+    assert blocked.exit_code() == 2
+    model = {r.unique_id: r for r in blocked.results}[MODEL]
+    assert model.status == "gate_failed"
+    assert model.gates[0].metric == "backtest_pr_auc" and not model.gates[0].passed
+
+    model_yml.write_text(model_yml.read_text().replace("threshold: 0.99", "threshold: 0.4"))
+    passed = invoke(demo_project, fake_registry)
+    assert passed.exit_code() == 0
+    assert {r.unique_id: r for r in passed.results}[MODEL].gates[0].passed
+
+
 def test_failing_gate_blocks_registration_exit_2(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:

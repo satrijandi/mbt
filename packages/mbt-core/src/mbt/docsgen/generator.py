@@ -113,11 +113,29 @@ def _page(title: str, body: str) -> str:
 def _metric_table(result: NodeResult | None) -> str:
     if result is None or not result.metrics:
         return "<p class='muted'>no run results yet - run <code>mbt build</code></p>"
-    rows = "".join(
-        f"<tr><td><code>{html.escape(k)}</code></td><td>{v:.4f}</td></tr>"
-        for k, v in sorted(result.metrics.items())
+    # A cross-validated fold mean sits beside the single-split value (R2-7), so
+    # an optimistic single split is visible at a glance.
+    backtest = result.backtest_metrics
+    backtest_std = result.backtest_std
+    header = (
+        "<tr><th>metric</th><th>value</th>"
+        + ("<th>backtest (cross-validated mean &pm; std)</th>" if backtest else "")
+        + "</tr>"
     )
-    out = f"<table><tr><th>metric</th><th>value</th></tr>{rows}</table>"
+    rows = ""
+    for k, v in sorted(result.metrics.items()):
+        cell = ""
+        if backtest:
+            bt = backtest.get(k)
+            if bt is not None:
+                # the std (fold-to-fold spread) shows whether the mean is stable
+                std = backtest_std.get(k)
+                text = f"{bt:.4f} &pm; {std:.4f}" if std is not None else f"{bt:.4f}"
+                cell = f"<td>{text}</td>"
+            else:
+                cell = "<td class='muted'>-</td>"
+        rows += f"<tr><td><code>{html.escape(k)}</code></td><td>{v:.4f}</td>{cell}</tr>"
+    out = f"<table>{header}{rows}</table>"
     if result.slices:
         slice_rows = ""
         for slice_key, metrics in sorted(result.slices.items()):
@@ -142,8 +160,39 @@ def _importance_table(result: NodeResult | None) -> str:
         for name, share in top
     )
     return (
-        "<h2>Feature importance (normalized gain, latest run)</h2>"
+        "<h2>Feature importance (normalized, latest run)</h2>"
         f"<table><tr><th>feature</th><th>share</th></tr>{rows}</table>"
+    )
+
+
+def _sparkline(curve: list[list[float]], width: int = 120, height: int = 24) -> str:
+    ys = [point[1] for point in curve]
+    low = min(ys)
+    span = (max(ys) - low) or 1.0
+    last = max(len(curve) - 1, 1)
+    points = " ".join(
+        f"{round(i / last * width, 1)},{round(height - (y - low) / span * height, 1)}"
+        for i, y in enumerate(ys)
+    )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+        f'xmlns="http://www.w3.org/2000/svg"><polyline points="{points}" fill="none" '
+        'stroke="var(--accent)" stroke-width="1.5"/></svg>'
+    )
+
+
+def _partial_dependence_section(result: NodeResult | None) -> str:
+    if result is None or not result.partial_dependence:
+        return ""
+    rows = "".join(
+        f"<tr><td><code>{html.escape(feature)}</code></td>"
+        f"<td>{_sparkline(curve)}</td>"
+        f"<td>{curve[0][1]:.3f} &rarr; {curve[-1][1]:.3f}</td></tr>"
+        for feature, curve in result.partial_dependence.items()
+    )
+    return (
+        "<h2>Partial dependence (avg prediction across each feature's range)</h2>"
+        f"<table><tr><th>feature</th><th>response</th><th>low &rarr; high</th></tr>{rows}</table>"
     )
 
 
@@ -238,6 +287,7 @@ def _model_card(manifest: Manifest, uid: str, result: NodeResult | None) -> str:
     <p>include: <code>{html.escape(str(features.get("include", ["*"])))}</code><br>
        exclude: <code>{html.escape(str(features.get("exclude", [])))}</code></p>
     {_importance_table(result)}
+    {_partial_dependence_section(result)}
     <h2>Hyperparameters</h2>
     <table><tr><th>param</th><th>value</th><th>resolved auto</th></tr>{hyper_rows}</table>
     <h2>Metrics (latest run)</h2>

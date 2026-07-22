@@ -15,6 +15,23 @@ Common flags behave identically everywhere they appear:
 are dropped otherwise); it has no effect under `--log-format json` (which
 always carries every event) or `--quiet` (which suppresses all events).
 
+Set `MBT_LOG_FILE=<path>` to additionally append every event, as redacted
+JSON lines, to that file: a durable machine-readable timeline for scheduled
+jobs that keeps the human console intact (unlike `--log-format json`, which
+replaces it) and captures even under `--quiet`. The path is relative to where
+you run mbt; parent directories are created, and each run appends (every event
+carries a `run_id` to demultiplex overlapping runs).
+
+Set `MBT_OTEL=1` (needs the `otel` extra: `pip install 'mbt-core[otel]'`) to
+also emit each command as an OpenTelemetry trace - one root span per command
+with a child span per node, carrying status and timing.
+mbt emits spans against your process's globally-configured tracer and does not
+stand up an exporter itself, so wire the destination through the standard
+`OTEL_*` environment (or `opentelemetry-instrument`); with no provider
+installed the spans are a no-op.
+Setting `MBT_OTEL` without the extra fails loudly rather than dropping
+telemetry silently.
+
 Path semantics: paths you type on the command line (`--state`,
 `--manifest`, `--from-file`, `--profiles-dir`) are relative to where you
 run mbt, shell-style; relative paths inside config (profiles' `file://`
@@ -32,15 +49,17 @@ wherever mbt is invoked from. URIs (`s3://...`) pass through untouched.
 | `mbt test` | Data checks/tests + gate re-evaluation of registered versions; never trains |
 | `mbt score` | Batch-score scoring pipelines with their registered champions: input checks, predictions to the configured sink, shift monitors (ADR-20) |
 | `mbt monitor` | Evaluate matured predictions against arrived labels; realized-metric gates, each prediction run evaluated once (ADR-21) |
+| `mbt predictions ls [--output table\|json]` / `mbt predictions show <run_key>` | Inspect the prediction store: which runs exist, which matured, which were evaluated, and their realized metrics (read-only over the score/monitor ledger) |
 | `mbt evaluate --model X [--version N \| --stage S] [--gates]` | Re-evaluate a registered artifact on fresh data |
 | `mbt promote --model X --to production [--version N] [--force]` | Gate-verified stage transition |
 | `mbt promote --from-file promotions.yml` | GitOps promotion from a reviewed file |
+| `mbt rollback --model X [--to-version N] [--force]` | Revert the production champion to a prior version (incident rollback) |
 | `mbt ls [--output table\|name\|path\|json]` | List resources with selector support |
 | `mbt show <name> [--output yaml\|json]` | One resource's compiled config |
 | `mbt state diff --state <path-or-URI> [--deep-snapshot] [--output table\|json]` | What changed vs a reference manifest (deep-snapshot both sides to ignore mtime churn) |
-| `mbt docs generate` / `mbt docs serve` | Model cards (metrics, gates, feature importance) + lineage site |
+| `mbt docs generate` / `mbt docs serve` | Model cards (metrics, gates, feature importance, partial dependence) + lineage site |
 | `mbt run-operation <macro> --args '<dict>'` | Render a macro with the compile context |
-| `mbt clean [--artifacts-older-than 30d] [--dry-run]` | Delete `target/`, or prune old artifact-store run prefixes (champions and the latest run always survive) |
+| `mbt clean [--artifacts-older-than 30d] [--dry-run]` | Delete `target/` (and age out leaked `mbt-job-*` error payloads older than 7 days), or prune old artifact-store run prefixes (champions and the latest run always survive) |
 
 ## Selector grammar
 

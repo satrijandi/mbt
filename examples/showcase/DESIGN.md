@@ -33,7 +33,7 @@ The showcase must exercise mbt's actual differentiators, not generic MLOps plumb
 **Compose-first, one runner image, k3d/ArgoCD as an optional fidelity profile.**
 This synthesizes three competing designs that were independently drafted and adversarially judged; the judges' consensus and every confirmed fatal-flaw fix are folded in below.
 
-- One `docker-compose.yml` under `examples/showcase/compose/` with profiles `core`, `spark`, `orch`, `obs`, `dev`, so tests boot only what they assert.
+- One `docker-compose.yml` under `examples/showcase/compose/` with profiles `core`, `spark`, `orch`, `obs`, `dev`, `ci`, so tests boot only what they assert.
 - One bridge network; Woodpecker step containers join it (`WOODPECKER_BACKEND_DOCKER_NETWORK`) so CI steps resolve `spark-master`, `seaweedfs`, `mlflow` by name.
 - **One runner image** used everywhere: Jupyter kernel, Spark master/worker runtime, every Woodpecker step, Airflow task container, and the deployable unit base.
   Same image everywhere makes ADR-19 `env_digest` verification true by construction instead of an ops problem.
@@ -66,7 +66,7 @@ The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `
 | runner (built, not run) | `zot:5000/mbt/runner:<tag>` from `python:3.11-slim@<digest>` + JDK 17 + Spark 3.5.8 + hadoop-aws jars + workspace wheels + `mbt-h2o[sparkling]` + `mbt-core[s3]` + `mbt-mlflow` + jupyterlab | Universal environment; env_digest identity by construction |
 | gitea | `gitea/gitea:1.27.0-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
 | woodpecker server + agent | `woodpeckerci/woodpecker-*:v3.16.0` | CI: pr-check, prod-build, promote pipelines; agent mounts docker socket; repo marked trusted for the `/workspace` volume; split-horizon URLs (public WOODPECKER_HOST + forge OAuth host, in-network webhook host) so the Gitea OAuth login works from a host browser |
-| seaweedfs | `chrislusf/seaweedfs:4.39` (`weed server -s3`) | S3-compatible object store: `lake` bucket (feature store parquet, read via s3a://) and `mbt` bucket (artifact store `s3://mbt/churn/artifacts`); the filer UI is published for humans to browse the lake |
+| seaweedfs | `chrislusf/seaweedfs:4.39` (`weed server -s3`) | S3-compatible object store: `mbt-lake` bucket (feature store parquet, read via s3a://) and `mbt-artifacts` bucket (artifact store `s3://mbt-artifacts/churn_lake`); the filer UI is published for humans to browse the lake |
 | spark-master, spark-worker | runner image running `start-master.sh` / `start-worker.sh` | Standalone cluster: pushdown joins/sampling/windows + sparkling H2O training |
 | mlflow | runner image (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode, needs >= 2.9); champion source of truth |
 | jupyterlab | runner image + `jupyter lab` | DS workbench; terminal runs the same `mbt` as CI |
@@ -75,7 +75,7 @@ The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `
 | prometheus + pushgateway | `prom/prometheus:v3.13`, `prom/pushgateway:v1.11` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) |
 | grafana | `grafana/grafana:13` | File-provisioned dashboards + unified alerting with owner-label routing (no separate Alertmanager container) |
 | webhook-sink | ~40-line python recorder with `GET /requests` | Convergence point for `MBT_ALERT_WEBHOOK` curls and Grafana contact points; human-readable in demos, assertable in tests |
-| bootstrap (one-shot) | runner image running `bootstrap.sh` | Idempotent seeding: Gitea org/repos/tokens/branch protection, Woodpecker activation + secrets, buckets (retention explicitly disabled), seed data upload, repo pushes, image build+push |
+| bootstrap (one-shot) | runner image running `scripts/ci_bootstrap.py` | Idempotent seeding: Gitea org/repos/tokens/branch protection, Woodpecker activation + secrets, buckets (retention explicitly disabled), seed data upload, repo pushes, image build+push |
 
 Registry addressing: in-network `zot:5000` with documented insecure-registries daemon config is the default; `127.0.0.1:5000` publishing is the fallback and must be smoke-tested on Docker Desktop for macOS first (the daemon lives in a VM there).
 
@@ -108,14 +108,14 @@ Note: boto3's env chain is the only S3 endpoint mechanism (nothing in mbt parses
 
 | Target | Data | Compute/training | Registry/artifacts | Use |
 |---|---|---|---|---|
-| `dev` | spark `master: local[2]`, s3a to lake | h2o local backend, `sample_fraction: 0.1` | shared MLflow, `s3://mbt/...` | DS fast inner loop |
+| `dev` | spark `master: local[2]`, s3a to lake | h2o local backend, `sample_fraction: 0.1` | shared MLflow, `s3://mbt-artifacts/...` | DS fast inner loop |
 | `ci` | same as dev | same as dev | **per-run sqlite MLflow + local artifact store** | PR checks: green PRs must never register versions or re-point the shared `staging` alias; tradeoff: champion gates render "none (bootstrap)" in PR comments, documented |
-| `prod` | spark `master: spark://spark-master:7077` | `h2o_backend: sparkling`, driver-host conf per section 2 | shared MLflow, `s3://mbt/...` | Prod builds, weekly retrain |
+| `prod` | spark `master: spark://spark-master:7077` | `h2o_backend: sparkling`, driver-host conf per section 2 | shared MLflow, `s3://mbt-artifacts/...` | Prod builds, weekly retrain |
 | `prod_score` | **local adapter**, `root: /workspace/lake_local` | n/a (MOJO scoring is local-JVM by design; remote cluster is train-time only, and mbt-spark implements no contract-1.1 scoring methods) | shared MLflow | `mbt score` / `mbt monitor` |
 
 ### 4.4 Scoring resource
 
-`scoring/retention_scores.yml`: `model: churn_automl`, `stage: production`, `tags: [daily]`, input checks, PSI/KS shift monitors, `ground_truth` with a 14-day maturity window and realized-metric gates.
+`scoring/retention_scoring.yml`: `model: churn_automl`, `stage: production`, `tags: [daily]`, input checks, PSI/KS shift monitors, `ground_truth` with a 14-day maturity window and realized-metric gates.
 Scheduling lives entirely outside the YAML (there is no schedule field); Airflow selects via `--select tag:daily`.
 
 ### 4.5 Anchors and seed data (the determinism spine)
@@ -162,7 +162,7 @@ Every mbt surface is a batch job that exits, so there is no live scrape target; 
 - `scripts/push_metrics.py` (stdlib-only, baked into the runner image, zero new mbt source code so zero coverage-gate exposure) parses `target/run_results.json`, NOT stderr events (monitor values deliberately do not travel as typed events), and pushes gauges grouped by `(job=mbt, project, target, command, node)`, every series labeled with the spec's `owner`.
 - Metric names: `mbt_node_success`, `mbt_node_duration_seconds`, `mbt_test_metric{metric=}`, `mbt_realized_metric{metric=}`, `mbt_gate_passed`, `mbt_gate_margin{kind=threshold|champion|ground_truth}` (signed headroom, so alert rules never duplicate spec thresholds), `mbt_shift_value{monitor=,subject=,measure=}`, `mbt_shift_threshold`.
 - The four canonical alert rules, env-templated so tests shrink windows (staleness 60s in test mode, 8d in demo mode): gate failed, schedule stale, gate near-breach, shift breach.
-- Grafana: file-provisioned datasource + two dashboards (Model Health, Pipeline Ops) + unified alerting with owner-label notification policies (one fewer container than Alertmanager, same routing lesson); contact point forwards to webhook-sink.
+- Grafana: file-provisioned datasource + one dashboard (Model Health) + unified alerting with owner-label notification policies (one fewer container than Alertmanager, same routing lesson); contact point forwards to webhook-sink.
 - Tests assert alert firing via the Prometheus HTTP API (`ALERTS{alertstate="firing"}`), not webhook delivery timing.
 
 ## 8. The E2E test tier (the answer to "what kinds of tests")
@@ -219,24 +219,28 @@ examples/showcase/
   README.md                    # runbook: make up, golden path, URLs, RAM knobs, teardown,
                                # the two documented deviations (snapshot scheme, local scoring plane)
   DESIGN.md                    # this file
-  Makefile                     # up, down, image, demo, score, monitor, inject-drift, tamper, clean
+  Makefile                     # up, down, image, seed, demo, score, monitor, monthly, wide, inject-drift, clean
   .env.example
   images/runner/{Dockerfile,constraints.txt,entrypoint.sh}
-  compose/docker-compose.yml   # profiles: core, spark, orch, obs, dev (+ argocd)
+  compose/docker-compose.yml   # profiles: core, spark, orch, obs, dev, ci (+ argocd)
   compose/{gitea,seaweedfs,prometheus,grafana,airflow}/...
-  bootstrap/{bootstrap.sh,seed_lake.py,inject_drift.py}
+  bootstrap/{seed_lake.py,sync_lake.py,inject_drift.py,webhook_sink.py}
   project/                     # the churn mbt project (source of truth; pushed into Gitea)
     .woodpecker/{pr-check.yml,prod-build.yml,promote.yml}
-    scripts/{run_mbt.sh,push_metrics.py,gitea_pr_comment.py,anchor.sh}
+    scripts/{run_mbt.sh,push_metrics.py,gitea_pr_comment.py,select_features.py}
     ...
   deploy/                      # the deploy repo source (images.env, DAGs; + k8s/ for the argocd profile)
 tests/
   test_showcase_infra.py       # SHOW-01/02/15
-  test_showcase_ds_loop.py     # SHOW-03/04
-  test_showcase_ci.py          # SHOW-05/06/07
+  test_showcase_ci.py          # SHOW-05/06/07/10
+  test_showcase_lifecycle.py   # SHOW-03/04 + 10/11/12/13 (CLI-driven)
   test_showcase_provenance.py  # SHOW-08/09
-  test_showcase_serving.py     # SHOW-10/11/12/13
+  test_showcase_scheduling.py  # SHOW-11/13 + SHOW-17 scheduled path
   test_showcase_obs.py         # SHOW-14
+  test_showcase_k3d.py         # SHOW-16 (optional argocd/k3d)
+  test_showcase_monthly.py     # SHOW-17
+  test_showcase_make.py        # SHOW-18
+  test_showcase_wide.py        # SHOW-19 (ADR-22)
   showcase_utils.py
 ```
 
@@ -244,7 +248,7 @@ tests/
 
 1. **P1 Runner image + data/ML core**: seaweedfs, mlflow, spark, jupyterlab, seeded lake, dev/prod targets. Tests SHOW-01..04. Closes integration items A2 + A3.
 2. **P2 Git + CI loop**: gitea, woodpecker, bootstrap seeding, pipelines, exit-code wrapper, Gitea PR comments, state branch. Tests SHOW-05..07.
-3. **P3 Deployable unit + provenance**: zot, bake + push, commit-time anchors, oras artifacts, tamper target. Tests SHOW-08..09.
+3. **P3 Deployable unit + provenance**: zot, bake + push, commit-time anchors, oras artifacts, the tamper provenance test. Tests SHOW-08..09.
 4. **P4 Scheduling + CD + promotion**: airflow + postgres + git-sync, deploy repo, DAGs with exit-code routing, prod_score plane, promotion flow. Tests SHOW-10..13.
 5. **P5 Observability + docs**: prometheus/pushgateway/grafana, dashboards, rules, drift injection; docs page in mkdocs nav; one exactly-true sentence in v0.1-status; nightly workflow. Tests SHOW-14..15.
 6. **P6 (optional) ArgoCD fidelity profile**: k3d + ArgoCD over the same deploy repo. Test SHOW-16, local-only.

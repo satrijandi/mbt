@@ -1,11 +1,15 @@
 """Every workspace package must agree on one version and ship its license.
 
-A release edits eleven pyproject.toml files in lockstep; nothing else enforces
-that they stay in sync (the wheel-install e2e only checks the packages it
-happens to install). In the spirit of the cli-reference drift guard, this
-turns the release convention into a permanent check.
+A release edits the version in lockstep across the root plus ten package
+``pyproject.toml`` files AND each package's runtime ``__version__``; nothing
+else enforces that they stay in sync (the wheel-install e2e only checks the
+packages it happens to install). In the spirit of the cli-reference drift
+guard, this turns the release convention into a permanent check - and covers
+every package's ``__version__``, not just ``mbt`` core's. See CONTRIBUTING's
+"Releasing" section for the bump procedure.
 """
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -23,7 +27,14 @@ def test_all_package_versions_match_the_root_and_the_runtime() -> None:
     root = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     versions = {"pyproject.toml": root["project"]["version"], "mbt.__version__": mbt.__version__}
     for pyproject in PACKAGE_PYPROJECTS:
-        versions[pyproject.parent.name] = tomllib.loads(pyproject.read_text())["project"]["version"]
+        name = pyproject.parent.name
+        versions[name] = tomllib.loads(pyproject.read_text())["project"]["version"]
+        # ...and the package's runtime __version__ (only mbt core's was checked
+        # before, so an adapter's __version__ could silently drift on a release)
+        (init,) = (pyproject.parent / "src").glob("*/__init__.py")
+        match = re.search(r'__version__ = "([^"]+)"', init.read_text())
+        assert match, f"{name}: no __version__ in {init.name}"
+        versions[f"{name}.__version__"] = match.group(1)
     assert len(set(versions.values())) == 1, versions
 
 

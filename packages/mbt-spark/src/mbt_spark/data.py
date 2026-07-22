@@ -7,9 +7,14 @@ split assignment all push down as Spark SQL; each split lands as one
 parquet file in the shared mbt materialization, so training jobs reopen
 datasets without a Spark session.
 
-Sampling uses the same md5-threshold formula as the local and Snowflake
-adapters (``conv(substring(md5(key),1,15),16,10) % 1e6 < fraction*1e6``):
-same fraction -> same rows; smaller fractions are subsets of larger ones.
+Sampling and random splits use the canonical cross-adapter digest (F19): the
+unsigned LOWER 64 BITS of the md5 of the '|'-joined key -
+``conv(substring(md5(key), 17, 16), 16, 10)`` here, ``MD5_NUMBER_LOWER64`` on
+Snowflake, and the same hex-slice cast on local DuckDB - bucketed with
+``% SAMPLE_MODULUS``. The same fraction keeps the same rows, smaller fractions
+are subsets of larger ones, and the same key lands in the same sample/split
+bucket on every backend, so a model validated locally trains on the same
+partition in the warehouse.
 """
 
 import glob as globlib
@@ -20,7 +25,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mbt_adapter_base import DatasetLocator, DatasetSpec, parse_time_offset
+from mbt_adapter_base import (
+    DatasetLocator,
+    DatasetSpec,
+    ScoringInputSpec,
+    ScoringOutputSpec,
+    parse_time_offset,
+)
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
     MaterializationError,
@@ -32,6 +43,8 @@ from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
+
+    from mbt_adapter_base.predictions import LocalPredictionStore
 
 
 class SparkAdapterError(RuntimeError):
@@ -59,25 +72,42 @@ def _interval_sql(count: int, unit: str) -> str:
 
 def key_hash_sql(key_columns: list[str], salt: str = "") -> str:
     """Deterministic 0..SAMPLE_MODULUS-1 bucket from a stable row key
-    (Spark SQL; md5 is stable across Spark versions, unlike hash())."""
+    (Spark SQL; md5 is stable across Spark versions, unlike hash()).
+
+    The digest is the canonical cross-adapter one (F19): the unsigned lower 64
+    bits of the md5 - the last 16 hex chars, which ``conv`` parses as an
+    unsigned 64-bit value (its decimal string exceeds BIGINT for high bits, so
+    it goes through DECIMAL(20,0)) - matching Snowflake's
+    ``MD5_NUMBER_LOWER64`` and the local DuckDB hex-slice cast exactly.
+    """
     parts = ", ".join(f"COALESCE(CAST({_quote(c)} AS STRING), '')" for c in key_columns)
     if salt:
         safe = salt.replace("'", "''")
         parts = f"'{safe}', {parts}"
-    digest = f"conv(substring(md5(concat_ws('|', {parts})), 1, 15), 16, 10)"
-    return f"pmod(CAST({digest} AS BIGINT), {SAMPLE_MODULUS})"
+    digest = f"conv(substring(md5(concat_ws('|', {parts})), 17, 16), 16, 10)"
+    return f"CAST(pmod(CAST({digest} AS DECIMAL(20, 0)), {SAMPLE_MODULUS}) AS BIGINT)"
 
 
 class SparkDataAdapter:
     """DataAdapter over Spark-readable tables."""
 
     name = "spark"
+    #: Source formats this adapter can read; the compiler rejects a referenced
+    #: source declaring any other format before anything runs (F23). Spark is
+    #: the one adapter that also reads Delta tables (`_read`).
+    supported_source_formats = frozenset({"parquet", "delta"})
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self.master: str = str(config.get("master", "local[*]"))
         self.conf: dict[str, Any] = dict(config.get("conf", {}))
         self.root: str | None = config.get("root")  # optional prefix for path sources
+        from mbt_adapter_base.predictions import resolve_predictions_root
+
+        #: Where staged prediction runs land (contract 1.1); joined with the
+        #: scoring node's output.path. Unset, defaults to an ephemeral
+        #: <tmpdir>/mbt-predictions (never the project dir), like Snowflake (F20).
+        self.predictions_root: str = str(resolve_predictions_root(config.get("predictions_root")))
         self._session: SparkSession | None = None
 
     def _spark(self) -> "SparkSession":
@@ -114,17 +144,17 @@ class SparkDataAdapter:
     # -- snapshots ------------------------------------------------------------------
 
     def snapshot_id(self, source: SourceTableLike, deep: bool = False) -> str:
-        """Local paths: (path, size, mtime) listing - cheap, no Spark session.
-        URIs/catalog tables: hash of the table's input file listing.
+        """Local paths: ``(path, size, mtime)`` listing - cheap, no Spark
+        session - or, with ``deep``, a content hash of each file so a fresh
+        checkout (which rewrites mtimes) does not flag everything as modified
+        (ADR-11), mirroring the local adapter's deep snapshot.
+        URIs/catalog tables: hash of the table's input file listing, which is
+        already mtime-independent for immutable (Delta/Iceberg/committed
+        parquet) files, so deep and shallow agree there.
 
         The branch is decided on the RESOLVED path: a relative table path
         under a URI root (e.g. root s3://lake + path t/*.parquet) is a URI
         source, and locally globbing it would always find nothing."""
-        if deep:
-            raise SparkAdapterError(
-                "--deep-snapshot is not supported by the spark adapter yet",
-                hint="rely on Delta/Iceberg immutable files, or file listings",
-            )
         digest = hashlib.sha256()
         resolved = self._resolve_path(source) if source.path is not None else None
         if resolved is not None and "://" not in resolved:
@@ -143,8 +173,12 @@ class SparkDataAdapter:
             if not files:
                 raise SparkAdapterError(f"no files under source path {pattern!r}")
             for file in files:
-                stat = file.stat()
-                digest.update(f"{file}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
+                if deep:
+                    digest.update(f"{file}\n".encode())
+                    digest.update(file.read_bytes())  # content, not mtime
+                else:
+                    stat = file.stat()
+                    digest.update(f"{file}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
         else:
             for uri in sorted(self._read(source).inputFiles()):
                 digest.update(uri.encode())
@@ -203,6 +237,22 @@ class SparkDataAdapter:
             f"dataset {ctx.node.unique_id}: materialized {sum(written.values())} rows: "
             + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
         )
+        coverage: dict[str, int] | None = None
+        if spec.inputs is not None and spec.inputs.population is not None:
+            # Label-join coverage (F21): spine rows vs rows surviving the inner
+            # label join, counted before filters/sampling/windows.
+            tables = {uid: self._read(table) for uid, table in ctx.source_tables.items()}
+            coverage = {
+                "spine_rows": self._spine_frame(spec, tables).count(),
+                "matched_rows": self._base_frame(spec, ctx).count(),
+            }
+            if coverage["spine_rows"] > 0:
+                fraction = coverage["matched_rows"] / coverage["spine_rows"]
+                ctx.events.emit(
+                    f"dataset {ctx.node.unique_id}: label join matched "
+                    f"{coverage['matched_rows']} of {coverage['spine_rows']} "
+                    f"spine rows ({fraction:.1%})"
+                )
         write_materialization_metadata(
             output_dir,
             snapshot_id=ctx.node.snapshot_id,
@@ -212,19 +262,27 @@ class SparkDataAdapter:
             windows=ctx.resolved_windows,
             sample_fraction=ctx.sample_fraction,
             row_counts=written,
+            label_join_coverage=coverage,
         )
         _ = spark  # session kept alive for the adapter's lifetime
         return MaterializedDatasetHandle(output_dir, adapter=self.name)
+
+    def _spine_frame(self, spec: DatasetSpec, tables: dict[str, "DataFrame"]) -> "DataFrame":
+        """The spine + feature joins, before any label join (shared by
+        ``_base_frame`` and the label-join coverage counts, F21)."""
+        assert spec.inputs is not None
+        frame = tables[spec.inputs.spine]
+        how = "left" if spec.inputs.join == "left" else "inner"
+        for feature_uid, using in spec.inputs.feature_entries:
+            frame = frame.join(tables[feature_uid], on=using, how=how)
+        return frame
 
     def _base_frame(self, spec: DatasetSpec, ctx: DataBuildContext) -> "DataFrame":
         tables = {uid: self._read(table) for uid, table in ctx.source_tables.items()}
         if spec.inputs is None:
             assert spec.source is not None
             return tables[spec.source]
-        frame = tables[spec.inputs.spine]
-        how = "left" if spec.inputs.join == "left" else "inner"
-        for feature_uid, using in spec.inputs.feature_entries:
-            frame = frame.join(tables[feature_uid], on=using, how=how)
+        frame = self._spine_frame(spec, tables)
         if spec.inputs.population is None:
             return frame
         # The label joins the population spine last (always inner - an example
@@ -250,6 +308,31 @@ class SparkDataAdapter:
                 conditions.append(f"{_quote(alias)} = {_quote(column)}")
         frame = frame.join(label, on=F.expr(" AND ".join(conditions)), how="inner")
         return frame.drop(*renames.values())
+
+    # -- source-level checks (F2/F21) ----------------------------------------------------
+
+    def count_source_duplicates(self, source: SourceTableLike, columns: list[str]) -> int:
+        """Distinct COMPOSITE keys appearing more than once in the raw source
+        (pre-join): the 1:1 join-cardinality contract behind the ``unique``
+        check's ``source:`` mode (F2). Null keys are ignored, as in dbt."""
+        frame = self._read(source).dropna(subset=list(columns))
+        return frame.groupBy(*columns).count().filter("count > 1").count()
+
+    def read_source_distinct(self, source: SourceTableLike, column: str) -> Any:
+        """DISTINCT non-null values of one raw source column as a
+        single-column ``value`` arrow table - the parent side of the
+        ``relationships`` check (F2/F21)."""
+        import pyarrow as pa
+
+        rows = (
+            self._read(source)
+            .select(column)
+            .dropna()
+            .distinct()
+            .withColumnRenamed(column, "value")
+            .collect()
+        )
+        return pa.table({"value": [row["value"] for row in rows]})
 
     def _write_splits(
         self,
@@ -281,8 +364,17 @@ class SparkDataAdapter:
             fractions["validation"] = float(spec.split.validation)
         fractions["test"] = float(spec.split.test)
         low = 0.0
-        for split, fraction in fractions.items():
-            lo, hi = int(low * SAMPLE_MODULUS), int((low + fraction) * SAMPLE_MODULUS)
+        entries = list(fractions.items())
+        for index, (split, fraction) in enumerate(entries):
+            lo = int(low * SAMPLE_MODULUS)
+            # the final split's upper bound is pinned to the modulus, mirroring
+            # the local and snowflake adapters, so no bucket can fall through a
+            # float-accumulation gap (F19)
+            hi = (
+                SAMPLE_MODULUS
+                if index == len(entries) - 1
+                else int((low + fraction) * SAMPLE_MODULUS)
+            )
             frame = base.filter(f"{bucket} >= {lo} AND {bucket} < {hi}")
             written[split] = self._write_one(frame, output_dir / f"{split}.parquet")
             low += fraction
@@ -326,6 +418,103 @@ class SparkDataAdapter:
                 f"{handle.snapshot_id} != {locator.snapshot_id}"
             )
         return handle
+
+    # -- batch scoring (contract 1.1, ADR-20/21) -------------------------------------
+
+    def _scoring_frame(self, spec: ScoringInputSpec, ctx: DataBuildContext) -> "DataFrame":
+        """Spine + feature joins for a scoring batch - the training relation
+        (``_base_frame``) minus the label (scoring inputs are unlabeled)."""
+        tables = {uid: self._read(table) for uid, table in ctx.source_tables.items()}
+        if spec.inputs is None:
+            assert spec.source is not None
+            return tables[spec.source]
+        frame = tables[spec.inputs.spine]
+        how = "left" if spec.inputs.join == "left" else "inner"
+        for feature_uid, using in spec.inputs.feature_entries:
+            frame = frame.join(tables[feature_uid], on=using, how=how)
+        return frame
+
+    def build_scoring_input(
+        self, spec: ScoringInputSpec, ctx: DataBuildContext
+    ) -> MaterializedDatasetHandle:
+        """Materialize one unlabeled Spark batch as a single ``score`` split.
+
+        Mirrors ``build_dataset`` (spine + feature joins, filters, key sampling,
+        the ``score`` window) but writes one ``score.parquet`` with no label.
+        Zero rows is a warning, not an error - an empty nightly batch is
+        legitimate (unlike a training split; ADR-20). No snapshot verification:
+        the scoring input (and the monitor's arriving labels, read through this
+        same path) is expected to change every run, so a pinned manifest scores
+        the live data instead of hard-failing on drift the way a dataset does
+        (R2-10)."""
+        self._spark()  # session kept alive for the adapter's lifetime
+        output_dir = ctx.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for stale in output_dir.glob("*"):
+            stale.unlink()
+
+        base = self._scoring_frame(spec, ctx)
+        for clause in spec.filters:
+            base = base.filter(clause)
+        if not 0.0 < ctx.sample_fraction <= 1.0:
+            raise SparkAdapterError(f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}")
+        if ctx.sample_fraction < 1.0:
+            keys = spec.sample_key_columns
+            if not keys:
+                raise SparkAdapterError(
+                    "sampling a Spark scoring input needs a stable row identity",
+                    hint="declare sample_key on the input (or use the inputs form, "
+                    "whose join_key is used)",
+                )
+            threshold = int(ctx.sample_fraction * SAMPLE_MODULUS)
+            base = base.filter(f"{key_hash_sql(keys)} < {threshold}")
+
+        if spec.time_column is not None:
+            window = ctx.resolved_windows.get("score")
+            if window is not None:
+                start, end = window
+                time_sql = f"CAST({_quote(spec.time_column)} AS TIMESTAMP)"
+                base = base.filter(
+                    f"{time_sql} >= to_timestamp('{_iso_to_ts(start)}') AND "
+                    f"{time_sql} < to_timestamp('{_iso_to_ts(end)}')"
+                )
+
+        count = self._write_one(base, output_dir / "score.parquet")
+        # A plain string the EventSink wraps in a LogMessage (adapters cannot
+        # import core event models); mirrors the local and snowflake adapters.
+        if count == 0:
+            ctx.events.emit(
+                f"scoring input {ctx.node.unique_id}: materialized 0 rows; nothing to score"
+            )
+        else:
+            ctx.events.emit(
+                f"scoring input {ctx.node.unique_id}: materialized {count} rows to score"
+            )
+        write_materialization_metadata(
+            output_dir,
+            snapshot_id=ctx.node.snapshot_id,
+            dataset=ctx.node.name,
+            label_column="",  # unlabeled by design (ADR-20)
+            time_column=spec.time_column,
+            windows=ctx.resolved_windows,
+            sample_fraction=ctx.sample_fraction,
+            row_counts={"score": count},
+        )
+        return MaterializedDatasetHandle(output_dir, adapter=self.name)
+
+    def open_predictions(self, output: ScoringOutputSpec) -> "LocalPredictionStore":
+        """Prediction store for a Spark scoring pipeline.
+
+        v1 stages prediction runs as parquet under ``predictions_root`` using the
+        shared local layout (ADR-21's sanctioned reuse: "warehouse adapters can
+        reuse it for staged exports"), the same stance as the Snowflake adapter;
+        a lakehouse-table-backed store is the ADR-23 v2 design, gated on live
+        verification. ``predictions_root`` (adapter config; unset, an ephemeral
+        ``<tmpdir>/mbt-predictions``) is joined with the scoring node's
+        ``output.path``."""
+        from mbt_adapter_base.predictions import LocalPredictionStore
+
+        return LocalPredictionStore(Path(self.predictions_root) / output.path)
 
 
 def _iso_to_ts(iso: str) -> str:

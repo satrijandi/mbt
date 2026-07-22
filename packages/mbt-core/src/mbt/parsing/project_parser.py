@@ -405,11 +405,29 @@ def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: Par
 
 
 def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
-    """Warn on random-split configurations that invite leakage (FR-RES-09).
+    """Warn on split configurations that invite leakage (FR-RES-09).
 
     Warnings, not errors: a random split over truly exchangeable rows is
     legitimate; these flag the configurations that usually are not.
     """
+    # Temporal split + a label horizon but no embargo (R2-7): rows near the
+    # train boundary have their labels observed inside the evaluation window and
+    # leak. The embargo mechanism exists; guide the user to actually set it.
+    label_offset = spec.inputs.label_time_offset if spec.inputs is not None else None
+    if (
+        spec.split.strategy is SplitStrategy.TEMPORAL
+        and label_offset is not None
+        and spec.split.embargo is None
+    ):
+        report.warning(
+            "temporal split with a label 'time_offset' but no 'split.embargo': "
+            "training rows near the boundary have labels observed inside the "
+            "evaluation window and can leak into it",
+            file=rel,
+            resource=uid,
+            field_path="/split/embargo",
+            hint=f"set split.embargo to at least the label horizon ({label_offset})",
+        )
     if spec.split.strategy is not SplitStrategy.RANDOM:
         return
     if spec.split.time_column is not None:
@@ -556,6 +574,15 @@ def _check_adapter(
             resource=uid,
             field_path="/task",
             hint=f"supported tasks: {supported}",
+        )
+        return
+    if spec.calibration is not None and not getattr(adapter, "supports_calibration", False):
+        report.error(
+            f"adapter {spec.adapter!r} does not support calibration",
+            file=rel,
+            resource=uid,
+            field_path="/calibration",
+            hint="drop 'calibration', or use a built-in adapter (all support it)",
         )
         return
     validate_hyperparameters(

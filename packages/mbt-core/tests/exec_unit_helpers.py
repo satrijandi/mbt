@@ -157,6 +157,7 @@ def make_inline_runtime(
         adapter=adapter,
         handle=transformed,
         transformed=transformed,
+        base_handle=base,
         base_profile=base.profile(),
         hooks=hooks,
         builtin_specs=builtin_specs or [],

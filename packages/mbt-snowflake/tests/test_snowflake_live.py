@@ -349,6 +349,27 @@ def test_push_down_sampling_reproducible_and_monotone_live(
     assert 0 < len(quarter) < len(half_a) < len(full) == len(live.rows)
 
 
+def test_md5_number_lower64_matches_the_cross_adapter_reference(live: LiveWarehouse) -> None:
+    """F19: the canonical cross-adapter digest is defined as Snowflake's
+    MD5_NUMBER_LOWER64 (the unsigned lower 64 bits of the md5, i.e. the last
+    16 hex chars as an unsigned integer). The local DuckDB and Spark adapters
+    - and the hermetic stub's emulation macro - pin their SQL to a Python
+    reference of that definition; this test closes the loop by asserting the
+    REAL engine agrees with the reference, so cross-backend split/sample
+    parity rests on vendor behavior, not on our reading of the docs."""
+    import hashlib
+
+    probes = ["mbt", "7|42", "a|2026-01-31", "", "Snowflake"]
+    cursor = SnowflakeDataAdapter(live.config)._connect().cursor()
+    for probe in probes:
+        literal = probe.replace("'", "''")
+        cursor.execute(f"SELECT MD5_NUMBER_LOWER64('{literal}')")
+        row = cursor.fetchone()
+        assert row is not None
+        expected = int(hashlib.md5(probe.encode()).hexdigest()[16:32], 16)
+        assert int(row[0]) == expected, f"digest mismatch for {probe!r}"
+
+
 def test_snapshot_tokens_track_dml_and_guard_pins(live: LiveWarehouse, tmp_path: Path) -> None:
     """SYSTEM$LAST_CHANGE_COMMIT_TIME and HASH_AGG tokens are stable while
     data holds still, move on DML, and a stale manifest pin fails the build."""

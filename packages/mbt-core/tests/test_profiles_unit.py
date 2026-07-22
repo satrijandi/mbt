@@ -118,6 +118,14 @@ def test_non_mapping_profiles(tmp_path: Path) -> None:
         load_profiles("demo", tmp_path)
 
 
+def test_non_utf8_profiles_is_a_config_error(tmp_path: Path) -> None:
+    # A non-UTF-8 byte used to escape as UnicodeDecodeError and hit the CLI's
+    # "Internal error" catch-all; it must surface as a friendly ConfigError.
+    (tmp_path / "profiles.yml").write_bytes(b"demo:\n  target: dev\n\xff\xfe")
+    with pytest.raises(ConfigError, match=r"profiles\.yml is not valid UTF-8"):
+        load_profiles("demo", tmp_path)
+
+
 def test_missing_project_entry(tmp_path: Path) -> None:
     write_profiles(tmp_path)
     with pytest.raises(ConfigError, match="no entry for project 'other'") as excinfo:

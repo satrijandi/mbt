@@ -20,6 +20,7 @@ them to forward the same event stream, read the same result file, and
 honor the same timeout config key.
 """
 
+import contextlib
 import json
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,35 @@ from mbt.contracts import JobResult, TrainingJob
 from mbt.events import get_bus
 from mbt.events.models import Event, JobLine
 from mbt.exceptions import ConfigError
+
+#: Prefix for per-job payload dirs under the system temp dir. Successful jobs
+#: clean theirs up; error payloads stay for debugging (``mbt clean`` ages them).
+JOB_DIR_PREFIX = "mbt-job-"
+
+
+def sweep_stale_job_payloads(cutoff: datetime, *, root: Path | None = None) -> list[Path]:
+    """Remove leaked ``mbt-job-*`` payload dirs older than ``cutoff``.
+
+    Error payloads are kept for debugging and never self-clean, so they
+    accumulate; ``mbt clean`` calls this to age out the stale ones. Recent
+    payloads (mtime >= cutoff) stay so an in-progress reproduction survives.
+    Best-effort: unreadable or unremovable entries (a shared temp dir, a racing
+    process) are skipped, not fatal.
+    """
+    base = root if root is not None else Path(tempfile.gettempdir())
+    limit = cutoff.timestamp()
+    removed: list[Path] = []
+    for entry in sorted(base.glob(f"{JOB_DIR_PREFIX}*")):
+        try:
+            stat = entry.stat()  # follows symlinks: a broken one raises
+        except OSError:
+            continue  # a broken link, or a racing process already removed it
+        if not entry.is_dir() or stat.st_mtime >= limit:
+            continue
+        with contextlib.suppress(OSError):
+            shutil.rmtree(entry)
+            removed.append(entry)
+    return removed
 
 
 def result_path_for(job_path: Path) -> Path:
@@ -79,7 +110,7 @@ class LocalComputeAdapter:
         self.job_timeout_seconds = parse_job_timeout(self.config)
 
     def submit(self, job: TrainingJob) -> LocalJobHandle:
-        job_dir = Path(tempfile.mkdtemp(prefix="mbt-job-"))
+        job_dir = Path(tempfile.mkdtemp(prefix=JOB_DIR_PREFIX))
         job_path = job_dir / "job.json"
         job_path.write_text(job.model_dump_json())
         process = subprocess.Popen(

@@ -12,9 +12,16 @@ permissions:
 env:
   MBT_STATE_URI: state/prod/latest.json
 
+# Serialize prod builds: overlapping runs both publish the state baseline, so
+# never cancel one in flight - queue the next instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   prod-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

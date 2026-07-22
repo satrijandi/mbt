@@ -80,6 +80,16 @@ def test_broken_yaml_file_and_non_mapping_entry(
     assert any("entry 0 under 'datasets' must be a mapping" in m for m in messages)
 
 
+def test_non_utf8_spec_file_is_a_parse_error(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    # A non-UTF-8 byte used to escape as UnicodeDecodeError and hit the CLI's
+    # "Internal error" catch-all; it must be collected as a parse error.
+    (demo_project / "datasets/binary.yml").write_bytes(b"datasets:\n\xff\xfe broken")
+    parsed = parse(demo_project, fake_registry)
+    assert any("not valid UTF-8" in m for m in error_messages(parsed))
+
+
 # -- sources and metrics -----------------------------------------------------------
 
 
@@ -288,6 +298,103 @@ def test_adapter_capability_error_branches(
     assert any("fussy adapter says no" in m for m in messages)
     assert any("fussy adapter is uneasy" in m for m in warning_messages(parsed))
     assert any("task 'survival' has no registered task schema" in m for m in messages)
+
+
+def test_calibration_on_unsupporting_adapter_is_rejected(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """Calibration is probed like task support: the fake adapter does not set
+    supports_calibration, so a model that asks for it fails at parse (R2-8)."""
+    write(
+        demo_project / "models/cal.yml",
+        """
+        models:
+          - name: cal_model
+            task: binary_classification
+            adapter: fake
+            owner: ds@example.com
+            dataset: ref('churn_training')
+            target: churned
+            evaluation: {protocol: {split: temporal}, metrics: [pr_auc]}
+            seed: 7
+            calibration: isotonic
+        """,
+    )
+    parsed = parse(demo_project, fake_registry)
+    errs = [i for i in parsed.report.errors if "does not support calibration" in i.message]
+    assert errs and "built-in adapter" in (errs[0].hint or "")
+
+
+def test_backtest_folds_accepted_on_a_path_adapter(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """The walk-forward backtest works on path adapters too (R2-7): a fold stages
+    to parquet like any split, so there is no adapter-kind gate at parse."""
+    register_unit_plugins(fake_registry)
+    write(
+        demo_project / "models/bt.yml",
+        """
+        models:
+          - name: bt_model
+            task: binary_classification
+            adapter: pathy
+            owner: ds@example.com
+            dataset: ref('churn_training')
+            target: churned
+            evaluation:
+              protocol: {split: temporal, backtest_folds: 3}
+              metrics: [pr_auc]
+            seed: 7
+        """,
+    )
+    parsed = parse(demo_project, fake_registry)
+    assert not [i for i in parsed.report.errors if "backtest" in i.message]
+
+
+def test_temporal_split_with_label_offset_warns_without_embargo() -> None:
+    """A population-spine dataset with a label time_offset but no split.embargo
+    invites boundary leakage (R2-7); the parser warns and names the horizon."""
+    from mbt.contracts import DatasetSpec
+    from mbt.parsing.errors import ParseReport
+    from mbt.parsing.project_parser import _validate_split_protocol
+
+    def _ds(embargo: str | None = None) -> DatasetSpec:
+        split: dict = {
+            "strategy": "temporal",
+            "time_column": "snapshot_date",
+            "train": "-180d:-28d",
+            "test": "-28d:now",
+        }
+        if embargo is not None:
+            split["embargo"] = embargo
+        return DatasetSpec.model_validate(
+            {
+                "name": "wide_churn",
+                "inputs": {
+                    "population": "source('lake', 'pop')",
+                    "label": {
+                        "source": "source('lake', 'lbl')",
+                        "using": ["id", "snapshot_date"],
+                        "time_offset": "1mo",
+                    },
+                    "features": [
+                        {"source": "source('lake', 'f')", "using": ["id", "snapshot_date"]}
+                    ],
+                },
+                "sample_key": "id",
+                "label": {"column": "y"},
+                "split": split,
+            }
+        )
+
+    report = ParseReport()
+    _validate_split_protocol(_ds(), "d.yml", "dataset.p.d", report)
+    warns = [w for w in report.warnings if "embargo" in w.message]
+    assert warns and "1mo" in (warns[0].hint or "")
+
+    clean = ParseReport()
+    _validate_split_protocol(_ds(embargo="1mo"), "d.yml", "dataset.p.d", clean)
+    assert not [w for w in clean.warnings if "embargo" in w.message]
 
 
 def test_tuning_engine_errors(demo_project: Path, fake_registry: AdapterRegistry) -> None:

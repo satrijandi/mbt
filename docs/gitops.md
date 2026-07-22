@@ -74,6 +74,11 @@ alert on failure through the `MBT_ALERT_WEBHOOK` secret (any
 Slack/Teams-style JSON webhook); unset, the step logs and skips - a
 scheduled retrain that fails silently violates continuous training, and a
 scoring or monitor run that fails silently hides broken serving.
+The three scheduled loops also ping a dead-man's-switch on success (the
+`MBT_HEARTBEAT_URL` secret, e.g. healthchecks.io or Cronitor), so a schedule
+that stops firing entirely - a mis-set cron, or GitHub auto-disabling the
+workflow after 60 days of repo inactivity - is caught by the missing ping,
+which a failure-only webhook can never detect.
 When a run fails or retrains more than you expected, the
 [troubleshooting runbook](troubleshooting.md) maps each deliberate
 failure mode (snapshot drift, env mismatch, unloadable champion,

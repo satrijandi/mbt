@@ -7,9 +7,16 @@ on:
     - cron: "0 5 * * 1"  # Mondays 05:00 UTC
   workflow_dispatch: {}
 
+# Serialize runs: a slow retrain still going when the next cron fires would
+# race to publish the champion/state baseline, so queue instead of cancelling.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   retrain:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,6 +28,17 @@ jobs:
           python scripts/generate_sample_data.py
       - name: Retrain weekly models (prod target)
         run: mbt build --target prod --select tag:weekly
+      - name: Heartbeat on success
+        # Dead-man's-switch: ping a cron-monitor (healthchecks.io, Cronitor, ...)
+        # so a schedule that silently stops - a mis-set cron, or GitHub disabling
+        # the workflow after 60 days of repo inactivity - is caught by the
+        # missing ping. Set the MBT_HEARTBEAT_URL secret to enable.
+        if: success()
+        env:
+          HEARTBEAT_URL: ${{ secrets.MBT_HEARTBEAT_URL }}
+        run: |
+          [ -z "$HEARTBEAT_URL" ] && { echo "MBT_HEARTBEAT_URL not set; skipping heartbeat"; exit 0; }
+          curl -fsS -m 10 --retry 3 "$HEARTBEAT_URL" || echo "heartbeat ping failed; the dead-man's-switch will alert on the missing ping"
       - name: Alert on failure
         # A silently failed scheduled retrain violates continuous training;
         # set the MBT_ALERT_WEBHOOK secret (Slack/Teams/PagerDuty webhook).

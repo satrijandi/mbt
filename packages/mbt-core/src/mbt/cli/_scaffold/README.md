@@ -31,7 +31,11 @@ mbt show churn_classifier
 - `macros/` - Jinja macros usable in any spec
 - `profiles.yml` - environments (dev/prod); keep secrets in `{{ env_var(...) }}`
 - `requirements.in` / `requirements.txt` - pinned toolchain for CI; regenerate
-  with hashes via `uv pip compile --generate-hashes requirements.in -o requirements.txt`
+  with hashes via `uv pip compile --generate-hashes requirements.in -o requirements.txt`.
+  The pins reference the mbt release tag `v__MBT_VERSION__`; until that tag
+  exists on the mbt repo, `pip install -r requirements.txt` fails with
+  `git checkout -q v__MBT_VERSION__ did not run successfully` - the
+  requirements.txt header documents the pin-a-commit workaround
 - `.github/workflows/` - PR check, prod build, promotion, weekly + monthly
   retrain, daily scoring, weekly ground-truth monitor
 - `scripts/publish_state.sh` / `fetch_state.sh` - the durable prod-state

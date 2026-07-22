@@ -31,6 +31,9 @@ class TargetConfig(BaseModel):
     tracking: AdapterRef
     registry: AdapterRef
     compute: AdapterRef = Field(default_factory=lambda: AdapterRef(adapter="local"))
+    #: Optional tuning-engine ops config (sampler, pruner knobs); the engine is
+    #: named by the model's tuning spec, so only ``config`` here is consumed.
+    tuning: AdapterRef | None = None
     artifact_store: str  # URI: file://, s3://
     threads: int = Field(default=1, ge=1)
     vars: dict[str, Any] = Field(default_factory=dict)
@@ -132,7 +135,14 @@ def load_profiles(
 ) -> LoadedProfiles:
     """Load, render, validate profiles.yml and select a target."""
     path = find_profiles_path(project_dir, profiles_dir)
-    text = path.read_text()
+    try:
+        text = path.read_text()
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"profiles.yml is not valid UTF-8: {exc}",
+            path=path,
+            hint="config files must be UTF-8 encoded text",
+        ) from exc
 
     def parse(source: str, label: str) -> dict[str, Any]:
         try:

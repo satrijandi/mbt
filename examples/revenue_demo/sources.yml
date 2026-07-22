@@ -1,0 +1,13 @@
+sources:
+  - name: lakehouse
+    description: Committed demo parquet standing in for a warehouse gold layer.
+    tables:
+      - name: subscribers
+        path: data/subscribers/*.parquet
+        description: One row per subscriber per monthly snapshot, with realized next-30-day spend.
+      - name: scoring_batch
+        path: data/scoring_batch/*.parquet
+        description: Fresh unlabeled subscribers to forecast (last week before the anchor).
+      - name: spend_outcomes
+        path: data/spend_outcomes/*.parquet
+        description: Realized next-30-day spend, arriving ~30 days after the forecast.

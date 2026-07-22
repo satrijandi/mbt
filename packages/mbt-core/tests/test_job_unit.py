@@ -40,14 +40,18 @@ from mbt.contracts import (
 from mbt.events import get_bus, set_bus
 from mbt.exceptions import AdapterError, ConfigError
 from mbt.execute.job import (
+    _backtest_folds,
+    _carve_calibration,
     _carve_validation,
     _champion_delta_bounds,
     _feature_importance,
+    _partial_dependence,
     _prepare,
     _render_adapter_ref,
     _run_score,
     _run_train,
     _run_tuning,
+    _walk_forward_backtest,
     main,
     run_job,
 )
@@ -351,6 +355,47 @@ def test_feature_importance_absent_returns_empty() -> None:
     assert _feature_importance(runtime, object()) == {}
 
 
+def test_feature_importance_prefers_shap_over_gain_when_available() -> None:
+    """The model card uses the data-grounded SHAP importance when the adapter
+    exposes it (tree adapters), falling back to model-intrinsic gain otherwise."""
+    shap_adapter = SimpleNamespace(
+        shap_importance=lambda model, handle, split: {"a": 0.7, "b": 0.3},
+        feature_importance=lambda model: {"a": 0.5, "b": 0.5},  # the gain fallback
+    )
+    runtime = SimpleNamespace(adapter=shap_adapter, handle=object())
+    assert _feature_importance(runtime, object()) == {"a": 0.7, "b": 0.3}  # SHAP preferred
+
+    gain_only = SimpleNamespace(feature_importance=lambda model: {"a": 0.5, "b": 0.5})
+    assert _feature_importance(SimpleNamespace(adapter=gain_only), object()) == {"a": 0.5, "b": 0.5}
+
+
+def test_partial_dependence_covers_top_numeric_features_only() -> None:
+    """Partial dependence is computed for the top numeric features by importance;
+    categorical and unknown-column features are skipped, and each curve is a list
+    of [grid_value, avg_prediction] pairs (explainability)."""
+    from mbt_testing.adapters import FakeModel
+
+    from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+    table = pa.table(
+        {
+            "num": [float(i) for i in range(20)],  # numeric -> PD computed
+            "cat": ["a", "b"] * 10,  # categorical -> skipped
+            "label": [i % 2 for i in range(20)],
+        }
+    )
+    runtime = SimpleNamespace(
+        handle=InMemoryDatasetHandle({"test": table}, label_column="label"),
+        adapter=FakeTrainingAdapter({}),
+    )
+    importance = {"num": 0.7, "cat": 0.2, "missing": 0.1}
+    curves = _partial_dependence(runtime, FakeModel(value=0.6, target="label"), importance)
+
+    assert set(curves) == {"num"}  # categorical + unknown-column features skipped
+    curve = curves["num"]
+    assert len(curve) >= 2 and all(len(point) == 2 for point in curve)  # [grid, avg] pairs
+
+
 def test_champion_delta_bounds_without_confidence_gates() -> None:
     spec = minimal_model_spec(
         evaluation={
@@ -435,15 +480,198 @@ def test_carve_applies_hooks_to_the_carved_handle() -> None:
     assert carved.read("train").num_rows == 8  # triggers the carved hook context
 
 
+# -- dedicated calibration carve (F17) + backtest composition (F5) -------------------
+
+
+def test_calibration_carve_keeps_all_splits_and_shrinks_train() -> None:
+    spec = minimal_model_spec(calibration="isotonic")
+    runtime = make_inline_runtime(_tables(), spec)
+    carved = _carve_calibration(runtime, spec, runtime.transformed)
+    assert carved.splits() == {"train", "calibration", "test"}
+    assert carved.read("train").num_rows == 8
+    assert carved.read("calibration").num_rows == 2
+    # test passes through untouched
+    assert carved.read("test").num_rows == 2
+    # train and calibration partition the original train rows exactly
+    train_x = carved.read("train").column("x").to_pylist()
+    cal_x = carved.read("calibration").column("x").to_pylist()
+    assert not set(train_x) & set(cal_x)
+    assert sorted(train_x + cal_x) == [float(i) for i in range(10)]
+
+
+def test_calibration_carve_is_seeded_independently_of_the_validation_carve() -> None:
+    """The calibration carve is seed+5, the implicit validation carve seed+2:
+    a spec using both must not hand the calibrator the tuning-selection rows."""
+    spec = minimal_model_spec(calibration="isotonic")
+    runtime = make_inline_runtime(_tables(40), spec)
+    validation = _carve_validation(runtime)
+    assert validation is not None
+    calibration = _carve_calibration(runtime, spec, runtime.transformed)
+    val_rows = set(validation.read("validation").column("x").to_pylist())
+    cal_rows = set(calibration.read("calibration").column("x").to_pylist())
+    assert val_rows != cal_rows  # different seeds pick different held-out rows
+    # and the carve itself is deterministic
+    again = _carve_calibration(runtime, spec, runtime.transformed)
+    assert set(again.read("calibration").column("x").to_pylist()) == cal_rows
+
+
+def test_calibration_carve_temporal_takes_the_train_tail() -> None:
+    n = 10
+    dates = [dt.date(2026, 1, 1) + dt.timedelta(days=i * 9) for i in range(n)]
+    tables = {
+        "train": pa.table(
+            {
+                "t": pa.array(dates, type=pa.date32()),
+                "x": [float(i) for i in range(n)],
+                "y": [i % 2 for i in range(n)],
+            }
+        ),
+        "test": pa.table(
+            {"t": pa.array([dt.date(2026, 5, 1)], type=pa.date32()), "x": [1.0], "y": [1]}
+        ),
+    }
+    job = SimpleNamespace(
+        dataset_windows={"windows": {"train": ["2026-01-01T00:00:00Z", "2026-04-01T00:00:00Z"]}},
+        node=SimpleNamespace(unique_id="model.demo.unit_model"),
+    )
+    spec = minimal_model_spec(calibration="isotonic")
+    runtime = make_inline_runtime(tables, spec, time_column="t", job=job)
+    carved = _carve_calibration(runtime, spec, runtime.transformed)
+    assert carved.read("train").num_rows == 8
+    cal = carved.read("calibration")
+    assert cal.num_rows == 2
+    # the slice is the temporal TAIL of the train window (most recent rows)
+    assert cal.column("x").to_pylist() == [8.0, 9.0]
+
+
+def test_calibration_carve_with_too_few_rows_errors() -> None:
+    tables = {
+        "train": pa.table({"x": [1.0], "y": [1]}),
+        "test": pa.table({"x": [2.0], "y": [0]}),
+    }
+    spec = minimal_model_spec(calibration="isotonic")
+    runtime = make_inline_runtime(tables, spec)
+    with pytest.raises(ConfigError, match="calibration carve produced an empty split") as excinfo:
+        _carve_calibration(runtime, spec, runtime.transformed)
+    assert "drop 'calibration'" in (excinfo.value.hint or "")
+
+
+class _SplitRecordingAdapter(FakeTrainingAdapter):
+    """Records the splits and calibration setting of every train() call."""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.seen: list[tuple[frozenset, str | None]] = []
+
+    def train(self, spec, data, ctx):
+        self.seen.append((frozenset(data.splits()), spec.calibration))
+        return super().train(spec, data, ctx)
+
+
+def test_backtest_folds_carve_a_calibration_slice_when_the_spec_calibrates() -> None:
+    """F5 (real fix): each fold's fit sees a carved 'calibration' split, so the
+    fold models calibrate the way the production model does."""
+    adapter = _SplitRecordingAdapter()
+    spec = minimal_model_spec(
+        calibration="isotonic",
+        evaluation={
+            "protocol": {"split": "random", "backtest_folds": 3},
+            "metrics": ["pr_auc"],
+        },
+    )
+    runtime = make_inline_runtime(
+        _tables(30), spec, adapter=adapter, builtin_specs=[MetricSpec(name="pr_auc")]
+    )
+    means, _stds = _walk_forward_backtest(runtime, spec, 3)
+    assert means  # folds actually ran
+    assert len(adapter.seen) == 3
+    for splits, calibration in adapter.seen:
+        assert "calibration" in splits
+        assert calibration == "isotonic"
+
+
+def test_backtest_folds_do_not_carve_without_calibration() -> None:
+    adapter = _SplitRecordingAdapter()
+    spec = minimal_model_spec(
+        evaluation={
+            "protocol": {"split": "random", "backtest_folds": 3},
+            "metrics": ["pr_auc"],
+        },
+    )
+    runtime = make_inline_runtime(
+        _tables(30), spec, adapter=adapter, builtin_specs=[MetricSpec(name="pr_auc")]
+    )
+    _walk_forward_backtest(runtime, spec, 3)
+    assert adapter.seen and all("calibration" not in splits for splits, _ in adapter.seen)
+
+
+def test_calibration_carve_applies_hooks_to_the_carved_handle() -> None:
+    class _IdentityHooks:
+        has_transform = True
+        has_custom_metrics = False
+
+        def transform_features(self, table, ctx):
+            return table
+
+    spec = minimal_model_spec(calibration="isotonic")
+    runtime = make_inline_runtime(_tables(), spec, hooks=_IdentityHooks())
+    carved = _carve_calibration(runtime, spec, runtime.transformed)
+    assert carved.read("train").num_rows == 8  # triggers the carved hook context
+    assert carved.read("calibration").num_rows == 2
+
+
+def test_final_fit_trains_on_the_calibration_carved_handle(tmp_path: Path) -> None:
+    """_run_train (F17): a calibrated spec's final fit sees train minus the
+    dedicated 'calibration' slice, for arrow and path adapters alike."""
+    from mbt.storage import artifact_store_for
+
+    for data_access in ("arrow", "path"):
+        adapter = _SplitRecordingAdapter()
+        if data_access == "path":
+            adapter.data_access = "path"  # instance-level override
+        spec = minimal_model_spec(calibration="isotonic")
+        runtime = make_inline_runtime(
+            _tables(), spec, adapter=adapter, builtin_specs=[MetricSpec(name="pr_auc")]
+        )
+        runtime.job.champion = None
+        runtime.store = artifact_store_for(f"file://{tmp_path}/{data_access}", run_prefix="t")
+        result = _run_train(runtime, None, None)
+        assert result.status == "success"
+        assert len(adapter.seen) == 1
+        splits, calibration = adapter.seen[0]
+        assert "calibration" in splits and calibration == "isotonic"
+
+
+def test_tuning_trials_never_calibrate() -> None:
+    """Trials must not fit a calibrator on the split their objective is scored
+    on - that would make a brier/ece objective circularly optimal (F17); the
+    final fit calibrates on its own dedicated slice instead."""
+    adapter = _SplitRecordingAdapter()
+    spec = minimal_model_spec(
+        calibration="isotonic",
+        hyperparameters={"fake_metric_value": 0.6},
+        tuning=_tuning_spec(),
+    )
+    runtime = make_inline_runtime(
+        _tables(30),
+        spec,
+        adapter=adapter,
+        builtin_specs=[MetricSpec(name="pr_auc")],
+        job=_tuning_job(),
+    )
+    _run_tuning(runtime, spec)
+    assert adapter.seen and all(calibration is None for _, calibration in adapter.seen)
+
+
 # -- tuning (ADR-8, FR-TUNE-01..04) --------------------------------------------------
 
 
-def _tuning_spec(objective: str = "pr_auc", **extra):
+def _tuning_spec(objective: str = "pr_auc", robust: bool = False, **extra):
     return {
         "engine": "fake",
         "n_trials": 2,
         "search_space": {"max_depth": {"type": "int", "low": 2, "high": 5}},
-        "objective": {"metric": objective, "direction": "maximize"},
+        "objective": {"metric": objective, "direction": "maximize", "robust": robust},
         **extra,
     }
 
@@ -469,6 +697,51 @@ def test_tuning_without_engine_errors() -> None:
         job=_tuning_job(engine=False),
     )
     with pytest.raises(ConfigError, match="no tuning engine"):
+        _run_tuning(runtime, spec)
+
+
+def test_robust_tuning_selects_on_the_bootstrap_lower_bound() -> None:
+    """A robust objective (R2-7) reports the bootstrap lower bound of the
+    validation metric, which sits below the point estimate the plain objective
+    uses - the same trial wins, but the selection is defended against luck."""
+
+    def _tuned(robust: bool) -> TuningResult:
+        spec = minimal_model_spec(
+            hyperparameters={"fake_metric_value": 0.7},
+            evaluation={"protocol": {"split": "temporal"}, "metrics": ["pr_auc"]},
+            tuning=_tuning_spec(robust=robust),
+        )
+        runtime = make_inline_runtime(
+            _tables(60),
+            spec,
+            adapter=FakeTrainingAdapter(),
+            builtin_specs=[MetricSpec(name="pr_auc")],
+            job=_tuning_job(),
+        )
+        _, result = _run_tuning(runtime, spec)
+        assert result is not None
+        return result
+
+    plain, robust = _tuned(False), _tuned(True)
+    assert robust.best_params == plain.best_params  # the same trial wins either way
+    assert robust.best_value < plain.best_value  # ...reported as the pessimistic bound
+
+
+def test_robust_tuning_rejects_a_hook_objective() -> None:
+    spec = minimal_model_spec(
+        hyperparameters={"fake_metric_value": 0.6},
+        evaluation={"protocol": {"split": "temporal"}, "metrics": ["pr_auc", "custom_hook"]},
+        tuning=_tuning_spec(objective="custom_hook", robust=True),
+    )
+    runtime = make_inline_runtime(
+        _tables(),
+        spec,
+        adapter=FakeTrainingAdapter(),
+        builtin_specs=[MetricSpec(name="pr_auc")],
+        hook_specs=[MetricSpec(name="custom_hook", kind="hook")],
+        job=_tuning_job(),
+    )
+    with pytest.raises(ConfigError, match="builtin metrics only"):
         _run_tuning(runtime, spec)
 
 
@@ -798,3 +1071,349 @@ def test_module_entrypoint_raises_systemexit(
     with pytest.raises(SystemExit) as excinfo:
         runpy.run_module("mbt.execute.job", run_name="__main__")
     assert excinfo.value.code == 0
+
+
+# -- walk-forward backtest (_walk_forward_backtest, R2-7) ---------------------------
+
+
+class _RecordingBacktestAdapter:
+    """Records the feature values it trains/evaluates on per fold, so the test
+    can assert the walk-forward folds are time-ordered, expanding, and non-leaky."""
+
+    data_access = "arrow"
+
+    def __init__(self, fold_values: list[float] | None = None) -> None:
+        self.train_x: list[list[float]] = []
+        self.test_x: list[list[float]] = []
+        # per-fold metric values (to exercise a non-zero backtest std); default is
+        # a fixed 0.5 every fold (std 0).
+        self._fold_values = fold_values
+
+    def train(self, spec: object, handle: object, ctx: object) -> object:
+        self.train_x.append(handle.read("train").column("x").to_pylist())  # type: ignore[attr-defined]
+        return object()
+
+    def evaluate(
+        self, model: object, handle: object, split: str, metrics: list, slices: object = None
+    ) -> MetricResults:
+        self.test_x.append(handle.read(split).column("x").to_pylist())  # type: ignore[attr-defined]
+        value = 0.5 if self._fold_values is None else self._fold_values[len(self.test_x) - 1]
+        return MetricResults(metrics={m.name: value for m in metrics}, slices={})
+
+
+class _IdentityHooks:
+    """A transform hook that leaves the table unchanged - present so each fold's
+    TransformedDatasetHandle exercises the hook-context path (faithful refit)."""
+
+    has_transform = True
+
+    def transform_features(self, table: object, ctx: object) -> object:
+        return table
+
+
+def test_walk_forward_backtest_refits_on_expanding_time_ordered_prefixes() -> None:
+    # 20 rows written in DESCENDING time order (x tracks the time rank), so the
+    # backtest must sort by the time column before cutting folds.
+    n = 20
+    anchor = dt.datetime(2026, 1, 1)
+    table = pa.table(
+        {
+            "ts": [anchor + dt.timedelta(days=n - 1 - i) for i in range(n)],
+            "x": [float(n - 1 - i) for i in range(n)],
+            "y": [(n - 1 - i) % 2 for i in range(n)],
+        }
+    )
+    adapter = _RecordingBacktestAdapter()
+    runtime = make_inline_runtime(
+        {"train": table},
+        minimal_model_spec(),
+        time_column="ts",
+        adapter=adapter,
+        hooks=_IdentityHooks(),  # exercise the per-fold hook-context path
+        builtin_specs=[MetricSpec(name="pr_auc")],
+    )
+    result, std = _walk_forward_backtest(runtime, runtime.spec, 4)
+
+    # 4 folds -> 3 walk-forward steps, each on a strictly larger prefix
+    assert [len(t) for t in adapter.train_x] == [5, 10, 15]
+    for train_x, test_x in zip(adapter.train_x, adapter.test_x, strict=True):
+        assert max(train_x) < min(test_x)  # train entirely before test (no leakage)
+    assert result == {"pr_auc": 0.5}  # mean of the per-fold metric
+    assert std == {"pr_auc": 0.0}  # identical folds -> zero spread
+
+
+def _embargo_job(embargo: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        dataset_windows={"embargo": embargo},
+        node=SimpleNamespace(unique_id="model.demo.unit_model"),
+        tuning_engine=None,
+        tuning_cap=None,
+        vars={},
+        metric_specs=[],
+    )
+
+
+def _daily_train(n: int) -> pa.Table:
+    anchor = dt.datetime(2026, 1, 1)
+    return pa.table(
+        {
+            "ts": [anchor + dt.timedelta(days=i) for i in range(n)],
+            "x": [float(i) for i in range(n)],
+            "y": [i % 2 for i in range(n)],
+        }
+    )
+
+
+def test_backtest_folds_gap_each_boundary_by_the_embargo() -> None:
+    """R2-7/F6: split.embargo must gap each walk-forward fold's train tail from
+    its test window, exactly as it gaps the single train/test split - otherwise
+    the backtest leaks at every fold boundary (train-tail labels are observed
+    inside the next fold's evaluation window)."""
+    base_train = _daily_train(20)
+    runtime = make_inline_runtime(
+        {"train": base_train}, minimal_model_spec(), time_column="ts", job=_embargo_job("3d")
+    )
+    folds = _backtest_folds(runtime, runtime.spec, base_train, 4)
+
+    # 4 folds -> boundaries at rows 5/10/15; a 3-day embargo drops the 3-day tail
+    # before each, shrinking the prefixes 5/10/15 -> 2/7/12.
+    assert [train.num_rows for train, _ in folds] == [2, 7, 12]
+    for train, test in folds:
+        last_train = max(train.column("ts").to_pylist())
+        first_test = min(test.column("ts").to_pylist())
+        assert first_test - last_train > dt.timedelta(days=3)  # strictly beyond the embargo
+
+
+def test_backtest_fold_dropped_when_the_embargo_consumes_its_prefix() -> None:
+    """A fold whose entire (earliest, shortest) train prefix falls inside the
+    embargo has no leakage-free history and is dropped rather than trained on
+    nothing (F6)."""
+    base_train = _daily_train(20)
+    runtime = make_inline_runtime(
+        {"train": base_train}, minimal_model_spec(), time_column="ts", job=_embargo_job("8d")
+    )
+    folds = _backtest_folds(runtime, runtime.spec, base_train, 4)
+    # fold 1's 5-row prefix (days 0-4) lies entirely within 8 days of its day-5
+    # boundary, so it is dropped; only folds 2 and 3 survive (2 and 7 train rows).
+    assert [train.num_rows for train, _ in folds] == [2, 7]
+
+
+def test_backtest_reports_the_fold_to_fold_std_beside_the_mean() -> None:
+    """R2-7: the backtest reports the population std across folds, so an estimate
+    whose folds disagree (an unstable model) is distinguishable from a stable one
+    with the same mean."""
+    import statistics
+
+    n = 20
+    anchor = dt.datetime(2026, 1, 1)
+    table = pa.table(
+        {
+            "ts": [anchor + dt.timedelta(days=i) for i in range(n)],
+            "x": [float(i) for i in range(n)],
+            "y": [i % 2 for i in range(n)],
+        }
+    )
+    # 4 folds -> 3 walk-forward steps, each returning a different metric value
+    fold_values = [0.4, 0.6, 0.8]
+    adapter = _RecordingBacktestAdapter(fold_values=fold_values)
+    runtime = make_inline_runtime(
+        {"train": table},
+        minimal_model_spec(),
+        time_column="ts",
+        adapter=adapter,
+        builtin_specs=[MetricSpec(name="pr_auc")],
+    )
+    means, stds = _walk_forward_backtest(runtime, runtime.spec, 4)
+
+    assert means == {"pr_auc": round(statistics.fmean(fold_values), 6)}  # 0.6
+    assert stds == {"pr_auc": round(statistics.pstdev(fold_values), 6)}  # ~0.163299
+    assert stds["pr_auc"] > 0.0  # the folds genuinely disagree
+
+
+def test_walk_forward_backtest_without_time_column_returns_empty() -> None:
+    table = pa.table({"x": [1.0, 2.0, 3.0, 4.0], "y": [0, 1, 0, 1]})
+    adapter = _RecordingBacktestAdapter()
+    runtime = make_inline_runtime(
+        {"train": table},
+        minimal_model_spec(),
+        adapter=adapter,
+        builtin_specs=[MetricSpec(name="pr_auc")],
+    )
+    assert _walk_forward_backtest(runtime, runtime.spec, 3) == ({}, {})
+    assert adapter.train_x == []  # no refit attempted without a time order
+
+
+def test_walk_forward_backtest_skips_when_folds_are_degenerate() -> None:
+    # One row cannot form a single train->test step across 4 folds -> {}.
+    table = pa.table({"ts": [dt.datetime(2026, 1, 1)], "x": [1.0], "y": [0]})
+    adapter = _RecordingBacktestAdapter()
+    runtime = make_inline_runtime(
+        {"train": table},
+        minimal_model_spec(),
+        time_column="ts",
+        adapter=adapter,
+        builtin_specs=[MetricSpec(name="pr_auc")],
+    )
+    assert _walk_forward_backtest(runtime, runtime.spec, 4) == ({}, {})
+    assert adapter.train_x == []  # every fold degenerate -> skipped
+
+
+def test_backtest_runs_k_fold_cross_validation_on_a_random_split() -> None:
+    """R2-7: backtest_folds on a RANDOM split does k-fold CV - each row is the
+    test set exactly once, and each fold trains on the complement (no time order)."""
+    n = 20
+    table = pa.table({"x": [float(i) for i in range(n)], "y": [i % 2 for i in range(n)]})
+    adapter = _RecordingBacktestAdapter()
+    spec = minimal_model_spec(evaluation={"protocol": {"split": "random"}, "metrics": ["pr_auc"]})
+    runtime = make_inline_runtime(
+        {"train": table},
+        spec,
+        adapter=adapter,
+        builtin_specs=[MetricSpec(name="pr_auc")],
+    )
+    result, _ = _walk_forward_backtest(runtime, runtime.spec, 4)
+
+    all_x = {float(i) for i in range(n)}
+    assert len(adapter.test_x) == 4  # k folds
+    tested = [x for fold in adapter.test_x for x in fold]
+    assert sorted(tested) == sorted(all_x)  # each row tested exactly once (a partition)
+    for train_x, test_x in zip(adapter.train_x, adapter.test_x, strict=True):
+        assert set(train_x).isdisjoint(test_x)  # leave-one-fold-out: no overlap
+        assert set(train_x) | set(test_x) == all_x  # train is the complement of the test fold
+    assert result == {"pr_auc": 0.5}  # mean across the k folds
+
+
+class _NestedRecordingAdapter:
+    """Records the (split, rows) of every evaluate call, so the test can verify
+    nested CV: outer folds partition the rows, and each fold's inner tuning
+    (evaluated on 'validation') never touches that fold's outer-test rows."""
+
+    data_access = "arrow"
+
+    def __init__(self) -> None:
+        self.evals: list[tuple[str, list[float]]] = []
+
+    def train(self, spec: object, handle: object, ctx: object) -> object:
+        return object()
+
+    def evaluate(
+        self, model: object, handle: object, split: str, metrics: list, slices: object = None
+    ) -> MetricResults:
+        xs = sorted(handle.read(split).column("x").to_pylist())  # type: ignore[attr-defined]
+        self.evals.append((split, xs))
+        return MetricResults(metrics={m.name: 0.5 for m in metrics}, slices={})
+
+
+def test_nested_cv_re_tunes_per_fold_without_leaking_the_outer_test() -> None:
+    """R2-7: nested CV re-tunes inside each outer fold, so the outer-test fold
+    (evaluated on 'test') never appears in that fold's inner tuning (evaluated on
+    'validation'), and the outer folds partition the rows."""
+    n = 24
+    table = pa.table({"x": [float(i) for i in range(n)], "y": [i % 2 for i in range(n)]})
+    adapter = _NestedRecordingAdapter()
+    spec = minimal_model_spec(
+        evaluation={
+            "protocol": {"split": "random", "backtest_folds": 3, "nested_cv": True},
+            "metrics": ["pr_auc"],
+        },
+        tuning=_tuning_spec(),
+    )
+    runtime = make_inline_runtime(
+        {"train": table},
+        spec,
+        adapter=adapter,
+        builtin_specs=[MetricSpec(name="pr_auc")],
+        job=_tuning_job(),
+    )
+    result, _ = _walk_forward_backtest(runtime, runtime.spec, 3, nested=True)
+    assert result == {"pr_auc": 0.5}  # the k-fold nested estimate
+
+    # group evals into folds: each is [validation evals..., one 'test' eval]
+    folds: list[list[tuple[str, list[float]]]] = []
+    current: list[tuple[str, list[float]]] = []
+    for split, xs in adapter.evals:
+        current.append((split, xs))
+        if split == "test":
+            folds.append(current)
+            current = []
+    assert len(folds) == 3  # one outer test per fold
+    tested: list[float] = []
+    for fold in folds:
+        outer_test = set(fold[-1][1])
+        tested += list(outer_test)
+        for split, xs in fold[:-1]:
+            assert split == "validation"  # inner tuning evaluates on validation, never test
+            assert set(xs).isdisjoint(outer_test)  # the outer-test never leaks into tuning
+    assert sorted(tested) == [float(i) for i in range(n)]  # outer folds partition all rows
+
+
+def test_temporal_nested_cv_tunes_on_the_past_only() -> None:
+    """R2-7: temporal nested CV re-tunes on each fold's PAST (the expanding
+    prefix), so the inner validation is EARLIER in time than the outer-test fold
+    it is scored against - no future leakage."""
+    n = 30
+    anchor = dt.datetime(2026, 1, 1)
+    # x tracks the time rank; rows in DESCENDING time order so the sort is exercised
+    table = pa.table(
+        {
+            "ts": [anchor + dt.timedelta(days=n - 1 - i) for i in range(n)],
+            "x": [float(n - 1 - i) for i in range(n)],
+            "y": [(n - 1 - i) % 2 for i in range(n)],
+        }
+    )
+    adapter = _NestedRecordingAdapter()
+    spec = minimal_model_spec(
+        evaluation={
+            "protocol": {"split": "temporal", "backtest_folds": 3, "nested_cv": True},
+            "metrics": ["pr_auc"],
+        },
+        tuning=_tuning_spec(),
+    )
+    runtime = make_inline_runtime(
+        {"train": table},
+        spec,
+        time_column="ts",
+        adapter=adapter,
+        builtin_specs=[MetricSpec(name="pr_auc")],
+        job=_tuning_job(),
+    )
+    assert "pr_auc" in _walk_forward_backtest(runtime, runtime.spec, 3, nested=True)[0]
+
+    folds: list[list[tuple[str, list[float]]]] = []
+    current: list[tuple[str, list[float]]] = []
+    for split, xs in adapter.evals:
+        current.append((split, xs))
+        if split == "test":
+            folds.append(current)
+            current = []
+    assert len(folds) == 2  # walk-forward: 3 folds -> 2 outer steps
+    for fold in folds:
+        outer_test = fold[-1][1]
+        for split, xs in fold[:-1]:
+            assert split == "validation"
+            # the inner validation is the temporal TAIL of the fold's prefix: it
+            # ends immediately before the outer-test (a random carve would not).
+            assert max(xs) == min(outer_test) - 1
+
+
+def test_run_train_reports_walk_forward_backtest_when_configured(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """End to end: a model whose protocol sets backtest_folds gets a populated
+    backtest_metrics in its JobResult (the fake adapter evaluates each fold)."""
+    from mbt.contracts import ModelSpec
+
+    _, job = make_training_job(demo_project, fake_registry)
+    spec = ModelSpec.model_validate(job.node.config)
+    protocol = spec.evaluation.protocol.model_copy(update={"backtest_folds": 2})
+    evaluation = spec.evaluation.model_copy(update={"protocol": protocol})
+    new_spec = spec.model_copy(update={"evaluation": evaluation})
+    job = job.model_copy(
+        update={"node": job.node.model_copy(update={"config": new_spec.model_dump(mode="json")})}
+    )
+
+    result = run_job(job)
+    assert result.status == "success", result.error
+    assert result.backtest_metrics and "pr_auc" in result.backtest_metrics
+    # the std is reported alongside the mean, on the same metric keys
+    assert result.backtest_std.keys() == result.backtest_metrics.keys()

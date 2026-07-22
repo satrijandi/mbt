@@ -41,6 +41,13 @@ if TYPE_CHECKING:
     import numpy as np
     import xgboost as xgb
 
+    from mbt_adapter_base import (
+        SupportsExplain,
+        SupportsFeatureImportance,
+        SupportsShapImportance,
+    )
+    from mbt_adapter_base.calibration import Calibrator
+
 
 class XGBoostModel:
     """Opaque trained-model wrapper: booster + the exact feature list + the
@@ -52,11 +59,14 @@ class XGBoostModel:
         features: list[str],
         target: str,
         categories: dict[str, list[str]] | None = None,
+        calibrator: "Calibrator | None" = None,
     ) -> None:
         self.booster = booster
         self.features = features
         self.target = target
         self.categories = categories or {}
+        #: Optional post-hoc probability calibrator (R2-8); applied in _scores.
+        self.calibrator = calibrator
 
 
 class XGBoostTrainingAdapter:
@@ -69,6 +79,8 @@ class XGBoostTrainingAdapter:
         TaskType.BINARY_CLASSIFICATION,
         TaskType.REGRESSION,
     }
+    #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
+    supports_calibration: ClassVar[bool] = True
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -247,9 +259,33 @@ class XGBoostTrainingAdapter:
         booster.set_attr(mbt_target=spec.target)
         if categories:
             booster.set_attr(mbt_categories=json.dumps(categories, sort_keys=True))
-        return XGBoostModel(
+        model = XGBoostModel(
             booster=booster, features=features, target=spec.target, categories=categories
         )
+        if spec.calibration is not None:
+            self._fit_calibrator(model, spec, data)
+        return model
+
+    def _fit_calibrator(self, model: XGBoostModel, spec: ModelSpec, data: DatasetHandle) -> None:
+        """Fit a post-hoc probability calibrator on the held-out calibration
+        slice and persist it as a booster attribute (R2-8).
+
+        Calibrated scores flow through ``_scores``, so ``evaluate`` (ece/brier),
+        ``predict`` (scoring), and the paired champion delta all see calibrated
+        probabilities - both models carry their own calibrator, so the gate stays
+        apples-to-apples. Fits on the dedicated ``calibration`` slice core
+        carves from train (falling back to ``validation`` for direct calls,
+        F17); without either there is no honest calibration set (fails loudly)."""
+        from mbt_adapter_base.calibration import Calibrator
+        from mbt_adapter_base.training_helpers import calibration_split
+
+        assert spec.calibration is not None  # guarded by the caller
+        val = data.read(calibration_split(data))
+        raw = self._scores(model, val)  # no calibrator attached yet -> raw scores
+        labels = val.column(spec.target).to_numpy(zero_copy_only=False)
+        calibrator = Calibrator.fit(raw, labels, spec.calibration)
+        model.booster.set_attr(mbt_calibrator=calibrator.to_json())
+        model.calibrator = calibrator
 
     # -- evaluation ------------------------------------------------------------------
 
@@ -261,8 +297,14 @@ class XGBoostTrainingAdapter:
         # champions behave identically to freshly trained models).
         best = getattr(model.booster, "best_iteration", None)
         if best is not None:
-            return model.booster.predict(matrix, iteration_range=(0, int(best) + 1))
-        return model.booster.predict(matrix)
+            raw = model.booster.predict(matrix, iteration_range=(0, int(best) + 1))
+        else:
+            raw = model.booster.predict(matrix)
+        # Post-hoc calibration is a monotonic transform on the raw score (R2-8),
+        # so it recalibrates probabilities without changing rank ordering.
+        if model.calibrator is not None:
+            return model.calibrator.transform(raw)
+        return raw
 
     def evaluate(
         self,
@@ -292,6 +334,51 @@ class XGBoostTrainingAdapter:
         if not total:
             return dict.fromkeys(model.features, 0.0)
         return {name: round(scores.get(name, 0.0) / total, 6) for name in model.features}
+
+    def _shap_values(self, model: XGBoostModel, table: "pa.Table") -> "np.ndarray":
+        """Per-feature SHAP contributions ``[n_rows, n_features]`` for one table
+        (the trailing bias column is dropped). Shared by the global importance
+        and the per-prediction explanation."""
+        import numpy as np
+
+        matrix, _ = self._matrix(table, model.features, model.categories, None)
+        best = getattr(model.booster, "best_iteration", None)
+        extra = {"iteration_range": (0, int(best) + 1)} if best is not None else {}
+        # pred_contribs: [n_rows, n_features + 1]; the trailing column is the bias
+        contribs = np.asarray(model.booster.predict(matrix, pred_contribs=True, **extra))
+        return contribs[:, :-1]
+
+    def shap_importance(
+        self, model: XGBoostModel, data: DatasetHandle, split: str
+    ) -> dict[str, float]:
+        """Global importance as mean |SHAP| over the split, normalized to
+        fractions (FR-DOCS-02).
+
+        SHAP contributions are additive and, unlike split-gain, are not biased
+        toward high-cardinality features, so they rank a many-valued column
+        against a binary one fairly - the model card prefers this over gain when
+        the eval data is available (explainability). Data-grounded, so it needs
+        a split, unlike the model-intrinsic ``feature_importance``.
+        """
+        import numpy as np
+
+        mean_abs = np.abs(self._shap_values(model, data.read(split))).mean(axis=0)
+        total = float(mean_abs.sum()) or 1.0  # a model that learned nothing -> all zeros
+        return {
+            name: round(float(value) / total, 6)
+            for name, value in zip(model.features, mean_abs, strict=True)
+        }
+
+    def explain(
+        self, model: XGBoostModel, data: DatasetHandle, split: str, top_k: int
+    ) -> list[str]:
+        """Per-prediction local attribution: the top_k features by |SHAP| for
+        each row, as a JSON ``[[feature, contribution], ...]`` ordered by
+        descending |contribution|, so a consumer can see WHY each row scored the
+        way it did (explainability)."""
+        from mbt_adapter_base.training_helpers import top_k_explanations
+
+        return top_k_explanations(self._shap_values(model, data.read(split)), model.features, top_k)
 
     # -- artifacts -----------------------------------------------------------------------
 
@@ -341,9 +428,26 @@ class XGBoostTrainingAdapter:
         booster.load_model(str(store.fetch(ref)))
         features = list(booster.feature_names or [])
         attributes = booster.attributes()
+        calibrator_blob = attributes.get("mbt_calibrator")
+        calibrator = None
+        if calibrator_blob:
+            from mbt_adapter_base.calibration import Calibrator
+
+            calibrator = Calibrator.from_json(calibrator_blob)
         return XGBoostModel(
             booster=booster,
             features=features,
             target=attributes.get("mbt_target") or "",
             categories=json.loads(attributes.get("mbt_categories") or "{}"),
+            calibrator=calibrator,
         )
+
+
+if TYPE_CHECKING:
+    # F27: strict mypy verifies this adapter conforms to each optional-capability
+    # protocol it implements (feature_importance, shap_importance, explain);
+    # ``@runtime_checkable`` alone only checks the method names. No runtime cost.
+    def _capability_conformance(adapter: XGBoostTrainingAdapter) -> None:
+        _feature_importance: SupportsFeatureImportance = adapter
+        _shap_importance: SupportsShapImportance = adapter
+        _explain: SupportsExplain = adapter

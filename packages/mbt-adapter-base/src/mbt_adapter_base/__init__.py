@@ -41,7 +41,9 @@ from mbt_adapter_base.protocols import (
     JobHandle,
     PredictionStore,
     RegistryAdapter,
+    SupportsExplain,
     SupportsFeatureImportance,
+    SupportsShapImportance,
     SupportsTrainWithReport,
     TaskSchema,
     TrackingAdapter,
@@ -49,6 +51,7 @@ from mbt_adapter_base.protocols import (
     TrainingAdapter,
     TuningEngine,
 )
+from mbt_adapter_base.retry import retry_with_jitter
 from mbt_adapter_base.specs import (
     AdapterRef,
     CheckSpec,
@@ -154,7 +157,9 @@ __all__ = [
     "SplitSpec",
     "SplitStrategy",
     "Stage",
+    "SupportsExplain",
     "SupportsFeatureImportance",
+    "SupportsShapImportance",
     "SupportsTrainWithReport",
     "TaskSchema",
     "TaskType",
@@ -170,5 +175,6 @@ __all__ = [
     "ValidationIssue",
     "combine_snapshots",
     "parse_time_offset",
+    "retry_with_jitter",
     "write_materialization_metadata",
 ]

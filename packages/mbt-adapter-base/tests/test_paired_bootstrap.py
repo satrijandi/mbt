@@ -94,3 +94,29 @@ def test_all_degenerate_falls_back_to_point_delta() -> None:
     assert result.n_resamples == 0
     assert result.point == pytest.approx(0.25 - 0.01)  # brier is lower-better
     assert result.lower == result.point
+
+
+def test_bootstrap_metric_lower_bound_is_pessimistic_and_deterministic() -> None:
+    """Single-model metric bound (R2-7): lower percentile for higher-is-better,
+    upper for lower-is-better, and reproducible given the seed."""
+    from mbt_adapter_base.metrics import bootstrap_metric_lower_bound, compute_metric
+
+    y, strong, _ = _synthetic(500, seed=3)
+    point = compute_metric(AUC, y, strong)
+    lb = bootstrap_metric_lower_bound(AUC, y, strong, confidence=0.95, n_resamples=500, seed=1)
+    assert lb < point  # higher-is-better -> the pessimistic bound is below the point
+    again = bootstrap_metric_lower_bound(AUC, y, strong, confidence=0.95, n_resamples=500, seed=1)
+    assert lb == again  # seeded -> deterministic
+
+    b_point = compute_metric(BRIER, y, strong)
+    ub = bootstrap_metric_lower_bound(BRIER, y, strong, confidence=0.95, n_resamples=500, seed=1)
+    assert ub > b_point  # lower-is-better -> pessimistic bound is the UPPER percentile
+
+
+def test_bootstrap_metric_lower_bound_all_degenerate_returns_point() -> None:
+    from mbt_adapter_base.metrics import bootstrap_metric_lower_bound, compute_metric
+
+    y = np.zeros(20)  # single class: every resample is skipped
+    score = np.linspace(0.0, 1.0, 20)
+    result = bootstrap_metric_lower_bound(BRIER, y, score, confidence=0.95, n_resamples=50, seed=1)
+    assert result == compute_metric(BRIER, y, score)  # fell back to the point value

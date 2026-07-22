@@ -105,3 +105,87 @@ def test_param_defaults_are_deterministic_config() -> None:
     assert booster["nthread"] == 1
     assert booster["tree_method"] == "hist"
     assert booster["seed"] == 7
+
+
+# -- post-hoc calibration (R2-8) ------------------------------------------------------
+
+
+def _synthetic(n: int, seed: int):
+    """A binary problem with a base rate ~0.25, so scale_pos_weight will inflate
+    the predicted probabilities and leave the model measurably miscalibrated."""
+    import numpy as np
+    import pyarrow as pa
+
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=n)
+    p = 1.0 / (1.0 + np.exp(-(1.6 * x - 1.2)))
+    y = (rng.uniform(size=n) < p).astype("int64")
+    return pa.table({"x": x.astype("float64"), "label": y})
+
+
+def _calibration_data():
+    from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+    return InMemoryDatasetHandle(
+        {"train": _synthetic(800, 1), "validation": _synthetic(400, 2), "test": _synthetic(400, 3)},
+        label_column="label",
+    )
+
+
+@pytest.mark.parametrize("method", ["isotonic", "sigmoid"])
+def test_calibration_reduces_ece_without_hurting_ranking(method: str) -> None:
+    """scale_pos_weight inflates the probabilities (the demo's own miscalibration
+    source); a calibrator fit on validation pulls ece down, and because it is a
+    monotonic transform the ranking metric (roc_auc) is preserved."""
+    from mbt_adapter_base import MetricSpec
+
+    adapter = XGBoostTrainingAdapter({})
+    data = _calibration_data()
+    hp = {"n_estimators": 40, "max_depth": 3, "scale_pos_weight": 6}
+    metrics = [MetricSpec(name="ece"), MetricSpec(name="roc_auc")]
+
+    raw = adapter.evaluate(
+        adapter.train(_spec(hyperparameters=hp), data, _ctx()), data, "test", metrics
+    )
+    cal_model = adapter.train(_spec(hyperparameters=hp, calibration=method), data, _ctx())
+    cal = adapter.evaluate(cal_model, data, "test", metrics)
+
+    assert cal_model.calibrator is not None and cal_model.calibrator.method == method
+    assert cal.metrics["ece"] < raw.metrics["ece"]  # calibration fixed the inflation
+    assert cal.metrics["roc_auc"] == pytest.approx(raw.metrics["roc_auc"], abs=0.02)
+
+
+def test_calibrator_survives_save_load(tmp_path) -> None:
+    """The calibrator persists as a booster attribute, so a reloaded champion
+    produces byte-identical calibrated scores (parity across save/load)."""
+    from pathlib import Path
+
+    import numpy as np
+
+    from mbt_adapter_base.compliance.suite import TempArtifactStore
+
+    adapter = XGBoostTrainingAdapter({})
+    data = _calibration_data()
+    model = adapter.train(
+        _spec(hyperparameters={"n_estimators": 20}, calibration="isotonic"), data, _ctx()
+    )
+    store = TempArtifactStore(Path(tmp_path))
+    loaded = adapter.load(adapter.export(model, "native", store), store)
+
+    assert loaded.calibrator is not None and loaded.calibrator.method == "isotonic"
+    test = data.read("test")
+    np.testing.assert_allclose(adapter._scores(loaded, test), adapter._scores(model, test))
+
+
+def test_calibration_requires_a_holdout_split() -> None:
+    # neither a carved 'calibration' slice nor a 'validation' fallback present
+    from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+    adapter = XGBoostTrainingAdapter({})
+    data = InMemoryDatasetHandle(
+        {"train": _synthetic(200, 1), "test": _synthetic(100, 2)}, label_column="label"
+    )
+    with pytest.raises(ValueError, match="validation"):
+        adapter.train(
+            _spec(hyperparameters={"n_estimators": 10}, calibration="isotonic"), data, _ctx()
+        )

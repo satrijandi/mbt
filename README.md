@@ -159,7 +159,7 @@ sources).
 
 ## Status
 
-v0.1: the full PR -> CI -> registry -> promotion -> batch scoring -> ground-truth monitoring loop works end-to-end for binary classification (ADR-20/21).
+v0.1: the full PR -> CI -> registry -> promotion -> batch scoring -> ground-truth monitoring loop works end-to-end for binary classification and regression (ADR-20/21).
 Data comes from local Parquet, Snowflake, or a Spark lakehouse; training covers XGBoost, LightGBM, SparkML, and H2O AutoML (optionally distributed via Sparkling Water); MLflow tracks and registers.
 The dockerized showcase (`examples/showcase`) proves the loop nightly in CI against real services: S3 lake, HTTP MLflow, a Spark cluster, Gitea + Woodpecker CI, Zot provenance, Airflow CD, and Prometheus/Grafana observability.
 See `docs/roadmap.md` for what lands in v1 (sklearn/PyTorch, Feast, ensembles, warehouse prediction sinks, Iceberg sources).

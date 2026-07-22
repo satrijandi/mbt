@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mbt.artifacts.atomic import atomic_write_text
 from mbt.contracts import ArtifactRef
 from mbt.secrets import redact
 
@@ -18,17 +19,20 @@ class GateResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metric: str
-    kind: Literal["threshold", "champion"]
+    kind: Literal["threshold", "champion", "disparity"]
     slice: str | None = None  # "column=value" for per-slice gates
     passed: bool
-    expected: float | None = None  # threshold gates
-    actual: float | None = None
+    expected: float | None = None  # threshold gates; min_ratio for disparity gates
+    actual: float | None = None  # worst/best ratio for disparity gates
     champion_version: str | None = None  # champion gates
     champion_value: float | None = None
     min_delta: float | None = None
     actual_delta: float | None = None
     delta_lower: float | None = None  # paired-bootstrap lower bound (ADR-18)
     confidence: float | None = None
+    across: str | None = None  # disparity gates: the slice column measured
+    worst_slice: str | None = None  # disparity gates: "column=value" of the worst slice
+    best_slice: str | None = None  # disparity gates: "column=value" of the best slice
     message: str | None = None
 
 
@@ -81,6 +85,15 @@ class NodeResult(BaseModel):
     tracking_run_id: str | None = None
     resolved_auto: dict[str, Any] = Field(default_factory=dict)
     feature_importance: dict[str, float] = Field(default_factory=dict)  # FR-DOCS-02
+    #: Partial dependence per top numeric feature (explainability): feature ->
+    #: [[grid_value, avg_prediction], ...]; rendered as a sparkline in the card.
+    partial_dependence: dict[str, list[list[float]]] = Field(default_factory=dict)
+    #: Walk-forward backtest (R2-7): builtin metric -> mean across time-ordered
+    #: folds; shown beside the single-split metrics on the card.
+    backtest_metrics: dict[str, float] = Field(default_factory=dict)
+    #: Population std of each backtest metric across folds (R2-7); rendered as
+    #: ``mean ± std`` so the card exposes how stable the estimate is.
+    backtest_std: dict[str, float] = Field(default_factory=dict)
     message: str | None = None
 
 
@@ -118,5 +131,4 @@ class RunResults(BaseModel):
         return redact(json.dumps(self.model_dump(mode="json"), indent=2, sort_keys=True) + "\n")
 
     def write(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.to_json())
+        atomic_write_text(path, self.to_json())

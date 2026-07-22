@@ -24,7 +24,7 @@ from mbt.artifacts.manifest import (
     ManifestSource,
 )
 from mbt.compile.hashing import config_hash, env_digest, env_freeze_digest, input_hash
-from mbt.compile.windows import format_ts, parse_window
+from mbt.compile.windows import format_ts, parse_window, subtract_duration
 from mbt.config.profiles import LoadedProfiles
 from mbt.contracts import DatasetSpec, ManifestNode, ModelSpec, ScoringSpec, SplitStrategy
 from mbt.dag.graph import topological_order
@@ -269,8 +269,23 @@ def _resolve_dataset(
             if expression is None:
                 continue
             start, end = parse_window(expression).resolve(anchor)
+            if split_name == "train" and spec.split.embargo is not None:
+                # Embargo the train window's tail (R2-7): every data adapter
+                # builds splits from these resolved windows, so this is uniform.
+                end = subtract_duration(end, spec.split.embargo)
+                if end <= start:
+                    raise CompilationError(
+                        f"embargo {spec.split.embargo!r} consumes the entire train window",
+                        resource=res.unique_id,
+                        path=res.path,
+                    )
             windows[split_name] = [format_ts(start), format_ts(end)]
         resolved["windows"] = windows
+        if spec.split.embargo is not None:
+            # Thread the embargo *duration* (not just its already-applied window
+            # effect) so the walk-forward backtest can gap each internal fold
+            # boundary too, not only the outer train/test split (R2-7/F6).
+            resolved["embargo"] = spec.split.embargo
     return spec, spec.model_dump(mode="json"), resolved
 
 
@@ -355,6 +370,22 @@ def _pin_snapshots(
     if not referenced:
         return {}
     adapter = build_data_adapter(profiles, parsed.project_dir, registry)
+    # A format the resolved adapter cannot read must fail here, not as a
+    # silently-misread path or an opaque engine error at build time (F23).
+    # Adapters without the attribute read only parquet, the universal format.
+    supported = getattr(adapter, "supported_source_formats", frozenset({"parquet"}))
+    for uid in sorted(referenced):
+        entry = parsed.sources[uid]
+        if entry.table.format not in supported:
+            raise CompilationError(
+                f"source '{entry.group}.{entry.table.name}' declares format "
+                f"{entry.table.format!r}, which data adapter "
+                f"'{profiles.target.data.adapter}' cannot read "
+                f"(it reads: {', '.join(sorted(supported))})",
+                resource=uid,
+                hint="'delta' sources need the spark data adapter; convert the "
+                "source to parquet or switch the target's data adapter",
+            )
 
     def snapshot(uid: str) -> tuple[str, str | None]:
         entry = parsed.sources[uid]

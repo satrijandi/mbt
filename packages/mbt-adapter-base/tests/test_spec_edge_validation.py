@@ -28,6 +28,18 @@ def test_source_table_needs_path_or_identifier() -> None:
         SourceTable(name="gold_subscribers")
 
 
+def test_source_table_rejects_an_unsupported_format() -> None:
+    # 'iceberg' is roadmap, not implemented anywhere, so it must not silently
+    # parse (and get mis-read as parquet); only the actually-supported formats
+    # are accepted - parquet everywhere, delta on spark (F23).
+    with pytest.raises(ValidationError, match="format"):
+        SourceTable(name="t", path="data/t", format="iceberg")
+    with pytest.raises(ValidationError, match="format"):
+        SourceTable(name="t", path="data/t", format="csv")
+    assert SourceTable(name="t", path="data/t", format="parquet").format == "parquet"
+    assert SourceTable(name="t", path="data/t", format="delta").format == "delta"
+
+
 def test_temporal_split_rejects_stratify_by() -> None:
     with pytest.raises(ValidationError, match="random strategy only"):
         SplitSpec(time_column="ts", train="-180d:-28d", test="-28d:now", stratify_by="plan")
@@ -152,3 +164,116 @@ def test_ground_truth_join_key_must_be_nonempty() -> None:
             maturity="14d",
             metrics=["roc_auc"],
         )
+
+
+def test_backtest_folds_at_least_two_on_either_strategy() -> None:
+    """Cross-validated backtest (R2-7): works on temporal (walk-forward) and
+    random (k-fold) splits; >= 2 folds."""
+    assert EvaluationProtocol.model_validate({"backtest_folds": 3}).backtest_folds == 3
+    assert (
+        EvaluationProtocol.model_validate({"split": "random", "backtest_folds": 5}).backtest_folds
+        == 5
+    )
+    with pytest.raises(ValidationError):  # a single fold cannot form a backtest
+        EvaluationProtocol.model_validate({"backtest_folds": 1})
+
+
+def test_backtest_gate_source_requires_threshold_and_backtest_folds() -> None:
+    """A gate with source: backtest must be a whole-split threshold gate and
+    needs evaluation.protocol.backtest_folds set (R2-7 part 2)."""
+    from mbt_adapter_base.specs import GateSpec
+
+    with pytest.raises(ValidationError, match="whole-split threshold gate"):
+        GateSpec(metric="pr_auc", compare_to="production", source="backtest")
+
+    def _spec(**protocol: Any) -> ModelSpec:
+        return ModelSpec.model_validate(
+            {
+                "name": "m",
+                "task": "binary_classification",
+                "adapter": "xgboost",
+                "owner": "t@example.com",
+                "dataset": "ref('d')",
+                "target": "y",
+                "evaluation": {
+                    "protocol": {"split": "temporal", **protocol},
+                    "metrics": ["pr_auc"],
+                    "gates": [{"metric": "pr_auc", "threshold": 0.7, "source": "backtest"}],
+                },
+                "seed": 1,
+            }
+        )
+
+    with pytest.raises(ValidationError, match="backtest_folds is not set"):
+        _spec()
+    assert _spec(backtest_folds=4).evaluation.gates[0].source == "backtest"
+
+
+def test_embargo_is_temporal_only_and_positive() -> None:
+    """The split embargo (R2-7) is a positive duration on the temporal strategy."""
+    from mbt_adapter_base.specs import SplitSpec
+
+    ok = SplitSpec(time_column="ts", train="-180d:-28d", test="-28d:now", embargo="7d")
+    assert ok.embargo == "7d"
+    with pytest.raises(ValidationError, match="temporal strategy only"):
+        SplitSpec.model_validate(
+            {"strategy": "random", "train": "0.8", "test": "0.2", "seed": 1, "embargo": "7d"}
+        )
+    with pytest.raises(ValidationError, match="positive duration"):
+        SplitSpec(time_column="ts", train="-180d:-28d", test="-28d:now", embargo="-7d")
+
+
+def test_nested_cv_requires_backtest_folds_and_tuning() -> None:
+    """Nested CV (R2-7): needs backtest_folds and a tuning block; works on either
+    split (temporal walk-forward or random k-fold)."""
+    from mbt_adapter_base.specs import EvaluationProtocol
+
+    with pytest.raises(ValidationError, match="needs backtest_folds"):
+        EvaluationProtocol.model_validate({"split": "random", "nested_cv": True})
+    assert EvaluationProtocol.model_validate(
+        {"split": "temporal", "backtest_folds": 3, "nested_cv": True}
+    ).nested_cv  # temporal nested CV is now supported (walk-forward outer folds)
+    assert EvaluationProtocol.model_validate(
+        {"split": "random", "backtest_folds": 3, "nested_cv": True}
+    ).nested_cv
+
+
+def test_calibration_and_backtest_folds_compose() -> None:
+    """F5 (real fix): each backtest fold carves its own calibration slice from
+    the fold's train, exactly like the production fit (seed+5), so the pairing
+    that used to be rejected at parse now parses and trains."""
+    backtest_eval = EvaluationSpec(
+        protocol=EvaluationProtocol(backtest_folds=3), metrics=["roc_auc"]
+    )
+    combined = _model_spec(calibration="isotonic", evaluation=backtest_eval)
+    assert combined.calibration == "isotonic"
+    assert combined.evaluation.protocol.backtest_folds == 3
+    assert _model_spec(calibration="isotonic").calibration == "isotonic"
+    assert _model_spec(evaluation=backtest_eval).evaluation.protocol.backtest_folds == 3
+
+    def _spec(with_tuning: bool) -> ModelSpec:
+        payload: dict[str, Any] = {
+            "name": "m",
+            "task": "binary_classification",
+            "adapter": "xgboost",
+            "owner": "t@example.com",
+            "dataset": "ref('d')",
+            "target": "y",
+            "evaluation": {
+                "protocol": {"split": "random", "backtest_folds": 3, "nested_cv": True},
+                "metrics": ["pr_auc"],
+            },
+            "seed": 1,
+        }
+        if with_tuning:
+            payload["tuning"] = {
+                "engine": "optuna",
+                "n_trials": 5,
+                "search_space": {"max_depth": {"type": "int", "low": 2, "high": 5}},
+                "objective": {"metric": "pr_auc", "direction": "maximize"},
+            }
+        return ModelSpec.model_validate(payload)
+
+    with pytest.raises(ValidationError, match="needs a 'tuning' block"):
+        _spec(with_tuning=False)
+    assert _spec(with_tuning=True).evaluation.protocol.nested_cv

@@ -61,14 +61,20 @@ def qualify_table(identifier: str, database: str | None, schema: str | None) -> 
 
 
 def key_hash_expr(key_columns: list[str], salt: str = "") -> str:
-    """Deterministic 0..SAMPLE_MODULUS-1 bucket from a stable row key."""
+    """Deterministic 0..SAMPLE_MODULUS-1 bucket from a stable row key.
+
+    ``MD5_NUMBER_LOWER64`` (the unsigned lower 64 bits of the md5) over the
+    '|'-joined preimage is the canonical cross-adapter digest (F19): the local
+    DuckDB adapter and Spark compute the identical value, so the same key
+    lands in the same bucket on every backend.
+    """
     if not key_columns:
         raise SnowflakeSQLError("a non-empty key is required for hashing")
     parts = ", ".join(f"COALESCE(CAST({validate_column(c)} AS VARCHAR), '')" for c in key_columns)
     if salt:
         safe_salt = salt.replace("'", "''")
         parts = f"'{safe_salt}', {parts}"
-    return f"MOD(ABS(MD5_NUMBER_LOWER64(CONCAT_WS('|', {parts}))), {SAMPLE_MODULUS})"
+    return f"MOD(MD5_NUMBER_LOWER64(CONCAT_WS('|', {parts})), {SAMPLE_MODULUS})"
 
 
 def sampling_predicate(key_columns: list[str], fraction: float) -> str:
@@ -92,6 +98,18 @@ def _interval_sql(count: int, unit: str) -> str:
     return f"{operator} INTERVAL '{abs(count)} {_INTERVAL_UNITS[unit]}'"
 
 
+def _spine_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> str:
+    """The spine + feature USING joins, before any label join (shared by
+    ``base_relation`` and the label-join coverage counts, F21)."""
+    assert spec.inputs is not None
+    join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
+    sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
+    for i, (feature_uid, using_cols) in enumerate(spec.inputs.feature_entries):
+        using = ", ".join(validate_column(c) for c in using_cols)
+        sql += f" {join_kind} {table_refs[feature_uid]} AS mbt_f{i} USING ({using})"
+    return sql
+
+
 def base_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> tuple[str, list[str]]:
     """FROM clause plus columns to project away afterwards.
 
@@ -104,11 +122,7 @@ def base_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> tuple[str
     if spec.inputs is None:
         assert spec.source is not None
         return table_refs[spec.source], []
-    join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
-    sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
-    for i, (feature_uid, using_cols) in enumerate(spec.inputs.feature_entries):
-        using = ", ".join(validate_column(c) for c in using_cols)
-        sql += f" {join_kind} {table_refs[feature_uid]} AS mbt_f{i} USING ({using})"
+    sql = _spine_relation(spec, table_refs)
     if spec.inputs.population is None:
         return sql, []
     renames = {
@@ -180,13 +194,29 @@ def split_queries(
         fractions["validation"] = float(spec.split.validation)
     fractions["test"] = float(spec.split.test)
     low = 0.0
-    for split, fraction in fractions.items():
+    entries = list(fractions.items())
+    for index, (split, fraction) in enumerate(entries):
         lo = int(low * SAMPLE_MODULUS)
-        hi = int((low + fraction) * SAMPLE_MODULUS)
+        # the final split's upper bound is pinned to the modulus so no bucket
+        # can fall through a float-accumulation gap (mirrored by the local
+        # adapter, so the two backends compute identical edges - F19)
+        hi = SAMPLE_MODULUS if index == len(entries) - 1 else int((low + fraction) * SAMPLE_MODULUS)
         predicates = [*base_where, f"{bucket} >= {lo}", f"{bucket} < {hi}"]
         queries[split] = f"SELECT {select} FROM {relation} WHERE {' AND '.join(predicates)}"
         low += fraction
     return queries
+
+
+def coverage_queries(spec: DatasetSpec, table_refs: Mapping[str, str]) -> tuple[str, str] | None:
+    """``(spine_count_sql, matched_count_sql)`` for the label-join coverage
+    statistic (F21), or None when the dataset has no population-spine label
+    join. Counted before filters/sampling/windows so the ratio isolates the
+    inner label join's silent drop (labels off the offset grid)."""
+    if spec.inputs is None or spec.inputs.population is None:
+        return None
+    matched, _ = base_relation(spec, table_refs)
+    spine = _spine_relation(spec, table_refs)
+    return (f"SELECT COUNT(*) FROM {spine}", f"SELECT COUNT(*) FROM {matched}")
 
 
 def scoring_relation(spec: ScoringInputSpec, table_refs: Mapping[str, str]) -> str:

@@ -15,6 +15,7 @@ from mbt.adapters.local.compute import (
     parse_job_line,
     parse_job_timeout,
     result_path_for,
+    sweep_stale_job_payloads,
 )
 from mbt.contracts import AdapterRef, DatasetLocator, JobResult, TrainingJob
 from mbt.events.bus import EventBus
@@ -263,3 +264,62 @@ def test_terminate_falls_back_to_kill_when_sigterm_is_ignored(tmp_path: Path) ->
     LocalComputeAdapter().terminate(handle, "timed out after 1s and was killed")
     assert process.killed
     assert handle.terminated_reason == "timed out after 1s and was killed"
+
+
+def test_sweep_stale_job_payloads_ages_out_only_stale_dirs(tmp_path: Path) -> None:
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    old = tmp_path / "mbt-job-old"
+    old.mkdir()
+    (old / "job.json").write_text("{}")
+    fresh = tmp_path / "mbt-job-fresh"
+    fresh.mkdir()
+    other = tmp_path / "unrelated-dir"  # not an mbt-job payload
+    other.mkdir()
+    stray = tmp_path / "mbt-job-stray"  # matches the prefix but is a file
+    stray.write_text("x")
+    broken = tmp_path / "mbt-job-broken"  # broken symlink: stat() raises
+    broken.symlink_to(tmp_path / "does-not-exist")
+
+    eight_days_ago = (datetime.now(tz=UTC) - timedelta(days=8)).timestamp()
+    os.utime(old, (eight_days_ago, eight_days_ago))
+
+    removed = sweep_stale_job_payloads(datetime.now(tz=UTC) - timedelta(days=7), root=tmp_path)
+
+    assert removed == [old]
+    assert not old.exists()  # older than the cutoff -> aged out
+    assert fresh.exists()  # recent -> kept for active debugging
+    assert other.exists()  # not an mbt-job dir -> untouched
+    assert stray.exists()  # a file, not a dir -> skipped
+    assert broken.is_symlink()  # broken link (stat raised) -> skipped
+
+
+def test_sweep_stale_job_payloads_survives_unremovable_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    from mbt.adapters.local import compute
+
+    old = tmp_path / "mbt-job-locked"
+    old.mkdir()
+    eight_days_ago = (datetime.now(tz=UTC) - timedelta(days=8)).timestamp()
+    os.utime(old, (eight_days_ago, eight_days_ago))
+
+    def _boom(_path: object) -> None:
+        raise OSError("directory busy")
+
+    monkeypatch.setattr(compute.shutil, "rmtree", _boom)
+    removed = sweep_stale_job_payloads(datetime.now(tz=UTC) - timedelta(days=7), root=tmp_path)
+    assert removed == []  # rmtree failed -> suppressed, not counted, not fatal
+    assert old.exists()
+
+
+def test_sweep_defaults_to_the_system_tempdir() -> None:
+    from datetime import UTC, datetime
+
+    # An epoch cutoff predates every real file, so this exercises the default
+    # (system tempdir) root as a guaranteed no-op - nothing is old enough.
+    assert sweep_stale_job_payloads(datetime(1970, 1, 1, tzinfo=UTC)) == []

@@ -23,6 +23,7 @@ from mbt.events.models import (
     StateDiffed,
     TestEvaluated,
 )
+from mbt.events.otel import OTelSpanSink
 from mbt.events.sinks import ConsoleSink, JsonLinesSink, NullSink
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "NodeFinished",
     "NodeStarted",
     "NullSink",
+    "OTelSpanSink",
     "ParseCompleted",
     "ParseStarted",
     "PromotionApplied",

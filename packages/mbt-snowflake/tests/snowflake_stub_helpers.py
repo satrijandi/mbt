@@ -27,11 +27,19 @@ class StubCursor:
         self._connection.executed.append(sql)
         if "SYSTEM$LAST_CHANGE_COMMIT_TIME" in sql or "HASH_AGG" in sql:
             self._scalar = self._connection.snapshot_token(sql)
+            self._table = None
             return self
+        self._scalar = None
         self._table = self._connection.run_in_duckdb(sql)
         return self
 
-    def fetchone(self) -> tuple[Any] | None:
+    def fetchone(self) -> tuple[Any, ...] | None:
+        # Snapshot queries answer with the scripted token; anything else (the
+        # coverage/source-check COUNTs) answers from the real DuckDB result.
+        if self._table is not None:
+            if self._table.num_rows == 0:
+                return None
+            return tuple(column[0].as_py() for column in self._table.columns)
         return (self._scalar,)
 
     def fetch_arrow_batches(self):
@@ -65,9 +73,12 @@ class StubConnection:
     def run_in_duckdb(self, sql: str) -> pa.Table:
         con = duckdb.connect()
         try:
+            # The true Snowflake semantics: the unsigned lower 64 bits of the
+            # md5 (the last 16 hex chars as a UBIGINT). This is the canonical
+            # cross-adapter digest (F19), so the emulation must match exactly -
+            # DuckDB's own md5_number uses a different byte interpretation.
             con.execute(
-                "CREATE MACRO MD5_NUMBER_LOWER64(s) AS "
-                "(md5_number(s) % 9223372036854775807)::BIGINT"
+                "CREATE MACRO MD5_NUMBER_LOWER64(s) AS ('0x' || substring(md5(s), 17, 16))::UBIGINT"
             )
             con.execute("CREATE MACRO TO_TIMESTAMP_NTZ(s) AS CAST(s AS TIMESTAMP)")
             for i, (ref, table) in enumerate(self.tables.items()):

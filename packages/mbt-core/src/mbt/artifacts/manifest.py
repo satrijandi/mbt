@@ -13,6 +13,7 @@ from typing import Any
 import networkx as nx
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
+from mbt.artifacts.atomic import atomic_write_text
 from mbt.compile.hashing import manifest_hash
 from mbt.contracts import ManifestNode, SourceTable
 from mbt.dag.selector import SelectableNode
@@ -166,8 +167,7 @@ class Manifest(BaseModel):
         return redact(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
     def write(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.to_json())
+        atomic_write_text(path, self.to_json())
 
 
 def read_manifest(path_or_text: Path | str, *, source: str = "manifest") -> Manifest:

@@ -18,7 +18,24 @@ from mbt_adapter_base.interchange import DatasetProfile, MetricResults
 from mbt_adapter_base.specs import MetricSpec
 
 if TYPE_CHECKING:
+    import numpy as np
     import pyarrow as pa
+
+
+def top_k_explanations(shap_values: "np.ndarray", features: list[str], top_k: int) -> list[str]:
+    """Per-row local attribution: the ``top_k`` features by |SHAP| for each row,
+    as a JSON string ``[[feature, contribution], ...]`` ordered by descending
+    |contribution| (explainability). Shared by the SHAP-capable adapters so the
+    scoring ``explanation`` column has one format regardless of framework."""
+    import json
+
+    import numpy as np
+
+    result: list[str] = []
+    for row in shap_values:
+        order = np.argsort(-np.abs(row))[:top_k]
+        result.append(json.dumps([[features[i], round(float(row[i]), 6)] for i in order]))
+    return result
 
 
 def evaluate_split(
@@ -42,6 +59,27 @@ def evaluate_split(
         if name in table.column_names
     }
     return compute_results(metrics, y_true, np.asarray(y_score, dtype=np.float64), slice_columns)
+
+
+def calibration_split(data: Any) -> str:
+    """The split a post-hoc calibrator must fit on.
+
+    Core carves a dedicated ``calibration`` slice from train whenever the spec
+    sets ``calibration`` (F17: the calibrator must not fit on the validation
+    split that early stopping and tuning select on). Direct adapter calls (the
+    compliance suite, notebooks) may instead pass their own held-out
+    ``validation`` split, so that remains the documented fallback. Without
+    either there is no honest calibration set, so this fails loudly.
+    """
+    splits = data.splits()
+    if "calibration" in splits:
+        return "calibration"
+    if "validation" in splits:
+        return "validation"
+    raise ValueError(
+        "calibration needs a 'calibration' (or 'validation') split to fit on; "
+        "core carves one from train when the model spec sets 'calibration'"
+    )
 
 
 def positive_rate(profile: DatasetProfile) -> float | None:

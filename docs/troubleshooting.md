@@ -6,6 +6,27 @@ Every symptom below was reproduced against the real CLI; the messages are verbat
 Exit codes (TSD §17): `0` success, `1` hard error (something is broken), `2` quality failure (the pipeline ran; a gate, check, or test said no).
 CI should treat `1` as "page someone" and `2` as "review the model, not the plumbing".
 
+## `git checkout -q v0.1.0 did not run successfully` installing a scaffolded project
+
+**Symptom:** `pip install -r requirements.txt` in a fresh `mbt init` project (locally or in its first CI run) fails:
+
+```text
+  error: subprocess-exited-with-error
+
+  × git checkout -q v0.1.0 did not run successfully.
+  │ exit code: 1
+  ╰─> No available output.
+
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+ERROR: Failed to build 'mbt-core' when git checkout -q v0.1.0
+```
+
+**Why:** the scaffold pins mbt to the immutable release tag matching the mbt version that generated it (`mbt-core @ git+https://github.com/satrijandi/mbt@v0.1.0#...`), and that tag has not been cut on the mbt repo yet.
+The pin is deliberate - a floating ref would invalidate the manifest's env digest - but it only resolves once the release exists.
+
+**Fix:** until the tag is cut, replace `@v0.1.0` in all three refs in `requirements.txt` (and `requirements.in`) with the commit SHA you installed mbt from - a SHA is just as immutable, so reproducibility is preserved - and re-run the install.
+Once mbt is released (tag on the repo, or packages on PyPI), restore the tag pin or switch to plain version pins per the file's header.
+
 ## Everything is `state:modified` but nobody changed anything
 
 **Symptom:** `mbt state diff` flags datasets as `modified` with component `snapshot`, and every downstream model as `modified` with component `upstream`:
@@ -178,6 +199,9 @@ Warehouse adapters fail hard on this by design (TSD §8.3).
 **Fix:** if the data change is expected, recompile (`mbt compile` / a fresh `mbt build`) so the pin moves with it.
 If it is not expected, treat it as an incident: something wrote to a table your manifest pinned.
 
+**This applies to datasets only.** A scoring input (`mbt score`) and the arriving labels (`mbt monitor`) are expected to change every run, so they are exempt: a pinned manifest scores/monitors the live data instead of raising (R2-10).
+That is what makes `mbt score --manifest` / `mbt monitor --manifest` usable as the reviewed, pinned artifact a scheduled job runs from - only the training data is held immutable.
+
 ## `no champion of 'churn_model' in stage 'production' to score with`
 
 **Symptom (hard error, exit 1):**
@@ -191,6 +215,27 @@ no champion of 'churn_model' in stage 'production' to score with
 The scoring spec's `stage` (default `production`) names the registry alias the champion is resolved from at run time (ADR-20).
 
 **Fix:** build and promote the referenced model (`mbt build`, then `mbt promote --model <name> --to production`), or point the pipeline's `stage` at the stage you actually register to.
+
+## Rolling back a bad champion (incident procedure)
+
+**Situation:** a version you just promoted to `production` is misbehaving - an `mbt monitor` realized-metric breach, or a downstream incident - and you need to revert to the previous champion now.
+
+**Steps:**
+
+1. Roll back. `mbt rollback` reverts the production champion to the most recent version below it that recorded passing gates - the last known good - so you do not have to look up a version number mid-incident:
+
+   ```text
+   mbt rollback --model churn_classifier
+   -> ROLLBACK: churn_classifier production reverted from v3 to v2
+   -> rolled back churn_classifier to v2 in production
+   ```
+
+   To revert to a specific earlier version instead, pass `--to-version N`. In CI, drive this from a `workflow_dispatch` job; `promotions.yml`'s git history remains the audit trail of every forward promotion.
+2. Verify: the registry now resolves the reverted version as the production champion and the bad version becomes the newly archived one; `mbt score` and `mbt monitor` pick up the reverted champion on their next run (the champion is resolved from the registry at run time, ADR-20).
+
+**Note:** rollback re-promotes through the same recorded-gate check as `mbt promote` (FR-REG-03), and the last-known-good target already passed its gates, so it reverts cleanly. A version promoted before gate recording, or whose run metadata is gone, needs `--force`.
+
+**If it refuses with `cannot roll back ... no longer exists (aged out by 'mbt clean' or a bucket lifecycle rule)`:** the target's artifact reference survives in the registry but the file behind it is gone, so moving the alias would only relocate the failure to the next `mbt score` (F12). The refusal happens BEFORE the alias moves; pick an earlier version whose artifact still exists (`--to-version N`) or re-train. On a store the probe cannot reach (an unrecognized scheme, or s3 without the s3 extra installed in the operator environment), rollback proceeds but logs `could not verify the artifact` - treat that warning as a prompt to check the artifact by hand.
 
 ## `the champion was trained with a different hooks.py than the current project's`
 
@@ -221,19 +266,19 @@ In the ADR-10 spirit this passes loudly instead of blocking scoring.
 
 **Fix:** retrain and promote once; every training job now exports a baseline and registration pins it to the version.
 
-## `data adapter 'snowflake' does not support batch scoring`
+## `data adapter '<name>' does not support batch scoring`
 
 **Symptom (hard error, exit 1, before any job runs):**
 
 ```text
-data adapter 'snowflake' does not support batch scoring (contract 1.1 adds build_scoring_input and open_predictions)
-  hint: upgrade the adapter package, or score against a target whose data adapter supports scoring (the local adapter does)
+data adapter 'acme_lakehouse' does not support batch scoring (contract 1.1 adds build_scoring_input and open_predictions)
+  hint: upgrade the adapter package, or score against a target whose data adapter supports scoring (the built-in local, snowflake, and spark adapters all do)
 ```
 
 **Why:** `mbt score` needs the contract 1.1 data-adapter methods (materialize an unlabeled batch; open a prediction store).
-Adapters built against contract 1.0 still load and train fine - the capability is probed up front so the failure is immediate and clear (ADR-21).
+All three built-in data adapters (local, snowflake, spark) ship them, so this fires only for a third-party adapter built against contract 1.0, which still loads and trains fine - the capability is probed up front so the failure is immediate and clear (ADR-21).
 
-**Fix:** upgrade the adapter package to a release that implements scoring, or run the pipeline against a target whose data adapter does (the local adapter ships it).
+**Fix:** upgrade the adapter package to a release that implements scoring, or run the pipeline against a target whose data adapter does (any built-in adapter ships it).
 
 ## `mbt monitor` says `evaluated 0 of 1 matured prediction run(s)`
 
@@ -248,6 +293,21 @@ The run is deliberately NOT marked evaluated, so it retries on the next monitor 
 
 **Fix:** nothing, if labels are simply late - the next scheduled `mbt monitor` picks the run up.
 If it persists, check `ground_truth.join_key` against the label table's columns and verify the label pipeline delivers to the configured source.
+
+## `mbt monitor` skips a run with `unparseable scored_at`
+
+**Symptom (exit 0, with a warning):**
+
+```text
+WARN skipping prediction run 'a1b2c3d4e5f60718': unparseable scored_at 'not-a-timestamp'
+```
+
+**Why:** a prediction run's `predictions.json` sidecar carries a `scored_at` that is not an ISO-8601 timestamp.
+mbt's own scoring path always writes the manifest anchor, so this points at a run written (or edited) by an external store.
+One malformed sidecar is skipped rather than allowed to fail the whole monitor node with a bare `ValueError` (R2-19), so every other run in the store still evaluates.
+
+**Fix:** repair or remove that run directory (`scored_at` must be an ISO-8601 timestamp); the next `mbt monitor` then picks the run up.
+If an external store produced it, fix the store's `scored_at` serialization.
 
 ## A mistyped flag prints `No such option`
 
@@ -269,10 +329,29 @@ training job timed out after 2s and was killed (job payload kept at /tmp/mbt-job
 **Why:** the target's compute config sets `job_timeout_seconds`, and this job outlived it.
 Without the limit, a wedged training job (an infinite loop, a hung network call inside a framework) blocks the whole run forever; with it, the watchdog SIGTERMs the subprocess (SIGKILL after a grace period) and the node reports the reason.
 The kept job payload is the exact serialized job for reproduction: `python -m mbt.execute.job <path>` reruns it under a debugger.
+These payloads are kept indefinitely for debugging; `mbt clean` ages out the ones older than 7 days so they do not accumulate in the temp dir.
 
 **Fix:** if the job was genuinely making progress, raise `job_timeout_seconds` in `profiles.yml` (or remove it for no limit).
 If it was hung, the payload plus the tail of the event log tells you where.
 The same key works for the Spark compute adapter (`spark-submit` wording in the message).
+
+## `Internal error: <ExceptionType>: <message>`
+
+**Symptom (any command, exit 1; captured from a real occurrence - a non-UTF-8 spec file, a vector that has since been fixed to parse-error cleanly):**
+
+```text
+Internal error: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in
+position 22: invalid start byte
+  hint: this is a bug in mbt; please report it with the command you ran. Set
+MBT_DEBUG=1 to see the full traceback.
+```
+
+**Why:** this is the CLI's coordinator-side safety net.
+Every expected failure (bad spec, missing file, gate breach) has its own friendly message and exit code; anything that reaches this catch-all is by definition a bug in mbt, not in your project.
+The message is redacted (the error path is a serialization path too), so secrets never leak into it.
+
+**Fix:** re-run the same command with `MBT_DEBUG=1` in the environment - the catch-all then re-raises, printing the full traceback - and file a bug report with the command and that traceback.
+There is nothing to fix on the project side; if the message suggests a project problem that surfaced this way (as a raw exception rather than a friendly error), that mis-routing is part of the bug, so report it too.
 
 ## Informational event lines you may now see
 
@@ -286,7 +365,11 @@ They were added so paths that used to run silently now report progress; an opera
 | `evaluate: 2 node(s) selected on target 'dev'` / `evaluate finished [success]: 2 ok, 0 failed, 0 skipped in 1.2s` | `mbt evaluate` run brackets, matching the other commands |
 | `check schema: PASS` / `test test_row_count: PASS` | each built-in check and Python data test (the `FAIL` variant is a symptom - see its entry above) |
 | `materialized 1000 rows: test=200, train=800` | a dataset build's per-split row counts (local, snowflake, and spark data adapters; the warehouse adapters prefix the node id) |
+| `label join matched 480 of 520 spine rows (92.3%)` | a population-spine build's outcome coverage (F21): how many spine rows survived the inner label join, counted before filters/sampling/windows. Expected to be below 100% when the newest cohort's outcomes have not matured yet; enforce a floor with the `label_join_coverage` check |
 | `scoring input materialized 340 rows to score` | a scoring-input build (an empty batch warns `scoring input materialized 0 rows; nothing to score` instead) |
 | `tuning complete: 10 trial(s), 2 pruned, best pr_auc=0.8300` | a tuning search summary; per-trial `tuning trial 0: pr_auc=0.8300` lines are debug-level, shown only under `--verbose` or `--log-format json` |
+| `feature_shift warn: tenure: psi=0.1800 in the shift warn band [0.15, 0.25]` | a shift in a monitor's optional `warn_threshold` band - elevated but below the fail bar, so the run stays green (exit 0); tune the thresholds or investigate the feature |
+| `feature_shift most shifted: tenure=0.1800, age=0.0900, region=0.0400 (top 3 of 12)` | a per-run summary of the most-shifted features (ranked, whether or not any breached), so drift is visible before it crosses a threshold |
+| `run 06e35b21ab994b83: already evaluated by a concurrent monitor run; skipping to avoid a double gate/alert` | benign: two overlapping `mbt monitor` runs raced, and the atomic ledger let only one record the evaluation (R2-11); the loser skips - "evaluated exactly once" held |
 
 `--quiet` suppresses all of these; `--log-format json` emits them as structured event objects instead of the rendered text shown here.

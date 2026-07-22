@@ -91,3 +91,32 @@ class _EmptyImportanceCompliance(TrainingAdapterCompliance):
 def test_feature_importance_check_accepts_the_empty_escape_hatch() -> None:
     # {} is the documented outcome for unattributable models (ensemble leaders).
     _EmptyImportanceCompliance().test_feature_importance_is_normalized_when_supported()
+
+
+def test_shap_importance_check_skips_without_the_method() -> None:
+    # the optional-capability probe is a no-op for an adapter that does not
+    # advertise shap_importance (F25), same contract as feature_importance.
+    with pytest.raises(pytest.skip.Exception, match="optional"):
+        _NoImportanceCompliance().test_shap_importance_is_normalized_when_supported()
+
+
+def test_explain_check_skips_without_the_method() -> None:
+    with pytest.raises(pytest.skip.Exception, match="optional"):
+        _NoImportanceCompliance().test_explain_returns_per_row_attribution_when_supported()
+
+
+def test_calibration_check_skips_without_support() -> None:
+    # an adapter that does not set supports_calibration is a no-op for the
+    # calibration round-trip probe (F25), like the other optional capabilities.
+    with pytest.raises(pytest.skip.Exception, match="optional"):
+        _NoImportanceCompliance().test_calibration_round_trips_through_export_when_supported()
+
+
+def test_calibration_fallback_check_skips_without_support() -> None:
+    with pytest.raises(pytest.skip.Exception, match="optional"):
+        _NoImportanceCompliance().test_calibration_falls_back_to_the_validation_split_when_supported()
+
+
+def test_train_with_report_check_skips_without_the_method() -> None:
+    with pytest.raises(pytest.skip.Exception, match="optional"):
+        _NoImportanceCompliance().test_train_with_report_streams_validation_progress_when_supported()

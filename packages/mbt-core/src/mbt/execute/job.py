@@ -36,6 +36,7 @@ from mbt.contracts import (
     PredictionRunInfo,
     RunContext,
     ScoringSpec,
+    SplitStrategy,
     TrainingJob,
     TuningResult,
 )
@@ -51,6 +52,18 @@ from mbt_adapter_base.datasets import InMemoryDatasetHandle
 
 #: Fraction of the train window carved as implicit validation (TSD §13.5).
 _IMPLICIT_VALIDATION_FRACTION = 0.2
+
+#: Fraction of the train window carved as the dedicated calibration slice (F17).
+#: The calibrator must fit on rows the model never trained on AND that no
+#: selection step (early stopping, tuning) optimized against, so it gets its
+#: own slice rather than reusing the validation split.
+_CALIBRATION_FRACTION = 0.2
+
+#: Robust tuning bootstrap (R2-7): fewer resamples than a gate's 1000 because it
+#: runs once per trial during the search; the one-sided confidence matches the
+#: champion-gate default.
+_TUNING_BOOTSTRAP_RESAMPLES = 200
+_TUNING_BOOTSTRAP_CONFIDENCE = 0.95
 
 
 def _render_adapter_ref(ref: AdapterRef, job_vars: dict[str, Any]) -> AdapterRef:
@@ -90,6 +103,7 @@ class _JobRuntime:
     adapter: Any
     handle: Any  # what the adapter reads (transformed, or a path materialization)
     transformed: TransformedDatasetHandle  # always the lazy transformed view
+    base_handle: Any  # pre-transform materialization (carries the time_column)
     base_profile: DatasetProfile
     hooks: ModelHooks | None
     builtin_specs: list[MetricSpec]
@@ -238,6 +252,7 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
         adapter=adapter,
         handle=handle,
         transformed=transformed,
+        base_handle=base_handle,
         base_profile=base_profile,
         hooks=hooks,
         builtin_specs=[m for m in job.metric_specs if m.kind == "builtin"],
@@ -309,14 +324,58 @@ def _export_baseline(runtime: _JobRuntime, model: Any) -> Any:
 
 
 def _feature_importance(runtime: _JobRuntime, model: Any) -> dict[str, float]:
-    """Per-feature importance when the adapter exposes it (FR-DOCS-02).
+    """Per-feature importance for the model card (FR-DOCS-02).
 
-    Optional per adapter, like ``log_trial`` on trackers: absence simply
-    leaves model cards without an importance table.
+    Prefers a data-grounded SHAP importance when the adapter exposes it (the
+    tree adapters), since split-gain is cardinality-biased; falls back to the
+    adapter's model-intrinsic ``feature_importance``. Optional per adapter, like
+    ``log_trial`` on trackers: absence simply leaves cards without the table.
     """
-    if not hasattr(runtime.adapter, "feature_importance"):
-        return {}
-    return dict(runtime.adapter.feature_importance(model))
+    adapter = runtime.adapter
+    if hasattr(adapter, "shap_importance"):
+        return dict(adapter.shap_importance(model, runtime.handle, "test"))
+    if hasattr(adapter, "feature_importance"):
+        return dict(adapter.feature_importance(model))
+    return {}
+
+
+def _partial_dependence(
+    runtime: _JobRuntime, model: Any, importance: dict[str, float], *, top_n: int = 3
+) -> dict[str, list[list[float]]]:
+    """Partial dependence for the ``top_n`` most-important NUMERIC features: how
+    the average prediction moves as each feature sweeps its range while the rest
+    stay at their observed values (explainability). Adapter-agnostic - it
+    re-predicts on the test split with one feature overridden across a quantile
+    grid. Categorical features are skipped (their PD is a different idiom)."""
+    import numpy as np
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+    table = runtime.handle.read("test")
+    curves: dict[str, list[list[float]]] = {}
+    for feature in sorted(importance, key=lambda name: -importance[name]):
+        if len(curves) >= top_n or feature not in table.column_names:
+            continue
+        column = table.column(feature)
+        is_int = pa.types.is_integer(column.type)
+        if not (is_int or pa.types.is_floating(column.type)):
+            continue  # numeric features only
+        values = np.asarray(column.to_numpy(zero_copy_only=False), dtype=float)
+        grid = np.unique(np.quantile(values, np.linspace(0.0, 1.0, 8)))
+        index = table.column_names.index(feature)
+        curve: list[list[float]] = []
+        for point in grid:
+            cell = round(float(point)) if is_int else float(point)
+            override = table.set_column(
+                index, feature, pa.array([cell] * table.num_rows, type=column.type)
+            )
+            handle = InMemoryDatasetHandle({"pd": override})
+            predicted = runtime.adapter.predict(model, handle, "pd").column("prediction")
+            curve.append([round(float(point), 6), round(float(pc.mean(predicted).as_py()), 6)])
+        curves[feature] = curve
+    return curves
 
 
 def _champion_delta_bounds(
@@ -361,7 +420,8 @@ def _champion_delta_bounds(
             greater_is_better=metric_direction(gate.metric, runtime.job.metric_specs),
             confidence=confidence,
             n_resamples=gate.bootstrap_resamples,
-            seed=spec.seed + 3,  # seed: train, +1: tuning, +2: validation carve, +3: bootstrap
+            seed=spec.seed + 3,  # seed ladder: train, +1 tuning, +2 validation
+            # carve, +3 bootstrap, +4 random k-fold, +5 calibration carve
         )
     return bounds
 
@@ -369,10 +429,59 @@ def _champion_delta_bounds(
 # -- tuning (TSD §13.5, ADR-8) ----------------------------------------------------
 
 
-def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
+def _tail_carve_indices(
+    raw_train: pa.Table,
+    *,
+    time_column: str | None,
+    windows: dict[str, Any],
+    time_range: tuple[Any, Any] | None,
+    seed: int,
+    fraction: float,
+) -> tuple[list[int], list[int]]:
+    """``(fit_idx, held_idx)`` slicing the train rows for a carve: the tail
+    ``fraction`` of the train time span when the split is temporal, else a
+    seeded random ``fraction``. Shared by the implicit-validation carve
+    (``seed+2``) and the calibration carve (``seed+5``) so the two slice train
+    by identical rules and differ only in seed and destination split."""
+    if time_column and (time_range is not None or "train" in windows):
+        from datetime import datetime
+
+        def _naive(value: Any) -> Any:
+            if isinstance(value, datetime):
+                return value.replace(tzinfo=None)
+            if hasattr(value, "isoformat") and not isinstance(value, datetime):  # date
+                return datetime(value.year, value.month, value.day)
+            return value  # pragma: no cover - split time columns are temporal by construction
+
+        if time_range is not None:
+            start, end = _naive(time_range[0]), _naive(time_range[1])
+        else:
+            start = datetime.fromisoformat(str(windows["train"][0]).replace("Z", "+00:00"))
+            end = datetime.fromisoformat(str(windows["train"][1]).replace("Z", "+00:00"))
+        boundary = _naive(start) + (_naive(end) - _naive(start)) * (1 - fraction)
+        column = raw_train.column(time_column).to_pylist()
+        fit_idx = [i for i, v in enumerate(column) if _naive(v) < boundary]
+        held_idx = [i for i, v in enumerate(column) if _naive(v) >= boundary]
+    else:
+        import numpy as np
+
+        rng = np.random.RandomState(seed)
+        permutation = rng.permutation(raw_train.num_rows)
+        cut = int(raw_train.num_rows * (1 - fraction))
+        fit_idx = sorted(int(i) for i in permutation[:cut])
+        held_idx = sorted(int(i) for i in permutation[cut:])
+    return fit_idx, held_idx
+
+
+def _carve_validation(
+    runtime: _JobRuntime, *, time_range: tuple[Any, Any] | None = None
+) -> TransformedDatasetHandle | None:
     """A handle whose train/validation splits tuning may see; test never (ADR-8).
 
     Returns None when the dataset already declares a validation split.
+    ``time_range`` (nested temporal CV) overrides the declared train window with
+    the fold's own ``[start, end]`` so the carve is fold-aware; the main path
+    leaves it None and uses the declared window unchanged.
     """
     base = runtime.transformed
     if "validation" in base.splits():
@@ -384,35 +493,14 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
     time_column = getattr(base._base, "time_column", None)
     windows = job.dataset_windows.get("windows", job.dataset_windows)
 
-    if time_column and "train" in windows:
-        from datetime import datetime, timedelta
-
-        start = datetime.fromisoformat(str(windows["train"][0]).replace("Z", "+00:00"))
-        end = datetime.fromisoformat(str(windows["train"][1]).replace("Z", "+00:00"))
-        boundary = (start + (end - start) * (1 - _IMPLICIT_VALIDATION_FRACTION)).replace(
-            tzinfo=None
-        )
-        column = raw_train.column(time_column).to_pylist()
-
-        def _naive(value: Any) -> Any:
-            if isinstance(value, datetime):
-                return value.replace(tzinfo=None)
-            if hasattr(value, "isoformat") and not isinstance(value, datetime):  # date
-                return datetime(value.year, value.month, value.day)
-            return value  # pragma: no cover - split time columns are temporal by construction
-
-        fit_idx = [i for i, v in enumerate(column) if _naive(v) < boundary]
-        val_idx = [i for i, v in enumerate(column) if _naive(v) >= boundary]
-        _ = timedelta  # keep import local and explicit
-    else:
-        import numpy as np
-
-        rng = np.random.RandomState(spec.seed + 2)
-        permutation = rng.permutation(raw_train.num_rows)
-        cut = int(raw_train.num_rows * (1 - _IMPLICIT_VALIDATION_FRACTION))
-        fit_idx = sorted(int(i) for i in permutation[:cut])
-        val_idx = sorted(int(i) for i in permutation[cut:])
-
+    fit_idx, val_idx = _tail_carve_indices(
+        raw_train,
+        time_column=time_column,
+        windows=windows,
+        time_range=time_range,
+        seed=spec.seed + 2,
+        fraction=_IMPLICIT_VALIDATION_FRACTION,
+    )
     if not fit_idx or not val_idx:
         raise ConfigError(
             "implicit validation carve produced an empty split",
@@ -435,11 +523,98 @@ def _carve_validation(runtime: _JobRuntime) -> TransformedDatasetHandle | None:
     return TransformedDatasetHandle(carved, spec, runtime.hooks, hook_ctx, time_column)
 
 
+def _carve_calibration(
+    runtime: _JobRuntime,
+    spec: ModelSpec,
+    base: TransformedDatasetHandle,
+    *,
+    time_range: tuple[Any, Any] | None = None,
+) -> TransformedDatasetHandle:
+    """A handle whose train is shrunk by a dedicated ``calibration`` slice (F17).
+
+    The calibrator must fit on rows the model never trained on and that no
+    selection step optimized against - fitting it on the ``validation`` split
+    that early stopping and tuning select on makes the reported ``ece``/``brier``
+    optimistic and overfits the deployed calibrator. So a spec that sets
+    ``calibration`` always gets its own slice carved from train (temporal tail
+    or seeded random ``seed+5``, mirroring the validation carve rules); every
+    other split (test, a declared validation) passes through untouched.
+    ``time_range`` makes the carve fold-aware inside the backtest (F5).
+    """
+    job = runtime.job
+    raw_train = base._base.read("train")
+    time_column = getattr(base._base, "time_column", None)
+    windows = job.dataset_windows.get("windows", job.dataset_windows)
+
+    fit_idx, cal_idx = _tail_carve_indices(
+        raw_train,
+        time_column=time_column,
+        windows=windows,
+        time_range=time_range,
+        seed=spec.seed + 5,
+        fraction=_CALIBRATION_FRACTION,
+    )
+    if not fit_idx or not cal_idx:
+        raise ConfigError(
+            "calibration carve produced an empty split",
+            resource=job.node.unique_id,
+            hint="the train split is too small to carve a calibration slice "
+            "from; grow the train window or drop 'calibration'",
+        )
+    tables = {
+        "train": raw_train.take(fit_idx),
+        "calibration": raw_train.take(cal_idx),
+    }
+    for split in base._base.splits():
+        if split not in ("train", "calibration"):
+            tables[split] = base._base.read(split)
+    carved = InMemoryDatasetHandle(
+        tables,
+        snapshot_id=base.snapshot_id,
+        label_column=spec.target,
+        time_column=time_column,
+    )
+
+    def hook_ctx(split: str) -> HookContext:
+        return HookContext(spec=spec, profile=runtime.base_profile, split=split, logger=get_bus())
+
+    return TransformedDatasetHandle(carved, spec, runtime.hooks, hook_ctx, time_column)
+
+
+def _robust_objective_value(
+    runtime: _JobRuntime, model: Any, spec: ModelSpec, objective_spec: MetricSpec
+) -> float:
+    """Bootstrap lower bound of the validation objective metric (R2-7): the
+    tuning selection is then defended against validation-window luck, not made
+    on a single-carve point estimate. Predicts once on validation and resamples
+    the (label, score) rows with a fixed seed, so trials are compared on the same
+    resamples and the search stays reproducible."""
+    import numpy as np
+
+    from mbt_adapter_base.metrics import bootstrap_metric_lower_bound
+
+    predictions = runtime.adapter.predict(model, runtime.handle, "validation")
+    y_score = np.asarray(
+        predictions.column("prediction").to_numpy(zero_copy_only=False), dtype=float
+    )
+    y_true = np.asarray(predictions.column(spec.target).to_numpy(zero_copy_only=False), dtype=float)
+    return bootstrap_metric_lower_bound(
+        objective_spec,
+        y_true,
+        y_score,
+        confidence=_TUNING_BOOTSTRAP_CONFIDENCE,
+        n_resamples=_TUNING_BOOTSTRAP_RESAMPLES,
+        seed=spec.seed + 3,
+    )
+
+
 def _run_tuning(
     runtime: _JobRuntime,
     spec: ModelSpec,
     tracking: Any = None,
     run_handle: Any = None,
+    *,
+    carve_time_range: tuple[Any, Any] | None = None,
 ) -> tuple[ModelSpec, TuningResult | None]:
     tuning = spec.tuning
     if tuning is None:
@@ -453,7 +628,7 @@ def _run_tuning(
     engine_ref = _render_adapter_ref(job.tuning_engine, _job_vars(job))
     engine = get_registry().component("tuning", engine_ref.adapter, engine_ref.config)
 
-    carved = _carve_validation(runtime)
+    carved = _carve_validation(runtime, time_range=carve_time_range)
     tune_handle: Any = carved or runtime.handle
     if carved is not None and getattr(runtime.adapter, "data_access", "arrow") == "path":
         tune_handle = _materialize_for_path_adapter(carved, spec)
@@ -470,6 +645,12 @@ def _run_tuning(
     if objective_spec is None:
         raise ConfigError(
             f"tuning objective {tuning.objective.metric!r} is not a resolved metric",
+            resource=job.node.unique_id,
+        )
+    if tuning.objective.robust and objective_spec.kind != "builtin":
+        raise ConfigError(
+            f"tuning objective {tuning.objective.metric!r} is a hook metric; "
+            "robust (bootstrap) selection supports builtin metrics only",
             resource=job.node.unique_id,
         )
 
@@ -491,8 +672,15 @@ def _run_tuning(
         )
 
     def objective(trial_params: dict[str, Any], report: Any = None) -> float:
+        # Trials never calibrate: the objective is scored on the same
+        # validation split a trial calibrator would fit on, which would make a
+        # calibration-sensitive objective (brier/ece) circularly optimal (F17).
+        # The final fit calibrates on its own dedicated slice instead.
         trial_spec = spec.model_copy(
-            update={"hyperparameters": {**spec.hyperparameters, **trial_params}}
+            update={
+                "hyperparameters": {**spec.hyperparameters, **trial_params},
+                "calibration": None,
+            }
         )
         if report is not None and adapter_reports:
             # A pruning report may raise out of the training loop; the engine
@@ -500,8 +688,11 @@ def _run_tuning(
             model = runtime.adapter.train_with_report(trial_spec, tune_handle, runtime.ctx, report)
         else:
             model = runtime.adapter.train(trial_spec, tune_handle, runtime.ctx)
-        results = _metrics_for(tune_runtime, model, "validation", with_slices=False)
-        value = float(results.metrics[tuning.objective.metric])
+        if tuning.objective.robust:
+            value = _robust_objective_value(tune_runtime, model, spec, objective_spec)
+        else:
+            results = _metrics_for(tune_runtime, model, "validation", with_slices=False)
+            value = float(results.metrics[tuning.objective.metric])
         index = trial_counter["index"]
         trial_counter["index"] += 1
         # Per-trial progress on the bus at debug (visible under --verbose or
@@ -546,6 +737,156 @@ def _run_tuning(
 # -- main paths -------------------------------------------------------------------
 
 
+def _backtest_folds(
+    runtime: _JobRuntime, spec: ModelSpec, base_train: pa.Table, n_folds: int
+) -> list[tuple[pa.Table, pa.Table]]:
+    """(train_rows, test_rows) fold pairs for the backtest, by split strategy:
+    time-ordered expanding prefixes for a temporal split (train on the past,
+    evaluate on the next fold), or random leave-one-fold-out k-fold for a random
+    split (each fold is the test set once, train on the rest). The temporal path
+    needs the base handle's time column (the transformed view strips it); the
+    random fold assignment is seeded off the model seed for reproducibility.
+
+    A temporal ``split.embargo`` (R2-7) gaps each fold's train tail from its test
+    window exactly as it gaps the single train/test split - without it the
+    walk-forward backtest leaks at every fold boundary (F6). A fold whose entire
+    (earliest, shortest) train prefix falls inside the embargo has no
+    leakage-free history to train on and is dropped."""
+    import numpy as np
+    import pyarrow.compute as pc
+
+    if spec.evaluation.protocol.split is SplitStrategy.TEMPORAL:
+        time_column = getattr(runtime.base_handle, "time_column", None)
+        if time_column is None or time_column not in base_train.column_names:
+            return []
+        ordered = base_train.take(
+            pc.sort_indices(base_train, sort_keys=[(time_column, "ascending")])
+        )
+        edges = [round(i * ordered.num_rows / n_folds) for i in range(n_folds + 1)]
+        embargo = runtime.job.dataset_windows.get("embargo")
+        if embargo is None:
+            return [
+                (ordered.slice(0, edges[i]), ordered.slice(edges[i], edges[i + 1] - edges[i]))
+                for i in range(1, n_folds)
+            ]
+        # Embargo each internal fold boundary: drop training rows whose label
+        # horizon could reach into that fold's test window (mirrors the
+        # single-split embargo in compile/compiler.py).
+        from mbt.compile.windows import subtract_duration
+
+        times = ordered.column(time_column)
+        folds: list[tuple[pa.Table, pa.Table]] = []
+        for i in range(1, n_folds):
+            cutoff = subtract_duration(times[edges[i]].as_py(), embargo)
+            prefix = ordered.slice(0, edges[i])
+            prefix = prefix.filter(
+                pc.less(prefix.column(time_column), pa.scalar(cutoff, type=times.type))
+            )
+            if prefix.num_rows == 0:
+                continue  # the embargo consumed this fold's entire train prefix
+            folds.append((prefix, ordered.slice(edges[i], edges[i + 1] - edges[i])))
+        return folds
+    # random split: k-fold cross-validation (each fold is held out as the test set)
+    n = base_train.num_rows
+    perm = np.random.default_rng(spec.seed + 4).permutation(n)
+    edges = [round(i * n / n_folds) for i in range(n_folds + 1)]
+    return [
+        (
+            base_train.take(np.concatenate([perm[: edges[i]], perm[edges[i + 1] :]])),
+            base_train.take(perm[edges[i] : edges[i + 1]]),
+        )
+        for i in range(n_folds)
+    ]
+
+
+def _walk_forward_backtest(
+    runtime: _JobRuntime, spec: ModelSpec, n_folds: int, *, nested: bool = False
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Fold-based cross-validated evaluation over the training window (R2-7):
+    time-ordered walk-forward for a temporal split, random k-fold for a random
+    split (see ``_backtest_folds``). Returns ``(means, stds)`` of each builtin
+    metric across the folds: the mean is the de-luckified point estimate (a
+    single lucky split cannot flatter it) and the population std is the standard
+    CV stability signal. Report-only unless a gate uses ``source: backtest``.
+
+    With ``nested`` (nested CV), each fold re-runs ``_run_tuning`` on the fold's
+    train only and refits with the fold-tuned params, so the estimate is unbiased
+    for the TUNED model - the outer-test fold never informs the selection. Without
+    it, refits use ``spec`` (already AUTO-resolved and tuned). Either way the fold
+    goes through the SAME ``TransformedDatasetHandle`` pipeline as the real fit.
+    Returns {} when there is too little data (or, for a temporal split, no usable
+    time column) to form a fold.
+    """
+    from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+    base_train = runtime.base_handle.read("train")
+    folds = _backtest_folds(runtime, spec, base_train, n_folds)
+    if not folds:
+        return {}, {}
+    time_column = getattr(runtime.base_handle, "time_column", None)
+
+    def hook_ctx(split: str) -> HookContext:
+        return HookContext(spec=spec, profile=runtime.base_profile, split=split, logger=get_bus())
+
+    per_fold: dict[str, list[float]] = {}
+    for train_rows, test_rows in folds:
+        if train_rows.num_rows == 0 or test_rows.num_rows == 0:
+            continue
+        base = InMemoryDatasetHandle(
+            {"train": train_rows, "test": test_rows},
+            label_column=spec.target,
+            time_column=time_column,
+        )
+        handle = TransformedDatasetHandle(base, spec, runtime.hooks, hook_ctx, time_column)
+
+        def fold_time_range(rows: pa.Table = train_rows) -> tuple[Any, Any] | None:
+            if time_column is None or time_column not in rows.column_names:
+                return None
+            # a temporal fold's carve must use THIS fold's time span (an
+            # expanding prefix), not the whole train window
+            import pyarrow.compute as pc
+
+            col = rows.column(time_column)
+            return (pc.min(col).as_py(), pc.max(col).as_py())
+
+        fold_spec = spec
+        if nested:
+            # Nested CV: re-tune on this fold's train only, so the outer-test fold
+            # never informs the selection (an unbiased estimate of the tuning).
+            fold_runtime = _JobRuntime(
+                **{
+                    **runtime.__dict__,
+                    "handle": handle,
+                    "transformed": handle,
+                    "base_handle": base,
+                    "base_profile": base.profile(),
+                }
+            )
+            fold_spec, _ = _run_tuning(fold_runtime, spec, carve_time_range=fold_time_range())
+        fit_handle = handle
+        if spec.calibration is not None:
+            # Each fold calibrates on its own carved slice, exactly as the
+            # production fit does, so a `source: backtest` gate compares
+            # calibrated fold models against a calibrated final model (F5).
+            fit_handle = _carve_calibration(
+                runtime, fold_spec, handle, time_range=fold_time_range()
+            )
+        fold_model = runtime.adapter.train(fold_spec, fit_handle, runtime.ctx)
+        result = runtime.adapter.evaluate(fold_model, handle, "test", runtime.builtin_specs)
+        for name, value in result.metrics.items():
+            per_fold.setdefault(name, []).append(float(value))
+    if not per_fold:
+        return {}, {}
+    import statistics
+
+    # mean is the de-luckified point estimate; the population std across folds is
+    # the standard CV stability signal (a big std means the mean is not to be
+    # trusted - the model's score swings with the split).
+    means = {name: round(statistics.fmean(vals), 6) for name, vals in per_fold.items()}
+    stds = {name: round(statistics.pstdev(vals), 6) for name, vals in per_fold.items()}
+    return means, stds
+
+
 def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResult:
     job = runtime.job
     bus = get_bus()
@@ -566,6 +907,9 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
     for key, value in resolved_auto.items():
         bus.emit(AutoResolved(unique_id=job.node.unique_id, param=key, value=str(value)))
 
+    # Nested CV re-tunes per fold, so it needs the pre-tuning (search-space) spec.
+    pre_tuning_spec = spec
+
     # 2. tuning (never sees the test split, ADR-8)
     spec, tuning_result = _run_tuning(runtime, spec, tracking, run_handle)
     tuning_cfg = runtime.spec.tuning
@@ -583,8 +927,16 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
             )
         )
 
-    # 3. final fit on the declared train window
-    model = runtime.adapter.train(spec, runtime.handle, runtime.ctx)
+    # 3. final fit on the declared train window; a calibrated spec fits on
+    # train minus a dedicated calibration slice so the calibrator never sees
+    # training rows nor the validation split selection optimized against (F17)
+    fit_handle = runtime.handle
+    if spec.calibration is not None:
+        carved = _carve_calibration(runtime, spec, runtime.transformed)
+        fit_handle = carved
+        if getattr(runtime.adapter, "data_access", "arrow") == "path":
+            fit_handle = _materialize_for_path_adapter(carved, spec)
+    model = runtime.adapter.train(spec, fit_handle, runtime.ctx)
 
     # 4. evaluate challenger and (if provided) champion on the SAME test split
     challenger = _metrics_for(runtime, model, "test", with_slices=True)
@@ -599,6 +951,16 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
     artifact = runtime.adapter.export(model, "native", runtime.store)
     baseline = _export_baseline(runtime, model)
     importance = _feature_importance(runtime, model)
+    partial_dependence = _partial_dependence(runtime, model, importance)
+    backtest_folds = spec.evaluation.protocol.backtest_folds
+    nested = spec.evaluation.protocol.nested_cv
+    backtest_metrics, backtest_std = (
+        _walk_forward_backtest(
+            runtime, pre_tuning_spec if nested else spec, backtest_folds, nested=nested
+        )
+        if backtest_folds is not None
+        else ({}, {})
+    )
 
     # 6. tracking: params, metrics, artifacts, tuning history
     tracking_run_id: str | None = None
@@ -629,6 +991,9 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         champion_metrics=champion_metrics,
         champion_delta_bounds=delta_bounds,
         feature_importance=importance,
+        partial_dependence=partial_dependence,
+        backtest_metrics=backtest_metrics,
+        backtest_std=backtest_std,
         resolved_auto=resolved_auto,
         tuning=tuning_result,
         artifact=artifact,
@@ -713,6 +1078,32 @@ def _run_score(job: TrainingJob) -> JobResult:
     else:
         prediction_column = pa.chunked_array([pa.array([], type=pa.float64())])
     output_table = raw.select(passthrough).append_column("prediction", prediction_column)
+    if job.output.explain_top_k is not None:
+        # Per-prediction local attribution (explainability): the top-k features
+        # by |SHAP| for each row, as a JSON string, so a consumer can answer
+        # "why did THIS row score this way".
+        if not hasattr(adapter, "explain"):
+            raise ConfigError(
+                f"output.explain_top_k is set but the {model_spec.adapter!r} adapter does not "
+                "support per-prediction SHAP explanations",
+                resource=job.node.unique_id,
+                hint="use a tree adapter (xgboost/lightgbm), or drop explain_top_k",
+            )
+        rows = (
+            adapter.explain(model, handle, "score", job.output.explain_top_k)
+            if raw.num_rows
+            else []
+        )
+        output_table = output_table.append_column("explanation", pa.array(rows, type=pa.string()))
+    # job.output is the coordinator-resolved output: a string decision_threshold
+    # (a champion operating-point metric) has already been resolved to a float
+    # from the champion's tags (R2-5), unlike the raw spec in node.config.
+    threshold = job.output.decision_threshold
+    if threshold is not None:
+        # The deployable operating point (R2-5): emit a 0/1 decision alongside
+        # the probability so downstream consumers get a decision rule.
+        decision = (prediction_column.to_numpy(zero_copy_only=False) >= threshold).astype("int8")
+        output_table = output_table.append_column("decision", pa.array(decision))
 
     stats: MonitorStats | None = None
     if scoring_spec.monitors is not None:
@@ -744,6 +1135,7 @@ def _run_score(job: TrainingJob) -> JobResult:
                 "config_hash": job.node.config_hash,
                 "input_hash": job.node.input_hash,
                 "snapshot_id": job.node.snapshot_id or "",
+                **({"decision_threshold": str(threshold)} if threshold is not None else {}),
             },
         ),
     )

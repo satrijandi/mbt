@@ -121,6 +121,35 @@ def tiny_regression_dataset(n_rows: int = 1000, seed: int = 99) -> InMemoryDatas
     )
 
 
+def tiny_mixed_dataset(n_rows: int = 1000, seed: int = 99) -> InMemoryDatasetHandle:
+    """~1k deterministic rows where the binary label is driven by a CATEGORICAL
+    (string) feature plus numeric noise.
+
+    The other fixtures are all-numeric, so the ship bar never exercises a string
+    feature - which is exactly where cross-adapter handling diverges (F24/F25). An
+    adapter that cannot train on a categorical, or silently mishandles it, fails
+    to learn on this dataset and is caught here.
+    """
+    from random import Random
+
+    rng = Random(seed)
+    positive_rate = {"north": 0.92, "south": 0.08, "east": 0.5}
+    columns: dict[str, list[Any]] = {"region": [], "f_noise": [], "f_scale": [], "label": []}
+    for _ in range(n_rows):
+        region = rng.choice(list(positive_rate))
+        columns["region"].append(region)
+        columns["f_noise"].append(rng.gauss(0, 1))
+        columns["f_scale"].append(rng.uniform(0, 100))
+        columns["label"].append(1 if rng.random() < positive_rate[region] else 0)
+    table = pa.table(columns)
+    split = int(n_rows * 0.8)
+    return InMemoryDatasetHandle(
+        {"train": table.slice(0, split), "test": table.slice(split)},
+        snapshot_id="sha256:compliance-tiny-mixed",
+        label_column="label",
+    )
+
+
 _BINARY_METRICS = [
     MetricSpec(name="roc_auc", kind="builtin"),
     MetricSpec(name="pr_auc", kind="builtin"),
@@ -161,6 +190,42 @@ class TrainingAdapterCompliance:
 
     def dataset(self) -> InMemoryDatasetHandle:
         return tiny_binary_dataset()
+
+    def dataset_with_validation(self) -> InMemoryDatasetHandle:
+        """A 3-split (train/validation/test) binary dataset for the optional
+        capabilities that read a held-out validation split - train_with_report
+        (it reports a validation value per round) and calibration's documented
+        validation fallback - which the 2-split ``dataset()`` lacks."""
+        base = tiny_binary_dataset()
+        train_full = base.read("train")
+        cut = int(train_full.num_rows * 0.75)
+        return InMemoryDatasetHandle(
+            {
+                "train": train_full.slice(0, cut),
+                "validation": train_full.slice(cut),
+                "test": base.read("test"),
+            },
+            snapshot_id="sha256:compliance-tiny-binary-validation",
+            label_column="label",
+        )
+
+    def dataset_with_calibration(self) -> InMemoryDatasetHandle:
+        """A 3-split (train/calibration/test) binary dataset mirroring what core
+        hands a calibrated fit: a dedicated ``calibration`` slice carved from
+        train (F17), with no validation split at all - so the probe fails on an
+        adapter that still insists on ``validation``."""
+        base = tiny_binary_dataset()
+        train_full = base.read("train")
+        cut = int(train_full.num_rows * 0.75)
+        return InMemoryDatasetHandle(
+            {
+                "train": train_full.slice(0, cut),
+                "calibration": train_full.slice(cut),
+                "test": base.read("test"),
+            },
+            snapshot_id="sha256:compliance-tiny-binary-calibration",
+            label_column="label",
+        )
 
     def model_spec(self, task: TaskType, **overrides: Any) -> ModelSpec:
         hyperparameters = dict(self.valid_hyperparameters)
@@ -311,6 +376,20 @@ class TrainingAdapterCompliance:
         metrics = self._train_and_evaluate()
         assert metrics["roc_auc"] > 0.7, f"roc_auc {metrics['roc_auc']} suggests no learning"
 
+    def test_learns_from_a_categorical_feature(self) -> None:
+        """The other fixtures are all-numeric; this one puts the signal in a
+        STRING feature, so an adapter that cannot train on a categorical - or
+        silently mishandles it - fails to clear coin-flip ROC AUC (F25). This is
+        the string-feature path the ship bar otherwise never exercises."""
+        adapter = self.adapter()
+        data = tiny_mixed_dataset()
+        spec = self.model_spec(TaskType.BINARY_CLASSIFICATION)
+        model = adapter.train(spec, data, self.run_context())
+        metrics = adapter.evaluate(model, data, "test", _BINARY_METRICS)
+        assert metrics.metrics["roc_auc"] > 0.7, (
+            f"roc_auc {metrics.metrics['roc_auc']} suggests the categorical was not learned"
+        )
+
     def test_regression_train_predict_evaluate(self) -> None:
         """OPTIONAL (adapters that declare ``REGRESSION``): train a real
         regressor - predictions are target-scale and a signal-bearing set beats
@@ -351,6 +430,125 @@ class TrainingAdapterCompliance:
             assert set(importance) <= set(features)
         assert all(value >= 0 for value in importance.values())
         assert sum(importance.values()) == pytest.approx(1.0, abs=1e-2)
+
+    def test_shap_importance_is_normalized_when_supported(self) -> None:
+        """OPTIONAL capability (``SupportsShapImportance``): when the method
+        exists, mean-|SHAP| importances over a split are non-negative fractions
+        summing to ~1 (the model card prefers this over ``feature_importance``).
+        Data-grounded, so it takes the split, and it is computed on the actual
+        model - a broken SHAP path is caught here, at the ship bar (F25)."""
+        import pytest
+
+        adapter = self.adapter()
+        if not hasattr(adapter, "shap_importance"):
+            pytest.skip("adapter does not expose shap_importance (optional)")
+        data = self.dataset()
+        model = adapter.train(
+            self.model_spec(TaskType.BINARY_CLASSIFICATION), data, self.run_context()
+        )
+        importance = adapter.shap_importance(model, data, "test")
+        features = getattr(model, "features", None)
+        if features is not None:
+            assert set(importance) <= set(features)
+        assert all(value >= 0 for value in importance.values())
+        assert sum(importance.values()) == pytest.approx(1.0, abs=1e-2)
+
+    def test_explain_returns_per_row_attribution_when_supported(self) -> None:
+        """OPTIONAL capability (``SupportsExplain``): when the method exists it
+        returns one JSON string per row of the split - that row's <= ``top_k``
+        ``[feature, contribution]`` pairs ordered by descending |contribution|
+        (this is what a scoring node's ``output.explain_top_k`` serializes). A
+        drifted explain shape is caught here, at the ship bar (F25)."""
+        import json
+
+        import pytest
+
+        adapter = self.adapter()
+        if not hasattr(adapter, "explain"):
+            pytest.skip("adapter does not expose explain (optional)")
+        data = self.dataset()
+        model = adapter.train(
+            self.model_spec(TaskType.BINARY_CLASSIFICATION), data, self.run_context()
+        )
+        top_k = 2
+        explanations = adapter.explain(model, data, "test", top_k)
+        assert len(explanations) == data.read("test").num_rows  # exactly one per row
+        for blob in explanations:
+            pairs = json.loads(blob)
+            assert len(pairs) <= top_k
+            magnitudes = [abs(float(contribution)) for _, contribution in pairs]
+            assert magnitudes == sorted(magnitudes, reverse=True)  # descending |contribution|
+
+    def test_calibration_round_trips_through_export_when_supported(self) -> None:
+        """OPTIONAL capability (``supports_calibration``): a model trained with
+        post-hoc calibration must carry its calibrator through export -> load, so
+        the calibration-sensitive metrics are unchanged afterward. A calibrator
+        dropped on export silently un-calibrates a promoted model while its
+        rank-based metrics (roc_auc/pr_auc) still look fine - so this probes
+        brier/ece, which move under calibration, not auc, which does not. The
+        calibrator is fit on the dedicated ``calibration`` slice (the handle
+        core passes has no validation split at all, F17). F25."""
+        import pytest
+
+        adapter = self.adapter()
+        if not getattr(adapter, "supports_calibration", False):
+            pytest.skip("adapter does not support calibration (optional)")
+        metrics = [
+            MetricSpec(name="brier", kind="builtin", greater_is_better=False),
+            MetricSpec(name="ece", kind="builtin", greater_is_better=False),
+        ]
+        data = self.dataset_with_calibration()
+        spec = self.model_spec(TaskType.BINARY_CLASSIFICATION, calibration="isotonic")
+        model = adapter.train(spec, data, self.run_context())
+        direct = adapter.evaluate(model, data, "test", metrics)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TempArtifactStore(Path(tmp))
+            ref = adapter.export(model, "native", store)
+            reloaded = adapter.evaluate(adapter.load(ref, store), data, "test", metrics)
+        for metric, value in direct.metrics.items():
+            tolerance = adapter.determinism.tolerance_for(metric)
+            assert abs(value - reloaded.metrics[metric]) <= tolerance, (
+                f"{metric} changed across export -> load with calibration "
+                f"({value} vs {reloaded.metrics[metric]}): the calibrator did not round-trip"
+            )
+
+    def test_calibration_falls_back_to_the_validation_split_when_supported(self) -> None:
+        """OPTIONAL capability (``supports_calibration``): a direct caller (this
+        suite, a notebook) that passes a handle with a held-out ``validation``
+        split and no ``calibration`` slice still gets a calibrated model - the
+        documented fallback (F17). Probes that training succeeds and predictions
+        stay within [0, 1] after calibration."""
+        import pytest
+
+        adapter = self.adapter()
+        if not getattr(adapter, "supports_calibration", False):
+            pytest.skip("adapter does not support calibration (optional)")
+        data = self.dataset_with_validation()
+        spec = self.model_spec(TaskType.BINARY_CLASSIFICATION, calibration="isotonic")
+        model = adapter.train(spec, data, self.run_context())
+        scores = adapter.predict(model, data, "test").column("prediction").to_pylist()
+        assert scores and all(0.0 <= s <= 1.0 for s in scores)
+
+    def test_train_with_report_streams_validation_progress_when_supported(self) -> None:
+        """OPTIONAL tuning contract (``SupportsReportingTrainer``): reports a
+        higher-is-better validation value per round to the callback the Optuna
+        pruner consumes, and still returns a usable model. A silent or drifted
+        report path breaks pruning without failing training - caught here. It
+        reports off the held-out ``validation`` split. F25."""
+        import pytest
+
+        adapter = self.adapter()
+        if not hasattr(adapter, "train_with_report"):
+            pytest.skip("adapter does not expose train_with_report (optional)")
+        data = self.dataset_with_validation()
+        spec = self.model_spec(TaskType.BINARY_CLASSIFICATION)
+        reports: list[tuple[Any, Any]] = []
+        model = adapter.train_with_report(
+            spec, data, self.run_context(), lambda step, value: reports.append((step, value))
+        )
+        assert reports, "train_with_report never invoked its report callback"
+        # the returned model is real and usable, not a placeholder
+        assert "prediction" in adapter.predict(model, data, "test").column_names
 
 
 def _tiny_predictions(n_rows: int, offset: int = 0) -> pa.Table:
