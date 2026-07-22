@@ -24,8 +24,15 @@ jobs:
     # here - keeps the gate honest: it is exactly what guards main, so it can
     # never silently drift from it.
     uses: ./.github/workflows/ci.yml
+    # A reusable call's caller job must grant EVERYTHING the called workflow
+    # declares anywhere, or GitHub refuses the run at startup - even for jobs
+    # (ci.yml's docs-publish) whose main-only `if:` skips them on a tag. The
+    # first v0.1.0 tag failed with startup_failure on exactly this;
+    # tests/test_release_workflow.py now pins the envelope.
     permissions:
       contents: read
+      pages: write
+      id-token: write
     secrets: inherit
 
   release:
