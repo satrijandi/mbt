@@ -57,7 +57,7 @@ def snapshot_row(rng: Random, uid: int, prof: dict, when: datetime, months_in: i
     tenure = prof["tenure0"] + months_in * 30
     return {
         "user_id": uid,
-        "snapshot_date": when,
+        "inference_date": when,
         "is_active": rng.random() > 0.04,
         "tenure_days": tenure,
         "monthly_usage": round(usage, 2),

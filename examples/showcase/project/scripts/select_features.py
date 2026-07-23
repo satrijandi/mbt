@@ -26,7 +26,7 @@ model's config hash, so slim CI retrains exactly the AutoML model.
 Reproducibility: ``--seed`` defaults to 42, deliberately the same seed the
 probe and AutoML specs declare - one committed seed governs the probe
 materialization, this search, and the final training. Rows are sorted by
-(customer_id, snapshot_date) before splitting because materializations from
+(customer_id, inference_date) before splitting because materializations from
 different data adapters may order rows differently, and the search is
 single-threaded and LightGBM-deterministic so the committed list is
 byte-identical across host and runner image.
@@ -53,10 +53,10 @@ PROBE = "churn_wide_probe"
 BEGIN = "# BEGIN selected-features"
 END = "# END selected-features"
 
-#: Row-identity and label columns, never feature candidates. snapshot_date
+#: Row-identity and label columns, never feature candidates. inference_date
 #: must be excluded here explicitly: mbt drops the split time column at
 #: train time, but the raw materialized parquet still carries it.
-NON_FEATURES = ["customer_id", "safe_id", "snapshot_date", "is_churn"]
+NON_FEATURES = ["customer_id", "safe_id", "inference_date", "as_of_date", "is_churn"]
 TARGET = "is_churn"
 
 #: The ds-helper randomized-search grid (satrijandi/ds-helper
@@ -126,7 +126,7 @@ def load_frames(
     df = pd.read_parquet(train_parquet)
     # mergesort is stable: different engines materialize different row
     # orders, and StratifiedKFold(shuffle=True) is index-sensitive.
-    df = df.sort_values(["customer_id", "snapshot_date"], kind="mergesort").reset_index(drop=True)
+    df = df.sort_values(["customer_id", "inference_date"], kind="mergesort").reset_index(drop=True)
     y = df[TARGET]
     dropped = [c for c in [*NON_FEATURES, *excluded] if c in df.columns]
     features = df.drop(columns=dropped)

@@ -25,24 +25,31 @@ sources:
       - name: monthly_churn_outcomes
         path: monthly_churn_outcomes/*.parquet
         description: Realized 30-day churn outcomes for the monthly batch, arriving ~30 days later.
-      # The wide multi-table shape (ADR-22): a population spine with the
-      # entity crosswalk, three feature-history tables joined by DIFFERENT
-      # keys, and labels recorded one calendar month after each snapshot.
+      # The wide multi-table shape (ADR-22, docs/naming-conventions.md): a
+      # population spine carrying the entity crosswalk, three feature
+      # -history tables joined by DIFFERENT entity keys on the one uniform
+      # inference_date, and matured labels keyed by the cohort's own
+      # inference_date.
       - name: monthly_population
         path: monthly_population/*.parquet
-        description: One row per active customer per month-start snapshot; carries the customer_id-to-safe_id crosswalk.
+        description: >-
+          One row per active customer per month-start inference_date; carries the entity
+          crosswalk (customer_id to safe_id), the informational as_of_date lineage column,
+          and the loaded_at_time ingest audit column.
       - name: monthly_labels
         path: monthly_labels/*.parquet
-        description: Churn outcomes keyed by (customer_id, snapshot_date); each row records the outcome of the snapshot one month EARLIER.
+        description: >-
+          Matured churn outcomes keyed by (customer_id, inference_date) - the cohort's own
+          prediction date; rows appear once the one-month outcome window closes.
       - name: demographic_history
         path: demographic_history/*.parquet
-        description: Monthly demographic features keyed by (customer_id, snapshot_date).
+        description: Monthly demographic features keyed by (customer_id, inference_date); rows describe balances as of the previous day.
       - name: login_history
         path: login_history/*.parquet
-        description: Monthly login-activity features keyed by (customer_id, snapshot_date).
+        description: Monthly login-activity features keyed by (customer_id, inference_date); rows describe balances as of the previous day.
       - name: transaction_history
         path: transaction_history/*.parquet
-        description: Monthly transaction features keyed by (safe_id, snapshot_date).
+        description: Monthly transaction features keyed by (safe_id, inference_date); rows describe balances as of the previous day.
       - name: wide_churn_outcomes
         path: wide_churn_outcomes/*.parquet
         description: Matured outcomes of the newest snapshot's cohort, for ground-truth monitoring.

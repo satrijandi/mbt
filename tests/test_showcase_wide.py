@@ -2,8 +2,8 @@
 
 The realistic churn shape end to end: a population spine with the entity
 crosswalk, three feature histories joined by DIFFERENT keys (transactions
-only reach the panel through the population's safe_id), the label joined
-from one calendar month after each snapshot, the ds-helper selection
+only reach the panel through the population's safe_id), matured labels
+keyed by the cohort's own inference_date, the ds-helper selection
 funnel as a committed reviewable diff, the shared hooks categorical cast,
 sparkling H2O AutoML on the selected columns, the Evidently stability
 gates around promotion and scoring, and the population-form scoring input

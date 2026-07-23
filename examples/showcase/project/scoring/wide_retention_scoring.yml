@@ -10,23 +10,24 @@ scoring:
     input:
       # The same population spine the training dataset declares, minus the
       # label: the newest month-start cohort joined to its feature histories
-      # (per-table keys, ADR-22) at scoring time.
+      # (per-table entity keys, one uniform inference_date join key,
+      # ADR-22 + docs/naming-conventions.md) at scoring time.
       inputs:
         spine: source('lake', 'monthly_population')
         features:
           - source: source('lake', 'demographic_history')
-            using: [customer_id, snapshot_date]
+            using: [customer_id, inference_date]
           - source: source('lake', 'login_history')
-            using: [customer_id, snapshot_date]
+            using: [customer_id, inference_date]
           - source: source('lake', 'transaction_history')
-            using: [safe_id, snapshot_date]
-      time_column: snapshot_date
+            using: [safe_id, inference_date]
+      time_column: inference_date
       window: "-31d:now"           # exactly the newest month-start cohort
       sample_key: customer_id
 
     checks:
       - not_null:
-          columns: [customer_id, safe_id, snapshot_date]
+          columns: [customer_id, safe_id, inference_date, as_of_date]
 
     monitors:
       feature_shift:
@@ -35,9 +36,9 @@ scoring:
         threshold: 0.25
 
     # Maturity counts from scored_at (the scoring run's anchor, 2026-06-30).
-    # The cohort's outcomes are recorded one month after its snapshot
-    # (2026-07-01), so 14d models label-arrival lag and matures inside the
-    # pinned monitor anchor (2026-07-14 <= 2026-07-20).
+    # The cohort's outcome window closes one month after its
+    # inference_date (2026-07-01), so 14d models label-arrival lag and
+    # matures inside the pinned monitor anchor (2026-07-14 <= 2026-07-20).
     ground_truth:
       label:
         source: source('lake', 'wide_churn_outcomes')
@@ -51,4 +52,4 @@ scoring:
 
     output:
       path: predictions/wide_retention_scores
-      columns: [customer_id, snapshot_date]
+      columns: [customer_id, inference_date]

@@ -9,8 +9,8 @@ vars:
   # snapshots runs a ~9% positive rate (random baseline ~0.09), so the
   # daily/weekly floor would be unreachable there.
   monthly_pr_auc_floor: 0.15
-  # The wide multi-table cadence runs a ~11.7% positive rate (random
-  # baseline ~0.117; the contract_code hazard added to the earlier ~6.5%);
+  # The wide multi-table cadence runs a ~12% positive rate (random
+  # baseline ~0.12; the contract_code hazard added to the earlier ~6.5%);
   # 0.2 is meaningfully above it without demanding heroics from a 3-model
   # AutoML budget.
   wide_pr_auc_floor: 0.2

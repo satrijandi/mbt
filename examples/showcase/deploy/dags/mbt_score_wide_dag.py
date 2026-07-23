@@ -5,8 +5,11 @@ Evidently serving-phase stability gate on the scored batch.
 Manual-trigger in the showcase (schedule=None) so the test tier and demos
 stay deterministic; in a real deployment wire `schedule="0 0 1 * *"` here -
 the wide cadence predicts every 1st of the month at 00:00, matching the
-month-start population snapshots. The anchor is a param for the same
-reason (fixed-date seed data, DESIGN.md 4.5).
+month-start population cohorts. The anchor is a param for the same reason
+(fixed-date seed data, DESIGN.md 4.5). Naming-convention mapping
+(docs/naming-conventions.md): the anchor carries the Airflow logical date
+(execution_date = target_date = inference_date), and the feature balances
+the run scores describe as_of_date = inference_date - 1 day.
 
 Task containers are ephemeral (`run_in_unit` starts a fresh unit per task
 and `/app/project/target` dies with it), so the score task copies the

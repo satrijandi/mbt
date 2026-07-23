@@ -14,7 +14,7 @@ datasets:
       - "tenure_days >= 30"
     split:
       strategy: temporal
-      time_column: snapshot_date
+      time_column: inference_date
       # From the pinned anchor 2026-06-30: train on the ten oldest month
       # starts (2025-07-01 .. 2026-04-01), evaluate on the two freshest.
       train: "-365d:-62d"
@@ -26,5 +26,5 @@ datasets:
       - class_balance_report
       - no_future_columns
       - not_null:
-          columns: [churned_30d, snapshot_date]
+          columns: [churned_30d, inference_date]
     tags: [churn, monthly]

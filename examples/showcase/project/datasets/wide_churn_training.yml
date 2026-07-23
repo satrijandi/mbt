@@ -1,8 +1,20 @@
-# The wide multi-table shape (ADR-22): the population table defines the
-# examples and carries the customer_id-to-safe_id crosswalk, three feature
-# histories join by DIFFERENT keys (transactions only match through the
-# crosswalk), and the outcome joins from one calendar month AFTER each
-# snapshot (time_offset) instead of being pre-aligned upstream.
+# The wide multi-table shape (ADR-22) under the project naming convention
+# (docs/naming-conventions.md): every table shares ONE join key,
+# inference_date (the prediction date), so the population spine defines
+# the examples and carries the customer_id-to-safe_id entity crosswalk;
+# three feature histories join by DIFFERENT entity keys (transactions
+# only match through safe_id). Feature rows are aligned by their producer
+# to the inference_date they serve - the balances they describe are as of
+# the previous day, recorded in the spine's informational as_of_date
+# column (a lineage column, never a join key or feature).
+#
+# monthly_labels follows the gold-layer label contract: each row is keyed
+# by the cohort's OWN inference_date, and rows appear only once the
+# outcome window has closed (one calendar month later), so the newest
+# cohort has no label rows yet at the build anchor and the plain inner
+# join below cannot leak immature outcomes. A raw upstream feed keyed by
+# observation date would instead declare `time_offset: "1mo"` here - the
+# s3_wide and snowflake_wide examples still demonstrate that shape.
 datasets:
   - name: wide_churn_training
     description: Monthly churn panel joined from population + labels + three feature histories.
@@ -10,25 +22,24 @@ datasets:
       population: source('lake', 'monthly_population')
       label:
         source: source('lake', 'monthly_labels')
-        using: [customer_id, snapshot_date]
-        time_offset: "1mo"       # outcome recorded at snapshot + 1 month
+        using: [customer_id, inference_date]
       features:
         - source: source('lake', 'demographic_history')
-          using: [customer_id, snapshot_date]
+          using: [customer_id, inference_date]
         - source: source('lake', 'login_history')
-          using: [customer_id, snapshot_date]
+          using: [customer_id, inference_date]
         - source: source('lake', 'transaction_history')
-          using: [safe_id, snapshot_date]
+          using: [safe_id, inference_date]
     label:
       column: is_churn
-      definition: "churned during the month after snapshot_date"
+      definition: "churned during the month after inference_date"
     # Panel sampling: hashing customer_id keeps or drops every snapshot of a
     # customer together, so `--vars '{sample_fraction: 0.25}'` on the dev
     # inner loop trains on a coherent quarter of the population.
     sample_key: customer_id
     split:
       strategy: temporal
-      time_column: snapshot_date
+      time_column: inference_date
       # Explicit ISO date ranges (the DS pins exact cohort boundaries).
       # The 2026-06-01 cohort stays out on purpose: it is the scoring batch.
       train: "2025-07-01:2026-04-01"
@@ -37,5 +48,5 @@ datasets:
       - class_balance_report
       - no_future_columns
       - not_null:
-          columns: [is_churn, snapshot_date, customer_id, safe_id]
+          columns: [is_churn, inference_date, as_of_date, customer_id, safe_id]
     tags: [churn, wide]

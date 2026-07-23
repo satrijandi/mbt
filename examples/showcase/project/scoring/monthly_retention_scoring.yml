@@ -13,12 +13,12 @@ scoring:
       filters:
         - "is_active = true"
         - "tenure_days >= 30"
-      time_column: snapshot_date
+      time_column: inference_date
       window: "-31d:now"           # exactly the newest month-start batch
 
     checks:
       - not_null:
-          columns: [user_id, snapshot_date]
+          columns: [user_id, inference_date]
 
     monitors:
       feature_shift:
@@ -43,4 +43,4 @@ scoring:
 
     output:
       path: predictions/monthly_retention_scores
-      columns: [user_id, snapshot_date]
+      columns: [user_id, inference_date]

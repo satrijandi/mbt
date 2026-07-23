@@ -139,7 +139,8 @@ def test_load_frames_is_row_order_invariant(tmp_path: Path) -> None:
         {
             "customer_id": np.arange(50),
             "safe_id": [f"sf-{i}" for i in range(50)],
-            "snapshot_date": pd.Timestamp("2026-01-01"),
+            "inference_date": pd.Timestamp("2026-01-01"),
+            "as_of_date": pd.Timestamp("2025-12-31"),
             "is_churn": rng.integers(0, 2, 50),
             "contract_code": rng.integers(0, 4, 50).astype(np.int8),
             "value": rng.normal(size=50),
@@ -167,7 +168,7 @@ def test_load_frames_honors_ds_excluded_columns(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {
             "customer_id": [1, 2],
-            "snapshot_date": pd.Timestamp("2026-01-01"),
+            "inference_date": pd.Timestamp("2026-01-01"),
             "is_churn": [0, 1],
             "tenure_months": [12, 40],
             "value": [0.5, 0.7],

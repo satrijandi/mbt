@@ -35,7 +35,7 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 `make inject-drift` poisons the scoring batch: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert, and `make score` recovers.
 `make score` and `make monitor` also work standalone: they rerun just the daily scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
 `make monthly` runs the second, cluster-free cadence: the `tag:monthly` churn pipeline trains, promotes, and scores entirely on the DuckDB batch plane over the synced S3 parquet lake.
-`make wide` runs the third, wide batch-monthly cadence (ADR-22): a monthly population spine with an entity crosswalk, three feature histories joined by different keys, a one-calendar-month label offset, a ds-helper LightGBM selection funnel committed as a reviewable diff, DS-declared categorical codes cast by a shared hooks file, sparkling H2O AutoML on the selected columns, and Evidently feature-stability gates (exit 2 blocks promotion; every scored batch re-checks against the exported baseline) beside mbt's own enforcing monitors.
+`make wide` runs the third, wide batch-monthly cadence (ADR-22): a monthly population spine with an entity crosswalk, three feature histories joined by different keys, matured labels keyed by each cohort's own `inference_date`, a ds-helper LightGBM selection funnel committed as a reviewable diff, DS-declared categorical codes cast by a shared hooks file, sparkling H2O AutoML on the selected columns, and Evidently feature-stability gates (exit 2 blocks promotion; every scored batch re-checks against the exported baseline) beside mbt's own enforcing monitors.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
 The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); phases P1-P6 of its plan are implemented (the k3d/ArgoCD fidelity profile local-only behind its own gate), and a P7 Snowflake warehouse variant is scoped but deliberately parked.
 
@@ -51,19 +51,19 @@ The demo narrative exercises mbt's differentiators against real service boundari
 - CD that promotion never touches: two scheduled score runs straddling a promotion serve different champions while the deploy repo HEAD and the pinned image digest stay byte-identical.
 - Run-time champion resolution (ADR-20): a promotion changes the next scoring run with zero redeploy.
 - Adapter portability on one lake: the monthly cadence trains, scores, and ground-truth-monitors the same project's `tag:monthly` pipeline on the DuckDB local adapter - no cluster - while the daily/weekly cadences use Spark, from the same `sources.yml`.
-- Real training-set topology (ADR-22): the wide cadence declares a population spine whose crosswalk feeds per-table join keys, joins the label from one calendar month after each snapshot, panel-samples by `customer_id` with pushdown hash sampling, prunes ~66 joined columns to a committed funnel-selected include list, and scores the newest cohort through the same multi-table shape - identical declarations on the Spark and DuckDB planes.
+- Real training-set topology (ADR-22 + [naming conventions](naming-conventions.md)): the wide cadence joins every table on the one uniform `inference_date` key through a population spine carrying the `customer_id`-to-`safe_id` entity crosswalk (feature balances describe the previous day, recorded in the spine's informational `as_of_date` column), and joins matured labels keyed by each cohort's own `inference_date` (the gold-layer label contract; a raw observation-dated feed would use `time_offset` instead), panel-samples by `customer_id` with pushdown hash sampling, prunes ~66 joined columns to a committed funnel-selected include list, and scores the newest cohort through the same multi-table shape - identical declarations on the Spark and DuckDB planes.
 - Prediction-store idempotency (ADR-21): same-anchor re-runs overwrite one `run_key`, new anchors partition.
 - Ground-truth monitoring: realized metrics are evaluated exactly once per prediction run, and a realized-gate breach exits 2, never 1.
 - Observability: `run_results.json` becomes Pushgateway gauges, and injected shift makes the provisioned Prometheus rule actually fire.
 
 ## Who defines what: the DS / MLOps seam
 
-The showcase project is split along the same line the [tutorial](tutorial.md) teaches: the DS owns everything that defines the model as an experiment, the MLOps engineer owns everything that defines where and how it runs, and every handoff between them is a reviewable YAML diff.
+The showcase project follows the [naming conventions](naming-conventions.md) for its temporal and entity columns, and is split along the same line the [tutorial](tutorial.md) teaches: the DS owns everything that defines the model as an experiment, the MLOps engineer owns everything that defines where and how it runs, and every handoff between them is a reviewable YAML diff.
 The wide batch-monthly cadence makes the split concrete:
 
 | Decision | Owner | Where |
 |---|---|---|
-| Training population, label source and its `+1mo` `time_offset`, per-table join keys | DS | `project/datasets/wide_churn_training.yml` |
+| Training population, the matured-label contract keyed by `inference_date`, per-table join keys | DS | `project/datasets/wide_churn_training.yml` |
 | ID columns: `sample_key: customer_id` (panel sampling) and entity ids as non-features | DS | dataset `sample_key` + model `features.exclude` |
 | The split date column and exact train/test cohort boundaries (ISO ranges) | DS | the dataset's `split:` block |
 | Ignored columns the selection funnel must never offer, including the time-anchored `tenure_months` | DS | the model's `features.exclude` (honored by `select_features.py`) |

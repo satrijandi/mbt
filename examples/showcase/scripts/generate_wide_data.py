@@ -5,13 +5,34 @@ table carrying the entity crosswalk, features live in three history tables
 joined by DIFFERENT keys, and the outcome is observed one calendar month
 after the prediction snapshot.
 
-    monthly_population    customer_id, safe_id, snapshot_date (month starts)
-    monthly_labels        customer_id, snapshot_date (population's + 1mo), is_churn
-    demographic_history   customer_id, snapshot_date, profile + filler columns
-    login_history         customer_id, snapshot_date, activity + filler columns
-    transaction_history   safe_id,     snapshot_date, spend + filler columns
+    monthly_population    customer_id, safe_id, inference_date, as_of_date,
+                          loaded_at_time (month starts)
+    monthly_labels        customer_id, inference_date, is_churn
+    demographic_history   customer_id, inference_date, profile + filler columns
+    login_history         customer_id, inference_date, activity + filler columns
+    transaction_history   safe_id,     inference_date, spend + filler columns
     wide_churn_outcomes   customer_id, is_churn - the matured outcomes of the
-                          newest snapshot's cohort, for `mbt monitor` (ADR-21)
+                          newest cohort, for `mbt monitor` (ADR-21)
+
+The columns follow docs/naming-conventions.md. EVERY table joins on one
+uniform key: inference_date, the prediction date (00:00 local on the 1st
+of each month, the orchestrator's logical date). Feature rows are aligned
+by their producer to the inference_date they serve; the balances they
+describe are as of inference_date - 1 day (a batch run has complete data
+only through the end of the previous day), which the spine records in its
+informational as_of_date column - a lineage column, not a join key.
+loaded_at_time is the lakehouse ingest audit column (spine only:
+shared-name audit columns on joined tables would collide in the panel);
+both are excluded from features.
+
+monthly_labels follows the gold-layer label contract: each row is keyed by
+the cohort's OWN inference_date, and rows appear only once the outcome
+window has closed (one calendar month later) - so the newest cohort is
+deliberately absent from monthly_labels; its outcomes live only in
+wide_churn_outcomes until the monitor anchor. A raw upstream feed keyed by
+observation date would instead be joined with the dataset spec's
+`time_offset` (ADR-22), which the s3_wide and snowflake_wide examples
+still demonstrate.
 
 demographic_history carries one NUMERIC-CODED categorical on purpose:
 contract_code (int8, 0 = month-to-month ... 3 = two-year). Its churn effect
@@ -28,9 +49,10 @@ newest (scoring) cohort's risk mix consistent with late training months.
 
 Dates are chosen so the showcase's pinned anchors work unchanged: with the
 build/score anchor 2026-06-30 the training window covers 2025-07..2026-03,
-the test window 2026-04..2026-05, and the 2026-06-01 snapshot is the
-scoring batch whose labels (recorded at 2026-07-01) mature before the
-monitor anchor 2026-07-20.
+the test window 2026-04..2026-05, and the 2026-06-01 cohort is the scoring
+batch - its outcomes are not yet in monthly_labels at that anchor (the
+window closes 2026-07-01) and are evaluated from wide_churn_outcomes at
+the monitor anchor 2026-07-20.
 
 The default output is committed (~3000 customers, small filler counts);
 regenerate only when the schema must change. ``--customers`` and
@@ -41,7 +63,7 @@ scale costs disk, not hours.
 """
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -52,7 +74,6 @@ OUT = Path(__file__).resolve().parent.parent / "data"
 SEED = 20260717
 
 MONTHS = [datetime(2025, m, 1) for m in range(7, 13)] + [datetime(2026, m, 1) for m in range(1, 7)]
-LABEL_MONTHS = [*MONTHS[1:], datetime(2026, 7, 1)]
 
 REGIONS = np.array(["north", "south", "east", "west", "central"])
 INCOME_BANDS = np.array(["low", "mid", "upper_mid", "high"])
@@ -88,8 +109,10 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
     login_base = np.clip(rng.normal(16.0, 7.0, pool), 0.5, 30.0)
     txn_base = np.clip(rng.normal(28.0, 14.0, pool), 1.0, 120.0)
 
-    population = {k: [] for k in ("customer_id", "safe_id", "snapshot_date")}
-    labels = {k: [] for k in ("customer_id", "snapshot_date", "is_churn")}
+    population = {
+        k: [] for k in ("customer_id", "safe_id", "inference_date", "as_of_date", "loaded_at_time")
+    }
+    labels = {k: [] for k in ("customer_id", "inference_date", "is_churn")}
     demo_parts: list[dict] = []
     login_parts: list[dict] = []
     txn_parts: list[dict] = []
@@ -107,6 +130,10 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
             next_joiner += joiners_per_month
         idx = np.flatnonzero(active)
         n = idx.size
+        # Convention dates (docs/naming-conventions.md): balances describe
+        # the end of the previous day; ingest lands just after midnight.
+        as_of = when - timedelta(days=1)
+        loaded_at = when + timedelta(minutes=5)
 
         # monthly activity around each base, decaying for at-risk customers
         month_noise = rng.normal(1.0, 0.28, n)
@@ -133,15 +160,22 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
 
         population["customer_id"].append(customer_id[idx])
         population["safe_id"].append(safe_id[idx])
-        population["snapshot_date"].append(np.full(n, when, dtype="datetime64[us]"))
-        labels["customer_id"].append(customer_id[idx])
-        labels["snapshot_date"].append(np.full(n, LABEL_MONTHS[month_idx], dtype="datetime64[us]"))
-        labels["is_churn"].append(churned.astype(np.int64))
+        population["inference_date"].append(np.full(n, when, dtype="datetime64[us]"))
+        population["as_of_date"].append(np.full(n, as_of, dtype="datetime64[us]"))
+        population["loaded_at_time"].append(np.full(n, loaded_at, dtype="datetime64[us]"))
+        # Gold-layer label contract: keyed by the cohort's own
+        # inference_date, present only once matured - the newest cohort's
+        # outcome window has not closed at the build anchor, so its rows
+        # exist only in wide_churn_outcomes.
+        if when != MONTHS[-1]:
+            labels["customer_id"].append(customer_id[idx])
+            labels["inference_date"].append(np.full(n, when, dtype="datetime64[us]"))
+            labels["is_churn"].append(churned.astype(np.int64))
 
         demo_parts.append(
             {
                 "customer_id": customer_id[idx],
-                "snapshot_date": np.full(n, when, dtype="datetime64[us]"),
+                "inference_date": np.full(n, when, dtype="datetime64[us]"),
                 "age_years": age_years[idx],
                 "region": region[idx],
                 "income_band": income_band[idx],
@@ -155,7 +189,7 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
         login_parts.append(
             {
                 "customer_id": customer_id[idx],
-                "snapshot_date": np.full(n, when, dtype="datetime64[us]"),
+                "inference_date": np.full(n, when, dtype="datetime64[us]"),
                 "login_days_30d": login_days,
                 "days_since_login": days_since_login,
                 "sessions_30d": (login_days * np.clip(rng.normal(2.2, 0.6, n), 0.5, None)).round(0),
@@ -166,7 +200,7 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
         txn_parts.append(
             {
                 "safe_id": safe_id[idx],
-                "snapshot_date": np.full(n, when, dtype="datetime64[us]"),
+                "inference_date": np.full(n, when, dtype="datetime64[us]"),
                 "txn_cnt_30d": txn_cnt,
                 "txn_amt_sum_30d": txn_amt_sum,
                 "txn_amt_avg_90d": np.clip(rng.normal(40.0, 12.0, n), 1.0, None).round(2),
