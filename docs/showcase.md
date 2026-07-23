@@ -56,6 +56,31 @@ The demo narrative exercises mbt's differentiators against real service boundari
 - Ground-truth monitoring: realized metrics are evaluated exactly once per prediction run, and a realized-gate breach exits 2, never 1.
 - Observability: `run_results.json` becomes Pushgateway gauges, and injected shift makes the provisioned Prometheus rule actually fire.
 
+## Who defines what: the DS / MLOps seam
+
+The showcase project is split along the same line the [tutorial](tutorial.md) teaches: the DS owns everything that defines the model as an experiment, the MLOps engineer owns everything that defines where and how it runs, and every handoff between them is a reviewable YAML diff.
+The wide batch-monthly cadence makes the split concrete:
+
+| Decision | Owner | Where |
+|---|---|---|
+| Training population, label source and its `+1mo` `time_offset`, per-table join keys | DS | `project/datasets/wide_churn_training.yml` |
+| ID columns: `sample_key: customer_id` (panel sampling) and entity ids as non-features | DS | dataset `sample_key` + model `features.exclude` |
+| The split date column and exact train/test cohort boundaries (ISO ranges) | DS | the dataset's `split:` block |
+| Ignored columns the selection funnel must never offer, including the time-anchored `tenure_months` | DS | the model's `features.exclude` (honored by `select_features.py`) |
+| Numeric-coded categorical features | DS | `CATEGORICAL_CODES` in `project/models/wide_hooks.py` |
+| Algorithm, AutoML budget, seed, metrics, gate floors, registration target | DS | `project/models/churn_wide_*.yml` |
+| Shift-monitor thresholds, ground-truth maturity and realized gates, the Evidently `--max-drift-share` policy | DS | `project/scoring/wide_retention_scoring.yml` + the `make wide` gate flags |
+| The selected feature list itself | DS | rerunning `scripts/select_features.py`; the rewritten include list is the PR diff reviewers see |
+| Targets: Spark master, s3a endpoint and credentials, MLflow URIs, artifact store, per-environment `sample_fraction` defaults, the sparkling backend var | MLOps | `project/profiles.yml` (specs stay target-portable) |
+| The CI loop: slim PR checks, merge-time prod builds, the `mbt-state` baseline, gate-verified promotion governance | MLOps | `project/.woodpecker/`, protected `promotions.yml` |
+| The deployment plane: runner-image version matrix, deployable-unit bake, digest pin, DAGs including `mbt_score_wide`'s monthly cron and its exit-code routing | MLOps | `images/runner/`, `deploy/` |
+| Operations: lake seeding and sync, metric push, the shift-breach alert, the monitor cadence | MLOps | `bootstrap/`, the observability profile |
+
+Three handoffs keep the seam clean.
+Promotion is a registry event: the next scheduled run resolves the new champion, and CD redeploys nothing (ADR-20).
+Failures route by exit code: a quality verdict (exit 2) is deterministic, fails without retries, and notifies the model's DS owner, while a hard error (exit 1) is retried and then pages on-call.
+And every DS decision - selected features, excluded columns, thresholds, seeds - lives in committed YAML, so the MLOps-owned pipelines can enforce it without ever needing to understand the model.
+
 ## The live test tier
 
 Every claim above is pinned by an opt-in E2E tier that boots its own isolated compose project on ephemeral ports and tears everything down:
