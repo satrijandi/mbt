@@ -27,6 +27,11 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 After `make ci`, pushing to main runs prod-build end to end: economy build, `mbt-state` baseline publish, deployable-unit bake to Zot (digest-pinned in the deploy repo), and oras provenance push; git-sync feeds the deploy repo's DAGs into Airflow, where `mbt_retrain`/`mbt_score`/`mbt_score_monthly`/`mbt_monitor` run the pinned unit on demand.
 
 `make up` prints every UI URL with its login (`make urls` re-prints them); a bare `make` lists the targets.
+
+After `make up`, start where a data scientist would: open JupyterLab (http://localhost:8899), open `project/notebooks/ds_inner_loop.ipynb`, and run it top to bottom.
+It explores the seeded lake from the shared mount, walks the YAML that IS the model, builds the probe on the dev target, runs the ds-helper selection funnel (reproducing the committed include list byte for byte), analyzes the run artifacts, and experiments on a hash-sampled slice against a scratch copy - the committed contract stays clean throughout.
+The notebook ends where the PR begins; `make demo` and `make wide` below are the platform side of that same story.
+
 After `make demo`, look at:
 
 - **MLflow**: registered `churn_automl` versions, the `production` alias set by the promotion, per-run metrics and `mbt.*` provenance tags, plus one tracking run per monitored prediction run (the realized-performance time series).

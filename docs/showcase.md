@@ -31,6 +31,7 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 ```
 
 `make up` prints every UI URL with its login (JupyterLab, MLflow, Spark, the SeaweedFS lake browser, Grafana, Prometheus, Gitea, Woodpecker, Zot, Airflow).
+Start where a data scientist would: open JupyterLab and run `project/notebooks/ds_inner_loop.ipynb` top to bottom - it explores the seeded lake, builds the probe on the dev target, runs the selection funnel (reproducing the committed include list byte for byte), and experiments on a hash-sampled slice without touching the committed contract; the notebook ends where the PR begins, and the make targets below are the platform side of the same story.
 `make ci` seeds the CI loop headlessly; then log into Woodpecker from the browser with the Gitea account (the compose file gives Woodpecker split-horizon URLs so the OAuth dance works from the host), clone the printed repo URL, and open a PR - Woodpecker runs the state-diff check and posts the mbt build report comment, and merges to main bake the deployable unit, pin its digest in the deploy repo, and feed the Airflow DAGs via git-sync.
 `make inject-drift` poisons the scoring batch: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert, and `make score` recovers.
 `make score` and `make monitor` also work standalone: they rerun just the daily scoring stage or just the ground-truth monitoring stage, with the same pinned anchors as the demo.
