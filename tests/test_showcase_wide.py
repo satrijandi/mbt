@@ -114,6 +114,33 @@ def test_panel_sampling_is_reproducible_and_monotone(wide) -> None:
     assert fifth <= half <= full  # threshold hashing: subsets, not resamples
 
 
+def test_ds_notebook_executes_the_inner_loop(wide) -> None:
+    """The committed DS notebook runs top to bottom in the JupyterLab
+    environment: explore the lake, build the probe, run the funnel (which
+    must leave the committed contract untouched), and a sampled what-if on
+    a scratch copy. nbconvert fails on any cell error. Runs after the
+    sampling test on purpose: its 0.25 build adds a materialization key,
+    and the size-based full-build pick must keep the funnel honest."""
+    stack = wide
+    committed = (SHOWCASE_DIR / "project" / "models" / "churn_wide_automl.yml").read_text()
+    stack.exec(
+        "jupyter",
+        "nbconvert",
+        "--to",
+        "notebook",
+        "--execute",
+        "--ExecutePreprocessor.timeout=900",
+        "--output-dir",
+        "/tmp",
+        "--output",
+        "ds_inner_loop_executed.ipynb",
+        "notebooks/ds_inner_loop.ipynb",
+        timeout=1500,
+    )
+    model_file = stack.workspace / "project" / "models" / "churn_wide_automl.yml"
+    assert model_file.read_text() == committed, "the notebook run dirtied the committed contract"
+
+
 def test_wide_automl_trains_on_the_cluster(wide) -> None:
     """Sparkling H2O AutoML on the selected top-K of the wide join (prod)."""
     stack = wide

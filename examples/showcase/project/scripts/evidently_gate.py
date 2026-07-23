@@ -80,10 +80,19 @@ def load_categorical_codes(model_file: Path) -> list[str]:
     return list(module.CATEGORICAL_CODES)
 
 
-def newest_dir(root: Path, required: tuple[str, ...], hint: str) -> Path:
+def newest_dir(root: Path, required: tuple[str, ...], hint: str, by: str = "mtime") -> Path:
+    """Pick a complete dir by recency, or by="size" for the FULL build.
+
+    Training materializations use size (sampled builds are strict subsets,
+    so the largest first split is the full panel regardless of which build
+    ran last); scoring runs use recency (the latest batch is the one to
+    gate).
+    """
     complete = [d for d in root.glob("*") if all((d / name).is_file() for name in required)]
     if not complete:
         sys.exit(f"error: no {'/'.join(required)} under {root}; {hint}")
+    if by == "size":
+        return max(complete, key=lambda d: ((d / required[0]).stat().st_size, d.stat().st_mtime))
     return max(complete, key=lambda d: d.stat().st_mtime)
 
 
@@ -181,6 +190,7 @@ def main() -> None:
             TRAIN_ROOT,
             ("train.parquet", "test.parquet"),
             "run `mbt build --select churn_wide_automl` first",
+            by="size",
         )
         reference_path = split_dir / "train.parquet"
         current_path = split_dir / "test.parquet"
@@ -193,7 +203,10 @@ def main() -> None:
                     "run the train-phase gate first"
                 )
             split_dir = newest_dir(
-                TRAIN_ROOT, ("train.parquet",), "run the train-phase gate or `mbt build` first"
+                TRAIN_ROOT,
+                ("train.parquet",),
+                "run the train-phase gate or `mbt build` first",
+                by="size",
             )
             reference_path = split_dir / "train.parquet"
             print(

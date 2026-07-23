@@ -105,10 +105,13 @@ def load_excluded(model_file: Path) -> list[str]:
 
 
 def newest_materialization(root: Path, required: tuple[str, ...]) -> Path:
-    """Newest materialization dir that has every required split file.
+    """The FULL-build materialization with every required split file.
 
-    Sampled-fraction dev builds materialize under their own keys and may
-    lack splits; selection must run on a complete (train + test) build.
+    Sampled-fraction builds materialize under their own keys and are strict
+    SUBSETS of the full build (hash sampling), so the largest first split
+    identifies the full panel, newest mtime breaking ties. Size, not
+    recency: a DS's sampled what-if from the notebook must never silently
+    become the selection input just because it ran last.
     """
     complete = [d for d in root.glob("*") if all((d / name).is_file() for name in required)]
     if not complete:
@@ -116,7 +119,7 @@ def newest_materialization(root: Path, required: tuple[str, ...]) -> Path:
             f"error: no materialization under {root} with {', '.join(required)}; "
             f"run `mbt build --select {PROBE}` first"
         )
-    return max(complete, key=lambda d: d.stat().st_mtime)
+    return max(complete, key=lambda d: ((d / required[0]).stat().st_size, d.stat().st_mtime))
 
 
 def load_frames(

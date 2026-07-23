@@ -193,6 +193,27 @@ def test_newest_materialization_requires_complete_split_dirs(tmp_path: Path) -> 
         select_features.newest_materialization(tmp_path / "absent", ("train.parquet",))
 
 
+def test_full_build_wins_over_a_newer_sampled_materialization(tmp_path: Path) -> None:
+    """Size, not recency, identifies the full panel: a DS's sampled what-if
+    must never silently become the selection or gate input."""
+    full, sampled = tmp_path / "full", tmp_path / "sampled"
+    for d, rows in ((full, b"x" * 1000), (sampled, b"x" * 100)):
+        d.mkdir()
+        (d / "train.parquet").write_bytes(rows)
+        (d / "test.parquet").write_bytes(b"y")
+    later = full.stat().st_mtime + 100
+    os_utime = __import__("os").utime
+    os_utime(sampled / "train.parquet")
+    os_utime(sampled, (later, later))  # sampled build ran last
+
+    picked = select_features.newest_materialization(tmp_path, ("train.parquet", "test.parquet"))
+    assert picked == full
+    gate_pick = evidently_gate.newest_dir(tmp_path, ("train.parquet",), "hint", by="size")
+    assert gate_pick == full
+    # scoring keeps recency semantics
+    assert evidently_gate.newest_dir(tmp_path, ("train.parquet",), "hint") == sampled
+
+
 # -- marker block round-trip ------------------------------------------------
 
 
@@ -334,6 +355,19 @@ def test_wide_hooks_casts_declared_codes_and_preserves_the_rest() -> None:
 
     untouched = pa.table({"other": pa.array([1, 2])})
     assert wide_hooks.transform_features(untouched, ctx=None) is untouched
+
+
+def test_ds_notebook_is_committed_clean() -> None:
+    """The DS inner-loop notebook ships without outputs (reviewable diffs)
+    and actually drives mbt; the live tier executes it for real."""
+    payload = json.loads((PROJECT / "notebooks" / "ds_inner_loop.ipynb").read_text())
+    assert payload["nbformat"] == 4
+    code_cells = [c for c in payload["cells"] if c["cell_type"] == "code"]
+    assert code_cells, "notebook has no code cells"
+    assert all(c["outputs"] == [] and c["execution_count"] is None for c in code_cells)
+    source = "".join("".join(c["source"]) for c in payload["cells"])
+    assert "mbt build --target dev" in source
+    assert "select_features.py" in source
 
 
 def test_selection_report_shape_matches_what_the_live_test_reads(tmp_path: Path) -> None:

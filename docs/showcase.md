@@ -8,7 +8,7 @@ Where the [tutorial](tutorial.md) walks a team through the concepts, the showcas
 | SeaweedFS | S3-compatible object store: the data lake of gold-layer feature tables (read via `s3a://`) and the MLflow artifact store; its filer UI is published so humans can browse the lake (the raw S3 port takes signed requests only) |
 | MLflow (HTTP server) | Tracking + model registry; champion source of truth |
 | Spark standalone cluster | Dataset pushdown; H2O AutoML training inside the executors via Sparkling Water |
-| JupyterLab | The DS workbench; its terminal runs the same `mbt` as everything else |
+| JupyterLab | The DS workbench; its terminal runs the same `mbt` as everything else, and the committed `project/notebooks/ds_inner_loop.ipynb` walks the DS inner loop (explore, probe build, selection funnel, sampled what-ifs) with the model staying in reviewed YAML |
 | Gitea + Woodpecker | The CI loop: state-diff slim PR checks with update-in-place build-report comments, merge-time economy builds publishing the `mbt-state` baseline, exit-code-classified alerts, and protected GitOps promotion (branch protection + CODEOWNERS on `promotions.yml`) |
 | Zot | OCI registry: the digest-pinned deployable unit (runner image + project + compiled manifest) and oras-pushed provenance artifacts (`manifest.json` + `run_results.json` per source sha) |
 | Airflow + git-sync | Scheduling/CD: git-sync reconciles the Gitea `deploy` repo (digest pin + DAGs); retrain/score/monitor DAGs run the pinned unit with exit-code routing (quality verdicts never retry) |
