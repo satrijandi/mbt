@@ -20,6 +20,7 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Tutorial: tutorial.md
+  - DS primer: ds-primer.md
   - Showcase: showcase.md
   - Concepts: concepts.md
   - Spec reference: spec-reference.md
