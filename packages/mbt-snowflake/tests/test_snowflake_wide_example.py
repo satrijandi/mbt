@@ -9,11 +9,13 @@ The build test is the pytest form of examples/snowflake_wide/show_wide_join.py.
 """
 
 import importlib.util
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
+import pytest
 import yaml
 from mbt_snowflake.adapter import SnowflakeDataAdapter
 from snowflake_stub_helpers import FakeBuildContext, FakeSourceTable, StubConnection
@@ -202,6 +204,34 @@ def test_snowflake_wide_example_parses_to_the_full_lifecycle_shape() -> None:
         assert parsed.graph.has_edge(source, DATASET)
     assert parsed.graph.has_edge(DATASET, MODEL)
     assert parsed.graph.has_edge(MODEL, SCORING)
+
+
+def test_example_profiles_render_with_dev_env_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """profiles.yml is jinja-rendered WHOLE regardless of the selected target,
+    so every env_var() in a non-selected target must carry a default. This
+    shipped broken once: prod's strict SNOWFLAKE_PRIVATE_KEY_FILE reference
+    made plain dev runs fail with 'environment variable ... is not set'."""
+    from mbt.config.profiles import load_profiles
+
+    for name in list(os.environ):
+        if name.startswith("SNOWFLAKE_"):
+            monkeypatch.delenv(name)
+    for key in ("ACCOUNT", "USER", "WAREHOUSE", "DATABASE", "SCHEMA"):
+        monkeypatch.setenv(f"SNOWFLAKE_{key}", f"dev-{key.lower()}")
+
+    dev = load_profiles("snowflake_wide", EXAMPLE)
+    assert dev.target_name == "dev"
+    config = dev.target.data.config
+    assert config["authenticator"] == "externalbrowser"  # the env_var default
+    assert config["account"] == "dev-account"
+
+    # The other target must also select cleanly on the same minimal env; its
+    # key-pair var is validated at connect time, not at render time.
+    prod = load_profiles("snowflake_wide", EXAMPLE, target_override="prod")
+    assert prod.target_name == "prod"
+    assert prod.target.data.config["connect_args"]["private_key_file"] == ""
 
 
 def test_seed_script_creates_exactly_the_example_source_tables() -> None:

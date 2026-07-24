@@ -10,8 +10,10 @@
 #                   enforce MFA on passwords) and the full data.
 #
 # Credentials come from the environment (never commit them) - see README.md
-# and packages/mbt-snowflake/.env.example. Only the SELECTED target is
-# rendered, so prod's key-pair env vars are not required to run dev.
+# and packages/mbt-snowflake/.env.example. The WHOLE file is jinja-rendered
+# whichever target is selected, so every env_var() a non-selected target
+# references must carry a default - that is why prod's key-pair var
+# defaults to '' below (it is validated when you actually run --target prod).
 snowflake_wide:
   target: dev
   outputs:
@@ -58,7 +60,9 @@ snowflake_wide:
           role: "{{ env_var('SNOWFLAKE_ROLE', '') }}"
           predictions_root: ./predictions
           connect_args:
-            private_key_file: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE') }}"
+            # Required for real prod runs; the default only keeps dev usable
+            # without it (the whole file renders regardless of target).
+            private_key_file: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE', '') }}"
       tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
       registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
       compute: {adapter: local}
