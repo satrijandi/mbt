@@ -1,20 +1,64 @@
 # The profile key must match `name` in mbt_project.yml.
-# Credentials come from the environment (never commit them) - see README.md.
+# Two targets, one project - the dbt-style split between the data
+# scientist's laptop and automation:
+#
+#   dev  (default)  SSO through the browser (externalbrowser: JumpCloud,
+#                   Okta, Entra - whatever IdP fronts your Snowflake
+#                   account) and a 5% entity sample, so the inner loop on
+#                   huge tables is cheap and needs no secrets at all.
+#   prod            key-pair auth for CI/schedulers (new Snowflake accounts
+#                   enforce MFA on passwords) and the full data.
+#
+# Credentials come from the environment (never commit them) - see README.md
+# and packages/mbt-snowflake/.env.example. Only the SELECTED target is
+# rendered, so prod's key-pair env vars are not required to run dev.
 snowflake_wide:
-  target: prod
+  target: dev
   outputs:
+    dev:
+      data:
+        adapter: snowflake
+        config:
+          account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+          user: "{{ env_var('SNOWFLAKE_USER') }}"
+          # externalbrowser opens your IdP's login page once; the adapter
+          # caches the SSO token (install mbt-snowflake[sso]) so every mbt
+          # job in the session reuses it instead of re-prompting.
+          authenticator: "{{ env_var('SNOWFLAKE_AUTHENTICATOR', 'externalbrowser') }}"
+          warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+          database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+          schema: "{{ env_var('SNOWFLAKE_SCHEMA') }}"
+          # Empty renders are dropped by the adapter, so the role is truly optional.
+          role: "{{ env_var('SNOWFLAKE_ROLE', '') }}"
+          # Where `mbt score` stages prediction runs (parquet, ADR-23 v1).
+          # Project-relative; gitignored.
+          predictions_root: ./predictions
+      # Tracking + registry stay local so the example runs without extra infra.
+      tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      compute: {adapter: local}
+      artifact_store: file://./target/artifacts
+      threads: 2
+      vars:
+        # The dev sample ladder: 5% of CUSTOMERS (sample_key), pushed down
+        # into the warehouse query - a fraction of a huge table never
+        # leaves Snowflake. Raise per run with --vars 'sample_fraction: 0.2'.
+        sample_fraction: 0.05
+        max_tuning_trials: 3
+
     prod:
       data:
         adapter: snowflake
         config:
           account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
           user: "{{ env_var('SNOWFLAKE_USER') }}"
-          password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
           warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
           database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
           schema: "{{ env_var('SNOWFLAKE_SCHEMA') }}"
-          # role: ML_ROLE          # optional; add if your account needs it
-      # Tracking + registry stay local so the example runs without extra infra.
+          role: "{{ env_var('SNOWFLAKE_ROLE', '') }}"
+          predictions_root: ./predictions
+          connect_args:
+            private_key_file: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE') }}"
       tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
       registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
       compute: {adapter: local}

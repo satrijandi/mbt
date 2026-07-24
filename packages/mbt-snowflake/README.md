@@ -36,6 +36,11 @@ sources:
         identifier: GOLD.CUSTOMER_FEATURES
 ```
 
+For the full data-scientist walkthrough - browser SSO, a server-side seed
+script for demo tables, sampled training on huge tables, batch scoring, and
+delayed ground-truth monitoring - see
+[`examples/snowflake_wide`](../../examples/snowflake_wide/README.md).
+
 ```yaml
 # datasets/churn_training_set.yml - feature table(s) + label table + join key
 datasets:
@@ -100,7 +105,8 @@ config:
 The config keys `account`, `user`, `password`, `warehouse`, `database`, `schema`, `role`, and `authenticator` pass straight to `snowflake.connector.connect()`.
 Every other documented connector parameter works under `connect_args`.
 
-SSO from a laptop (the usual data-scientist setup - no password anywhere):
+SSO from a laptop (the usual data-scientist setup - no password anywhere).
+The browser lands on whatever IdP your Snowflake account federates to (JumpCloud, Okta, Entra ID, ...); that mapping lives in Snowflake's SAML/OIDC config, and nothing changes on the mbt side:
 
 ```yaml
 config:

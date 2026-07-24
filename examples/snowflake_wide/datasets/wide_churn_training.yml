@@ -21,6 +21,13 @@ datasets:
       join_key: [customer_id, snapshot_date]
     label:
       column: is_churn
+    # Sampling identity for the sample_fraction var: whole CUSTOMERS are kept
+    # or dropped (never individual months of a customer's history), so a dev
+    # sample stays a coherent panel and cannot leak a sampled customer's
+    # future rows across splits. Deterministic and monotone: the same
+    # fraction always returns the same customers, and a 5% sample is a
+    # subset of the 20% one.
+    sample_key: [customer_id]
     split:
       strategy: temporal
       time_column: snapshot_date

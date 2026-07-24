@@ -27,6 +27,7 @@ mlflow.db
 *.duckdb
 *.duckdb.wal
 examples/churn_demo/predictions/
+examples/snowflake_wide/predictions/
 
 # JVM adapter leftovers (Spark/H2O e2e runs)
 derby.log

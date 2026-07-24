@@ -111,8 +111,12 @@ class _FakeBuildContext:
 
 
 # table name -> (snowflake identifier, arrow table); the single source of truth.
-# Five Snowflake-shaped tables (UPPERCASE columns, one row per customer per
-# month over Jan-Apr 2026), all keyed on (CUSTOMER_ID, SNAPSHOT_DATE).
+# Five Snowflake-shaped tables (UPPERCASE columns), all keyed on
+# (CUSTOMER_ID, SNAPSHOT_DATE). The POPULATION covers 60 customers over the
+# Jan-Apr 2026 month-starts; the label/feature tables deliberately cover a
+# strict SUPERSET (an off-population customer, an off-window month, and a
+# mid-month snapshot cadence) - like real gold tables, which serve the whole
+# company, not one model's cohort. The join must return spine rows only.
 def _synthetic_by_name() -> dict[str, tuple[str, pa.Table]]:
     months = [datetime(2026, m, 1) for m in (1, 2, 3, 4)]
     n = 60
@@ -121,9 +125,21 @@ def _synthetic_by_name() -> dict[str, tuple[str, pa.Table]]:
         for m in months:
             cid.append(c)
             snap.append(m)
+    spine_keys = {"CUSTOMER_ID": list(cid), "SNAPSHOT_DATE": list(snap)}
+
+    # The superset universe the label/feature tables cover.
+    for m in months:
+        cid.append(999)
+        snap.append(m)
+    for c in range(n):
+        cid.append(c)
+        snap.append(datetime(2026, 5, 1))
+        for m in months:
+            cid.append(c)
+            snap.append(datetime(m.year, m.month, 15))
     keys = {"CUSTOMER_ID": cid, "SNAPSHOT_DATE": snap}
 
-    population = pa.table(keys)
+    population = pa.table(spine_keys)
     labels = pa.table(
         {**keys, "IS_CHURN": [1 if (c * 7 + i) % 5 == 0 else 0 for i, c in enumerate(cid)]}
     )
@@ -202,7 +218,14 @@ def main() -> None:
             output_dir=Path(tmp) / "mat",
         )
 
-        print("Building the wide dataset through the mbt Snowflake adapter...\n")
+        population_rows = synth["customer_population"][1].num_rows
+        feature_rows = synth["engagement_features"][1].num_rows
+        print("Building the wide dataset through the mbt Snowflake adapter...")
+        print(
+            f"  population spine: {population_rows} rows; each feature/label table: "
+            f"{feature_rows} rows (a superset: extra customer, extra month, mid-month "
+            "snapshots).\n  Expect the joined panels to hold the spine's rows ONLY.\n"
+        )
         handle = adapter.build_dataset(spec, ctx)
 
         print("\nGenerated Snowflake SQL (one query per split):\n")
