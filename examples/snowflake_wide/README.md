@@ -85,6 +85,10 @@ It refuses to replace existing tables unless `--force` is given, and `--drop` cl
 **Using your own tables instead**: edit the `identifier:`s in `sources.yml` (they may be fully qualified, `DB.SCHEMA.TABLE`), set the join keys in `datasets/wide_churn_training.yml` to your entity + snapshot columns, and swap the absolute demo split windows for relative ones (e.g. `train: "-395d:-62d"`, `test: "-62d:now"`) so every compile re-anchors them.
 Everything below works unchanged.
 
+**Read-only sources, writable sandbox** - the usual enterprise grant layout works as-is.
+mbt never writes to the schema your source tables live in: training materializes to local parquet and predictions stage to local disk; only this seed script and the live test suite create Snowflake tables, and both target `SNOWFLAKE_DATABASE.SNOWFLAKE_SCHEMA`.
+So point those env vars at your personal sandbox (e.g. `ANALYTICS_SANDBOX.SANDBOX_ME`) and fully qualify each source, e.g. `identifier: GOLD.DS.LABEL_CHURN_MONTHLY` - a qualified identifier overrides the profile default, and plain `SELECT` grants on the source schema are all mbt needs (snapshot pinning via `SYSTEM$LAST_CHANGE_COMMIT_TIME` included).
+
 ## 4. Train on a 5% sample - the inner loop
 
 ```bash
