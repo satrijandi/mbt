@@ -101,5 +101,5 @@ Consistent with this project's documentation standards, they are stated plainly 
 ## Stack canvas, answered
 
 The [MLOps Stack Canvas](https://ml-ops.org/content/mlops-stack-canvas) asks teams to answer each infrastructure block explicitly and record decisions as ADRs.
-This repository practices what the canvas preaches: 24 [ADRs](adr/0001-arrow-interchange.md) record the load-bearing decisions with context and consequences, and the canvas blocks map to concrete choices - data versioning (snapshot tokens), experiment management (MLflow), pipelines (declarative DAG), registry (MLflow stages/aliases), deployment (GitOps + batch scoring), monitoring (shift + ground truth), and the metadata store (manifest + run results + tracking).
+This repository practices what the canvas preaches: 25 [ADRs](adr/0001-arrow-interchange.md) record the load-bearing decisions with context and consequences, and the canvas blocks map to concrete choices - data versioning (snapshot tokens), experiment management (MLflow), pipelines (declarative DAG), registry (MLflow stages/aliases), deployment (GitOps + batch scoring), monitoring (shift + ground truth), and the metadata store (manifest + run results + tracking).
 The buy-vs-build stance is explicit throughout: integrate MLflow, Optuna, and Feast (v1) rather than rebuild them, and keep mbt itself a thin, deterministic build tool.

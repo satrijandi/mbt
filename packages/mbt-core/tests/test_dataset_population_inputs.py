@@ -166,6 +166,63 @@ def test_population_spine_builds_and_trains(
             assert row["churned"] == expected
 
 
+def test_per_table_projection_prunes_at_the_source(
+    population_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """ADR-25 through the local adapter: a keep-list and a drop-list on the
+    two feature tables prune inside DuckDB's scan, so the materialized panel
+    never contains the pruned columns - unlike the model's features.exclude,
+    which selects after materialization."""
+    # Widen both feature tables with bookkeeping columns the spec prunes.
+    for name, extra in (("demo_features", "ingest_batch"), ("txn_features", "etl_loaded_at")):
+        path = population_project / "data" / name / "part-000.parquet"
+        table = pq.read_table(path)
+        widened = table.append_column(extra, pa.array([f"b-{i}" for i in range(table.num_rows)]))
+        pq.write_table(widened, path)
+    write(
+        population_project / "datasets/wide_churn.yml",
+        """
+        datasets:
+          - name: wide_churn
+            inputs:
+              population: source('lakehouse', 'population')
+              label:
+                source: source('lakehouse', 'churn_labels')
+                using: [customer_id, snapshot_date]
+                time_offset: "1mo"
+              features:
+                - source: source('lakehouse', 'demo_features')
+                  using: [customer_id, snapshot_date]
+                  columns: [age_years]
+                - source: source('lakehouse', 'txn_features')
+                  using: [safe_id, snapshot_date]
+                  exclude: [etl_loaded_at]
+            sample_key: customer_id
+            label:
+              column: churned
+            split:
+              strategy: temporal
+              time_column: snapshot_date
+              train: "2025-07-01:2026-04-01"
+              test: "2026-04-01:2026-07-02"
+        """,
+    )
+    results = invoke(population_project, fake_registry, select=["wide_churn_model"])
+    assert results.exit_code() == 0
+
+    key = next((population_project / "target/datasets/wide_churn").iterdir())
+    for split in ("train", "test"):
+        table = pq.read_table(key / f"{split}.parquet")
+        assert set(table.column_names) == {
+            "customer_id",
+            "safe_id",
+            "snapshot_date",
+            "age_years",
+            "txn_total",
+            "churned",
+        }
+
+
 def test_immature_outcomes_drop_via_inner_label_join(
     population_project: Path, fake_registry: AdapterRegistry
 ) -> None:
@@ -440,11 +497,57 @@ def test_single_string_using_and_accessors() -> None:
     )
     assert spec.inputs is not None
     assert spec.inputs.label_join_columns == ["id"]
-    assert spec.inputs.feature_entries == [("source('a', 'f')", ["id"])]
+    assert spec.inputs.feature_entries == [("source('a', 'f')", ["id"], None, None)]
     assert spec.inputs.feature_sources == ["source('a', 'f')"]
     assert spec.inputs.spine == "source('a', 'p')"
     # sample_key fallback: no join_key, so the label's join columns
     assert spec.sample_key_columns == ["id"]
+
+
+def test_per_table_projection_normalizes_and_dedupes() -> None:
+    """ADR-25: `columns` (keep) and `exclude` (drop) ride each feature entry;
+    keep_columns prepends the join columns and dedupes redundant mentions."""
+    spec = DatasetSpec.model_validate(
+        _base(
+            {
+                "population": "source('a', 'p')",
+                "label": {"source": "source('a', 'l')", "using": "id"},
+                "features": [
+                    {"source": "source('a', 'f')", "using": "id", "columns": ["id", "x"]},
+                    {"source": "source('a', 'g')", "using": "id", "exclude": "loaded_at"},
+                    "source('a', 'h')",
+                ],
+                "join_key": "id",
+            }
+        )
+    )
+    assert spec.inputs is not None
+    keep, drop, bare = spec.inputs.feature_entries
+    assert keep.keep_columns == ["id", "x"]  # join column deduped, order kept
+    assert keep.exclude is None
+    assert drop.exclude == ["loaded_at"] and drop.keep_columns is None
+    assert bare.columns is None and bare.exclude is None
+
+
+def test_per_table_projection_rejects_bad_shapes() -> None:
+    def feature(**overrides: object) -> dict:
+        base = _base(
+            {
+                "label": "source('a', 'l')",
+                "features": [{"source": "source('a', 'f')", **overrides}],
+                "join_key": "id",
+            }
+        )
+        return base
+
+    with pytest.raises(Exception, match="mutually exclusive"):
+        DatasetSpec.model_validate(feature(columns=["x"], exclude=["y"]))
+    with pytest.raises(Exception, match="at least one non-empty column"):
+        DatasetSpec.model_validate(feature(columns=[]))
+    with pytest.raises(Exception, match="at least one non-empty column"):
+        DatasetSpec.model_validate(feature(exclude=[""]))
+    with pytest.raises(Exception, match="join column cannot be dropped"):
+        DatasetSpec.model_validate(feature(exclude=["id"]))
 
 
 def test_mapping_entries_without_using_fall_back_to_join_key() -> None:
@@ -460,7 +563,7 @@ def test_mapping_entries_without_using_fall_back_to_join_key() -> None:
     )
     assert spec.inputs is not None
     assert spec.inputs.label_join_columns == ["id", "ts"]
-    assert spec.inputs.feature_entries == [("source('a', 'f')", ["id", "ts"])]
+    assert spec.inputs.feature_entries == [("source('a', 'f')", ["id", "ts"], None, None)]
 
 
 def test_empty_using_is_rejected() -> None:

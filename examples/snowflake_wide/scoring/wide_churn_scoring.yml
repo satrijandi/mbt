@@ -26,10 +26,15 @@ scoring:
         features:
           - source: source('snowflake', 'demographic_features')
             using: [customer_id, snapshot_date]
+          # Same per-table projections as training (ADR-25): keep-list on
+          # engagement, drop-list on billing - scoring reads must prune the
+          # same way or the champion would see unexpected columns.
           - source: source('snowflake', 'engagement_features')
             using: [customer_id, snapshot_date]
+            columns: [logins_30d, avg_session_min]
           - source: source('snowflake', 'billing_features')
             using: [customer_id, snapshot_date]
+            exclude: [etl_loaded_at]
         join_key: [customer_id, snapshot_date]
       time_column: snapshot_date
       # Exactly the newest month-start cohort, resolved against the run's

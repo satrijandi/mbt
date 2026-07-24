@@ -84,11 +84,25 @@ def _synthetic() -> dict[str, tuple[str, pa.Table]]:
         ),
         "engagement_features": (
             "ENGAGEMENT_FEATURES",
-            pa.table({**superset, "LOGINS_30D": list(cid)}),
+            pa.table(
+                {
+                    **superset,
+                    "LOGINS_30D": list(cid),
+                    "AVG_SESSION_MIN": [float(c % 25) for c in cid],
+                }
+            ),
         ),
         "billing_features": (
             "BILLING_FEATURES",
-            pa.table({**superset, "MONTHLY_SPEND": [float(c) for c in cid]}),
+            pa.table(
+                {
+                    **superset,
+                    "MONTHLY_SPEND": [float(c) for c in cid],
+                    # Bookkeeping column the spec's per-table `exclude:` must
+                    # prune in-warehouse (ADR-25).
+                    "ETL_LOADED_AT": [datetime(2026, 6, 1)] * len(cid),
+                }
+            ),
         ),
     }
 
@@ -106,7 +120,7 @@ def test_snowflake_wide_example_builds_the_five_table_join(tmp_path: Path) -> No
     refs = [
         spec.inputs.spine,
         spec.inputs.label_source,
-        *[src for src, _ in spec.inputs.feature_entries],
+        *[entry.source for entry in spec.inputs.feature_entries],
     ]
     source_tables = {}
     for ref in refs:
@@ -144,11 +158,14 @@ def test_snowflake_wide_example_builds_the_five_table_join(tmp_path: Path) -> No
     # Join keys merged (from the spine), each feature column present, the label
     # projected in, and the label's join columns projected away.
     assert handle.splits() == {"train", "test"}
+    # etl_loaded_at is absent: billing's per-table `exclude:` pruned it in
+    # the pushed-down query, not after materialization.
     assert set(handle.read("train").column_names) == {
         "customer_id",
         "snapshot_date",
         "age",
         "logins_30d",
+        "avg_session_min",
         "monthly_spend",
         "is_churn",
     }
@@ -164,12 +181,17 @@ def test_snowflake_wide_example_builds_the_five_table_join(tmp_path: Path) -> No
         assert days == {1}  # month-starts only; the mid-month cadence stayed behind
 
     # One pushed-down query per split, each joining all three feature tables on
-    # the shared key (no client-side join).
+    # the shared key (no client-side join), with the per-table projections
+    # (ADR-25) inside the query: engagement's keep-list becomes an explicit
+    # SELECT, billing's drop-list a SELECT * EXCLUDE - both executed by the
+    # DuckDB stub, so the syntax is proven on both dialects.
     selects = [q for q in stub.executed if q.startswith("SELECT *")]
     assert len(selects) == 2
     for query in selects:
         assert query.count("LEFT JOIN") == 3
         assert "USING (customer_id, snapshot_date)" in query
+        assert "(SELECT customer_id, snapshot_date, logins_30d, avg_session_min FROM" in query
+        assert "(SELECT * EXCLUDE (etl_loaded_at) FROM" in query
 
     # the positive-path row-count log reached the bus
     assert any("materialized" in str(m) for m in ctx.events.messages)

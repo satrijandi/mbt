@@ -596,9 +596,18 @@ _WIDE_TABLES: dict[str, tuple[str, Any]] = {
         "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, LOGINS_30D INTEGER, AVG_SESSION_MIN FLOAT",
         lambda r: (r["customer_id"], r["snapshot_date"], r["logins_30d"], r["avg_session_min"]),
     ),
+    # etl_loaded_at exists so the example's per-table `exclude:` (ADR-25) has
+    # something real to prune on the live engine.
     "billing_features": (
-        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, MONTHLY_SPEND FLOAT, PLAN_TIER STRING",
-        lambda r: (r["customer_id"], r["snapshot_date"], r["monthly_spend"], r["plan_tier"]),
+        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, MONTHLY_SPEND FLOAT, PLAN_TIER STRING, "
+        "ETL_LOADED_AT DATE",
+        lambda r: (
+            r["customer_id"],
+            r["snapshot_date"],
+            r["monthly_spend"],
+            r["plan_tier"],
+            r["snapshot_date"] + timedelta(days=2),
+        ),
     ),
 }
 
@@ -635,7 +644,7 @@ def test_wide_example_multi_table_join_live(
     refs = [
         spec.inputs.spine,
         spec.inputs.label_source,
-        *[src for src, _ in spec.inputs.feature_entries],
+        *[entry.source for entry in spec.inputs.feature_entries],
     ]
     sources: dict[str, SourceTable] = {}
     for ref in refs:

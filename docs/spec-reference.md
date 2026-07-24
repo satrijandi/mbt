@@ -234,8 +234,10 @@ datasets:
       features:
         - source: source('lake', 'demographic_history')
           using: [customer_id, snapshot_date]
+          columns: [age_band, tenure_months]   # keep-list: scan ONLY these (ADR-25)
         - source: source('lake', 'transaction_history')
           using: [safe_id, snapshot_date]   # key introduced by the population
+          exclude: [etl_loaded_at]          # drop-list: prune bookkeeping at the source
     sample_key: [customer_id]   # panel sampling: keeps whole customers
     label:
       column: is_churn
@@ -251,6 +253,14 @@ datasets:
   declaration order - so a column introduced by an earlier join (the
   population's `safe_id`) is usable by a later one. The field is named
   `using`, not `on`: bare `on` is a YAML 1.1 boolean.
+- Each mapping entry may carry a per-table column projection (ADR-25):
+  `columns` keeps ONLY the named payload columns (join columns are always
+  kept), `exclude` drops the named columns; at most one per entry, and a
+  join column cannot be excluded. The projection is pushed into the source
+  query itself (a subquery on Snowflake/DuckDB, a select/drop on Spark), so
+  pruned columns of a wide gold table are never scanned or transferred -
+  source-side workload reduction, distinct from the model's
+  `features.include/exclude`, which selects after materialization.
 - The label join is always **inner** when a population is present: an
   example without an observed outcome is not a training example, so
   population rows whose labels have not matured yet drop out.

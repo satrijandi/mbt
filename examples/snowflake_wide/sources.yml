@@ -40,4 +40,5 @@ sources:
         identifier: BILLING_FEATURES
         description: >-
           Join: customer_id + snapshot_date. Features: monthly_spend,
-          plan_tier.
+          plan_tier. Also carries etl_loaded_at bookkeeping, pruned at the
+          source by the specs' per-table exclude (ADR-25).

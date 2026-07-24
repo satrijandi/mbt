@@ -59,6 +59,7 @@ nav:
       - adr/0022-population-spine-and-per-table-joins.md
       - adr/0023-warehouse-batch-scoring.md
       - adr/0024-regression-task-vertical.md
+      - adr/0025-per-table-column-projection.md
 
 markdown_extensions:
   - admonition

@@ -20,12 +20,19 @@ datasets:
         # columns become candidate features (demographic: age, tenure_months).
         - source: source('snowflake', 'demographic_features')
           using: [customer_id, snapshot_date]
-        # engagement: logins_30d, avg_session_min.
+        # engagement: an explicit per-table KEEP-list (ADR-25) - only these
+        # payload columns are scanned; anything else the table grows later
+        # never reaches the panel.
         - source: source('snowflake', 'engagement_features')
           using: [customer_id, snapshot_date]
-        # billing: monthly_spend, plan_tier.
+          columns: [logins_30d, avg_session_min]
+        # billing: a per-table DROP-list - the warehouse query prunes the
+        # etl_loaded_at bookkeeping column at the source, reducing scan and
+        # transfer (this is NOT the model's features.exclude, which selects
+        # after materialization).
         - source: source('snowflake', 'billing_features')
           using: [customer_id, snapshot_date]
+          exclude: [etl_loaded_at]
       # The shared default key (every table above joins on it). One naming
       # convention everywhere; a table with divergent key names would get its
       # own `using:` instead. Columns IGNORED as features are declared in

@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime
 
-from mbt_adapter_base import DatasetSpec, ScoringInputSpec, parse_time_offset
+from mbt_adapter_base import DatasetSpec, FeatureEntry, ScoringInputSpec, parse_time_offset
 from mbt_adapter_base.materialization import SAMPLE_MODULUS
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -98,15 +98,31 @@ def _interval_sql(count: int, unit: str) -> str:
     return f"{operator} INTERVAL '{abs(count)} {_INTERVAL_UNITS[unit]}'"
 
 
+def _feature_relation(table_ref: str, entry: FeatureEntry) -> str:
+    """The joinable relation for one feature table: the bare table, or a
+    projecting subquery when the entry declares ``columns``/``exclude``
+    (ADR-25). The projection runs INSIDE the warehouse query, so pruned
+    columns of a wide gold table are never scanned into the panel."""
+    keep = entry.keep_columns
+    if keep is not None:
+        cols = ", ".join(validate_column(c) for c in keep)
+        return f"(SELECT {cols} FROM {table_ref})"
+    if entry.exclude is not None:
+        cols = ", ".join(validate_column(c) for c in entry.exclude)
+        return f"(SELECT * EXCLUDE ({cols}) FROM {table_ref})"
+    return table_ref
+
+
 def _spine_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> str:
     """The spine + feature USING joins, before any label join (shared by
     ``base_relation`` and the label-join coverage counts, F21)."""
     assert spec.inputs is not None
     join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
     sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
-    for i, (feature_uid, using_cols) in enumerate(spec.inputs.feature_entries):
-        using = ", ".join(validate_column(c) for c in using_cols)
-        sql += f" {join_kind} {table_refs[feature_uid]} AS mbt_f{i} USING ({using})"
+    for i, entry in enumerate(spec.inputs.feature_entries):
+        using = ", ".join(validate_column(c) for c in entry.using)
+        relation = _feature_relation(table_refs[entry.source], entry)
+        sql += f" {join_kind} {relation} AS mbt_f{i} USING ({using})"
     return sql
 
 
@@ -228,9 +244,10 @@ def scoring_relation(spec: ScoringInputSpec, table_refs: Mapping[str, str]) -> s
         return table_refs[spec.source]
     join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
     sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
-    for i, (feature_uid, using_cols) in enumerate(spec.inputs.feature_entries):
-        using = ", ".join(validate_column(c) for c in using_cols)
-        sql += f" {join_kind} {table_refs[feature_uid]} AS mbt_f{i} USING ({using})"
+    for i, entry in enumerate(spec.inputs.feature_entries):
+        using = ", ".join(validate_column(c) for c in entry.using)
+        relation = _feature_relation(table_refs[entry.source], entry)
+        sql += f" {join_kind} {relation} AS mbt_f{i} USING ({using})"
     return sql
 
 

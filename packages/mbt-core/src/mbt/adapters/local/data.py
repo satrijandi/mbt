@@ -47,7 +47,7 @@ from mbt_adapter_base.materialization import (
     write_materialization_metadata,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore
-from mbt_adapter_base.specs import parse_time_offset
+from mbt_adapter_base.specs import FeatureEntry, parse_time_offset
 
 #: time_offset units -> SQL interval keywords (calendar month included).
 _INTERVAL_UNITS = {"mo": "MONTH", "d": "DAY", "w": "WEEK", "h": "HOUR"}
@@ -95,9 +95,24 @@ class _RelationSpec:
     """The FROM-clause shape shared by datasets and scoring inputs."""
 
     spine: str  # uid of the single source, or of the spine table
-    features: list[tuple[str, list[str]]]  # (uid, on-columns), declaration order
+    features: list[FeatureEntry]  # normalized feature joins, declaration order
     join: str  # "left" | "inner"
     label: _LabelJoin | None = None  # only for population-spine datasets
+
+
+def _feature_relation(table_relation: str, entry: FeatureEntry) -> str:
+    """The joinable relation for one feature table: the raw parquet scan, or
+    a projecting subquery when the entry declares ``columns``/``exclude``
+    (ADR-25) - pruning happens inside DuckDB's scan, mirroring the
+    warehouse adapters."""
+    keep = entry.keep_columns
+    if keep is not None:
+        cols = ", ".join(_quote(c) for c in keep)
+        return f"(SELECT {cols} FROM {table_relation})"
+    if entry.exclude is not None:
+        cols = ", ".join(_quote(c) for c in entry.exclude)
+        return f"(SELECT * EXCLUDE ({cols}) FROM {table_relation})"
+    return table_relation
 
 
 def _dataset_relation(spec: DatasetSpec) -> _RelationSpec:
@@ -318,11 +333,10 @@ class LocalDataAdapter:
             return self._table_relation(ctx, rel.spine), []
         join_kind = "LEFT JOIN" if rel.join == "left" else "JOIN"
         sql = f"{self._table_relation(ctx, rel.spine)} AS mbt_spine"
-        for i, (feature_uid, on) in enumerate(rel.features):
-            using = ", ".join(_quote(c) for c in on)
-            sql += (
-                f" {join_kind} {self._table_relation(ctx, feature_uid)} AS mbt_f{i} USING ({using})"
-            )
+        for i, entry in enumerate(rel.features):
+            using = ", ".join(_quote(c) for c in entry.using)
+            relation = _feature_relation(self._table_relation(ctx, entry.source), entry)
+            sql += f" {join_kind} {relation} AS mbt_f{i} USING ({using})"
         if rel.label is None:
             return sql, []
         renames = {c: f"__mbt_lbl{i}" for i, c in enumerate(rel.label.using)}

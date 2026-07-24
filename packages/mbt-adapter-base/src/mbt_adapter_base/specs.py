@@ -9,7 +9,7 @@ parser layer turns those rejections into did-you-mean suggestions.
 """
 
 import re
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -146,15 +146,64 @@ class SplitSpec(_SpecModel):
 CheckSpec = str | dict[str, dict[str, Any]]
 
 
-class FeatureInput(_SpecModel):
-    """One feature table with its own USING-style join columns (ADR-22).
+class FeatureEntry(NamedTuple):
+    """One normalized feature-table join: source, join columns, projection.
 
-    The field is named ``using`` (not ``on``) deliberately: bare ``on`` is a
-    YAML 1.1 boolean, so PyYAML would hand pydantic a ``True`` key.
+    ``columns``/``exclude`` mirror :class:`FeatureInput`; at most one is set.
+    """
+
+    source: str
+    using: list[str]
+    columns: list[str] | None = None  # keep-list; join columns always kept
+    exclude: list[str] | None = None  # drop-list
+
+    @property
+    def keep_columns(self) -> list[str] | None:
+        """The full projected column list for a keep-list entry (join columns
+        first, then payload, deduplicated), or None when unprojected."""
+        if self.columns is None:
+            return None
+        return list(dict.fromkeys([*self.using, *self.columns]))
+
+
+def _normalize_columns(value: str | list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _validate_projection(where: str, entry: FeatureEntry) -> None:
+    """A drop-list must not remove the entry's own join columns (the join
+    needs them); a keep-list may name them redundantly (deduplicated)."""
+    if entry.exclude is None:
+        return
+    clash = sorted(set(entry.exclude) & set(entry.using))
+    if clash:
+        raise ValueError(
+            f"{where} excludes its own join column(s) {clash}: a join column cannot be dropped"
+        )
+
+
+class FeatureInput(_SpecModel):
+    """One feature table with its own USING-style join columns (ADR-22) and
+    an optional per-table column projection (ADR-25).
+
+    ``columns`` keeps ONLY the named payload columns (join columns are always
+    kept); ``exclude`` drops the named columns and keeps the rest. At most one
+    of the two may be set. The projection is pushed into the warehouse/lake
+    query itself, so pruned columns of a huge gold table are never scanned
+    into a training set or scoring batch - this is source-side workload
+    reduction, distinct from the model's ``features.include/exclude`` which
+    selects AFTER materialization.
+
+    The join field is named ``using`` (not ``on``) deliberately: bare ``on``
+    is a YAML 1.1 boolean, so PyYAML would hand pydantic a ``True`` key.
     """
 
     source: str  # source() ref
     using: str | list[str] | None = None  # join columns; default: the dataset join_key
+    columns: str | list[str] | None = None  # keep-list of payload columns
+    exclude: str | list[str] | None = None  # drop-list of columns
 
     @property
     def using_columns(self) -> list[str] | None:
@@ -162,12 +211,28 @@ class FeatureInput(_SpecModel):
             return None
         return [self.using] if isinstance(self.using, str) else list(self.using)
 
+    @property
+    def columns_list(self) -> list[str] | None:
+        return _normalize_columns(self.columns)
+
+    @property
+    def exclude_list(self) -> list[str] | None:
+        return _normalize_columns(self.exclude)
+
     @model_validator(mode="after")
     def _shape(self) -> "FeatureInput":
         if self.using_columns is not None and (
             not self.using_columns or any(not c for c in self.using_columns)
         ):
             raise ValueError("'using' must name at least one non-empty column")
+        if self.columns is not None and self.exclude is not None:
+            raise ValueError(
+                "'columns' (keep-list) and 'exclude' (drop-list) are mutually "
+                "exclusive on a feature table - set at most one"
+            )
+        for field_name, values in (("columns", self.columns_list), ("exclude", self.exclude_list)):
+            if values is not None and (not values or any(not c for c in values)):
+                raise ValueError(f"'{field_name}' must name at least one non-empty column")
         return self
 
 
@@ -254,19 +319,26 @@ class DatasetInputs(_SpecModel):
         return self.population if self.population is not None else self.label_source
 
     @property
-    def feature_entries(self) -> list[tuple[str, list[str]]]:
-        """Normalized ``(source, on_columns)`` pairs in declaration order."""
-        entries: list[tuple[str, list[str]]] = []
+    def feature_entries(self) -> list[FeatureEntry]:
+        """Normalized feature-table joins in declaration order."""
+        entries: list[FeatureEntry] = []
         for feature in self.features:
             if isinstance(feature, str):
-                entries.append((feature, self.join_columns))
+                entries.append(FeatureEntry(feature, self.join_columns))
             else:
-                entries.append((feature.source, feature.using_columns or self.join_columns))
+                entries.append(
+                    FeatureEntry(
+                        feature.source,
+                        feature.using_columns or self.join_columns,
+                        feature.columns_list,
+                        feature.exclude_list,
+                    )
+                )
         return entries
 
     @property
     def feature_sources(self) -> list[str]:
-        return [source for source, _ in self.feature_entries]
+        return [entry.source for entry in self.feature_entries]
 
     @model_validator(mode="after")
     def _shape(self) -> "DatasetInputs":
@@ -276,12 +348,13 @@ class DatasetInputs(_SpecModel):
             not self.join_columns or any(not c for c in self.join_columns)
         ):
             raise ValueError("inputs.join_key must name at least one non-empty column")
-        for i, (source, using) in enumerate(self.feature_entries):
-            if not using:
+        for i, entry in enumerate(self.feature_entries):
+            if not entry.using:
                 raise ValueError(
-                    f"inputs.features[{i}] ({source}) has no join columns: "
+                    f"inputs.features[{i}] ({entry.source}) has no join columns: "
                     "give it 'using' or set a dataset-level 'join_key'"
                 )
+            _validate_projection(f"inputs.features[{i}] ({entry.source})", entry)
         if self.population is None:
             if isinstance(self.label, LabelInput):
                 raise ValueError(
@@ -653,19 +726,26 @@ class ScoringInputs(_SpecModel):
         return [self.join_key] if isinstance(self.join_key, str) else list(self.join_key)
 
     @property
-    def feature_entries(self) -> list[tuple[str, list[str]]]:
-        """Normalized ``(source, on_columns)`` pairs in declaration order."""
-        entries: list[tuple[str, list[str]]] = []
+    def feature_entries(self) -> list[FeatureEntry]:
+        """Normalized feature-table joins in declaration order."""
+        entries: list[FeatureEntry] = []
         for feature in self.features:
             if isinstance(feature, str):
-                entries.append((feature, self.join_columns))
+                entries.append(FeatureEntry(feature, self.join_columns))
             else:
-                entries.append((feature.source, feature.using_columns or self.join_columns))
+                entries.append(
+                    FeatureEntry(
+                        feature.source,
+                        feature.using_columns or self.join_columns,
+                        feature.columns_list,
+                        feature.exclude_list,
+                    )
+                )
         return entries
 
     @property
     def feature_sources(self) -> list[str]:
-        return [source for source, _ in self.feature_entries]
+        return [entry.source for entry in self.feature_entries]
 
     @model_validator(mode="after")
     def _shape(self) -> "ScoringInputs":
@@ -675,12 +755,13 @@ class ScoringInputs(_SpecModel):
             not self.join_columns or any(not c for c in self.join_columns)
         ):
             raise ValueError("inputs.join_key must name at least one non-empty column")
-        for i, (source, on) in enumerate(self.feature_entries):
-            if not on:
+        for i, entry in enumerate(self.feature_entries):
+            if not entry.using:
                 raise ValueError(
-                    f"inputs.features[{i}] ({source}) has no join columns: "
+                    f"inputs.features[{i}] ({entry.source}) has no join columns: "
                     "give it 'on' or set an inputs-level 'join_key'"
                 )
+            _validate_projection(f"inputs.features[{i}] ({entry.source})", entry)
         return self
 
 

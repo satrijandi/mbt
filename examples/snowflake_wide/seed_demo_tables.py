@@ -140,13 +140,18 @@ SELECT customer_id, snapshot_date,
                    - MOD(ABS(HASH(customer_id, snapshot_date, 'l')), 8)) AS logins_30d,
        (1 + 30 * (1 - ({_PROPENSITY})) + ({_NOISE}) * 5)::FLOAT AS avg_session_min
 FROM cadence""",
+        # Billing carries a bookkeeping column (etl_loaded_at) on purpose: the
+        # dataset and scoring specs drop it with a per-table `exclude:`
+        # (ADR-25), so it is pruned inside the warehouse query and never
+        # reaches a training set or scoring batch.
         "BILLING_FEATURES": f"""CREATE OR REPLACE TABLE {prefix}.BILLING_FEATURES AS
 {feature_pairs}
 SELECT customer_id, snapshot_date,
        (10 + 60 * ({_PROPENSITY}) + ({_NOISE}) * 20)::FLOAT AS monthly_spend,
        CASE MOD(ABS(HASH(customer_id, 'plan')), 3)
             WHEN 0 THEN 'basic' WHEN 1 THEN 'pro' ELSE 'enterprise'
-       END AS plan_tier
+       END AS plan_tier,
+       DATEADD(DAY, 2, snapshot_date) AS etl_loaded_at
 FROM pairs""",
     }
 

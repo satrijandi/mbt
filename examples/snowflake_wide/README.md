@@ -10,10 +10,14 @@ A table's remaining columns are its payload; whether payload is used as a featur
 | population (spine) | `customer_population` | `customer_id`, `snapshot_date` | none | n/a - join keys only |
 | label | `churn_labels` | `customer_id`, `snapshot_date` | `is_churn` | training target, never a feature; joined inner |
 | feature | `demographic_features` | `customer_id`, `snapshot_date` | `age`, `tenure_months` | features; LEFT JOINed |
-| feature | `engagement_features` | `customer_id`, `snapshot_date` | `logins_30d`, `avg_session_min` | features; LEFT JOINed |
-| feature | `billing_features` | `customer_id`, `snapshot_date` | `monthly_spend`, `plan_tier` | features; LEFT JOINed |
+| feature | `engagement_features` | `customer_id`, `snapshot_date` | `logins_30d`, `avg_session_min` | features; LEFT JOINed via a per-table keep-list |
+| feature | `billing_features` | `customer_id`, `snapshot_date` | `monthly_spend`, `plan_tier`, `etl_loaded_at` | features; `etl_loaded_at` pruned at the source via per-table `exclude:` |
 
-The join keys themselves are **ignored as features** - declared once in `models/churn_wide.yml` under `features.exclude` (that is also where bookkeeping columns of real tables go: load timestamps, batch ids, and the like).
+Columns are ignored at two distinct layers, and this example shows both:
+
+- **At the source (ADR-25)**: a feature entry's `columns:` keep-list or `exclude:` drop-list prunes inside the warehouse query - use it for bookkeeping columns and to cut scan/transfer on wide tables (`billing_features.etl_loaded_at` never leaves Snowflake).
+- **At training time**: `models/churn_wide.yml` `features.exclude` drops materialized columns from the feature set - use it for identity columns the panel must keep (the join keys) but the model must not learn from.
+
 Join columns are declared per table via `using:` in the dataset and scoring specs; the label's join columns are projected away after the join, so nothing is duplicated.
 
 mbt compiles the five-table join into **one Snowflake query per split**, so the join, the temporal windows, the filters, and the sampling all run in the warehouse.
@@ -34,6 +38,7 @@ datasets/wide_churn_training.yml    the multi-table training join (population/la
 models/churn_wide.yml               an XGBoost model over the joined panel
 scoring/wide_churn_scoring.yml      batch scoring + drift monitors + delayed ground truth
 seed_demo_tables.py                 create the 5 demo tables in YOUR warehouse, server-side
+verify_warehouse_pull.py            print the pushed-down SQL; --execute runs bounded probes
 show_wide_join.py                   see the join work WITHOUT a Snowflake account
 ```
 
@@ -95,6 +100,18 @@ Everything below works unchanged.
 mbt never writes to the schema your source tables live in: training materializes to local parquet and predictions stage to local disk; only this seed script and the live test suite create Snowflake tables, and both target `SNOWFLAKE_DATABASE.SNOWFLAKE_SCHEMA`.
 So point those env vars at your personal sandbox (e.g. `ANALYTICS_SANDBOX.SANDBOX_ME`) and fully qualify each source, e.g. `identifier: GOLD.DS.LABEL_CHURN_MONTHLY` - a qualified identifier overrides the profile default, and plain `SELECT` grants on the source schema are all mbt needs (snapshot pinning via `SYSTEM$LAST_CHANGE_COMMIT_TIME` included).
 
+## 3b. Verify the pull before training anything
+
+`verify_warehouse_pull.py` prints the exact SQL mbt pushes down for the training splits and the scoring batch, rendered from the committed specs - the five-table join, the per-table column projections (ADR-25), the temporal windows, and the sampling predicate:
+
+```bash
+uv run python examples/snowflake_wide/verify_warehouse_pull.py                 # SQL only, no connection
+uv run python examples/snowflake_wide/verify_warehouse_pull.py --execute       # bounded probes
+```
+
+`--execute` runs cheap bounded probes against the warehouse: a `COUNT(*)` and a `LIMIT 5` sample per split/batch, plus an `INFORMATION_SCHEMA` comparison per source table showing which columns exist in the warehouse versus which enter the panel - so per-table pruning is verified against your production tables, not assumed.
+Nothing is written; with the default 1% sample the whole thing costs a few small queries.
+
 ## 4. Train on a 5% sample - the inner loop
 
 ```bash
@@ -153,7 +170,7 @@ What mbt guarantees, and where the DE seam is:
 - **Row volume never transits**: the five-table join, the temporal windows, the filters, and the entity sampling are one SQL statement per split executed in Snowflake; only the resulting panel streams back as Arrow batches. It does not matter that one feature table is 100x the size of the others - Snowflake's optimizer sees the whole join.
 - **Feature tables may be supersets**: rows outside the population spine (other customers, other dates, other populations entirely) are dropped by the join, in-warehouse, by construction. You never pre-filter a shared gold table just to train on it.
 - **Snapshot cadence is an upstream contract**: mbt joins on exact equality of the declared per-table `using:` keys. If a feature table snapshots daily or mid-month and your spine is month-start, the month-start rows join and the rest stay behind (as `engagement_features` demonstrates). If you need as-of semantics ("latest snapshot at or before the spine date"), align it in a DE-owned view (`QUALIFY ROW_NUMBER() ... = 1`) and point `sources.yml` at the view - the training-set contract stays in reviewed SQL instead of ad-hoc notebook joins.
-- **Thousands of columns**: the dataset materializes whatever the join produces, as columnar parquet. The model spec then prunes with `features.include`/`exclude` globs (plus an optional `hooks.py` transform for programmatic selection) at training time. For extreme width, put a curated projection view in front of the widest table so the materialized panel carries only plausible features - width, unlike rows, does flow into the materialization, and a reviewed projection is also better MLOps than a 3000-column `include: ["*"]`.
+- **Thousands of columns**: prune them per table, in the spec (ADR-25). A feature entry takes `columns:` (keep ONLY these payload columns) or `exclude:` (drop these), and the projection is pushed into the warehouse query itself - pruned columns are never scanned, transferred, or materialized. This example uses both flavors: a keep-list on `engagement_features`, and a drop-list removing `billing_features`' `etl_loaded_at` bookkeeping column. This is source-side reduction, distinct from the model's `features.include/exclude`, which selects after materialization; a keep-list also means upstream tables can grow columns without them ever reaching your panel.
 - **The inner loop is the sample ladder, not a smaller cluster**: `sample_fraction` at 0.05 with `sample_key: [customer_id]` gives you a coherent 5% panel of whole customers in seconds, deterministic and monotone, straight from the full-size tables.
 
 ## Why this shape - DE and MLOps notes

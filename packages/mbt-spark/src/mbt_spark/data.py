@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from mbt_adapter_base import (
     DatasetLocator,
     DatasetSpec,
+    FeatureEntry,
     ScoringInputSpec,
     ScoringOutputSpec,
     parse_time_offset,
@@ -54,6 +55,27 @@ class SparkAdapterError(RuntimeError):
         if hint:
             message = f"{message}\n  hint: {hint}"
         super().__init__(message)
+
+
+def _project_feature_frame(frame: "DataFrame", entry: FeatureEntry) -> "DataFrame":
+    """Apply a per-table column projection (ADR-25) before the join.
+
+    Keep-lists select join columns + payload; a missing keep column fails in
+    Spark's analyzer. Drop-lists must be checked here because ``.drop``
+    silently ignores unknown columns - a typo'd exclude would otherwise
+    "succeed" while pruning nothing.
+    """
+    keep = entry.keep_columns
+    if keep is not None:
+        return frame.select(*keep)
+    if entry.exclude is not None:
+        missing = sorted(set(entry.exclude) - set(frame.columns))
+        if missing:
+            raise SparkAdapterError(
+                f"feature table {entry.source!r} has no column(s) {missing} to exclude"
+            )
+        return frame.drop(*entry.exclude)
+    return frame
 
 
 def _quote(column: str) -> str:
@@ -273,8 +295,9 @@ class SparkDataAdapter:
         assert spec.inputs is not None
         frame = tables[spec.inputs.spine]
         how = "left" if spec.inputs.join == "left" else "inner"
-        for feature_uid, using in spec.inputs.feature_entries:
-            frame = frame.join(tables[feature_uid], on=using, how=how)
+        for entry in spec.inputs.feature_entries:
+            projected = _project_feature_frame(tables[entry.source], entry)
+            frame = frame.join(projected, on=entry.using, how=how)
         return frame
 
     def _base_frame(self, spec: DatasetSpec, ctx: DataBuildContext) -> "DataFrame":
@@ -430,8 +453,9 @@ class SparkDataAdapter:
             return tables[spec.source]
         frame = tables[spec.inputs.spine]
         how = "left" if spec.inputs.join == "left" else "inner"
-        for feature_uid, using in spec.inputs.feature_entries:
-            frame = frame.join(tables[feature_uid], on=using, how=how)
+        for entry in spec.inputs.feature_entries:
+            projected = _project_feature_frame(tables[entry.source], entry)
+            frame = frame.join(projected, on=entry.using, how=how)
         return frame
 
     def build_scoring_input(

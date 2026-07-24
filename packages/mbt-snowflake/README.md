@@ -66,6 +66,11 @@ datasets:
 - **Snapshots**: compile pins `SYSTEM$LAST_CHANGE_COMMIT_TIME` per table (a
   cheap metadata call); `--deep-snapshot` switches to `HASH_AGG(*)` content
   fingerprints. Any table changing marks the dataset `state:modified`.
+- **Per-table column projection** (ADR-25): a feature entry's `columns:`
+  (keep-list) or `exclude:` (drop-list) becomes a projecting subquery inside
+  the generated join, so pruned columns of a wide gold table are never
+  scanned or transferred - declare the handful of columns a model needs
+  instead of shipping a 3000-column `SELECT *`.
 - **Reproducible sampling** (`sample_fraction` var): rows are kept when
   `MOD(MD5_NUMBER_LOWER64(<sample_key>), 1e6) < fraction * 1e6` - pushed
   into the warehouse query, so a 1% dev sample of a 7M-row table never

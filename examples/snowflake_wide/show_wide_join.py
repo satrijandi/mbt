@@ -158,6 +158,9 @@ def _synthetic_by_name() -> dict[str, tuple[str, pa.Table]]:
             **keys,
             "MONTHLY_SPEND": [float(10 + (c % 90)) for c in cid],
             "PLAN_TIER": [["basic", "pro", "enterprise"][c % 3] for c in cid],
+            # Bookkeeping column the spec's per-table `exclude:` prunes
+            # inside the generated query (ADR-25) - absent from the panels.
+            "ETL_LOADED_AT": [datetime(2026, 6, 1)] * len(cid),
         }
     )
     return {
@@ -184,7 +187,7 @@ def main() -> None:
     refs = [
         spec.inputs.spine,
         spec.inputs.label_source,
-        *[src for src, _ in spec.inputs.feature_entries],
+        *[entry.source for entry in spec.inputs.feature_entries],
     ]
     source_tables = {}
     for ref in refs:
