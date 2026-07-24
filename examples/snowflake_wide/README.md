@@ -2,13 +2,19 @@
 
 An mbt project whose data source is **Snowflake**, built around the shape most feature stores actually have: a population table, a label table, and several feature tables, all keyed on `[customer_id, snapshot_date]`.
 
-| Role | Source table | What it contributes |
-|---|---|---|
-| population (spine) | `customer_population` | which `(customer, snapshot)` rows exist (ADR-22) |
-| label | `churn_labels` | `is_churn` per row, joined inner |
-| feature | `demographic_features` | `age`, `tenure_months`, LEFT JOINed |
-| feature | `engagement_features` | `logins_30d`, `avg_session_min`, LEFT JOINed |
-| feature | `billing_features` | `monthly_spend`, `plan_tier`, LEFT JOINed |
+**Column convention**: every table carries the same two join columns under the same names, `customer_id` + `snapshot_date`; the population table holds exactly those join keys and nothing else (it decides which rows exist, ADR-22).
+A table's remaining columns are its payload; whether payload is used as a feature, used as the target, or ignored is declared in the specs, per the table below.
+
+| Role | Source table | Join columns (same names everywhere) | Payload columns | Payload treatment |
+|---|---|---|---|---|
+| population (spine) | `customer_population` | `customer_id`, `snapshot_date` | none | n/a - join keys only |
+| label | `churn_labels` | `customer_id`, `snapshot_date` | `is_churn` | training target, never a feature; joined inner |
+| feature | `demographic_features` | `customer_id`, `snapshot_date` | `age`, `tenure_months` | features; LEFT JOINed |
+| feature | `engagement_features` | `customer_id`, `snapshot_date` | `logins_30d`, `avg_session_min` | features; LEFT JOINed |
+| feature | `billing_features` | `customer_id`, `snapshot_date` | `monthly_spend`, `plan_tier` | features; LEFT JOINed |
+
+The join keys themselves are **ignored as features** - declared once in `models/churn_wide.yml` under `features.exclude` (that is also where bookkeeping columns of real tables go: load timestamps, batch ids, and the like).
+Join columns are declared per table via `using:` in the dataset and scoring specs; the label's join columns are projected away after the join, so nothing is duplicated.
 
 mbt compiles the five-table join into **one Snowflake query per split**, so the join, the temporal windows, the filters, and the sampling all run in the warehouse.
 Only the resulting training panel streams back (Arrow batches into parquet); the huge tables never leave Snowflake.

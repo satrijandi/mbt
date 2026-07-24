@@ -9,9 +9,13 @@ models:
     dataset: ref('wide_churn_training')
 
     target: is_churn
+    # THE ignore list: every column of the joined panel is a candidate
+    # feature except the target (excluded automatically) and what is listed
+    # here. The join keys are identity, not signal; with real tables, add
+    # any bookkeeping columns they carry (load timestamps, batch ids, ...).
     features:
       include: ["*"]
-      exclude: [customer_id, snapshot_date]   # join keys are not features
+      exclude: [customer_id, snapshot_date]
 
     evaluation:
       protocol: {split: temporal}

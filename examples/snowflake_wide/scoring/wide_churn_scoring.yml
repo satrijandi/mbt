@@ -16,6 +16,11 @@ scoring:
     stage: staging
 
     input:
+      # Same column convention as training: every table joins on the shared
+      # customer_id + snapshot_date keys (present in the population table).
+      # The champion applies its training-time feature list, so the join
+      # keys are never scored as features; here they pass through as the
+      # identity columns declared under output.columns.
       inputs:
         spine: source('snowflake', 'customer_population')
         features:

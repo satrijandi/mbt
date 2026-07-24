@@ -6,18 +6,30 @@ datasets:
   - name: wide_churn_training
     description: Monthly churn panel from population + labels + three feature tables.
     inputs:
+      # The spine holds the join keys ONLY (customer_id, snapshot_date) and
+      # decides which rows exist; every `using:` below names columns that
+      # exist in the population table under the same names.
       population: source('snowflake', 'customer_population')
       label:
+        # Joins INNER on the shared keys; contributes is_churn (the target),
+        # and its join columns are projected away, never duplicated.
         source: source('snowflake', 'churn_labels')
         using: [customer_id, snapshot_date]
       features:
+        # Each feature table LEFT JOINs on the shared keys; its non-key
+        # columns become candidate features (demographic: age, tenure_months).
         - source: source('snowflake', 'demographic_features')
           using: [customer_id, snapshot_date]
+        # engagement: logins_30d, avg_session_min.
         - source: source('snowflake', 'engagement_features')
           using: [customer_id, snapshot_date]
+        # billing: monthly_spend, plan_tier.
         - source: source('snowflake', 'billing_features')
           using: [customer_id, snapshot_date]
-      # The shared default key (every table above joins on it).
+      # The shared default key (every table above joins on it). One naming
+      # convention everywhere; a table with divergent key names would get its
+      # own `using:` instead. Columns IGNORED as features are declared in
+      # models/churn_wide.yml `features.exclude`.
       join_key: [customer_id, snapshot_date]
     label:
       column: is_churn
