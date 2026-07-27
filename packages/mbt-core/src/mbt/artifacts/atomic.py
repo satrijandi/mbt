@@ -14,8 +14,20 @@ defeat the purpose.
 """
 
 import os
-import tempfile
+import uuid
 from pathlib import Path
+
+# Mode requested for the temp file, which the kernel masks with the process
+# umask - so the control file lands with exactly the permissions an ordinary
+# write would give it (0644 under the usual 022).
+#
+# This is deliberately not `tempfile.mkstemp`: mkstemp hardcodes 0600, and
+# `os.replace` carries the temp file's mode onto the destination, so every
+# manifest.json/run_results.json was readable only by the uid that wrote it.
+# Nothing in a control file is secret, and they are routinely written by one
+# uid for another to read - the showcase's runner container writing a workspace
+# its host user then inspects, or one CI step handing artifacts to the next.
+_CONTROL_FILE_MODE = 0o666
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -39,10 +51,17 @@ def atomic_write_text(path: Path, text: str) -> None:
     after, so a power loss or kernel panic cannot leave the control file present
     but zero-length (the rename persisting while the data blocks do not), which
     would brick every subsequent ``--state``/``--manifest``/``docs`` read (F13).
+
+    The destination inherits the temp file's permissions, so the temp is created
+    with ``_CONTROL_FILE_MODE`` and the result carries the same mode any ordinary
+    write would produce rather than a private-to-the-writer one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    tmp = Path(tmp_name)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    # O_EXCL so the temp path is never followed or clobbered if something is
+    # already there - a symlink planted in the project dir, or a leftover from a
+    # crashed run that happened to collide.
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, _CONTROL_FILE_MODE)
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(text)

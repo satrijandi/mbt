@@ -54,8 +54,11 @@ help:
 image:
 	$(SHOWCASE_DIR)/scripts/build_image.sh
 
+# tmp/ and monitoring/ are created by the HOST here on purpose: every container
+# runs as root, so whichever one reached the directory first would own it and
+# the host user could no longer write into its own workspace.
 workspace:
-	mkdir -p $(SHOWCASE_WORKSPACE)/tmp
+	mkdir -p $(SHOWCASE_WORKSPACE)/tmp $(SHOWCASE_WORKSPACE)/monitoring
 	rsync -a --delete $(SHOWCASE_DIR)/project/ $(SHOWCASE_WORKSPACE)/project/
 	rsync -a --delete $(REPO_ROOT)/examples/churn_demo/data/ $(SHOWCASE_WORKSPACE)/seed/
 	rsync -a $(SHOWCASE_DIR)/data/ $(SHOWCASE_WORKSPACE)/seed/

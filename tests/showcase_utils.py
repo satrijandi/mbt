@@ -161,7 +161,13 @@ class ComposeStack:
         self.compose("down", "-v", "--remove-orphans", timeout=300)
 
     def _stage_workspace(self) -> None:
-        (self.workspace / "tmp").mkdir(parents=True, exist_ok=True)
+        # tmp/ and monitoring/ are created here, by the host, on purpose: every
+        # container runs as root, so whichever one reached the directory first
+        # would own it and the host could no longer write into it. monitoring/
+        # holds the persisted serving baseline (the DAG's unit containers are
+        # ephemeral) and the poisoned batch the serving-gate test writes.
+        for shared in ("tmp", "monitoring"):
+            (self.workspace / shared).mkdir(parents=True, exist_ok=True)
         for src, dest in (
             (SHOWCASE_DIR / "project", self.workspace / "project"),
             (CHURN_DEMO_DATA, self.workspace / "seed"),

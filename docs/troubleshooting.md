@@ -388,6 +388,22 @@ The message is redacted (the error path is a serialization path too), so secrets
 **Fix:** re-run the same command with `MBT_DEBUG=1` in the environment - the catch-all then re-raises, printing the full traceback - and file a bug report with the command and that traceback.
 There is nothing to fix on the project side; if the message suggests a project problem that surfaced this way (as a raw exception rather than a friendly error), that mis-routing is part of the bug, so report it too.
 
+## `Permission denied` reading `target/manifest.json` or `target/run_results.json`
+
+**Symptom (exit 1, from whatever reads the control file - a `--state` compile, `mbt docs`, a CI script, or your own tooling; captured from a real reproduction where a root container wrote the file and a uid-1001 host process read it):**
+
+```text
+PermissionError: [Errno 13] Permission denied: '.../project/target/run_results.json'
+```
+
+**Why:** mbt versions up to v0.1.0 wrote the two control files through `tempfile.mkstemp`, which hardcodes mode `0600`, and the atomic `os.replace` carried that mode onto the destination.
+The files therefore ended up readable only by the uid that wrote them, which breaks any handoff between users - a container writing into a bind-mounted workspace its host user then inspects, or one CI step producing artifacts for the next to read.
+Later versions create the temp file with the process umask instead, so control files land `0644` like any ordinary write.
+
+**Fix:** the next write of that file heals it, because the rename replaces the destination inode - re-run the command that produces it (`mbt compile`, `mbt build`) as the writing user.
+To repair files you cannot regenerate, `chmod 644 target/manifest.json target/run_results.json` as their owner.
+Nothing in a control file is secret, so widening the mode loses no protection.
+
 ## Informational event lines you may now see
 
 These lines are normal observability output on stderr (or the `--log-format json` stream), not failures.
