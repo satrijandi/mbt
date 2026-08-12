@@ -57,9 +57,21 @@ image:
 # tmp/ and monitoring/ are created by the HOST here on purpose: every container
 # runs as root, so whichever one reached the directory first would own it and
 # the host user could no longer write into its own workspace.
+#
+# project/ is removed and restaged rather than rsync'd in place. A previous run
+# leaves root-owned output inside it - target/, and jupyter's
+# .ipynb_checkpoints/ once a DS opens the notebook - which the host cannot
+# unlink on native Linux, so `rsync --delete` fails outright instead of
+# restaging. Clearing the directory first needs no list of what a container
+# might have left, and lands on the same result --delete was aiming at: the
+# workspace copy is exactly the committed source. Host first, container as root
+# if that fails, the same fallback `clean` uses.
 workspace:
 	mkdir -p $(SHOWCASE_WORKSPACE)/tmp $(SHOWCASE_WORKSPACE)/monitoring
-	rsync -a --delete $(SHOWCASE_DIR)/project/ $(SHOWCASE_WORKSPACE)/project/
+	rm -rf $(SHOWCASE_WORKSPACE)/project 2>/dev/null || \
+	  docker run --rm -v $(SHOWCASE_WORKSPACE):/workspace $(SHOWCASE_RUNNER_IMAGE) \
+	    rm -rf /workspace/project
+	rsync -a $(SHOWCASE_DIR)/project/ $(SHOWCASE_WORKSPACE)/project/
 	rsync -a --delete $(REPO_ROOT)/examples/churn_demo/data/ $(SHOWCASE_WORKSPACE)/seed/
 	rsync -a $(SHOWCASE_DIR)/data/ $(SHOWCASE_WORKSPACE)/seed/
 	rsync -a $(SHOWCASE_DIR)/bootstrap/ $(SHOWCASE_WORKSPACE)/bootstrap/

@@ -211,5 +211,17 @@ def test_runbook_golden_path(runbook) -> None:
     runner.make("down")
     assert runner.containers() == [], "make down left containers behind"
 
+    # Re-staging over a previous run has to work: `make up` is the documented
+    # way back into the stack and does not imply `make clean` first. Everything
+    # above wrote into the workspace as root, so on native Linux the host
+    # cannot unlink project/target - the target clears it through a container
+    # the way `clean` does, where a plain rsync --delete failed outright.
+    assert (ws / "project" / "target").is_dir(), "expected build output to re-stage over"
+    runner.make("workspace")
+    assert not (ws / "project" / "target").exists(), (
+        "re-staging left the previous run's root-owned build output behind"
+    )
+    assert (ws / "project" / "mbt_project.yml").exists(), "re-staging lost the project"
+
     runner.make("clean")
     assert not ws.exists(), "make clean left the workspace behind"
