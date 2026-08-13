@@ -17,11 +17,14 @@ uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
 uv run pre-commit run --all-files
 uv run mkdocs build --strict         # docs changes; site/ is gitignored output
 uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples .github
+uv run python scripts/audit_dependencies.py   # dependency advisories; needs network
 ```
 
 - Run the JVM e2e tier via `uv run` (so `.venv/bin/spark-submit` is on PATH) with `JAVA_HOME=/opt/homebrew/opt/openjdk@17` locally.
 - Live external-system tests (`-m live`) are opt-in and NOT part of the battery above; both tiers run nightly in CI via `.github/workflows/live.yml`. `-m live_snowflake` skips unless `MBT_LIVE_SNOWFLAKE=1`, then fails loudly if `SNOWFLAKE_*` env vars are incomplete (setup in `packages/mbt-snowflake/README.md`). `-m live_showcase` skips unless `MBT_LIVE_SHOWCASE=1`, then fails loudly if docker is unusable; it boots the `examples/showcase` compose stack (see its README).
-- Do not pipe test commands through `tail` and trust the exit code; the pipeline returns tail's status, not pytest's.
+- Do not pipe test commands through `tail` and trust the exit code; the pipeline returns tail's status, not pytest's. Piping through `tail` also throws away the traceback you will need; write the run to a file instead.
+- `scripts/audit_dependencies.py` wraps pip-audit so an accepted advisory cannot rot: it fails on an unaccepted finding AND on an acceptance that no longer fires. Every entry in its `ACCEPTED` map states why the fix is unreachable, why the code is not in mbt's execute path, and what ends the acceptance. Adding an entry is a security-posture decision, not a build fix.
+- `uv lock --upgrade-package X` is NOT surgical when X has a wide subtree - it re-resolves and can move unrelated packages (it silently took h2o across a breaking release once). Always read the lock diff; never trust uv's "Updated ..." summary lines.
 - Workflow YAML under `.github/` (repo and scaffold) must also parse with PyYAML; unquoted scalars containing `: ` are syntax errors that yamllint's relaxed profile is the only local check for.
 
 ## Load-bearing decisions (do not "clean up")

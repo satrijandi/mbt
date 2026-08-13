@@ -97,8 +97,12 @@ jobs:
       - name: pip-audit against floors
         # The locked env is audited in the security job; floors are what a
         # user MAY install, so a floor version with a known CVE must raise
-        # the floor, not ship. Same documented ignore as the security job.
-        run: uv run pip-audit --skip-editable --ignore-vuln PYSEC-2026-1443
+        # the floor, not ship.
+        # --no-check-stale because this resolution is deliberately NOT the
+        # locked one: an accepted advisory may legitimately not apply to these
+        # versions, and that is not a reason to fail. The locked environment is
+        # the authority on whether an acceptance is still earned.
+        run: uv run python scripts/audit_dependencies.py --no-check-stale
 
   e2e:
     # The JVM tier (Spark 4.x per the locked resolution, H2O) runs once on
@@ -145,11 +149,13 @@ jobs:
       - name: Sync workspace
         run: uv sync
       - name: pip-audit (known-vulnerability scan of the locked environment)
-        # PYSEC-2026-1443 (CVE-2024-7768): DoS of h2o's own REST endpoint
-        # (/3/ImportFiles), which mbt-h2o only runs as a local, ephemeral
-        # training-time process. No fixed h2o release exists (<= 3.46.1 all
-        # affected); drop the ignore when a fixed version lands via Renovate.
-        run: uv run pip-audit --skip-editable --ignore-vuln PYSEC-2026-1443
+        # A wrapper rather than bare `pip-audit --ignore-vuln`: an ignore flag
+        # keeps passing forever once the advisory stops applying, so the
+        # suppression outlives its reason and reads to the next person as
+        # "recently reviewed". The wrapper fails on an unaccepted finding AND
+        # on an acceptance that no longer fires, so the list has to keep being
+        # earned. Each entry's rationale lives in ACCEPTED in that script.
+        run: uv run python scripts/audit_dependencies.py
 
   secrets-scan:
     # Complements CodeQL/pip-audit: scans the git history for committed

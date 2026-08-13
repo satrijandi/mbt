@@ -1,0 +1,94 @@
+"""Guard for the dependency audit wrapper (scripts/audit_dependencies.py).
+
+The wrapper exists so an accepted vulnerability cannot quietly become a
+permanent blind spot: it fails both on a finding nobody accepted AND on an
+acceptance that no longer fires. Both directions are asserted here, on fixture
+reports rather than a live pip-audit run, so the suite stays offline.
+"""
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location(
+    "audit_dependencies", REPO_ROOT / "scripts" / "audit_dependencies.py"
+)
+assert _spec is not None and _spec.loader is not None
+audit = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(audit)
+
+
+def _report(*vulns_by_package: tuple[str, list[str]]) -> dict:
+    return {
+        "dependencies": [
+            {"name": name, "version": "1.0", "vulns": [{"id": v} for v in ids]}
+            for name, ids in vulns_by_package
+        ]
+    }
+
+
+def test_findings_are_collected_across_packages() -> None:
+    found = audit.findings_from(_report(("a", ["PYSEC-1", "PYSEC-2"]), ("b", ["PYSEC-3"])))
+    assert found == {"PYSEC-1", "PYSEC-2", "PYSEC-3"}
+
+
+def test_packages_without_vulns_contribute_nothing() -> None:
+    assert audit.findings_from(_report(("a", []))) == set()
+    assert audit.findings_from({}) == set()
+
+
+def test_an_unaccepted_finding_fails() -> None:
+    unaccepted, stale = audit.classify({"PYSEC-9999-1"})
+    assert unaccepted == ["PYSEC-9999-1"]
+    assert audit.report(unaccepted, stale, check_stale=True) == 1
+
+
+def test_an_accepted_finding_passes_while_it_still_fires() -> None:
+    unaccepted, stale = audit.classify(set(audit.ACCEPTED))
+    assert (unaccepted, stale) == ([], [])
+    assert audit.report(unaccepted, stale, check_stale=True) == 0
+
+
+def test_an_acceptance_that_stopped_firing_fails_so_it_gets_deleted() -> None:
+    """The whole point: pip-audit alone would go on passing here forever."""
+    still_applies = sorted(audit.ACCEPTED)[:1]
+    unaccepted, stale = audit.classify(set(still_applies))
+    assert stale == sorted(set(audit.ACCEPTED) - set(still_applies))
+    assert audit.report(unaccepted, stale, check_stale=True) == 1
+
+
+def test_stale_acceptances_are_only_a_note_when_the_check_is_off() -> None:
+    """The floors job resolves different versions than the lock, so an advisory
+    may legitimately not apply there; that must not fail the build."""
+    unaccepted, stale = audit.classify(set())
+    assert stale == sorted(audit.ACCEPTED)
+    assert audit.report(unaccepted, stale, check_stale=False) == 0
+
+
+def test_unaccepted_findings_fail_even_with_the_stale_check_off() -> None:
+    unaccepted, stale = audit.classify(set(audit.ACCEPTED) | {"PYSEC-9999-2"})
+    assert audit.report(unaccepted, stale, check_stale=False) == 1
+
+
+def test_every_acceptance_documents_why_and_what_ends_it() -> None:
+    """An entry with no rationale is the blind spot this script exists to stop."""
+    for advisory, reason in audit.ACCEPTED.items():
+        assert len(reason) > 80, f"{advisory} needs a real rationale, got: {reason!r}"
+        assert "Ends when" in reason, f"{advisory} must say what ends the acceptance"
+
+
+def test_a_non_json_report_is_a_hard_error_not_a_silent_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken pip-audit must never look like a clean audit."""
+
+    class _Proc:
+        returncode = 2
+        stdout = "Traceback: pip-audit exploded"
+        stderr = "boom"
+
+    monkeypatch.setattr(audit.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(SystemExit, match="did not produce a JSON report"):
+        audit.run_pip_audit()
