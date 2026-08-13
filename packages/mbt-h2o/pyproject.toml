@@ -25,7 +25,17 @@ classifiers = [
 ]
 dependencies = [
     "mbt-adapter-base[metrics]>=0.1.0,<0.2",
-    "h2o>=3.46",
+    # Ceiling, not a stale pin. h2o 3.46.0.12 (2026-08-12) moved MOJO export
+    # behind H2O-3 Secure, its commercial tier: `download_mojo` now raises
+    # unconditionally via h2o/enterprise.py, and that is precisely what this
+    # adapter's native export calls, so the whole export/load path dies. That
+    # release is also sdist-only (a 266MB source build). Without this ceiling a
+    # fresh `pip install mbt-h2o` resolves it and breaks; uv.lock pins
+    # 3.46.0.11 so CI would never warn us.
+    # Lift only once a release restores MOJO to the OSS tier - the e2e H2O
+    # compliance module is what proves it (22 passed on 3.46.0.11, 4 of those
+    # plus the h2o/spark loop fail on 3.46.0.12).
+    "h2o>=3.46,<3.46.0.12",
     "numpy>=1.26",
 ]
 
