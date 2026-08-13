@@ -1,0 +1,141 @@
+# What a user installing mbt TODAY gets, rather than what uv.lock pins.
+#
+# The lock is what makes ci.yml reproducible, and it is also a blindfold: an
+# upstream release that breaks mbt cannot fail a locked build, so we would find
+# out from a bug report. This tier throws the lock away, re-resolves to the
+# newest versions our declared constraints allow, and runs the tests that would
+# notice.
+#
+# It runs the E2E tier specifically. ci.yml's floors job also re-resolves, but
+# only runs `-m "not e2e"`, and the expensive seams live in e2e: h2o 3.46.0.12
+# moved MOJO export behind a paid tier, and nothing except the e2e H2O
+# compliance module calls it, so floors could not have caught it. That is the
+# exact event this tier exists for.
+#
+# A failure here is usually NOT our bug - it is upstream's. The point is that
+# the news arrives on day one, with the resolution diff attached.
+name: Upstream resolution
+
+on:
+  schedule:
+    # After live.yml's 03:17 so the two heavy nightly tiers do not overlap.
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+# Never cancel in flight, and never run two at once: a half-torn-down JVM tier
+# leaves stray processes, same reasoning as live.yml.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write   # the failure notice below; a red nightly nobody reads is not a detector
+
+jobs:
+  fresh-resolution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          # Explicitly off, not left to setup-uv's default: cached index
+          # metadata is a stale view of "what is newest", which is the one
+          # thing this tier measures. A nightly can afford a cold resolve.
+          enable-cache: false
+      - uses: actions/setup-java@v4   # H2O + Spark adapters need a JVM
+        with: {distribution: temurin, java-version: "17"}
+
+      - name: Re-resolve every dependency to the newest allowed version
+        # --upgrade discards the locked pins and re-resolves against the
+        # constraints declared in pyproject. The result is never committed:
+        # this tier reports on the world, it does not decide what we ship.
+        run: uv lock --upgrade
+
+      - name: What moved
+        # Read this first when a step below fails. Emitted before the sync so
+        # it still appears when the new resolution is itself what broke.
+        run: |
+          git show HEAD:uv.lock > /tmp/lock-committed.toml
+          uv run --no-project python scripts/lock_versions.py /tmp/lock-committed.toml > /tmp/before.txt
+          uv run --no-project python scripts/lock_versions.py uv.lock > /tmp/after.txt
+          {
+            echo "## Resolution vs the committed lock"
+            if diff -q /tmp/before.txt /tmp/after.txt > /dev/null; then
+              echo "No change - the lock already holds the newest allowed versions."
+            else
+              echo '```diff'
+              diff /tmp/before.txt /tmp/after.txt || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          diff /tmp/before.txt /tmp/after.txt || true
+
+      - name: Sync the fresh resolution
+        run: uv sync
+
+      - name: Fast suite
+        run: uv run pytest -q -m "not e2e" --timeout 600
+
+      - name: End-to-end tier (the seam that only this tier can protect)
+        run: uv run pytest -q -m e2e --timeout 1800 --durations=10
+
+      - name: Advisories against the fresh resolution
+        # New advisories land against the newest versions first, so this sees
+        # them before the locked audit does. --no-check-stale because this is
+        # deliberately not the locked resolution: an accepted advisory may
+        # legitimately not apply here, which is not a failure.
+        run: uv run python scripts/audit_dependencies.py --no-check-stale
+
+      - name: Upload the resolution that failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-resolution
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            uv.lock
+            /tmp/before.txt
+            /tmp/after.txt
+            /tmp/pytest-of-*/pytest-*/**/target/run_results.json
+            /tmp/pytest-of-*/pytest-*/**/*.log
+
+      - name: Raise or update the tracking issue
+        # A scheduled job that goes red unnoticed is not a detector - the
+        # live tier sat red for six nights before anyone looked. One issue,
+        # commented on rather than duplicated, and closed automatically when
+        # the upstream world goes green again.
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Upstream resolution is failing"
+          OUTCOME: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment \
+                "Green again on the newest allowed resolution: $RUN_URL"
+            fi
+            exit 0
+          fi
+          body=$(printf '%s\n' \
+            "The newest versions our constraints allow no longer pass." \
+            "" \
+            "Run (see the job summary for the resolution diff): $RUN_URL" \
+            "" \
+            "This is usually upstream's change, not ours. Triage: read the" \
+            "resolution diff first, then decide whether to adapt mbt or to" \
+            "cap the offending package in its pyproject with the reason as a" \
+            "comment, the way mbt-h2o caps h2o below the MOJO paywall.")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi
