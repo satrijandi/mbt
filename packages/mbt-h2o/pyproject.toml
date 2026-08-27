@@ -35,11 +35,17 @@ dependencies = [
     # Lift only once a release restores MOJO to the OSS tier - the e2e H2O
     # compliance module is what proves it (22 passed on 3.46.0.11, 4 of those
     # plus the h2o/spark loop fail on 3.46.0.12).
-    # Floor is 3.46.0.11 because everything below it adds advisories the
-    # floors audit gates on (PYSEC-2026-351 needs 3.46.0.6, PYSEC-2026-2180
-    # needs 3.46.0.10); combined with the ceiling this pins 3.46.0.11 exactly,
-    # which is the only h2o that is both MOJO-capable and audit-clean.
-    "h2o>=3.46.0.11,<3.46.0.12",
+    # Floor is set by the [sparkling] extra, NOT by the advisory list. H2O
+    # requires the python client to match the backend embedded in
+    # h2o-pysparkling-3.5, whose newest release embeds 3.46.0.6 - so any floor
+    # above that makes `pip install mbt-h2o[sparkling]` a hard
+    # ResolutionImpossible. 3.46.0.6 is therefore the highest floor this package
+    # can declare; it still clears PYSEC-2026-351 over the old `>=3.46`.
+    # The three advisories left at that floor are FLOOR_ONLY entries in
+    # scripts/audit_dependencies.py: the resolution we ship is 3.46.0.11, which
+    # reports none of them. Raise this the moment pysparkling ships on a newer
+    # H2O, and re-read that set when you do.
+    "h2o>=3.46.0.6,<3.46.0.12",
     "numpy>=1.26",
 ]
 

@@ -53,9 +53,10 @@ def test_an_accepted_finding_passes_while_it_still_fires() -> None:
 
 def test_an_acceptance_that_stopped_firing_fails_so_it_gets_deleted() -> None:
     """The whole point: pip-audit alone would go on passing here forever."""
-    still_applies = sorted(audit.ACCEPTED)[:1]
+    checkable = sorted(set(audit.ACCEPTED) - audit.FLOOR_ONLY)
+    still_applies = checkable[:1]
     unaccepted, stale = audit.classify(set(still_applies))
-    assert stale == sorted(set(audit.ACCEPTED) - set(still_applies))
+    assert stale == sorted(set(checkable) - set(still_applies))
     assert audit.report(unaccepted, stale, check_stale=True) == 1
 
 
@@ -63,7 +64,7 @@ def test_stale_acceptances_are_only_a_note_when_the_check_is_off() -> None:
     """The floors job resolves different versions than the lock, so an advisory
     may legitimately not apply there; that must not fail the build."""
     unaccepted, stale = audit.classify(set())
-    assert stale == sorted(audit.ACCEPTED)
+    assert stale == sorted(set(audit.ACCEPTED) - audit.FLOOR_ONLY)
     assert audit.report(unaccepted, stale, check_stale=False) == 0
 
 
@@ -92,3 +93,32 @@ def test_a_non_json_report_is_a_hard_error_not_a_silent_pass(
     monkeypatch.setattr(audit.subprocess, "run", lambda *a, **k: _Proc())
     with pytest.raises(SystemExit, match="did not produce a JSON report"):
         audit.run_pip_audit()
+
+
+def test_floor_only_entries_are_real_acceptances() -> None:
+    """FLOOR_ONLY narrows an acceptance; it cannot create one. An id listed
+    there but absent from ACCEPTED would be exempt from the staleness check
+    while never having been justified at all."""
+    assert set(audit.ACCEPTED) >= audit.FLOOR_ONLY
+
+
+def test_floor_only_entries_are_exempt_from_the_staleness_check() -> None:
+    """They are accepted BECAUSE the shipped resolution is clear of them, so
+    demanding that they fire against the lock would be permanently red."""
+    _, stale = audit.classify(set())
+    assert not (audit.FLOOR_ONLY & set(stale))
+
+
+def test_a_floor_only_entry_firing_against_the_lock_fails() -> None:
+    """The exemption must not become a way to silence a live finding: if the
+    shipped resolution DOES have one, the floor-only story is false."""
+    advisory = sorted(audit.FLOOR_ONLY)[0]
+    misfiled = audit.misfiled_floor_only({advisory})
+    assert misfiled == [advisory]
+    assert audit.report([], [], check_stale=True, misfiled=misfiled) == 1
+
+
+def test_a_clean_locked_run_reports_no_misfiled_floor_only() -> None:
+    unaccepted, stale = audit.classify(set(audit.ACCEPTED))
+    assert audit.misfiled_floor_only(set(audit.ACCEPTED) - audit.FLOOR_ONLY) == []
+    assert audit.report(unaccepted, stale, check_stale=True, misfiled=[]) == 0

@@ -11,8 +11,11 @@ the environment is not at the floors.
 Offline: everything here reads the repo's own pyproject files.
 """
 
+import importlib.metadata
 import importlib.util
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
@@ -70,11 +73,35 @@ def test_the_higher_floor_wins_when_members_disagree() -> None:
     assert floors._release("5") == floors._release("5.0.0")
 
 
-def test_verify_flags_an_environment_that_is_not_at_the_floors() -> None:
-    """The running interpreter is the LOCKED env, deliberately above the floors,
-    so verify must report drift here. If this ever passes, --verify has stopped
-    being able to detect the regression it exists for."""
-    assert floors.verify(REPO_ROOT), (
-        "verify() found no drift in the locked environment, so it would not "
-        "notice the floors job silently resolving to newest either"
+def test_verify_flags_a_package_installed_above_its_declared_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression --verify exists for is an environment resolving to newest.
+
+    Simulated rather than read from the ambient environment: this suite runs in
+    BOTH the locked env (deliberately above the floors) and the floors env
+    (deliberately at them), so any assertion about the ambient versions passes
+    in one and fails in the other.
+    """
+    monkeypatch.setattr(floors, "declared_floors", lambda root, group="dev": {"pytest": "1.0"})
+    drift = floors.verify(REPO_ROOT)
+    assert len(drift) == 1
+    assert drift[0].startswith("pytest: declared floor 1.0, installed ")
+
+
+def test_verify_is_quiet_when_the_installed_version_is_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed = importlib.metadata.version("pytest")
+    monkeypatch.setattr(floors, "declared_floors", lambda root, group="dev": {"pytest": installed})
+    assert floors.verify(REPO_ROOT) == []
+
+
+def test_verify_ignores_a_declared_package_that_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extra we did not ask for is absent by design, not drift."""
+    monkeypatch.setattr(
+        floors, "declared_floors", lambda root, group="dev": {"not-a-real-package": "1.0"}
     )
+    assert floors.verify(REPO_ROOT) == []

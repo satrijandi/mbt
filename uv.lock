@@ -2292,7 +2292,7 @@ sparkling = [
 
 [package.metadata]
 requires-dist = [
-    { name = "h2o", specifier = ">=3.46.0.11,<3.46.0.12" },
+    { name = "h2o", specifier = ">=3.46.0.6,<3.46.0.12" },
     { name = "h2o-pysparkling-3-5", marker = "extra == 'sparkling'", specifier = ">=3.46" },
     { name = "mbt-adapter-base", extras = ["metrics"], editable = "packages/mbt-adapter-base" },
     { name = "numpy", specifier = ">=1.26" },
