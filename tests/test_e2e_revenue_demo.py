@@ -1,4 +1,4 @@
-"""End-to-end CLI tests over examples/revenue_demo - the regression vertical.
+"""End-to-end CLI tests over tests/fixtures/revenue_demo - the regression vertical.
 
 The classification path is covered by test_e2e_churn_demo.py; this exercises
 what regression changes: the regression metric set, an rmse (lower-is-better)

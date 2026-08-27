@@ -118,8 +118,9 @@ determinism tiers per adapter otherwise).
 | `packages/mbt-h2o` | H2O AutoML training adapter (MOJO artifacts; optional Sparkling Water backend) |
 | `packages/mbt-optuna` | Optuna tuning engine (seeded TPE, per-target trial caps) |
 | `packages/mbt-testing` | Fake adapters for testing mbt projects without frameworks |
-| `examples/churn_demo` | The demo project used by golden and E2E tests |
+| `examples/snowflake_wide` | Warehouse-native project: a population spine + label + three feature tables joined and sampled inside Snowflake (S3-lake variant documented alongside) |
 | `examples/showcase` | Docker-compose reference stack (S3 lake, HTTP MLflow, Spark cluster, Gitea + Woodpecker CI, Zot provenance, Airflow CD, Grafana; optional k3d/ArgoCD) with an opt-in live test tier |
+| `tests/fixtures` | Whole mbt projects the suite copies to tmp and drives through the real CLI: `churn_demo` (classification, golden + E2E) and `revenue_demo` (regression) |
 
 ## Development
 

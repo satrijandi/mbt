@@ -32,7 +32,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHOWCASE_DIR = REPO_ROOT / "examples" / "showcase"
-CHURN_DEMO_DATA = REPO_ROOT / "examples" / "churn_demo" / "data"
+CHURN_DEMO_DATA = REPO_ROOT / "tests" / "fixtures" / "churn_demo" / "data"
 
 SKIP_REASON = (
     "showcase stack tests are opt-in: set MBT_LIVE_SHOWCASE=1 with docker running "

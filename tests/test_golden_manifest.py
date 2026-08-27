@@ -1,6 +1,6 @@
 """Golden-file compile test (TSD §21, S2-09).
 
-examples/churn_demo compiles to a checked-in manifest with volatile metadata
+tests/fixtures/churn_demo compiles to a checked-in manifest with volatile metadata
 normalized; any diff is a reviewable change. Regenerate deliberately with:
 
     UPDATE_GOLDEN=1 uv run pytest tests/test_golden_manifest.py

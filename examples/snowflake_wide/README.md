@@ -183,6 +183,41 @@ What mbt guarantees, and where the DE seam is:
 - **Secrets never in the repo**: `profiles.yml` is committed and reads `env_var()`; humans use SSO (no long-lived secret exists at all), automation uses key-pair.
 - **Gates before registry, monitors after**: a model must clear its metric floor to be registered; once serving, drift monitors run on every batch and realized metrics run when labels mature - the whole loop exits nonzero for schedulers.
 
+## The same project over an S3 lake
+
+The wide shape is not Snowflake-specific: `datasets/wide_churn_training.yml` and `models/churn_wide.yml` describe a five-table join, not a warehouse.
+Swapping the data plane to an **S3 (or S3-compatible) parquet lake** touches only `profiles.yml` and `sources.yml`; the dataset, model, and scoring specs are unchanged.
+
+In mbt, S3 is read through the **Spark data adapter** over `s3a`:
+
+```yaml
+data:
+  adapter: spark
+  config:
+    master: local[*]
+    root: s3://my-lake                 # your bucket
+    conf:
+      spark.hadoop.fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+      spark.hadoop.fs.s3a.endpoint: "{{ env_var('AWS_S3_ENDPOINT', 's3.amazonaws.com') }}"
+      spark.hadoop.fs.s3a.access.key: "{{ env_var('AWS_ACCESS_KEY_ID') }}"
+      spark.hadoop.fs.s3a.secret.key: "{{ env_var('AWS_SECRET_ACCESS_KEY') }}"
+```
+
+Sources then carry `path:` globs relative to `root` instead of Snowflake `identifier:`s, so the spine becomes `customer_population/*.parquet` resolving to `s3://my-lake/customer_population/*.parquet`, and the other four roles follow the same pattern.
+
+The Spark plane needs a JVM (Java 17) and an endpoint - real AWS S3, or an S3-compatible store like MinIO/SeaweedFS:
+
+```bash
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+export AWS_S3_ENDPOINT=s3.amazonaws.com      # or http://minio:9000 for MinIO
+export AWS_S3_SSL=true                        # set false for plain-HTTP MinIO/SeaweedFS
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+```
+
+The join semantics are identical either way - same `inputs:` spec, same joined columns.
+What differs is only where the bytes live and which engine runs the join (Spark vs Snowflake SQL), so `show_wide_join.py` remains an accurate offline demonstration of both.
+`examples/showcase` runs exactly this configuration end to end against a SeaweedFS lake, if you want it wired up rather than described.
+
 ## Testing tiers
 
 | Tier | What it proves | Needs |

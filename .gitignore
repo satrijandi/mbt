@@ -26,7 +26,8 @@ mlartifacts/
 mlflow.db
 *.duckdb
 *.duckdb.wal
-examples/churn_demo/predictions/
+tests/fixtures/churn_demo/predictions/
+tests/fixtures/revenue_demo/predictions/
 examples/snowflake_wide/predictions/
 
 # JVM adapter leftovers (Spark/H2O e2e runs)

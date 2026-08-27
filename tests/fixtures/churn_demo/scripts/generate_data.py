@@ -1,4 +1,4 @@
-"""Deterministic demo data for examples/churn_demo.
+"""Deterministic demo data for tests/fixtures/churn_demo.
 
 The parquet output is committed; regenerate only when the schema must change
 (golden manifests hash the file bytes via --deep-snapshot).

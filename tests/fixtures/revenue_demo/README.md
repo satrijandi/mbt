@@ -1,18 +1,18 @@
-# revenue_demo
+# revenue_demo - the regression test fixture
 
-The regression reference project: an XGBoost **regressor** that forecasts each subscriber's next-30-day spend over one committed dataset.
-It is the `task: regression` twin of `churn_demo` (which is binary classification), so a data scientist starting a regression model has a working template to copy - metrics, gates, slices, and delayed ground-truth monitoring all wired for a continuous target.
-An end-to-end test builds it on every CI run, so everything in here is guaranteed to work.
+An XGBoost **regressor** that forecasts each subscriber's next-30-day spend over one committed dataset.
+It is the `task: regression` twin of `churn_demo` (which is binary classification), so a data scientist starting a regression model has a working template to read - metrics, gates, slices, and delayed ground-truth monitoring all wired for a continuous target.
+It lives under `tests/fixtures/` because a parse guard in the fast suite and an end-to-end build in the E2E suite run it on every CI run, so everything in here is guaranteed to work.
 
 ## Run it
 
-From the repo root (the demo's `profiles.yml` lives in the project dir, all local, sqlite MLflow):
+From the repo root (the fixture's `profiles.yml` lives in the project dir, all local, sqlite MLflow):
 
 ```bash
-uv run mbt build --project-dir examples/revenue_demo
-uv run mbt promote --model spend_regressor --to production --project-dir examples/revenue_demo
-uv run mbt score --project-dir examples/revenue_demo
-uv run mbt monitor --project-dir examples/revenue_demo
+uv run mbt build --project-dir tests/fixtures/revenue_demo
+uv run mbt promote --model spend_regressor --to production --project-dir tests/fixtures/revenue_demo
+uv run mbt score --project-dir tests/fixtures/revenue_demo
+uv run mbt monitor --project-dir tests/fixtures/revenue_demo
 ```
 
 The committed parquet under `data/` is deterministic output of `scripts/generate_data.py`; regenerate only deliberately - data bytes enter snapshot hashes.

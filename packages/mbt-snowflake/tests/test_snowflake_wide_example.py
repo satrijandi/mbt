@@ -201,8 +201,7 @@ def test_snowflake_wide_example_parses_to_the_full_lifecycle_shape() -> None:
     """The README advertises `mbt parse` and "Parsed 8 resources": 5 warehouse
     sources feeding one dataset feeding one model, plus the scoring node that
     reuses the spine and feature tables (and the label table as ground truth,
-    ADR-21/22). The parse-only sibling of the build test above, mirroring
-    tests/test_s3_wide_example.py."""
+    ADR-21/22). The parse-only sibling of the build test above."""
     from mbt.parsing import parse_project
 
     parsed = parse_project(EXAMPLE)

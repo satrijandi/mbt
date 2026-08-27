@@ -13,7 +13,7 @@ snapshots and evaluates on the two freshest, the scoring window catches
 exactly the 2026-06-01 batch, and its 30-day labels mature before the
 monitor anchor 2026-07-20.
 
-Schema mirrors examples/churn_demo minus the teaching-leak column
+Schema mirrors tests/fixtures/churn_demo minus the teaching-leak column
 (account_status); the monthly path carries no leak on purpose - one teaching
 asset in the project is enough, and the always-on `label_leakage_scan`
 guards this dataset without needing a reviewed exclusion.

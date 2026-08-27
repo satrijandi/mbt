@@ -1,19 +1,21 @@
-# churn_demo
+# churn_demo - the classification test fixture
 
-The reference mbt project: three XGBoost models over one committed dataset, exercising most of the spec surface.
-The golden-manifest and end-to-end tests build it on every CI run, so everything in here is guaranteed to work.
-If you want a gentler, minimal starting point, run `mbt init` instead - the scaffold is a simplified cousin of this project.
+A complete mbt project: three XGBoost models over one committed dataset, exercising most of the spec surface.
+It lives under `tests/fixtures/` rather than `examples/` because that is what it is for - the golden-manifest test compiles it in the fast suite, the E2E suite copies it to a tmp dir and drives it through the real CLI, and the live showcase tier seeds its lake from `data/`.
+Everything in here is therefore guaranteed to work, which also makes it a useful thing to read.
+
+If you want a starting point to copy, run `mbt init` instead (the scaffold is a simplified cousin of this project), or read `examples/snowflake_wide` for the warehouse-scale shape.
 
 ## Run it
 
-From the repo root (the demo's `profiles.yml` lives in the project dir, all local, sqlite MLflow):
+From the repo root (the fixture's `profiles.yml` lives in the project dir, all local, sqlite MLflow):
 
 ```bash
-uv run mbt build --project-dir examples/churn_demo
-uv run mbt docs generate --project-dir examples/churn_demo
-uv run mbt promote --model churn_classifier --to production --project-dir examples/churn_demo
-uv run mbt score --project-dir examples/churn_demo
-uv run mbt monitor --project-dir examples/churn_demo
+uv run mbt build --project-dir tests/fixtures/churn_demo
+uv run mbt docs generate --project-dir tests/fixtures/churn_demo
+uv run mbt promote --model churn_classifier --to production --project-dir tests/fixtures/churn_demo
+uv run mbt score --project-dir tests/fixtures/churn_demo
+uv run mbt monitor --project-dir tests/fixtures/churn_demo
 ```
 
 The committed parquet under `data/` is deterministic output of `scripts/generate_data.py`; regenerate only deliberately - data bytes enter snapshot hashes, so the golden manifests churn.

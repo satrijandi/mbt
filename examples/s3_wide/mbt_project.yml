@@ -1,8 +1,0 @@
-name: s3_wide
-version: "0.1.0"
-
-vars:
-  pr_auc_floor: 0.15
-
-model_defaults:
-  adapter: xgboost

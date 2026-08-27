@@ -36,7 +36,7 @@ jobs:
           packages/mbt-testing/src packages/mbt-snowflake/src
           packages/mbt-spark/src packages/mbt-h2o/src
       - name: yamllint
-        run: 'uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples .github'
+        run: 'uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples tests/fixtures .github'
       - name: No ML frameworks in mbt-core (NFR-04)
         run: |
           uv run python - <<'EOF'

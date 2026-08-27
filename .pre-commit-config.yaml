@@ -19,7 +19,7 @@ repos:
     hooks:
       - id: yamllint
         args: [-d, "{extends: relaxed, rules: {line-length: {max: 140}}}"]
-        files: ^(packages|examples|\.github)/
+        files: ^(packages|examples|tests/fixtures|\.github)/
   - repo: local
     hooks:
       - id: mypy

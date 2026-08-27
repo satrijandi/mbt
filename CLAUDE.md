@@ -1,6 +1,6 @@
 # CLAUDE.md - working guide for the mbt repo
 
-mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-mlflow, mbt-optuna, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/{churn_demo, showcase}`, repo-root `tests/` (E2E, golden, perf, live), and `docs/` (mkdocs + ADRs).
+mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-mlflow, mbt-optuna, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/{snowflake_wide, showcase}`, repo-root `tests/` (E2E, golden, perf, live, plus `tests/fixtures/{churn_demo, revenue_demo}` - whole mbt projects the suite copies to tmp and drives through the real CLI, excluded from collection via `norecursedirs`), and `docs/` (mkdocs + ADRs).
 Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anything that looks odd.
 `FEEDBACK.md` carries an external review and a progress log; when working through it, append a log entry per completed item (symptom, fix, verification, docs).
 
@@ -16,7 +16,7 @@ uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
   packages/mbt-spark/src packages/mbt-h2o/src   # strict, all 10 packages, must be clean
 uv run pre-commit run --all-files
 uv run mkdocs build --strict         # docs changes; site/ is gitignored output
-uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples .github
+uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples tests/fixtures .github
 uv run python scripts/audit_dependencies.py   # dependency advisories; needs network
 ```
 

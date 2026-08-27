@@ -14,7 +14,7 @@
 # cohort has no label rows yet at the build anchor and the plain inner
 # join below cannot leak immature outcomes. A raw upstream feed keyed by
 # observation date would instead declare `time_offset: "1mo"` here - the
-# s3_wide and snowflake_wide examples still demonstrate that shape.
+# snowflake_wide example still demonstrates that shape.
 datasets:
   - name: wide_churn_training
     description: Monthly churn panel joined from population + labels + three feature histories.

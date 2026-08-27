@@ -1,4 +1,4 @@
-"""Repo-level test fixtures: the churn_demo example project + showcase stack."""
+"""Repo-level test fixtures: the churn_demo fixture project + showcase stack."""
 
 import os
 import shutil
@@ -10,7 +10,7 @@ from e2e_utils import CHURN_DEMO, REVENUE_DEMO
 
 @pytest.fixture()
 def demo_copy(tmp_path: Path) -> Path:
-    """A disposable copy of examples/churn_demo (keeps the repo clean)."""
+    """A disposable copy of tests/fixtures/churn_demo (keeps the repo clean)."""
     destination = tmp_path / "churn_demo"
     shutil.copytree(
         CHURN_DEMO,
@@ -22,7 +22,7 @@ def demo_copy(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def revenue_copy(tmp_path: Path) -> Path:
-    """A disposable copy of examples/revenue_demo (the regression demo)."""
+    """A disposable copy of tests/fixtures/revenue_demo (the regression fixture)."""
     destination = tmp_path / "revenue_demo"
     shutil.copytree(
         REVENUE_DEMO,

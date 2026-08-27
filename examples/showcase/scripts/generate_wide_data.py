@@ -31,8 +31,8 @@ window has closed (one calendar month later) - so the newest cohort is
 deliberately absent from monthly_labels; its outcomes live only in
 wide_churn_outcomes until the monitor anchor. A raw upstream feed keyed by
 observation date would instead be joined with the dataset spec's
-`time_offset` (ADR-22), which the s3_wide and snowflake_wide examples
-still demonstrate.
+`time_offset` (ADR-22), which the snowflake_wide example still
+demonstrates.
 
 demographic_history carries one NUMERIC-CODED categorical on purpose:
 contract_code (int8, 0 = month-to-month ... 3 = two-year). Its churn effect

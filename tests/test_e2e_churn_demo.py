@@ -1,4 +1,4 @@
-"""End-to-end CLI tests over examples/churn_demo (S3-09, S5-08, S7-05; G2/G3).
+"""End-to-end CLI tests over tests/fixtures/churn_demo (S3-09, S5-08, S7-05; G2/G3).
 
 These run the real CLI in subprocesses: real XGBoost training jobs, MLflow
 on sqlite, the local subprocess ComputeAdapter - the full production path.

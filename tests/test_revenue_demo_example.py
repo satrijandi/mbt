@@ -1,4 +1,4 @@
-"""Guard for the committed examples/revenue_demo project (R2-4).
+"""Guard for the committed tests/fixtures/revenue_demo project (R2-4).
 
 Parses the regression example through the real registry and asserts the
 regression shape - `task: regression`, the regression metric set, and an
@@ -16,7 +16,7 @@ from pathlib import Path
 from mbt.parsing import parse_project
 from mbt_adapter_base import TaskType
 
-EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "revenue_demo"
+EXAMPLE = Path(__file__).resolve().parent / "fixtures" / "revenue_demo"
 
 SOURCES = {
     "source.revenue_demo.lakehouse.subscribers",

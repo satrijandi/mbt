@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CHURN_DEMO = REPO_ROOT / "examples" / "churn_demo"
-REVENUE_DEMO = REPO_ROOT / "examples" / "revenue_demo"
+FIXTURES = REPO_ROOT / "tests" / "fixtures"
+CHURN_DEMO = FIXTURES / "churn_demo"
+REVENUE_DEMO = FIXTURES / "revenue_demo"
 
 #: Anchor matching the committed demo data range (generated around 2026-01..06).
 #: Both demos share the same generated date range, so they share the anchor.

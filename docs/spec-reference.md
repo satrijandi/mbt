@@ -436,9 +436,10 @@ Regression (`task: regression`, all four adapters) uses `rmse`, `mae`, `r2`,
 regression from the numeric target - the same spec runs on every adapter. Lower-is-better: `rmse`, `mae`, `mape`; `r2` is
 higher-is-better. Champion gates and slice metrics work identically - the
 metric engine dispatches on the metric name (ADR-24).
-`examples/revenue_demo` is a complete worked regression project (spend
+`tests/fixtures/revenue_demo` is a complete worked regression project (spend
 forecasting) with an `rmse` ceiling gate and delayed ground-truth monitoring -
-the `task: regression` twin of `examples/churn_demo`.
+the `task: regression` twin of `tests/fixtures/churn_demo`, and both are built
+end to end by the E2E suite on every run.
 
 ## scoring/*.yml
 

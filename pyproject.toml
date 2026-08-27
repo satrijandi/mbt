@@ -179,6 +179,12 @@ testpaths = [
     "packages/mbt-testing/tests",
     "tests",
 ]
+# tests/fixtures holds whole mbt projects that the suite copies to tmp and runs
+# through the real CLI (churn_demo, revenue_demo). Their own tests/ dirs are
+# *mbt* dataset tests, not pytest modules - collecting them would import
+# churn_demo's test_no_leakage.py as a pytest file. Overriding this key drops
+# pytest's defaults, so they are restated here.
+norecursedirs = ["tests/fixtures", "*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}"]
 # No -q here: the documented commands pass -q themselves, and doubling it
 # (-qq) suppresses the final pass/fail summary line entirely.
 addopts = "--strict-markers"

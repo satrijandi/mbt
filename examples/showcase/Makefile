@@ -72,7 +72,7 @@ workspace:
 	  docker run --rm -v $(SHOWCASE_WORKSPACE):/workspace $(SHOWCASE_RUNNER_IMAGE) \
 	    rm -rf /workspace/project
 	rsync -a $(SHOWCASE_DIR)/project/ $(SHOWCASE_WORKSPACE)/project/
-	rsync -a --delete $(REPO_ROOT)/examples/churn_demo/data/ $(SHOWCASE_WORKSPACE)/seed/
+	rsync -a --delete $(REPO_ROOT)/tests/fixtures/churn_demo/data/ $(SHOWCASE_WORKSPACE)/seed/
 	rsync -a $(SHOWCASE_DIR)/data/ $(SHOWCASE_WORKSPACE)/seed/
 	rsync -a $(SHOWCASE_DIR)/bootstrap/ $(SHOWCASE_WORKSPACE)/bootstrap/
 

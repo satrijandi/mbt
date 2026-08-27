@@ -1,4 +1,4 @@
-"""Deterministic demo data for examples/revenue_demo (the regression vertical).
+"""Deterministic demo data for tests/fixtures/revenue_demo (the regression vertical).
 
 A spend-forecast regression twin of churn_demo: the target `spend_next_30d` is
 a continuous dollar amount driven by a strong, learnable signal (usage, plan,

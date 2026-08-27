@@ -44,4 +44,4 @@ Feature tables and the label all join on `inference_date`; `split.time_column` i
 
 - The wide batch-monthly cadence (`examples/showcase`, SHOW-19/SHOW-20) implements the convention in full: one uniform `inference_date` join key across all five tables, the entity crosswalk plus the `as_of_date`/`loaded_at_time` lineage columns on the spine, matured labels on `inference_date`, and DAGs that pass the logical date as the anchor.
 - The showcase's monthly DuckDB cadence (SHOW-17) uses `inference_date` as its time column.
-- The showcase's daily cadence reuses `examples/churn_demo`'s tables, a product example that predates this convention and is pinned by golden-manifest tests; its `snapshot_date` is an `inference_date` in this vocabulary.
+- The showcase's daily cadence reuses `tests/fixtures/churn_demo`'s tables, a fixture project that predates this convention and is pinned by golden-manifest tests; its `snapshot_date` is an `inference_date` in this vocabulary.
