@@ -46,6 +46,7 @@ def test_import_falls_back_to_real_click_exceptions(monkeypatch: pytest.MonkeyPa
     real click exception types (the dual except tuples in main)."""
     from mbt.cli import main as cli_main
 
+    original = cli_main.typer_click_exc
     monkeypatch.setitem(sys.modules, "typer._click", None)
     try:
         reloaded = importlib.reload(cli_main)
@@ -53,7 +54,11 @@ def test_import_falls_back_to_real_click_exceptions(monkeypatch: pytest.MonkeyPa
     finally:
         monkeypatch.undo()
         importlib.reload(cli_main)
-    assert cli_main.typer_click_exc is not click.exceptions  # vendored again
+    # Restored to whatever THIS typer provides: the vendored module on >= 0.20,
+    # the real click below it. Asserting "vendored" outright would encode the
+    # newer typer into a test whose whole subject is that main() supports both,
+    # and would red the floors job against the declared typer>=0.16.
+    assert cli_main.typer_click_exc is original
 
 
 # -- init ---------------------------------------------------------------------------

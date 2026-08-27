@@ -256,7 +256,15 @@ def _numeric_ks(quantiles: list[float], current: "np.ndarray") -> float:
     statistic = float(np.max(np.abs(current_at_edges - grid)))
     # at each current point: interpolated baseline ECDF vs both sides of the
     # current ECDF's jump (the sup of a step function lives at its jumps)
-    base_at_points = np.interp(ordered, edges, grid, left=0.0, right=1.0)
+    #
+    # Clipped because np.interp's slope is (dy/dx) and adjacent quantiles can be
+    # a denormal apart: dy/1.5e-323 overflows to inf, so the interpolant returns
+    # inf and the statistic escapes [0, 1] entirely. An ECDF value is in [0, 1]
+    # by definition, so clamping restores the invariant rather than hiding a
+    # miss. Reachable with any near-degenerate baseline, at every numpy we
+    # support (reproduced on 1.26.4 and 2.4.6), not just extreme ones - and an
+    # inf shift score would fire every monitor it feeds.
+    base_at_points = np.clip(np.interp(ordered, edges, grid, left=0.0, right=1.0), 0.0, 1.0)
     above = np.arange(1, n + 1) / n
     below = np.arange(0, n) / n
     statistic = max(

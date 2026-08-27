@@ -72,11 +72,11 @@ def _quad_spec() -> TuningSpec:
     )
 
 
-def _best(config: dict[str, Any], seed: int = 7) -> dict[str, Any]:
+def _best(config: dict[str, Any], seed: int = 7, n_trials: int = 12) -> dict[str, Any]:
     # correlated objective: rewards x and y moving together
     spec = _quad_spec()
     result = OptunaTuningEngine(config).tune(
-        spec, lambda p: -((p["x"] - p["y"]) ** 2), n_trials=12, seed=seed
+        spec, lambda p: -((p["x"] - p["y"]) ** 2), n_trials=n_trials, seed=seed
     )
     return dict(result.best_params)
 
@@ -92,7 +92,14 @@ def test_multivariate_tpe_is_opt_in_and_deterministic() -> None:
 def test_random_sampler_is_selectable_and_deterministic() -> None:
     first = _best({"sampler": "random"})
     assert first == _best({"sampler": "random"})  # seeded -> reproducible
-    assert first != _best({})  # and genuinely different from TPE
+    # ... and genuinely different from TPE. This needs MORE trials than TPE's
+    # n_startup_trials (10 by default): below that bar TPE is still sampling
+    # from its own seeded RandomSampler, so whether the two agree is decided by
+    # optuna's internal RNG wiring rather than by the sampler choice. At 12
+    # trials they happened to coincide on every optuna we support except 4.9,
+    # which would have forced the floor up to the newest release to satisfy an
+    # accident. Past the bar TPE is model-based and the comparison is real.
+    assert _best({"sampler": "random"}, n_trials=30) != _best({}, n_trials=30)
 
 
 def test_unknown_sampler_is_an_actionable_error() -> None:
