@@ -53,7 +53,10 @@ dev = [
     # (pre-commit revs / the strict-clean mypy claim); Renovate keeps them
     # grouped with the locked versions.
     "mypy>=2.0",
-    "ruff>=0.15",
+    # 0.16: the rev the ruff-pre-commit hook is pinned to, and the first line
+    # that stabilizes PLR0917 and formats Python inside Markdown fences - the
+    # two behaviours this repo's ruff config now takes a position on.
+    "ruff>=0.16",
     "yamllint>=1.38",
     "pre-commit>=3.7",
     "jsonschema>=4.22",
@@ -70,6 +73,12 @@ dev = [
 line-length = 100
 target-version = "py311"
 src = ["packages/mbt-core/src", "packages/mbt-adapter-base/src"]
+# ruff >= 0.16 lints and formats Python inside Markdown fences. That is wanted
+# for docs/ (published snippets should be idiomatic) but wrong for
+# design-history/, which its own README declares unmaintained provenance: its
+# TSD.md fences use hand-aligned trailing comments as a reading aid, and the
+# formatter rewrites 200+ lines of a frozen document to strip that alignment.
+extend-exclude = ["design-history"]
 
 [tool.ruff.lint]
 select = [
@@ -85,6 +94,11 @@ select = [
 ]
 ignore = [
     "PLR0913",  # many arguments: adapter contracts are wide by design
+    "PLR0917",  # same complaint restricted to positional params (stabilized in
+                # ruff 0.16). Ignored for the same reason as PLR0913, plus one
+                # it cannot answer: every typer command in cli/main.py declares
+                # one parameter per CLI flag and typer binds them by keyword, so
+                # the count is a property of the command surface, not the call.
     "PLR2004",  # magic values in tests and thresholds
     "PLR0912",  # complex branch logic in parser/scheduler is explicit by design
     "PLR0915",
@@ -129,10 +143,19 @@ ignore_missing_imports = true
 
 # pyarrow.parquet / pyarrow.compute are untyped upstream; the modules built
 # on them stay strict for everything else.
+#
+# Listed here rather than suppressed with inline `# type: ignore` because
+# whether the call is untyped flips with pyarrow's packaging: 24.0.0 shipped
+# py.typed (so mypy read its unannotated defs and raised no-untyped-call),
+# 25.0.1 dropped it (so pyarrow is Any again and the same ignore became an
+# unused-ignore error under strict). disable_error_code is inert when the
+# error does not fire, so it stays correct across that flip.
 [[tool.mypy.overrides]]
 module = [
     "mbt_adapter_base.materialization",
     "mbt_adapter_base.predictions",
+    "mbt_adapter_base.training_helpers",
+    "mbt.cli._scaffold.scripts.generate_sample_data",
     "mbt_snowflake.adapter",
     "mbt_h2o.adapter",
     "mbt_spark.data",

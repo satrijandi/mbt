@@ -40,12 +40,14 @@ ACCEPTED: dict[str, str] = {
         "decryption (pkcs7_decrypt_der/pem/smime). mbt never imports "
         "cryptography and decrypts no PKCS#7; it reaches us only as a "
         "transitive dep of mlflow, pyopenssl and snowflake-connector-python. "
-        "The fix is 50.0.0 and mlflow 3.15.1 (newest) still pins "
-        "cryptography<50, so it is unreachable. Already fixed upstream: "
-        "mlflow#24871 -> PR mlflow#24872 raises the cap to cryptography<51, "
-        "merged to master, unreleased as of 3.15.1. Ends when the next mlflow "
-        "minor ships and Renovate bumps us onto it; this script's staleness "
-        "check will then fail and force the entry out."
+        "The fix is 50.0.0 and mlflow 3.15.2 (newest) still pins "
+        "cryptography<50, so it is unreachable. pyopenssl 26.4.0 already "
+        "allows <51, leaving mlflow as the sole blocker. Already fixed "
+        "upstream: mlflow#24871 -> PR mlflow#24872 raises the cap to "
+        "cryptography<51, merged to master and still unreleased as of the "
+        "3.15.2 patch. Ends when the next mlflow minor ships and Renovate "
+        "bumps us onto it; this script's staleness check will then fail and "
+        "force the entry out."
     ),
 }
 

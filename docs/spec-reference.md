@@ -613,9 +613,11 @@ packages:
 ```python
 import pyarrow as pa
 
+
 def transform_features(table: pa.Table, ctx) -> pa.Table:
     """Applied per split after read; feature globs apply to the result."""
     return table.append_column("usage_per_ticket", ...)
+
 
 def custom_metrics(predictions: pa.Table, ctx) -> dict[str, float]:
     """predictions = the split's table + a 'prediction' column."""
@@ -627,6 +629,7 @@ def custom_metrics(predictions: pa.Table, ctx) -> dict[str, float]:
 ```python
 # mbt: select=churn_training_set          <- binding selector (optional)
 from mbt.contracts import TestResult
+
 
 def test_label_is_binary(dataset, spec) -> TestResult:
     values = set(dataset.column(spec.label.column).to_pylist())

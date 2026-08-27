@@ -31,6 +31,18 @@ dependencies = [
     "mbt-core>=0.1.0,<0.2",  # compute adapter forwards job events through the bus
     # Both majors are e2e-tested; the ceiling tracks what CI has validated.
     # The Spark-3.5 pin for Sparkling Water lives in mbt-h2o[sparkling] (ADR-17).
+    #
+    # <4.2 is now a measured block, not just "untested yet". Spark 4.2.0 stops
+    # scoring bit-exactly: the same PipelineModel transformed twice returns
+    # probabilities differing by ~1 ULP (1.11e-16). Measured on the compliance
+    # binary fixture, local[*]: 4.1.3 gives max|diff| == 0.0 on 10/10 repeats,
+    # 4.2.0 gives 1.11e-16 on most repeats. Smooth metrics absorb it (brier
+    # delta is exactly 0), but binned ece jumps ~0.013 whenever a score sits on
+    # a bin edge, which reds the calibration round-trip compliance probe about
+    # 1 run in 4 - and, more importantly, makes champion-gate deltas depend on
+    # execution nondeterminism rather than on the model.
+    # Lift only once a release scores reproducibly again; the e2e tier is what
+    # proves it (77 passed on 4.1.3; 4.2.0 is intermittently red there).
     "pyspark>=3.5,<4.2",
     "numpy>=1.26",  # _scores does `import numpy` directly (declared, not just via [metrics])
     "pandas>=2.0",  # _scores calls DataFrame.toPandas(); pyspark 4.x needs pandas 2.x

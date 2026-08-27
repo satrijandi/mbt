@@ -117,5 +117,5 @@ def staged_split_path(data: Any, split: str, *, prefix: str) -> Path:
     directory = Path(tempfile.mkdtemp(prefix=prefix))
     atexit.register(shutil.rmtree, directory, ignore_errors=True)
     out = directory / f"{split}.parquet"
-    pq.write_table(data.read(split), out)  # type: ignore[no-untyped-call]
+    pq.write_table(data.read(split), out)
     return out

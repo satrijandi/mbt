@@ -47,7 +47,7 @@ def main(n_rows: int = 5000) -> None:
 
     out = Path(__file__).resolve().parent.parent / "data" / "subscribers"
     out.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.table(rows), out / "part-000.parquet")  # type: ignore[no-untyped-call]
+    pq.write_table(pa.table(rows), out / "part-000.parquet")
     print(f"wrote {n_rows} rows to {out / 'part-000.parquet'}")
 
     generate_scoring_data(now, plans, max(n_rows // 10, 50))
@@ -90,7 +90,7 @@ def generate_scoring_data(now: datetime, plans: list[str], n_rows: int) -> None:
     for name, table in (("scoring_batch", batch), ("churn_outcomes", outcomes)):
         out = data_dir / name
         out.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table(table), out / "part-000.parquet")  # type: ignore[no-untyped-call]
+        pq.write_table(pa.table(table), out / "part-000.parquet")
         print(f"wrote {n_rows} rows to {out / 'part-000.parquet'}")
 
 

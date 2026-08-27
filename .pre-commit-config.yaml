@@ -9,7 +9,7 @@ repos:
         args: [--maxkb=2000]  # uv.lock is ~1MB and must stay committable
   # Keep in lockstep with the ruff version in uv.lock (grouped by renovate.json).
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
+    rev: v0.16.4
     hooks:
       - id: ruff
         args: [--fix]

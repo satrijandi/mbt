@@ -35,7 +35,7 @@ PLUGIN = AdapterPlugin(
     name="myframework",
     contract_version=CONTRACT_VERSION,
     training=MyTrainingAdapter,
-    fingerprint_packages=["myframework"],   # joins the env digest
+    fingerprint_packages=["myframework"],  # joins the env digest
 )
 ```
 
@@ -130,12 +130,13 @@ point, so an adapter that supports both tasks needs no metric-side branching.
 from mbt_adapter_base.compliance import TrainingAdapterCompliance
 from mbt_myframework.adapter import MyTrainingAdapter
 
+
 class TestMyFrameworkCompliance(TrainingAdapterCompliance):
     adapter_factory = MyTrainingAdapter
     plugin_module = "mbt_myframework.plugin"
     framework_modules = ("myframework",)
     valid_hyperparameters = {"n_estimators": 30}
-    auto_hyperparameter = "scale_pos_weight"   # or None
+    auto_hyperparameter = "scale_pos_weight"  # or None
 ```
 
 The suite asserts: contract metadata, plugin import hygiene, unknown-param
