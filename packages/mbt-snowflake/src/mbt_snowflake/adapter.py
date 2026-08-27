@@ -19,6 +19,7 @@ Built entirely on official Snowflake surfaces:
 .. _snowflake.connector.connect(): https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-api
 """
 
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -106,12 +107,34 @@ class SnowflakeDataAdapter:
         self.schema: str | None = self.config.get("schema")
         self.normalize_case: bool = bool(self.config.get("normalize_case", True))
         self._connection: SnowflakeConnection | None = None
+        #: Serializes lazy connection setup. One adapter instance is shared by
+        #: the compiler's snapshot-pinning thread pool (one thread per source
+        #: table), so an unguarded check-then-connect opens one connection PER
+        #: THREAD - and under `authenticator: externalbrowser`, one browser
+        #: window per source table, with every connection but the last leaked.
+        self._connect_lock = threading.Lock()
 
     # -- connection -----------------------------------------------------------
 
     def _connect(self) -> "SnowflakeConnection":
-        if self._connection is not None:
-            return self._connection
+        # Both checks read through a local: testing ``self._connection``
+        # directly would let mypy narrow the attribute to None for the rest of
+        # the function and call the re-check unreachable, which is exactly the
+        # concurrency this guards against.
+        connection = self._connection
+        if connection is not None:
+            return connection
+        with self._connect_lock:
+            # Re-check under the lock: a thread that raced us here may have
+            # completed the connection (and, for SSO, already paid for the
+            # single browser prompt) while we were blocked.
+            connection = self._connection
+            if connection is not None:
+                return connection
+            return self._open_connection()
+
+    def _open_connection(self) -> "SnowflakeConnection":
+        """Connect and memoize. Callers must hold ``_connect_lock``."""
         import snowflake.connector
 
         kwargs: dict[str, Any] = {

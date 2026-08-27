@@ -8,6 +8,9 @@ Snapshot queries return scriptable tokens.
 
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -695,6 +698,99 @@ def test_connect_externalbrowser_defaults_sso_token_caching(
 
     SnowflakeDataAdapter({"account": "acct", "user": "u", "password": "pw"})._connect()
     assert "client_store_temporary_credential" not in calls[-1]
+
+
+def test_concurrent_connect_opens_exactly_one_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compiler pins every source in a thread pool sharing ONE adapter
+    (compile/compiler.py). An unguarded lazy init let every thread that
+    arrived during the handshake open its own connection - under
+    `authenticator: externalbrowser` that is one browser window per source
+    table (five for examples/snowflake_wide), with all but the last leaked.
+    """
+    import snowflake.connector
+
+    calls: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def fake_connect(**kwargs: Any) -> object:
+        with lock:
+            calls.append(kwargs)
+        # Stand in for the SSO handshake: slow enough that every pool thread
+        # reaches the lazy-init check before the first connect returns.
+        time.sleep(0.2)
+        return object()
+
+    monkeypatch.setattr(snowflake.connector, "connect", fake_connect)
+    adapter = SnowflakeDataAdapter(
+        {"account": "acct", "user": "u", "authenticator": "externalbrowser"}
+    )
+
+    workers = 5
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        connections = list(pool.map(lambda _: adapter._connect(), range(workers)))
+
+    assert len(calls) == 1, f"one browser prompt expected, got {len(calls)}"
+    assert connections == [adapter._connection] * workers  # nothing leaked
+
+
+def test_connect_rechecks_after_losing_the_race(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A thread that blocks on the lock must adopt the winner's connection
+    rather than open a second one after acquiring it."""
+    import snowflake.connector
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_connect(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(snowflake.connector, "connect", fake_connect)
+    adapter = SnowflakeDataAdapter({"account": "acct", "user": "u"})
+    winner = object()
+    result: list[Any] = []
+
+    class SignallingLock:
+        """A lock that announces the worker has passed the unlocked check and
+        is about to block - so the handoff below is deterministic, not timed."""
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.blocking = threading.Event()
+
+        def acquire(self, *args: Any, **kwargs: Any) -> bool:
+            self.blocking.set()
+            return self._lock.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            self._lock.release()
+
+        def __enter__(self) -> "SignallingLock":
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            self.release()
+
+    gate = SignallingLock()
+    adapter._connect_lock = gate  # type: ignore[assignment]
+
+    # Hold the lock so the worker gets past the unlocked check and blocks,
+    # exactly as it would while another thread is mid-handshake.
+    gate._lock.acquire()
+    worker = threading.Thread(target=lambda: result.append(adapter._connect()))
+    worker.start()
+    try:
+        assert gate.blocking.wait(timeout=5), "worker never reached the lock"
+        adapter._connection = winner  # type: ignore[assignment]
+    finally:
+        gate._lock.release()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert result == [winner]
+    assert calls == []  # the re-check short-circuited before connecting
 
 
 def test_connect_failure_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:

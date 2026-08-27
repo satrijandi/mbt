@@ -65,6 +65,8 @@ Install the SSO extra once so the token is cached in your OS keyring - without i
 uv pip install 'mbt-snowflake[sso]'
 ```
 
+Running from an mbt checkout, you already have it: the repo's dev dependencies include `mbt-snowflake[sso]`, so anything under `uv run` is covered.
+
 Then describe your account in environment variables (never in YAML - `profiles.yml` is committed and secret-free, it reads these via `env_var()`):
 
 ```bash
@@ -73,7 +75,8 @@ set -a; source .env; set +a
 ```
 
 Use a **scratch schema** you can create tables in (e.g. `SNOWFLAKE_SCHEMA=SANDBOX`), not a shared gold one.
-The whole session needs **one** browser prompt; compile and every dataset/scoring job reuse the cached token.
+The whole session then needs **one** browser prompt: compile pins all five sources on a single connection, and every dataset/scoring job reuses the cached token.
+Token caching also needs the `ALLOW_ID_TOKEN` account parameter enabled server-side - Snowflake only returns a cacheable ID token when it is on, so if each job still prompts, that is the thing to check with your admin (see `docs/troubleshooting.md`).
 In containers or WSL, where the localhost callback can hang, see the connector's `SNOWFLAKE_AUTH_SOCKET_REUSE_PORT` docs (pointer in `packages/mbt-snowflake/README.md`).
 
 ## 3. Seed the five demo tables (or point at your real ones)

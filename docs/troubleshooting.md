@@ -281,6 +281,24 @@ All three built-in data adapters (local, snowflake, spark) ship them, so this fi
 
 **Fix:** upgrade the adapter package to a release that implements scoring, or run the pipeline against a target whose data adapter does (any built-in adapter ships it).
 
+## Snowflake SSO opens more than one browser window per run
+
+**Symptom:** with `authenticator: externalbrowser`, a single `mbt build` pops several IdP login tabs instead of one.
+
+**Why:** two different causes, and the window count tells them apart.
+
+*One window per source table, all at once* (five for `examples/snowflake_wide`) was an mbt bug: the compiler pins every source's snapshot concurrently on one shared adapter, and the adapter's lazy connection setup was unsynchronized, so each thread opened its own connection.
+Fixed - the adapter now serializes connection setup, so a compile costs one connection no matter how many sources it pins.
+If you still see it, you are on an older mbt.
+
+*One window per job process, in sequence* is not a bug in mbt and can still happen.
+Each job runs in its own subprocess with its own connection; they avoid re-prompting by reusing the SSO token the connector caches in your OS keyring.
+That cache only fills if all three hold: `mbt-snowflake[sso]` is installed (without keyring the cache is a silent no-op), the adapter requests caching (it defaults `client_store_temporary_credential` on for `externalbrowser`), and **the Snowflake account returns an ID token to cache at all** - which is gated server-side by the `ALLOW_ID_TOKEN` account parameter.
+When `ALLOW_ID_TOKEN` is off, nothing is cached and every process re-prompts, no matter how the client is configured.
+
+**Fix:** install the SSO extra (`uv pip install 'mbt-snowflake[sso]'`, or use the repo's own environment, whose dev dependencies already include it).
+If prompts persist one-per-process, ask a Snowflake admin whether `ALLOW_ID_TOKEN` is enabled for the account; until it is, use key-pair auth (`SNOWFLAKE_PRIVATE_KEY_FILE`, as the `prod` target does) for anything running more than one job.
+
 ## `mbt monitor` says `evaluated 0 of 1 matured prediction run(s)`
 
 **Symptom (exit 0, with a warning):**

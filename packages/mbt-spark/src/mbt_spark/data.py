@@ -21,6 +21,7 @@ import glob as globlib
 import hashlib
 import shutil
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -131,13 +132,32 @@ class SparkDataAdapter:
         #: <tmpdir>/mbt-predictions (never the project dir), like Snowflake (F20).
         self.predictions_root: str = str(resolve_predictions_root(config.get("predictions_root")))
         self._session: SparkSession | None = None
+        #: Serializes lazy session setup. The compiler's snapshot-pinning pool
+        #: shares one adapter across threads (compile/compiler.py), so this is
+        #: the same check-then-act shape that made the Snowflake adapter open
+        #: one connection - and one SSO browser window - per source table.
+        #: Here it is defensive rather than a live bug: pyspark's
+        #: ``getOrCreate`` takes its own lock and returns the single active
+        #: session, so a lost race only repeats builder work. Guarding it
+        #: keeps that a pyspark implementation detail rather than something
+        #: mbt's correctness leans on.
+        self._session_lock = threading.Lock()
 
     def _spark(self) -> "SparkSession":
-        if self._session is None:
+        # Read through a local so mypy cannot narrow the attribute to None and
+        # declare the under-lock re-check unreachable (see _connect in the
+        # Snowflake adapter for the same shape).
+        session = self._session
+        if session is not None:
+            return session
+        with self._session_lock:
+            session = self._session
+            if session is not None:
+                return session
             from mbt_spark.session import get_session
 
             self._session = get_session(self.master, self.conf, app_name="mbt-spark-data")
-        return self._session
+            return self._session
 
     # -- source resolution -------------------------------------------------------
 
