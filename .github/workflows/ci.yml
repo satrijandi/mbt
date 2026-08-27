@@ -82,6 +82,18 @@ jobs:
     # Declared lower bounds are only honest if something installs them:
     # resolve every direct dependency at its floor (transitives resolve
     # normally) and run the fast suite against that environment.
+    #
+    # This used to run `uv sync --resolution lowest-direct`, which looks like it
+    # does that and does not: in a virtual workspace root the members'
+    # requirements are not "direct", so everything resolved to newest and this
+    # job was an expensive duplicate of the test job. It installed pytest 9.1.1
+    # against a declared floor of 8.0. scripts/install_floors.py flattens the
+    # workspace into one `uv pip install --resolution lowest-direct`, where
+    # every requirement is direct by construction; see its docstring.
+    #
+    # Every step below MUST pass --no-project. Without it uv re-syncs the
+    # project from uv.lock first, which silently replaces the floors with the
+    # locked versions and makes this job green for the wrong reason.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -90,10 +102,18 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
-      - name: Sync workspace at dependency floors
-        run: uv sync --resolution lowest-direct
+      - name: Install workspace at dependency floors
+        run: |
+          uv venv
+          uv run --no-project python scripts/install_floors.py
+      - name: Assert the floors actually got installed
+        # Cheap belt-and-braces: if the install path ever silently reverts to
+        # newest-resolution, the suite would still pass and nobody would learn
+        # that the floors stopped being tested. That is the exact failure this
+        # job just spent months in.
+        run: uv run --no-project python scripts/install_floors.py --verify
       - name: Unit + integration tests against floors
-        run: uv run pytest -q -m "not e2e" --timeout 600
+        run: uv run --no-project pytest -q -m "not e2e" --timeout 600
       - name: pip-audit against floors
         # The locked env is audited in the security job; floors are what a
         # user MAY install, so a floor version with a known CVE must raise
@@ -102,7 +122,7 @@ jobs:
         # locked one: an accepted advisory may legitimately not apply to these
         # versions, and that is not a reason to fail. The locked environment is
         # the authority on whether an acceptance is still earned.
-        run: uv run python scripts/audit_dependencies.py --no-check-stale
+        run: uv run --no-project python scripts/audit_dependencies.py --no-check-stale
 
   e2e:
     # The JVM tier (Spark 4.x per the locked resolution, H2O) runs once on

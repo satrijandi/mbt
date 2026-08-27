@@ -25,7 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.7",
-    "pyarrow>=15.0",
+    "pyarrow>=23.0.1",  # 23.0.1 clears PYSEC-2026-113 / PYSEC-2024-161
 ]
 
 [project.urls]
@@ -38,11 +38,11 @@ Issues = "https://github.com/satrijandi/mbt/issues"
 # Shared metric computation helpers for tabular training adapters.
 metrics = [
     "numpy>=1.26",
-    "scikit-learn>=1.4",
+    "scikit-learn>=1.5",  # 1.5.0 clears PYSEC-2024-110
 ]
 # The adapter compliance test suite (pytest base classes).
 compliance = [
-    "pytest>=8.0",
+    "pytest>=9.0.3",  # 9.0.3 clears PYSEC-2026-1845
     "numpy>=1.26",
 ]
 

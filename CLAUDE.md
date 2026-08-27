@@ -34,7 +34,13 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
 - Events go to stderr; stdout is command data. Job subprocesses emit JSON events on stdout and the coordinator forwards them.
 - `main()` in `mbt/cli/main.py` catches BOTH real-click and typer-vendored-click exceptions; typer >= 0.20 vendors click, so the duplicate-looking except tuples are required.
 - `uv.lock` contains TWO pyspark versions on purpose: a `[tool.uv] conflicts` fork keeps the dev lock on Spark 4.x while `mbt-h2o[sparkling]` pins 3.5. Never hand-edit the lock; use `uv lock`.
-- Dependency floors are load-bearing metadata: CI's `floors` job installs every direct dependency at its declared lower bound (`uv sync --resolution lowest-direct`) and runs the fast suite. When adding or bumping a dependency, keep the floor honest (test it or raise it, with the reason as a pyproject comment).
+- Dependency floors are load-bearing metadata: CI's `floors` job installs every direct dependency at its declared lower bound via `scripts/install_floors.py`, then runs the fast suite and the advisory audit against it.
+  When adding or bumping a dependency, keep the floor honest (test it or raise it, with the reason as a pyproject comment).
+  Do NOT go back to `uv sync --resolution lowest-direct`: in a virtual workspace root the members' requirements are not "direct", so it resolves everything to newest and the job silently becomes a duplicate of the `test` job.
+  That is not hypothetical - it is what the job did until 2026-08-27, which is why `duckdb>=1.0` (could not parse the local adapter's own SQL) and `click>=8.1` (could not run the CLI tests) survived as declared floors, and why ~70 advisories sat unnoticed against floor versions.
+  The job re-asserts the environment really is at the floors (`--verify`) so that regression fails loudly instead of quietly.
+  Every step in that job must pass `uv run --no-project`; without it uv re-syncs from `uv.lock` and replaces the floors with the locked versions.
+  Reproduce locally with a throwaway venv, never the repo's own: `uv venv /tmp/floors && VIRTUAL_ENV=/tmp/floors uv run --no-project python scripts/install_floors.py`.
 - CI matrixes the fast suite over CPython 3.11-3.14; the JVM e2e tier stays on 3.11 deliberately.
 - Snapshots: one token scheme per pipeline. The scaffold CI workflows pass `--deep-snapshot` on every compiling step because fresh checkouts rewrite mtimes (ADR-11); a deep baseline diffed with the default mtime scheme flags everything.
 - Champion gates use a paired bootstrap lower bound (ADR-18); the seed ladder is `spec.seed` train, `+1` tuning, `+2` validation carve, `+3` bootstrap, `+4` random k-fold, `+5` calibration carve - a new seeded stage takes the next rung.

@@ -25,9 +25,11 @@ classifiers = [
 ]
 dependencies = [
     "mbt-adapter-base>=0.1.0,<0.2",
-    # 2.16: first release importable in setuptools-free environments (older
-    # ones import pkg_resources). use_aliases=false still covers old servers.
-    "mlflow>=2.16",
+    # 2.16 was the first release importable in setuptools-free environments
+    # (older ones import pkg_resources), and use_aliases=false still covers old
+    # servers - but 2.16 carries ~30 advisories, so the floor is the first
+    # release clear of all of them (PYSEC-2026-3687 fixes last, in 3.15.0).
+    "mlflow>=3.15",
 ]
 
 [project.urls]

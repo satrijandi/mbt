@@ -25,7 +25,9 @@ classifiers = [
 ]
 dependencies = [
     "mbt-adapter-base[metrics]>=0.1.0,<0.2",
-    "lightgbm>=4.4",  # first release with macOS arm64 wheels
+    # 4.4 was the first release with macOS arm64 wheels; 4.6 is the first
+    # without PYSEC-2024-231, and the floors audit gates on that.
+    "lightgbm>=4.6",
     "numpy>=1.26",
 ]
 

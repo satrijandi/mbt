@@ -32,15 +32,26 @@ dependencies = [
     # alongside typer's vendored copy); typer >= 0.20 VENDORS click, so it no
     # longer arrives transitively - undeclared, a standalone install crashes at
     # `import click` (caught by the per-package wheel closure test, F7).
-    # 8.1: the oldest line whose Exit/UsageError/Abort shapes main() handles;
-    # CI's floors job installs and tests this bound like every other floor.
-    "click>=8.1",
+    # Two independent bars, whichever is higher. 8.2 is the first line whose
+    # CliRunner captures stderr separately, which the CLI test surface reads on
+    # every error-path assertion (8.1 needs CliRunner(mix_stderr=False) and 8.2
+    # REMOVED that kwarg, so supporting both means version-sniffing the harness
+    # to keep a click nobody is on). 8.3.3 is the first clear of PYSEC-2026-2132.
+    # Was declared 8.1 with a comment claiming the floors job tested that bound;
+    # the job resolved highest, so nothing ever did - see scripts/install_floors.py.
+    "click>=8.3.3",
     "rich>=13.7",
     "pydantic>=2.7",
-    "jinja2>=3.1",
+    # 3.1.6: clears the sandbox-escape chain (PYSEC-2026-1471/2/3/4/5). Every
+    # floor below is a version the floors audit refuses to ship.
+    "jinja2>=3.1.6",
     "networkx>=3.2",
-    "duckdb>=1.0",
-    "pyarrow>=15.0",
+    # 1.2: first release parsing `SELECT * RENAME (...)`, which the local
+    # adapter emits for every label-offset join (adapters/local/data.py). On
+    # 1.0/1.1 that is a ParserException at build time, so the old `>=1.0` was
+    # not a conservative bound but a broken install a user could actually get.
+    "duckdb>=1.2",
+    "pyarrow>=23.0.1",  # 23.0.1 clears PYSEC-2026-113 (15.0 also carries PYSEC-2024-161)
     "PyYAML>=6.0",
     "packaging>=23.0",
 ]

@@ -25,7 +25,12 @@ classifiers = [
 ]
 dependencies = [
     "mbt-adapter-base>=0.1.0,<0.2",
-    "snowflake-connector-python>=3.7",
+    # 3.13.1 clears the connector's own advisories (PYSEC-2024-191,
+    # PYSEC-2025-26/27/28), but everything below 4.4.0 caps pyOpenSSL, which
+    # transitively strands cryptography on a vulnerable 46.0.x. 4.4.0 is the
+    # first release requiring cryptography>=46.0.5 with no pyOpenSSL ceiling,
+    # which lets the pair resolve clean.
+    "snowflake-connector-python>=4.4.0",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +38,7 @@ dependencies = [
 # through keyring (its secure-local-storage extra, available since well
 # before our 3.7 floor). Without it client_store_temporary_credential is a
 # silent no-op and every connection re-prompts the browser.
-sso = ["snowflake-connector-python[secure-local-storage]>=3.7"]
+sso = ["snowflake-connector-python[secure-local-storage]>=4.4.0"]
 
 [project.urls]
 Homepage = "https://github.com/satrijandi/mbt"

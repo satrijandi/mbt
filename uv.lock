@@ -354,30 +354,30 @@ wheels = [
 
 [[package]]
 name = "boto3"
-version = "1.43.80"
+version = "1.43.81"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cc/97/9ef9b949f253b197c813c57ab58578572d20dbacedceb5a5f4516ea628cb/boto3-1.43.80.tar.gz", hash = "sha256:384d522e2ce722266afceea8ab3e618e16695b358ebe32b45e0a2109fcd53a28", size = 112674, upload-time = "2026-08-25T20:38:34.564Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/60/41/7ac74a53ca5f59875324394e219f4494309c513df6d05bed9ac4c6c82a1f/boto3-1.43.81.tar.gz", hash = "sha256:62ecf695088e06f37500d6cc49a240dc1331379bd5ae992d185fef212038ca29", size = 112699, upload-time = "2026-08-26T19:42:56.662Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/79/66/415da75a7846e46156a4746aae72a8e4b0c4d263e2c2559a083ad247ba39/boto3-1.43.80-py3-none-any.whl", hash = "sha256:26afe3b950ca1cc722c7fa5544991c222919c98355f82300a55b6315a2c4995e", size = 140024, upload-time = "2026-08-25T20:38:33.021Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/b5/5dff3a52a7882a94537112ecd167f81d8384964c28833f03737a2375a64e/boto3-1.43.81-py3-none-any.whl", hash = "sha256:6e24f98974400a3845223bba77f457be92517f78e2cffadfa273e18ea1fe1944", size = 140025, upload-time = "2026-08-26T19:42:54.996Z" },
 ]
 
 [[package]]
 name = "botocore"
-version = "1.43.80"
+version = "1.43.81"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jmespath" },
     { name = "python-dateutil" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b5/94/de291ad81495365682722efa9397c54c7b666f7bf1ae4064d26e40a55296/botocore-1.43.80.tar.gz", hash = "sha256:c021e60df26d17e9a8db05fa5071669449c8fd15e0fb4374f56a6c17d553f89b", size = 16003031, upload-time = "2026-08-25T20:38:29.86Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/27/11f888f4dd7d725b3744b73dcaeb0797a7598126788c2bcabca4a96b9ba5/botocore-1.43.81.tar.gz", hash = "sha256:49eb02dac7eb4418ae589dc0da816d47bf40be1a7ccfdbed5f772c7a2efcf64d", size = 16004115, upload-time = "2026-08-26T19:42:51.652Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/93/7bba357266450f7d3e3075ee4d2f1e1d96c1617e40d8065c558485baed78/botocore-1.43.80-py3-none-any.whl", hash = "sha256:461bce2159eadd758d0651d2a11dced3450169383e6ca8ef65f5c250f8b7ebd4", size = 15695640, upload-time = "2026-08-25T20:38:26.76Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/bc/f72141175335fae251e625cdc6758328df0f6c1244e4fcb7880429223628/botocore-1.43.81-py3-none-any.whl", hash = "sha256:a5d343674b63a619b7f1f3caef4eedb403500c7a8b95a9e7d8cac98b95501adb", size = 15696589, upload-time = "2026-08-26T19:42:48.346Z" },
 ]
 
 [[package]]
@@ -2216,10 +2216,10 @@ metrics = [
 requires-dist = [
     { name = "numpy", marker = "extra == 'compliance'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'metrics'", specifier = ">=1.26" },
-    { name = "pyarrow", specifier = ">=15.0" },
+    { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pydantic", specifier = ">=2.7" },
-    { name = "pytest", marker = "extra == 'compliance'", specifier = ">=8.0" },
-    { name = "scikit-learn", marker = "extra == 'metrics'", specifier = ">=1.4" },
+    { name = "pytest", marker = "extra == 'compliance'", specifier = ">=9.0.3" },
+    { name = "scikit-learn", marker = "extra == 'metrics'", specifier = ">=1.5" },
 ]
 provides-extras = ["metrics", "compliance"]
 
@@ -2256,15 +2256,15 @@ s3 = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
-    { name = "click", specifier = ">=8.1" },
-    { name = "duckdb", specifier = ">=1.0" },
-    { name = "jinja2", specifier = ">=3.1" },
+    { name = "click", specifier = ">=8.3.3" },
+    { name = "duckdb", specifier = ">=1.2" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "mbt-adapter-base", editable = "packages/mbt-adapter-base" },
     { name = "networkx", specifier = ">=3.2" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.24" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.24" },
     { name = "packaging", specifier = ">=23.0" },
-    { name = "pyarrow", specifier = ">=15.0" },
+    { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyiceberg", marker = "extra == 'iceberg'", specifier = ">=0.6" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -2292,11 +2292,11 @@ sparkling = [
 
 [package.metadata]
 requires-dist = [
-    { name = "h2o", specifier = ">=3.46,<3.46.0.12" },
+    { name = "h2o", specifier = ">=3.46.0.11,<3.46.0.12" },
     { name = "h2o-pysparkling-3-5", marker = "extra == 'sparkling'", specifier = ">=3.46" },
     { name = "mbt-adapter-base", extras = ["metrics"], editable = "packages/mbt-adapter-base" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pyspark", marker = "extra == 'sparkling'", specifier = ">=3.5,<3.6" },
+    { name = "pyspark", marker = "extra == 'sparkling'", specifier = ">=3.5.2,<3.6" },
 ]
 provides-extras = ["sparkling"]
 
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lightgbm", specifier = ">=4.4" },
+    { name = "lightgbm", specifier = ">=4.6" },
     { name = "mbt-adapter-base", extras = ["metrics"], editable = "packages/mbt-adapter-base" },
     { name = "numpy", specifier = ">=1.26" },
 ]
@@ -2330,7 +2330,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mbt-adapter-base", editable = "packages/mbt-adapter-base" },
-    { name = "mlflow", specifier = ">=2.16" },
+    { name = "mlflow", specifier = ">=3.15" },
 ]
 
 [[package]]
@@ -2365,8 +2365,8 @@ sso = [
 [package.metadata]
 requires-dist = [
     { name = "mbt-adapter-base", editable = "packages/mbt-adapter-base" },
-    { name = "snowflake-connector-python", specifier = ">=3.7" },
-    { name = "snowflake-connector-python", extras = ["secure-local-storage"], marker = "extra == 'sso'", specifier = ">=3.7" },
+    { name = "snowflake-connector-python", specifier = ">=4.4.0" },
+    { name = "snowflake-connector-python", extras = ["secure-local-storage"], marker = "extra == 'sso'", specifier = ">=4.4.0" },
 ]
 provides-extras = ["sso"]
 
@@ -2390,7 +2390,7 @@ requires-dist = [
     { name = "mbt-core", editable = "packages/mbt-core" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.0" },
-    { name = "pyspark", specifier = ">=3.5,<4.2" },
+    { name = "pyspark", specifier = ">=3.5.2,<4.2" },
 ]
 
 [[package]]
@@ -2457,13 +2457,13 @@ dev = [
     { name = "mbt-spark", editable = "packages/mbt-spark" },
     { name = "mbt-testing", editable = "packages/mbt-testing" },
     { name = "mbt-xgboost", editable = "packages/mbt-xgboost" },
-    { name = "mkdocs-material", specifier = ">=9.5" },
+    { name = "mkdocs-material", specifier = ">=9.7" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=0.26" },
     { name = "moto", extras = ["s3"], specifier = ">=5" },
     { name = "mypy", specifier = ">=2.0" },
     { name = "pip-audit", specifier = ">=2.7" },
     { name = "pre-commit", specifier = ">=3.7" },
-    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-cov", specifier = ">=5" },
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "ruff", specifier = ">=0.16" },
@@ -4549,16 +4549,16 @@ wheels = [
 
 [[package]]
 name = "responses"
-version = "0.26.2"
+version = "0.26.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f0/1a/4af3e6d659394b809838490b144e4ab8d7ed3b9fecc7ca78f5d2f79b1a3d/responses-0.26.2.tar.gz", hash = "sha256:9c9259b46a8349197edebf43cfa68a87e1a2802ef503ff8b2fecbabc0b45afd8", size = 84030, upload-time = "2026-07-03T16:44:50.325Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/47/f216a33221db8eff328987661cf18371afee89c62a62b434b963d6b509c9/responses-0.26.3.tar.gz", hash = "sha256:b0c11ca8131b8b227b8d5108e6ed39772222bd5aab030ed430e8f99057c4c409", size = 86335, upload-time = "2026-08-26T19:17:24.373Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/28/693e1d9ebf72baa062ded80d837a035b86ce75eda5a269379e9e2b1008a8/responses-0.26.2-py3-none-any.whl", hash = "sha256:6fdfeabd58e5ec473b98dfe02e6d46d3173bd8dd573eff2ccccf1a05a5135364", size = 35609, upload-time = "2026-07-03T16:44:49.1Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/86/ca7958de70cb0752350575e98229368a3a2f746a2942034b3364e17312bb/responses-0.26.3-py3-none-any.whl", hash = "sha256:74474f799334ac4f37d93b6437ecc3bb1bb5c77a8d31780a338643be2dce0af8", size = 36289, upload-time = "2026-08-26T19:17:23.176Z" },
 ]
 
 [[package]]

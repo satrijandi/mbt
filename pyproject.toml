@@ -46,7 +46,7 @@ dev = [
     "mbt-spark",
     "mbt-optuna",
     "mbt-lightgbm",
-    "pytest>=8.0",
+    "pytest>=9.0.3",  # 9.0.3 clears PYSEC-2026-1845
     "pytest-timeout>=2.3",
     "hypothesis>=6.100",
     # Lint-stack floors track the versions the repo actually enforces
@@ -61,7 +61,9 @@ dev = [
     "pre-commit>=3.7",
     "jsonschema>=4.22",
     "types-PyYAML>=6.0",
-    "mkdocs-material>=9.5",
+    # 9.7: below it mkdocs-material pins pymdown-extensions~=10.2, which caps
+    # out below the PYSEC-2026-3609/3654 fix in 11.0.1.
+    "mkdocs-material>=9.7",
     # generated API reference for adapter authors (docs/api-reference.md)
     "mkdocstrings[python]>=0.26",
     "moto[s3]>=5",
