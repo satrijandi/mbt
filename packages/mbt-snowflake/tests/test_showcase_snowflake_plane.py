@@ -247,6 +247,33 @@ def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> 
     assert panel.column("txn_cnt_30d").null_count == 0
 
 
+def test_wide_tables_is_exactly_what_the_wide_specs_reference() -> None:
+    """The seeder loads rows only for the wide cadence and creates the rest
+    empty, so WIDE_TABLES must be derived from the specs, not guessed.
+
+    Too small and the wide build reads an empty table - which fails as a
+    zero-row split, far from the cause. Too large and the user's sandbox
+    collects demo data for cadences this plane never runs.
+    """
+    module = _seed_module()
+
+    referenced: set[str] = set()
+    for spec_file in (
+        PROJECT / "datasets" / "wide_churn_training.yml",
+        PROJECT / "scoring" / "wide_retention_scoring.yml",
+    ):
+        referenced |= set(re.findall(r"source\('lake',\s*'([a-z_]+)'\)", spec_file.read_text()))
+
+    assert referenced, "no source() references found - did the spec format change?"
+    assert set(module.WIDE_TABLES) == referenced, (
+        f"WIDE_TABLES drifted from the wide specs: "
+        f"missing={referenced - set(module.WIDE_TABLES)} "
+        f"extra={set(module.WIDE_TABLES) - referenced}"
+    )
+    # And every one of them is a real seedable table.
+    assert set(module.WIDE_TABLES) <= set(module.TABLES)
+
+
 def test_seeder_loads_with_parquet_logical_types(monkeypatch) -> None:
     """The second half of the timestamp fix, and the one with no visible symptom.
 
@@ -302,8 +329,17 @@ def test_seeder_loads_with_parquet_logical_types(monkeypatch) -> None:
     monkeypatch.delenv("SNOWFLAKE_AUTHENTICATOR", raising=False)
     monkeypatch.delenv("SNOWFLAKE_PRIVATE_KEY_FILE", raising=False)
 
+    # Default scope: rows only for the wide cadence, the rest created empty.
     assert module.main([]) == 0
+    assert len(calls) == len(module.WIDE_TABLES)
+    assert {k["table_name"] for k in calls} == {module.table_name(t) for t in module.WIDE_TABLES}
+
+    # --all-cadences restores the full load for anyone pointing this target at
+    # the daily/monthly pipelines.
+    calls.clear()
+    assert module.main(["--all-cadences"]) == 0
     assert len(calls) == len(module.TABLES)
+
     for kwargs in calls:
         assert kwargs["use_logical_type"] is True, kwargs
         # The other two settings this load depends on.

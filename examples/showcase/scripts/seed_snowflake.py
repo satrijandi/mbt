@@ -86,6 +86,30 @@ TABLES: dict[str, Path] = {
     "wide_churn_outcomes": SHOWCASE_DATA / "wide_churn_outcomes",
 }
 
+#: The only tables the Snowflake plane reads: the wide cadence's training
+#: inputs plus its ground-truth outcomes. Everything else in TABLES belongs to
+#: the daily/monthly cadences, which live on the lake planes.
+#:
+#: They still get CREATED (empty), because compile pins a snapshot for every
+#: source referenced by ANY dataset or scoring node regardless of --select - a
+#: missing table fails the compile before selection narrows anything. Pinning
+#: is a metadata call (SYSTEM$LAST_CHANGE_COMMIT_TIME), so an empty table
+#: satisfies it without putting ~26k rows of unrelated demo data in the user's
+#: sandbox schema.
+#:
+#: Kept in sync with the specs by
+#: packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py.
+WIDE_TABLES: frozenset[str] = frozenset(
+    {
+        "monthly_population",
+        "monthly_labels",
+        "demographic_history",
+        "login_history",
+        "transaction_history",
+        "wide_churn_outcomes",
+    }
+)
+
 
 def table_name(source: str) -> str:
     return f"{PREFIX}{source.upper()}"
@@ -209,7 +233,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--drop", action="store_true", help="drop the showcase demo tables and exit"
     )
+    parser.add_argument(
+        "--all-cadences",
+        action="store_true",
+        help="also load rows for the daily/monthly cadences (default: create them "
+        "empty, since the Snowflake plane only reads the wide cadence)",
+    )
     args = parser.parse_args(argv)
+
+    def loads_rows(source: str) -> bool:
+        return args.all_cadences or source in WIDE_TABLES
 
     if args.dry_run:
         database = os.environ.get("SNOWFLAKE_DATABASE", "ANALYTICS")
@@ -217,15 +250,21 @@ def main(argv: list[str] | None = None) -> int:
         total = 0
         for source, directory in TABLES.items():
             frame = read_table(directory)
-            total += len(frame)
+            rows = len(frame) if loads_rows(source) else 0
+            total += rows
+            note = "" if loads_rows(source) else "  (empty: not read by the wide cadence)"
             print(
                 f"{database}.{schema}.{table_name(source):40s} "
-                f"{len(frame):>8,} rows x {len(frame.columns):>3} cols  <- {directory}"
+                f"{rows:>8,} rows x {len(frame.columns):>3} cols{note}"
             )
-        print(f"\n{len(TABLES)} tables, {total:,} rows total")
+        loaded = sum(1 for s in TABLES if loads_rows(s))
+        print(
+            f"\n{len(TABLES)} tables created, {loaded} with data, {total:,} rows total"
+            + ("" if args.all_cadences else "  (--all-cadences loads the rest)")
+        )
         # The DDL is the part worth eyeballing: timestamp columns MUST come out
         # as TIMESTAMP_NTZ or every temporal window silently matches nothing.
-        sample = next(iter(TABLES))
+        sample = "monthly_population"
         print(f"\nDDL for {table_name(sample)} (the rest follow the same mapping):\n")
         print(create_table_sql(database, schema, table_name(sample), read_table(TABLES[sample])))
         return 0
@@ -267,6 +306,12 @@ def main(argv: list[str] | None = None) -> int:
                 ddl_cursor.execute(create_table_sql(database, schema, name, frame))
             finally:
                 ddl_cursor.close()
+            if not loads_rows(source):
+                # Created but not loaded: the wide cadence never reads this
+                # table, and compile only needs it to EXIST so snapshot pinning
+                # can resolve it (a metadata call, so an empty table answers).
+                print(f"created {database}.{schema}.{name:40s}    empty (other cadence)")
+                continue
             # quote_identifiers=False: columns must fold to UPPERCASE so the
             # adapter's unquoted lowercase SQL resolves them (see module docstring).
             #

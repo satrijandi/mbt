@@ -66,7 +66,7 @@ Switching the data plane really is one word.
 ```bash
 set -a; source .env; set +a          # SNOWFLAKE_* - see packages/mbt-snowflake/.env.example
 make up                              # the stack supplies MLflow + the artifact store
-make snowflake-seed                  # loads the 12 demo tables as MBT_SHOWCASE_*
+make snowflake-seed                  # creates 12 MBT_SHOWCASE_* tables, loads the 6 wide ones
 make snowflake                       # build -> promote -> score -> monitor, on the warehouse
 make snowflake-drop                  # remove the tables when you are done
 ```
@@ -78,6 +78,10 @@ Three things are worth knowing before you run it:
 - **Versions register as `churn_wide_automl_snowflake`**, not `churn_wide_automl`. Both planes train the same spec, so the `plane_suffix` var keeps their versions from interleaving in the shared registry and quietly corrupting champion resolution.
 
 The seeder uploads the *same parquet* the lake is seeded from rather than generating fresh data in-warehouse, which is what makes the two planes comparable: the live test asserts both materialize the same panel.
+
+**Why 12 tables when the cadence reads 6.** `mbt compile` pins a snapshot for every source referenced by any dataset or scoring node, regardless of `--select`, so all 12 must exist or the compile fails before selection narrows anything.
+Pinning is a metadata call, so the six belonging to the daily and monthly cadences are created **empty** - your sandbox gets the wide cadence's data and nothing else.
+Pass `--all-cadences` to the seeder if you want to point this target at `tag:daily` or `tag:monthly` too; that is also the fallback if your account ever refuses to pin a never-written table (`could not read a snapshot token`).
 
 ## The CI loop (make ci)
 

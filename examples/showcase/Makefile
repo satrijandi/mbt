@@ -64,7 +64,7 @@ help:
 	@echo "  make score         rerun daily scoring (lake sync, mbt score, metric push)"
 	@echo "  make monitor       rerun ground-truth monitoring at the pinned anchor"
 	@echo "  make inject-drift  poison the scoring batch and watch MbtShiftBreach fire"
-	@echo "  make snowflake-seed  load the demo tables into Snowflake (needs SNOWFLAKE_*)"
+	@echo "  make snowflake-seed  load the wide cadence's tables into Snowflake (needs SNOWFLAKE_*)"
 	@echo "  make snowflake       the same wide cadence, reading Snowflake instead of the lake"
 	@echo "  make snowflake-drop  remove the MBT_SHOWCASE_* tables from Snowflake"
 	@echo "  make urls          print every UI URL and its login"
