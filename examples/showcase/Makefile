@@ -45,8 +45,8 @@ AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 # published ports, which the `snowflake` target reads from these same vars.
 HOST_MBT := SHOWCASE_MLFLOW_PORT=$(or $(SHOWCASE_MLFLOW_PORT),5501) \
   SHOWCASE_S3_PORT=$(or $(SHOWCASE_S3_PORT),8333) \
-  AWS_ACCESS_KEY_ID=$(or $(SHOWCASE_S3_KEY),mbtshowcase) \
-  AWS_SECRET_ACCESS_KEY=$(or $(SHOWCASE_S3_SECRET),mbtshowcase) \
+  AWS_ACCESS_KEY_ID=$(or $(SHOWCASE_S3_KEY),mbtadmin) \
+  AWS_SECRET_ACCESS_KEY=$(or $(SHOWCASE_S3_SECRET),mbtsecret) \
   AWS_ENDPOINT_URL_S3=http://localhost:$(or $(SHOWCASE_S3_PORT),8333) \
   AWS_DEFAULT_REGION=us-east-1 \
   uv run --project $(REPO_ROOT) mbt

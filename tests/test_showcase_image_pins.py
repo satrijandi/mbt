@@ -95,3 +95,50 @@ def test_the_h2o_client_pin_matches_the_backend_pysparkling_embeds() -> None:
         f"h2o=={h2o_version} does not match the {embedded} backend embedded in "
         f"h2o-pysparkling-3-5=={pysparkling_version}; h2o.init() rejects a mismatch"
     )
+
+
+# -- S3 credential defaults (three files, one truth) ---------------------------
+
+COMPOSE = REPO_ROOT / "examples" / "showcase" / "compose" / "docker-compose.yml"
+S3_CONFIG = REPO_ROOT / "examples" / "showcase" / "compose" / "seaweedfs" / "s3_config.json"
+MAKEFILE = REPO_ROOT / "examples" / "showcase" / "Makefile"
+SHOWCASE_UTILS = REPO_ROOT / "tests" / "showcase_utils.py"
+
+
+def test_host_run_s3_credentials_match_the_stack() -> None:
+    """The Snowflake plane runs on the HOST, so it cannot inherit the container
+    env that every other target gets from compose - the Makefile and the test
+    harness each carry their own fallback copy of the SeaweedFS credentials.
+
+    That is three restatements of one fact, and getting one wrong fails LATE
+    and confusingly: the dataset builds, the model trains, and only the
+    artifact upload dies with `InvalidAccessKeyId` - which reads like a
+    warehouse or network problem rather than a typo. (It happened: the
+    host-run path shipped with an invented `mbtshowcase` key.)
+
+    seaweedfs/s3_config.json is the authority; everything else must agree.
+    """
+    import json
+
+    identity = json.loads(S3_CONFIG.read_text())["identities"][0]["credentials"][0]
+    key, secret = identity["accessKey"], identity["secretKey"]
+
+    compose = COMPOSE.read_text()
+    assert f"${{SHOWCASE_S3_KEY:-{key}}}" in compose, f"compose default is not {key}"
+    assert f"${{SHOWCASE_S3_SECRET:-{secret}}}" in compose, f"compose default is not {secret}"
+
+    makefile = MAKEFILE.read_text()
+    assert f"$(or $(SHOWCASE_S3_KEY),{key})" in makefile, (
+        f"the Makefile's host-run fallback must be {key} (see HOST_MBT)"
+    )
+    assert f"$(or $(SHOWCASE_S3_SECRET),{secret})" in makefile, (
+        f"the Makefile's host-run fallback must be {secret} (see HOST_MBT)"
+    )
+
+    utils = SHOWCASE_UTILS.read_text()
+    assert f'os.environ.get("SHOWCASE_S3_KEY", "{key}")' in utils, (
+        f"showcase_utils.host_env must fall back to {key}"
+    )
+    assert f'os.environ.get("SHOWCASE_S3_SECRET", "{secret}")' in utils, (
+        f"showcase_utils.host_env must fall back to {secret}"
+    )

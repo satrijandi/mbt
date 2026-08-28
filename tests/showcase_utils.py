@@ -267,8 +267,12 @@ class ComposeStack:
             {
                 "SHOWCASE_MLFLOW_PORT": str(self.ports["SHOWCASE_MLFLOW_PORT"]),
                 "SHOWCASE_S3_PORT": str(self.ports["SHOWCASE_S3_PORT"]),
-                "AWS_ACCESS_KEY_ID": "mbtshowcase",
-                "AWS_SECRET_ACCESS_KEY": "mbtshowcase",
+                # Must match compose's ${SHOWCASE_S3_KEY:-...} defaults and the
+                # identity in compose/seaweedfs/s3_config.json; a wrong key
+                # here fails late, as InvalidAccessKeyId when a trained model
+                # uploads. test_showcase_image_pins.py holds the three in sync.
+                "AWS_ACCESS_KEY_ID": os.environ.get("SHOWCASE_S3_KEY", "mbtadmin"),
+                "AWS_SECRET_ACCESS_KEY": os.environ.get("SHOWCASE_S3_SECRET", "mbtsecret"),
                 "AWS_ENDPOINT_URL_S3": self.s3_url(),
                 "AWS_DEFAULT_REGION": "us-east-1",
                 # Keep prediction runs inside the pytest workspace (F20: never
