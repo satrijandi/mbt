@@ -64,8 +64,7 @@ def test_every_source_declares_both_plane_addresses() -> None:
         )
 
 
-def test_source_identifiers_match_the_seeding_script() -> None:
-    """sources.yml and seed_snowflake.py must not drift apart."""
+def _seed_module():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -74,10 +73,52 @@ def test_source_identifiers_match_the_seeding_script() -> None:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
 
+
+def test_source_identifiers_match_the_seeding_script() -> None:
+    """sources.yml and seed_snowflake.py must not drift apart."""
+    module = _seed_module()
     declared = {t["name"]: t["identifier"] for t in _sources()}
     seeded = {name: module.table_name(name) for name in module.TABLES}
     assert seeded == declared
+
+
+def test_seeded_timestamp_columns_are_timestamps_not_numbers() -> None:
+    """The regression that broke the first real run.
+
+    The seeder used to let write_pandas(auto_create_table=True) infer types via
+    Snowflake's INFER_SCHEMA, which typed the tz-naive datetime64 columns as
+    NUMBER: every timestamp arrived as epoch microseconds (2025-07-01 became
+    1751328000000000). The load looked clean and the failure surfaced far away,
+    as a temporal split that matched no rows.
+
+    Nothing downstream tolerates that - the split predicate, the label join,
+    and monitor's maturity arithmetic all treat these as timestamps - so the
+    DDL is generated explicitly now and pinned here.
+    """
+    module = _seed_module()
+
+    assert module.snowflake_type("datetime64[us]") == "TIMESTAMP_NTZ"
+    assert module.snowflake_type("datetime64[ns]") == "TIMESTAMP_NTZ"
+    # The rest of the mapping, so a future edit cannot quietly widen it.
+    assert module.snowflake_type("int64") == "NUMBER(38,0)"
+    assert module.snowflake_type("int8") == "NUMBER(38,0)"
+    assert module.snowflake_type("float64") == "FLOAT"
+    assert module.snowflake_type("bool") == "BOOLEAN"
+    assert module.snowflake_type("object") == "VARCHAR"
+
+    # And end to end over the committed data: every datetime column of every
+    # seeded table lands as TIMESTAMP_NTZ in the real DDL.
+    for name, directory in module.TABLES.items():
+        frame = module.read_table(directory)
+        ddl = module.create_table_sql("DB", "SC", module.table_name(name), frame)
+        for column, dtype in frame.dtypes.items():
+            if str(dtype).startswith("datetime64"):
+                assert f"{column} TIMESTAMP_NTZ" in ddl, (name, column, ddl)
+    # The join key the wide cadence splits on, specifically.
+    spine = module.read_table(module.TABLES["monthly_population"])
+    assert str(spine.dtypes["inference_date"]).startswith("datetime64")
 
 
 def _synthetic() -> dict[str, tuple[str, pa.Table]]:

@@ -92,6 +92,54 @@ def read_table(directory: Path) -> Any:
     return pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
 
 
+#: pandas dtype family -> Snowflake column type. Deliberately explicit: see
+#: create_table_sql for why INFER_SCHEMA cannot be trusted with this data.
+_TYPE_MAP: tuple[tuple[str, str], ...] = (
+    ("datetime64", "TIMESTAMP_NTZ"),
+    ("bool", "BOOLEAN"),
+    ("int", "NUMBER(38,0)"),
+    ("uint", "NUMBER(38,0)"),
+    ("float", "FLOAT"),
+)
+
+
+def snowflake_type(dtype: Any) -> str:
+    """Snowflake column type for a pandas dtype.
+
+    Anything unrecognized becomes VARCHAR, which is the safe default for the
+    object columns (plan tiers, ids) these tables carry.
+    """
+    name = str(dtype)
+    for prefix, sf_type in _TYPE_MAP:
+        if name.startswith(prefix):
+            return sf_type
+    return "VARCHAR"
+
+
+def create_table_sql(database: str, schema: str, table: str, frame: Any) -> str:
+    """Explicit DDL for one demo table.
+
+    NOT left to ``write_pandas(auto_create_table=True)``. That path stages the
+    frame as parquet and asks Snowflake's INFER_SCHEMA for the column types,
+    and INFER_SCHEMA typed our tz-naive datetime64 columns as NUMBER - the
+    tables loaded fine and every timestamp arrived as epoch MICROSECONDS
+    (2025-07-01 became 1751328000000000).
+
+    Nothing downstream survives that: mbt's temporal split pushes down
+    ``CAST(inference_date AS TIMESTAMP_NTZ) >= TO_TIMESTAMP_NTZ('...')``, the
+    label join matches on the same column, and `mbt monitor` does maturity
+    arithmetic on it. Declaring the types here makes the load deterministic
+    and independent of connector/INFER_SCHEMA behavior.
+
+    Columns are UNQUOTED so they fold to uppercase, matching the
+    quote_identifiers=False load and the adapter's generated SQL.
+    """
+    columns = ",\n  ".join(
+        f"{name} {snowflake_type(dtype)}" for name, dtype in frame.dtypes.items()
+    )
+    return f"CREATE OR REPLACE TABLE {database}.{schema}.{table} (\n  {columns}\n)"
+
+
 def _connection_config() -> dict[str, Any]:
     """Connection kwargs from the same SNOWFLAKE_* env vars profiles.yml reads.
 
@@ -163,6 +211,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(frame):>8,} rows x {len(frame.columns):>3} cols  <- {directory}"
             )
         print(f"\n{len(TABLES)} tables, {total:,} rows total")
+        # The DDL is the part worth eyeballing: timestamp columns MUST come out
+        # as TIMESTAMP_NTZ or every temporal window silently matches nothing.
+        sample = next(iter(TABLES))
+        print(f"\nDDL for {table_name(sample)} (the rest follow the same mapping):\n")
+        print(create_table_sql(database, schema, table_name(sample), read_table(TABLES[sample])))
         return 0
 
     config = _connection_config()
@@ -194,6 +247,14 @@ def main(argv: list[str] | None = None) -> int:
         for source, directory in TABLES.items():
             name = table_name(source)
             frame = read_table(directory)
+            # Create the table ourselves, then load into it. auto_create_table
+            # would hand the typing decision to INFER_SCHEMA, which types these
+            # datetime64 columns as NUMBER (see create_table_sql).
+            ddl_cursor = connection.cursor()
+            try:
+                ddl_cursor.execute(create_table_sql(database, schema, name, frame))
+            finally:
+                ddl_cursor.close()
             # quote_identifiers=False: columns must fold to UPPERCASE so the
             # adapter's unquoted lowercase SQL resolves them (see module docstring).
             success, _chunks, rows, _output = write_pandas(
@@ -202,8 +263,8 @@ def main(argv: list[str] | None = None) -> int:
                 table_name=name,
                 database=database,
                 schema=schema,
-                auto_create_table=True,
-                overwrite=True,
+                auto_create_table=False,
+                overwrite=False,  # the CREATE OR REPLACE above already emptied it
                 quote_identifiers=False,
             )
             if not success:
