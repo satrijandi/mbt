@@ -25,6 +25,18 @@ SQL emits unquoted lowercase identifiers (which resolve to the same uppercase)
 and lowercases the Arrow batches on the way back via `normalize_case`. Quoting
 here would create lowercase columns that the adapter's SQL cannot resolve.
 
+TIMESTAMPS TAKE TWO SETTINGS, and getting either wrong is silent - the load
+reports success and the full row count, then temporal windows match nothing:
+
+1. `create_table_sql` declares TIMESTAMP_NTZ explicitly instead of letting
+   auto_create_table ask INFER_SCHEMA (which answers NUMBER).
+2. `use_logical_type=True` on the load, so Snowflake honors the parquet
+   TIMESTAMP(MICROS) annotation instead of reading the physical INT64.
+
+With only (1), epoch integers land in a timestamp column and Snowsight shows
+"Invalid date". With only (2), the column is typed by inference. Both are
+pinned by tests in packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py.
+
 Usage (from the repo root, with SNOWFLAKE_* exported - see
 packages/mbt-snowflake/.env.example):
 
@@ -257,6 +269,18 @@ def main(argv: list[str] | None = None) -> int:
                 ddl_cursor.close()
             # quote_identifiers=False: columns must fold to UPPERCASE so the
             # adapter's unquoted lowercase SQL resolves them (see module docstring).
+            #
+            # use_logical_type=True is the OTHER half of the timestamp fix, and
+            # it is not optional. write_pandas stages the frame as parquet and
+            # COPYs it through a generated FILE FORMAT; its default (None)
+            # leaves USE_LOGICAL_TYPE unset, and Snowflake's PARQUET default for
+            # that is FALSE - so Snowflake ignores the TIMESTAMP(MICROS)
+            # annotation and reads the physical INT64. That is what typed these
+            # columns as NUMBER under auto_create_table, and with the explicit
+            # TIMESTAMP_NTZ DDL it instead lands epoch integers in a timestamp
+            # column, which renders as 'Invalid date'. The connector only warns
+            # about this for tz-AWARE columns; ours are tz-naive, so it is
+            # silent.
             success, _chunks, rows, _output = write_pandas(
                 connection,
                 frame,
@@ -266,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
                 auto_create_table=False,
                 overwrite=False,  # the CREATE OR REPLACE above already emptied it
                 quote_identifiers=False,
+                use_logical_type=True,
             )
             if not success:
                 raise SystemExit(f"failed loading {database}.{schema}.{name}")

@@ -247,6 +247,70 @@ def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> 
     assert panel.column("txn_cnt_30d").null_count == 0
 
 
+def test_seeder_loads_with_parquet_logical_types(monkeypatch) -> None:
+    """The second half of the timestamp fix, and the one with no visible symptom.
+
+    write_pandas stages the frame as parquet and COPYs it through a generated
+    FILE FORMAT. Its use_logical_type default (None) leaves USE_LOGICAL_TYPE
+    unset, and Snowflake's PARQUET default for that is FALSE - so the
+    TIMESTAMP(MICROS) annotation is ignored and the physical INT64 is read.
+    Combined with the explicit TIMESTAMP_NTZ DDL that puts epoch integers into
+    a timestamp column ("Invalid date" in Snowsight).
+
+    The connector warns about this only for tz-AWARE columns; every datetime
+    here is tz-naive, so nothing surfaces. Hence a test rather than a comment.
+    """
+    import snowflake.connector
+    from snowflake.connector import pandas_tools
+
+    module = _seed_module()
+    calls: list[dict] = []
+
+    class FakeCursor:
+        def execute(self, sql, *a, **k):
+            self.sql = sql
+            return self
+
+        def fetchall(self):
+            return []  # no pre-existing tables
+
+        def close(self):
+            pass
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def close(self):
+            pass
+
+    def fake_write_pandas(conn, df, **kwargs):
+        calls.append(kwargs)
+        return True, 1, len(df), None
+
+    monkeypatch.setattr(snowflake.connector, "connect", lambda **kw: FakeConnection())
+    monkeypatch.setattr(pandas_tools, "write_pandas", fake_write_pandas)
+    for name, value in (
+        ("SNOWFLAKE_ACCOUNT", "acct"),
+        ("SNOWFLAKE_USER", "u"),
+        ("SNOWFLAKE_WAREHOUSE", "WH"),
+        ("SNOWFLAKE_DATABASE", "DB"),
+        ("SNOWFLAKE_SCHEMA", "SC"),
+        ("SNOWFLAKE_PASSWORD", "pw"),
+    ):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("SNOWFLAKE_AUTHENTICATOR", raising=False)
+    monkeypatch.delenv("SNOWFLAKE_PRIVATE_KEY_FILE", raising=False)
+
+    assert module.main([]) == 0
+    assert len(calls) == len(module.TABLES)
+    for kwargs in calls:
+        assert kwargs["use_logical_type"] is True, kwargs
+        # The other two settings this load depends on.
+        assert kwargs["quote_identifiers"] is False, kwargs
+        assert kwargs["auto_create_table"] is False, kwargs
+
+
 def test_snowflake_target_renders_without_credentials(monkeypatch) -> None:
     """profiles.yml renders WHOLE for whichever target is picked, so every
     env_var() the snowflake target adds needs a default or it breaks the lake
