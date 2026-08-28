@@ -121,3 +121,59 @@ churn_lake:
       threads: 1
       vars:
         sample_fraction: 1.0
+
+    # The warehouse plane (DESIGN.md section 11): the SAME wide cadence, the
+    # same dataset/model/scoring specs, reading Snowflake instead of the lake.
+    # Every table in sources.yml carries an identifier: alongside its path:,
+    # so switching planes is nothing but --target.
+    #
+    # Run this one from the HOST, not a container: externalbrowser SSO needs
+    # a real browser and a localhost callback, and the runner image does not
+    # ship mbt-snowflake (its sparkling extra pins pyspark 3.5.x, which does
+    # not resolve cleanly against the connector's cryptography floor). So the
+    # in-network service names are unusable here and every endpoint below is
+    # a published host port from compose/docker-compose.yml - keep the
+    # defaults in sync with the SHOWCASE_*_PORT defaults there.
+    snowflake:
+      data:
+        adapter: snowflake
+        config:
+          account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
+          user: "{{ env_var('SNOWFLAKE_USER', '') }}"
+          # Key-pair is the practical choice for this plane: a make target
+          # runs several mbt commands, and browser SSO re-prompts per process
+          # unless the account has ALLOW_ID_TOKEN enabled (docs/troubleshooting.md).
+          authenticator: "{{ env_var('SNOWFLAKE_AUTHENTICATOR', '') }}"
+          warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', '') }}"
+          database: "{{ env_var('SNOWFLAKE_DATABASE', '') }}"
+          schema: "{{ env_var('SNOWFLAKE_SCHEMA', '') }}"
+          role: "{{ env_var('SNOWFLAKE_ROLE', '') }}"
+          connect_args:
+            private_key_file: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE', '') }}"
+          # ADR-23 v1 stages prediction runs as parquet; the warehouse-native
+          # store is v2 (issue #1). Host path, so it is NOT the container's.
+          predictions_root: "{{ env_var('SHOWCASE_SNOWFLAKE_PREDICTIONS', './target/snowflake_predictions') }}"
+      tracking:
+        adapter: mlflow
+        config:
+          uri: "http://localhost:{{ env_var('SHOWCASE_MLFLOW_PORT', '5501') }}"
+      registry:
+        adapter: mlflow
+        config:
+          uri: "http://localhost:{{ env_var('SHOWCASE_MLFLOW_PORT', '5501') }}"
+      compute: {adapter: local}
+      # Its own prefix in the same SeaweedFS bucket the lake plane uses, so
+      # both planes' artifacts live in one store but never interleave.
+      # Reached over the published S3 port via AWS_ENDPOINT_URL_S3 (boto3
+      # reads it natively - mbt.storage builds an unpinned client).
+      artifact_store: s3://mbt-artifacts/churn_snowflake
+      threads: 1
+      vars:
+        sample_fraction: 1.0
+        # No cluster on the host: AutoML trains in a local H2O JVM, as dev does.
+        h2o_backend: local
+        h2o_max_mem: 1G
+        # Registers churn_wide_automl_snowflake / churn_wide_probe_snowflake,
+        # so this plane's versions never mix with the lake plane's in the
+        # shared registry. Project default is "" - see mbt_project.yml.
+        plane_suffix: _snowflake

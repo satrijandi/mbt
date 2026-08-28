@@ -93,3 +93,24 @@ MBT_LIVE_SHOWCASE=1 uv run pytest -q -m live_showcase --timeout 3600 -rA
 It follows the live-tier double gate: skipped everywhere unless `MBT_LIVE_SHOWCASE=1`, and once opted in, a missing docker fails loudly instead of skipping.
 The k3d/ArgoCD module carries one more gate (`MBT_LIVE_SHOWCASE_K3D=1`, needs `k3d` and `kubectl`) and stays local-only.
 CI runs the rest nightly via `.github/workflows/live.yml`, alongside the live Snowflake tier.
+
+## The warehouse plane
+
+The showcase runs its wide cadence over the SeaweedFS lake by default, but the same project also reads **Snowflake** - not a fork of the project, the same DAG and the same dataset, model, and scoring specs.
+Every table in `sources.yml` carries an `identifier:` beside its `path:`; the spark and local adapters read the path, the Snowflake adapter reads the identifier, and the plane becomes a target choice:
+
+```bash
+make snowflake-seed     # load the demo tables into your Snowflake sandbox
+make snowflake          # build -> promote -> score -> monitor, on the warehouse
+```
+
+This is the strong form of the claim `examples/snowflake_wide` makes about the ADR-22 wide shape being data-plane-agnostic: here it is enforced by a test that asserts both planes materialize the same panel, rather than asserted in prose.
+
+Because it needs credentials, it is gated one level beyond the rest of the tier - `MBT_LIVE_SHOWCASE=1` **and** `MBT_LIVE_SNOWFLAKE=1` **and** complete `SNOWFLAKE_*`:
+
+```bash
+MBT_LIVE_SHOWCASE=1 MBT_LIVE_SNOWFLAKE=1 uv run pytest -q tests/test_showcase_snowflake.py
+```
+
+The hermetic half of that coverage needs no account at all and runs in the ordinary fast suite: `packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py` builds the committed wide spec through the real Snowflake adapter with its generated SQL executed in DuckDB.
+So the showcase tier keeps its guarantee - docker and nothing else.

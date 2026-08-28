@@ -99,11 +99,12 @@ An `mbt init`-derived `churn` project, source-of-truth at `examples/showcase/pro
 
 ### 4.2 sources.yml (the one-file-serves-all resolution)
 
-One `sources.yml` must serve both the Spark training targets and the local-adapter scoring target:
+One `sources.yml` must serve the Spark training targets, the local-adapter scoring target, and the Snowflake plane:
 
 - Spark data adapter `root: "s3://mbt-lake"` (the `s3://` prefix is exempt from `normalized_adapter_config` project-dir path resolution; a raw `s3a://` root would be mangled).
 - Scheme mapping via conf: `spark.hadoop.fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem`, `fs.s3a.endpoint: http://seaweedfs:8333`, `fs.s3a.path.style.access: "true"`.
 - Table paths stay **relative** (`gold/subscribers/*.parquet`), so the local adapter serves the same tables from `root: /workspace/lake_local`.
+- Every table ALSO declares `identifier: MBT_SHOWCASE_<TABLE>` for the `snowflake` target (section 11, P7). Declaring both is legal - `SourceTable` rejects only a table with neither - and each adapter reads only its own field, which is what lets one project and one set of specs cover all three planes. All 12 tables carry an identifier even though only the wide cadence trains on Snowflake, because compile pins every referenced source regardless of `--select`.
 
 ### 4.3 Targets (profiles.yml, committed and secret-free)
 
@@ -115,7 +116,8 @@ Note: boto3's env chain is the only S3 endpoint mechanism (nothing in mbt parses
 | `dev` | spark `master: local[2]`, s3a to lake | h2o local backend, `sample_fraction: 0.1` | shared MLflow, `s3://mbt-artifacts/...` | DS fast inner loop |
 | `ci` | same as dev | same as dev | **per-run sqlite MLflow + local artifact store** | PR checks: green PRs must never register versions or re-point the shared `staging` alias; tradeoff: champion gates render "none (bootstrap)" in PR comments, documented |
 | `prod` | spark `master: spark://spark-master:7077` | `h2o_backend: sparkling`, driver-host conf per section 2 | shared MLflow, `s3://mbt-artifacts/...` | Prod builds, weekly retrain |
-| `prod_score` | **local adapter**, `root: /workspace/lake_local` | n/a (MOJO scoring is local-JVM by design; remote cluster is train-time only, and mbt-spark implements no contract-1.1 scoring methods) | shared MLflow | `mbt score` / `mbt monitor` |
+| `prod_score` | **local adapter**, `root: /workspace/lake_local` | n/a (MOJO scoring is local-JVM by design; remote cluster is train-time only) | shared MLflow | `mbt score` / `mbt monitor` |
+| `snowflake` | **snowflake adapter**, tables by `identifier:` | h2o local backend, on the host | shared MLflow + `s3://mbt-artifacts/churn_snowflake`, both over PUBLISHED ports | The warehouse plane (section 11): the same wide cadence, `--target snowflake`. Runs on the host, not in a container. Registers `*_snowflake` names via `plane_suffix` |
 
 ### 4.4 Scoring resource
 
@@ -259,12 +261,29 @@ tests/
 4. **P4 Scheduling + CD + promotion**: airflow + postgres + git-sync, deploy repo, DAGs with exit-code routing, prod_score plane, promotion flow. Tests SHOW-10..13.
 5. **P5 Observability + docs**: prometheus/pushgateway/grafana, dashboards, rules, drift injection; docs page in mkdocs nav; one exactly-true sentence in v0.1-status; nightly workflow. Tests SHOW-14..15.
 6. **P6 (optional) ArgoCD fidelity profile**: k3d + ArgoCD over the same deploy repo. Test SHOW-16, local-only.
-7. **P7 (proposed, parked 2026-07-16) Snowflake warehouse variant**: NOT implemented - recorded here so the scoping survives.
-   Decided direction: Snowflake stays read-only data storage (source tables, scoring batches, ground-truth labels); predictions, registry, and artifacts stay on mbt's side, so no warehouse-resident prediction store.
-   Scope when picked up: (a) extend mbt-snowflake to the contract-1.1 read side - `build_scoring_input` reuses the `build_dataset` SELECT machinery, `open_predictions` delegates to the local prediction store via a configured root; unit-testable against the DuckDB-as-Snowflake stub, then proven in the live_snowflake suite.
-   (b) A small host-run warehouse demo project BESIDE the showcase project, not inside it: snowflake sources use `identifier:` and cannot build on the spark `ci`/`dev` targets, so putting them in the churn repo would break every CI economy build.
-   Host-run keeps `externalbrowser` SSO trivial (the `mbt-snowflake[sso]` keyring cache; in-container SSO needs the localhost-callback port dance and credentials in the container) - the target reaches the stack's MLflow/S3 via host-mapped ports.
-   (c) Seeding mirrors the live suite (deterministic churn tables under a configurable prefix, a drop/cleanup make target), and the test module is triple-gated (MBT_LIVE_SHOWCASE=1 + MBT_LIVE_SNOWFLAKE=1 + complete SNOWFLAKE_* env) so it never enters the hermetic grand-suite guarantee.
+7. **P7 Snowflake warehouse plane**: IMPLEMENTED 2026-08-28 (parked 2026-07-16, unparked on request).
+   Decided direction, unchanged: Snowflake is read-only data storage (source tables, scoring batches, ground-truth labels); predictions, registry, and artifacts stay on mbt's side, so there is no warehouse-resident prediction store.
+   Predictions stage as parquet under `predictions_root` (ADR-23 v1); the warehouse-native store is v2, issue #1.
+   The plane runs the FULL loop - build, gate, register, promote, score, monitor - because P7(a) turned out to be already done: `mbt-snowflake` implements contract 1.1 (`build_scoring_input`, `open_predictions`).
+
+   **P7(b) was superseded, and that is the load-bearing change.**
+   The parked scope called for a separate host-run project BESIDE the showcase, on the grounds that "snowflake sources use `identifier:` and cannot build on the spark `ci`/`dev` targets".
+   That assumed a table must choose one addressing scheme.
+   It does not: `SourceTable` rejects only a table declaring NEITHER `path:` nor `identifier:`, and each adapter reads only the field it understands.
+   So every table in `sources.yml` now carries both, and the Snowflake plane is a TARGET INSIDE this project - same DAG, same dataset/model/scoring specs, not one line of spec duplicated.
+   Switching planes is `--target snowflake`, which is exactly the claim `examples/snowflake_wide`'s README makes about the wide shape being data-plane-agnostic; here a test enforces it instead of prose asserting it.
+
+   Consequences worth knowing:
+
+   - ALL 12 tables carry an identifier, not just the 6 the wide cadence reads. Compile pins a snapshot for every source referenced by any dataset or scoring node regardless of `--select`, so a missing identifier fails the compile before selection narrows anything.
+   - Registered names are namespaced per plane via the `plane_suffix` var (`""` everywhere, `"_snowflake"` on the new target). Both planes train the same spec, and without this their versions would interleave in the shared registry and quietly corrupt champion resolution. It reaches the spec through `var()`, so it enters the config hash by design - the two planes are genuinely different nodes.
+   - Host-run, still. `externalbrowser` SSO needs a real browser and a localhost callback, and the runner image does not ship `mbt-snowflake` (its sparkling extra pins pyspark 3.5.x, which does not resolve cleanly against the connector's `cryptography>=46.0.5` floor). The target reaches the stack's MLflow and S3 over published ports, so `make snowflake` runs mbt on the host rather than through `$(EXEC)`.
+   - Adding `identifier:` is state-neutral for the lake planes: source config lives on `ManifestSource`, and node `config_hash` covers only node config. Verified by diffing every resolved node config before and after the change.
+
+   Testing is two-tier, and the hermetic half is the one that runs by default.
+   `packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py` builds the committed wide spec through the real Snowflake adapter with its SQL executed in DuckDB (no account), and holds the both-addresses invariant plus seeder/sources agreement.
+   `tests/test_showcase_snowflake.py` is triple-gated (MBT_LIVE_SHOWCASE=1 + MBT_LIVE_SNOWFLAKE=1 + complete SNOWFLAKE_*) and proves the loop on a real account, including a cross-plane assertion that both planes materialize the same panel.
+   The triple gate keeps the hermetic grand-suite guarantee intact: the showcase tier still needs docker and nothing else.
 
 ## 12. Open questions
 

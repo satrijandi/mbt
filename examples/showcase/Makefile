@@ -34,8 +34,25 @@ WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 
-.PHONY: help image workspace up seed down clean urls demo score monthly wide monitor ci
+.PHONY: help image workspace up seed down clean urls demo score monthly wide monitor ci \
+  snowflake-seed snowflake snowflake-drop
 .DEFAULT_GOAL := help
+
+# The warehouse plane (DESIGN.md section 11). Unlike every other recipe here
+# these run mbt on the HOST, not through $(EXEC): warehouse credentials live
+# in your shell, externalbrowser SSO needs a real browser, and the runner
+# image does not ship mbt-snowflake. The host reaches the stack over its
+# published ports, which the `snowflake` target reads from these same vars.
+HOST_MBT := SHOWCASE_MLFLOW_PORT=$(or $(SHOWCASE_MLFLOW_PORT),5501) \
+  SHOWCASE_S3_PORT=$(or $(SHOWCASE_S3_PORT),8333) \
+  AWS_ACCESS_KEY_ID=$(or $(SHOWCASE_S3_KEY),mbtshowcase) \
+  AWS_SECRET_ACCESS_KEY=$(or $(SHOWCASE_S3_SECRET),mbtshowcase) \
+  AWS_ENDPOINT_URL_S3=http://localhost:$(or $(SHOWCASE_S3_PORT),8333) \
+  AWS_DEFAULT_REGION=us-east-1 \
+  uv run --project $(REPO_ROOT) mbt
+# --project-dir is a per-command option, not a global one, so it goes after
+# the subcommand in each recipe below.
+SF_PROJECT := --project-dir $(SHOWCASE_DIR)/project
 
 help:
 	@echo "mbt showcase (see README.md for the full runbook):"
@@ -47,6 +64,9 @@ help:
 	@echo "  make score         rerun daily scoring (lake sync, mbt score, metric push)"
 	@echo "  make monitor       rerun ground-truth monitoring at the pinned anchor"
 	@echo "  make inject-drift  poison the scoring batch and watch MbtShiftBreach fire"
+	@echo "  make snowflake-seed  load the demo tables into Snowflake (needs SNOWFLAKE_*)"
+	@echo "  make snowflake       the same wide cadence, reading Snowflake instead of the lake"
+	@echo "  make snowflake-drop  remove the MBT_SHOWCASE_* tables from Snowflake"
 	@echo "  make urls          print every UI URL and its login"
 	@echo "  make down          stop and remove containers, volumes, and the network"
 	@echo "  make clean         down, then also remove the workspace"
@@ -201,6 +221,32 @@ wide:
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
 	@echo "drift report: $(SHOWCASE_WORKSPACE)/project/drift_report.html"
 	@echo "selection report: $(SHOWCASE_WORKSPACE)/project/target/feature_selection_report.json"
+
+# The SAME wide cadence as `make wide`, reading Snowflake instead of the lake
+# (DESIGN.md section 11). The dataset, model, and scoring specs are unedited -
+# every source table declares an identifier: alongside its path:, so the plane
+# really is just --target. Needs SNOWFLAKE_* in your shell (see
+# packages/mbt-snowflake/.env.example) and `make up` already running, because
+# tracking, the registry, and the artifact store are the stack's.
+#
+# Key-pair auth is worth setting up for this: browser SSO re-prompts once per
+# mbt process unless your account has ALLOW_ID_TOKEN enabled, and this recipe
+# runs four of them (docs/troubleshooting.md).
+snowflake-seed:
+	uv run --project $(REPO_ROOT) python $(SHOWCASE_DIR)/scripts/seed_snowflake.py --force
+
+snowflake:
+	$(HOST_MBT) build $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(ANCHOR)
+	# --target matters here: without it promote falls back to dev, whose
+	# registry URI is the in-network http://mlflow:5000 the host cannot reach.
+	$(HOST_MBT) promote $(SF_PROJECT) --target snowflake --model churn_wide_automl_snowflake --to production
+	$(HOST_MBT) score $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(ANCHOR)
+	$(HOST_MBT) monitor $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(MONITOR_ANCHOR)
+	@echo "warehouse plane done: versions are registered as churn_wide_automl_snowflake"
+	@echo "predictions staged under: $(SHOWCASE_DIR)/project/target/snowflake_predictions"
+
+snowflake-drop:
+	uv run --project $(REPO_ROOT) python $(SHOWCASE_DIR)/scripts/seed_snowflake.py --drop
 
 # Break the model in production on purpose, then watch the alert fire:
 # shift the scoring batch, score (exit 2 tolerated), push, check Grafana.

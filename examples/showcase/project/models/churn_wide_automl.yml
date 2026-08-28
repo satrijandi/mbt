@@ -77,7 +77,11 @@ models:
           threshold: "{{ var('wide_pr_auc_floor') }}"
 
     registration:
-      name: churn_wide_automl
+      # plane_suffix is "" on every lake target and "_snowflake" on the
+      # warehouse plane, so both can train this spec into one registry
+      # without their versions colliding. ref() targets the model NODE name
+      # above, which never changes, so the scoring spec needs no edit.
+      name: "churn_wide_automl{{ var('plane_suffix') }}"
       stage_on_pass: staging
 
     seed: 42

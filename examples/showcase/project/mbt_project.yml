@@ -14,6 +14,13 @@ vars:
   # 0.2 is meaningfully above it without demanding heroics from a 3-model
   # AutoML budget.
   wide_pr_auc_floor: 0.2
+  # Suffix appended to the wide models' REGISTERED names, so a second data
+  # plane can train the same specs without its versions colliding with the
+  # lake plane's in the shared MLflow registry. Empty everywhere except the
+  # `snowflake` target, which sets "_snowflake" (target vars override these).
+  # It reaches a spec through var(), so it enters the config hash by design:
+  # the two planes are genuinely different nodes.
+  plane_suffix: ""
 
 model_defaults:
   adapter: xgboost

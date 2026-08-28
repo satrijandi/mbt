@@ -57,6 +57,28 @@ Joins and sampling push down into the source query, so only sampled rows ever le
 The width problem is handled by selection, not sampling: only the probe ever reads all columns (once per snapshot, cached by materialization key; parquet is columnar, so the funnel touches only surviving columns), and the committed include list cuts the panel down before AutoML ever sees it.
 Reproducibility is a chain: the generator seed fixes the data, the spec `seed: 42` drives the probe, the funnel's randomized search, and AutoML (the seed ladder derives every later stage), hash sampling is deterministic by key, the AutoML spec shape is the documented deterministic one (fixed `max_models`, no time budgets), and the selection itself is a committed diff - so a rerun reproduces the include list byte for byte.
 
+## The warehouse plane (make snowflake)
+
+The same wide cadence, reading **Snowflake** instead of the lake.
+Not a second project and not a second set of specs: every table in `sources.yml` declares an `identifier:` beside its `path:`, each adapter reads only the field it understands, and the dataset, model, and scoring specs are untouched.
+Switching the data plane really is one word.
+
+```bash
+set -a; source .env; set +a          # SNOWFLAKE_* - see packages/mbt-snowflake/.env.example
+make up                              # the stack supplies MLflow + the artifact store
+make snowflake-seed                  # loads the 12 demo tables as MBT_SHOWCASE_*
+make snowflake                       # build -> promote -> score -> monitor, on the warehouse
+make snowflake-drop                  # remove the tables when you are done
+```
+
+Three things are worth knowing before you run it:
+
+- **It runs on the host**, unlike every other `make` target here. Warehouse credentials belong in your shell, browser SSO needs a real browser, and the runner image does not ship `mbt-snowflake`. The host reaches the stack over its published ports, so `make up` must already be running.
+- **Use key-pair auth if you can.** `make snowflake` runs four mbt processes, and with browser SSO each one re-prompts unless your account has `ALLOW_ID_TOKEN` enabled - see `docs/troubleshooting.md`. Set `SNOWFLAKE_PRIVATE_KEY_FILE` and it is silent.
+- **Versions register as `churn_wide_automl_snowflake`**, not `churn_wide_automl`. Both planes train the same spec, so the `plane_suffix` var keeps their versions from interleaving in the shared registry and quietly corrupting champion resolution.
+
+The seeder uploads the *same parquet* the lake is seeded from rather than generating fresh data in-warehouse, which is what makes the two planes comparable: the live test asserts both materialize the same panel.
+
 ## The CI loop (make ci)
 
 `make ci` seeds Gitea with the `mbt-showcase/churn` repo (the project source, `.woodpecker/` pipelines included), creates the OAuth app, re-ups Woodpecker with the real credentials, and activates the repo - all headless (the first Woodpecker API token is minted by a scripted OAuth dance against the host-published ports - the exact flow a browser performs, thanks to Woodpecker's split-horizon URL config in the compose file).

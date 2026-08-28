@@ -1,55 +1,89 @@
-# One sources.yml serves BOTH data planes (DESIGN.md section 4.2):
-# table paths are RELATIVE and each target's data adapter supplies the root -
-# the spark targets use root s3://mbt-lake (the s3:// spelling is exempt from
-# project-dir path resolution; fs.s3.impl maps it onto S3AFileSystem), and the
-# prod_score target's local adapter uses root /workspace/lake_local.
+# One sources.yml serves ALL THREE data planes (DESIGN.md sections 4.2 + 11):
+# every table declares BOTH addresses, and each target's data adapter reads
+# only the field it understands.
+#
+#   path:        RELATIVE, with the adapter supplying the root - the spark
+#                targets use root s3://mbt-lake (the s3:// spelling is exempt
+#                from project-dir path resolution; fs.s3.impl maps it onto
+#                S3AFileSystem), and the prod_score target's local adapter
+#                uses root /workspace/lake_local.
+#   identifier:  the Snowflake table, resolved against the snowflake target's
+#                database/schema (see the `snowflake` target in profiles.yml
+#                and scripts/seed_snowflake.py, which loads these tables from
+#                the very same parquet the lake is seeded from).
+#
+# Declaring both is legal and load-bearing: SourceTable rejects only a table
+# that declares NEITHER, so the spark/local planes never see `identifier:`
+# and the Snowflake plane never sees `path:`. That is what lets one project,
+# one DAG, and one set of dataset/model/scoring specs serve every plane -
+# swapping planes really is just `--target`.
+#
+# ALL tables carry an identifier, not only the wide ones the Snowflake plane
+# actually trains on: compile pins a snapshot for every source referenced by
+# ANY dataset or scoring node regardless of --select, so a missing identifier
+# would fail the compile before selection is applied.
+#
+# The MBT_SHOWCASE_ prefix mirrors the live suite's MBT_LIVE_ convention so
+# these demo tables can never be confused with (or clobber) real ones.
 sources:
   - name: lake
-    description: Gold-layer feature tables on the SeaweedFS parquet lake.
+    description: Gold-layer feature tables - SeaweedFS parquet lake, or Snowflake tables.
     tables:
       - name: subscribers
         path: subscribers/*.parquet
+        identifier: MBT_SHOWCASE_SUBSCRIBERS
         description: One row per subscriber per monthly snapshot.
       - name: scoring_batch
         path: scoring_batch/*.parquet
+        identifier: MBT_SHOWCASE_SCORING_BATCH
         description: Fresh unlabeled subscribers to score (last week before the anchor).
       - name: churn_outcomes
         path: churn_outcomes/*.parquet
+        identifier: MBT_SHOWCASE_CHURN_OUTCOMES
         description: Realized churn outcomes, arriving ~90 days after scoring.
       - name: monthly_subscribers
         path: monthly_subscribers/*.parquet
+        identifier: MBT_SHOWCASE_MONTHLY_SUBSCRIBERS
         description: One row per subscriber per month-start snapshot, labeled with 30-day churn.
       - name: monthly_scoring_batch
         path: monthly_scoring_batch/*.parquet
+        identifier: MBT_SHOWCASE_MONTHLY_SCORING_BATCH
         description: Fresh unlabeled subscribers at the newest month start.
       - name: monthly_churn_outcomes
         path: monthly_churn_outcomes/*.parquet
+        identifier: MBT_SHOWCASE_MONTHLY_CHURN_OUTCOMES
         description: Realized 30-day churn outcomes for the monthly batch, arriving ~30 days later.
       # The wide multi-table shape (ADR-22, docs/naming-conventions.md): a
       # population spine carrying the entity crosswalk, three feature
       # -history tables joined by DIFFERENT entity keys on the one uniform
       # inference_date, and matured labels keyed by the cohort's own
-      # inference_date.
+      # inference_date. This is the cadence the Snowflake plane runs.
       - name: monthly_population
         path: monthly_population/*.parquet
+        identifier: MBT_SHOWCASE_MONTHLY_POPULATION
         description: >-
           One row per active customer per month-start inference_date; carries the entity
           crosswalk (customer_id to safe_id), the informational as_of_date lineage column,
           and the loaded_at_time ingest audit column.
       - name: monthly_labels
         path: monthly_labels/*.parquet
+        identifier: MBT_SHOWCASE_MONTHLY_LABELS
         description: >-
           Matured churn outcomes keyed by (customer_id, inference_date) - the cohort's own
           prediction date; rows appear once the one-month outcome window closes.
       - name: demographic_history
         path: demographic_history/*.parquet
+        identifier: MBT_SHOWCASE_DEMOGRAPHIC_HISTORY
         description: Monthly demographic features keyed by (customer_id, inference_date); rows describe balances as of the previous day.
       - name: login_history
         path: login_history/*.parquet
+        identifier: MBT_SHOWCASE_LOGIN_HISTORY
         description: Monthly login-activity features keyed by (customer_id, inference_date); rows describe balances as of the previous day.
       - name: transaction_history
         path: transaction_history/*.parquet
+        identifier: MBT_SHOWCASE_TRANSACTION_HISTORY
         description: Monthly transaction features keyed by (safe_id, inference_date); rows describe balances as of the previous day.
       - name: wide_churn_outcomes
         path: wide_churn_outcomes/*.parquet
+        identifier: MBT_SHOWCASE_WIDE_CHURN_OUTCOMES
         description: Matured outcomes of the newest snapshot's cohort, for ground-truth monitoring.

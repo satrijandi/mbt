@@ -49,6 +49,55 @@ ANCHOR = "2026-06-30T00:00:00Z"
 MONITOR_ANCHOR = "2026-07-20T00:00:00Z"
 RUNNER_IMAGE = os.environ.get("MBT_SHOWCASE_RUNNER_IMAGE", "mbt-showcase-runner:dev")
 
+# -- the Snowflake data plane (DESIGN.md section 11) ---------------------------
+# TRIPLE gated: the stack gate above, plus the live-Snowflake opt-in, plus
+# complete credentials. Warehouse traffic must never follow from docker alone,
+# and the hermetic grand-suite guarantee ("31 tests, docker and nothing else")
+# must survive - so this tier is additive, never a precondition.
+SNOWFLAKE_SKIP_REASON = (
+    "the showcase Snowflake plane is opt-in on TOP of the stack: set "
+    "MBT_LIVE_SHOWCASE=1 MBT_LIVE_SNOWFLAKE=1 plus SNOWFLAKE_* "
+    "(examples/showcase/README.md)"
+)
+SNOWFLAKE_MARKS = [
+    *SHOWCASE_MARKS,
+    pytest.mark.live_snowflake,
+    pytest.mark.skipif(os.environ.get("MBT_LIVE_SNOWFLAKE") != "1", reason=SNOWFLAKE_SKIP_REASON),
+]
+
+SNOWFLAKE_REQUIRED_ENV = (
+    "SNOWFLAKE_ACCOUNT",
+    "SNOWFLAKE_USER",
+    "SNOWFLAKE_WAREHOUSE",
+    "SNOWFLAKE_DATABASE",
+    "SNOWFLAKE_SCHEMA",
+)
+SNOWFLAKE_AUTH_ENV = (
+    "SNOWFLAKE_PASSWORD",
+    "SNOWFLAKE_AUTHENTICATOR",
+    "SNOWFLAKE_PRIVATE_KEY_FILE",
+)
+
+
+def require_snowflake() -> None:
+    """Gate 3: opted in but misconfigured must FAIL loudly, never skip.
+
+    Mirrors packages/mbt-snowflake/tests/test_snowflake_live.py, so one .env
+    satisfies both suites.
+    """
+    missing = [name for name in SNOWFLAKE_REQUIRED_ENV if not os.environ.get(name)]
+    if missing:
+        pytest.fail(
+            "MBT_LIVE_SNOWFLAKE=1 but these are unset: "
+            + ", ".join(missing)
+            + " (see packages/mbt-snowflake/.env.example)"
+        )
+    if not any(os.environ.get(name) for name in SNOWFLAKE_AUTH_ENV):
+        pytest.fail(
+            "MBT_LIVE_SNOWFLAKE=1 but no auth is configured: set one of "
+            + ", ".join(SNOWFLAKE_AUTH_ENV)
+        )
+
 
 def require_docker() -> None:
     """Gate 2: opted in but docker unusable must FAIL loudly, never skip."""
@@ -201,6 +250,57 @@ class ComposeStack:
         self, *args: str, expect_exit: int = 0, timeout: int = 1200
     ) -> subprocess.CompletedProcess[str]:
         return self.exec("mbt", *args, expect_exit=expect_exit, timeout=timeout)
+
+    # -- host execution (the Snowflake plane) ---------------------------------
+    def host_env(self) -> dict[str, str]:
+        """Env for a HOST-run mbt against this stack.
+
+        The `snowflake` target reaches MLflow and the S3 artifact store over
+        published ports rather than compose service names (see the target's
+        comment in project/profiles.yml), and the stack allocates those ports
+        at random, so they must be passed through rather than defaulted.
+        AWS_* are needed unconditionally: profiles.yml renders whole, and its
+        s3a anchor calls env_var('AWS_ACCESS_KEY_ID') with no default.
+        """
+        env = os.environ.copy()
+        env.update(
+            {
+                "SHOWCASE_MLFLOW_PORT": str(self.ports["SHOWCASE_MLFLOW_PORT"]),
+                "SHOWCASE_S3_PORT": str(self.ports["SHOWCASE_S3_PORT"]),
+                "AWS_ACCESS_KEY_ID": "mbtshowcase",
+                "AWS_SECRET_ACCESS_KEY": "mbtshowcase",
+                "AWS_ENDPOINT_URL_S3": self.s3_url(),
+                "AWS_DEFAULT_REGION": "us-east-1",
+                # Keep prediction runs inside the pytest workspace (F20: never
+                # the checkout), so teardown removes them with everything else.
+                "SHOWCASE_SNOWFLAKE_PREDICTIONS": str(self.workspace / "snowflake_predictions"),
+            }
+        )
+        return env
+
+    def host_mbt(
+        self, *args: str, expect_exit: int = 0, timeout: int = 1800
+    ) -> subprocess.CompletedProcess[str]:
+        """`mbt` on the host against the workspace copy of the project.
+
+        Used only by the Snowflake plane: warehouse credentials live in the
+        developer's shell (and SSO needs a real browser), and the runner image
+        does not ship mbt-snowflake.
+        """
+        proc = subprocess.run(
+            [sys.executable, "-m", "mbt.cli.main", *args],
+            cwd=self.workspace / "project",
+            env=self.host_env(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        assert proc.returncode == expect_exit, (
+            f"host mbt {args} exited {proc.returncode} (wanted {expect_exit})\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
+        return proc
 
     def seed_lake(self) -> None:
         self.exec("python", "/workspace/bootstrap/seed_lake.py", workdir="/workspace")
