@@ -6,10 +6,9 @@ Snowflake plane. This script fills in the Snowflake side, so
 `mbt build --target snowflake` reads the very same cadence the lake targets do,
 from the warehouse instead of parquet.
 
-Deliberately an UPLOAD, not a server-side generator (unlike
-examples/snowflake_wide/seed_demo_tables.py, whose GENERATOR() SQL synthesizes
-rows in-warehouse). The showcase's data is only ~8 MB, and loading the exact
-same bytes both planes read is what makes them comparable: the cross-plane
+Deliberately an UPLOAD rather than a server-side generator. The showcase's
+data is only ~8 MB, and loading the exact same bytes both planes read is what
+makes them comparable: the cross-plane
 equivalence test in tests/test_showcase_snowflake.py asserts the two
 materialized panels agree row for row, which would be meaningless if the
 warehouse held independently generated data.
@@ -179,8 +178,7 @@ def create_table_sql(database: str, schema: str, table: str, frame: Any) -> str:
 def _connection_config() -> dict[str, Any]:
     """Connection kwargs from the same SNOWFLAKE_* env vars profiles.yml reads.
 
-    Mirrors examples/snowflake_wide/seed_demo_tables.py so one .env drives both
-    examples.
+    Same keys the live Snowflake suite reads, so one .env drives both.
     """
     required = ("account", "user", "warehouse", "database", "schema")
     missing = [k for k in required if not os.environ.get(f"SNOWFLAKE_{k.upper()}")]

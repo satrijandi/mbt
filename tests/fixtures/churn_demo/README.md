@@ -4,7 +4,8 @@ A complete mbt project: three XGBoost models over one committed dataset, exercis
 It lives under `tests/fixtures/` rather than `examples/` because that is what it is for - the golden-manifest test compiles it in the fast suite, the E2E suite copies it to a tmp dir and drives it through the real CLI, and the live showcase tier seeds its lake from `data/`.
 Everything in here is therefore guaranteed to work, which also makes it a useful thing to read.
 
-If you want a starting point to copy, run `mbt init` instead (the scaffold is a simplified cousin of this project), or read `examples/snowflake_wide` for the warehouse-scale shape.
+If you want a starting point to copy, run `mbt init` instead (the scaffold is a simplified cousin of this project), or read `examples/showcase` for the warehouse-scale shape (its `snowflake` target
+runs the wide cadence straight out of Snowflake).
 
 ## Run it
 

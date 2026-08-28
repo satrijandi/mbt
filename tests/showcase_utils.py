@@ -265,7 +265,11 @@ class ComposeStack:
         env = os.environ.copy()
         env.update(
             {
-                "SHOWCASE_MLFLOW_PORT": str(self.ports["SHOWCASE_MLFLOW_PORT"]),
+                # A whole URI, not a bare port: env_var() taints its value and
+                # redact() censors every tainted string out of serialized
+                # output, so a 4-digit port corrupts floats in the job-result
+                # JSON. See the target's comment in project/profiles.yml.
+                "SHOWCASE_MLFLOW_URI": self.mlflow_url(),
                 "SHOWCASE_S3_PORT": str(self.ports["SHOWCASE_S3_PORT"]),
                 # Must match compose's ${SHOWCASE_S3_KEY:-...} defaults and the
                 # identity in compose/seaweedfs/s3_config.json; a wrong key

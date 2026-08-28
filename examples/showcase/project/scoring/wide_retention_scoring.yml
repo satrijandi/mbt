@@ -14,13 +14,20 @@ scoring:
       # ADR-22 + docs/naming-conventions.md) at scoring time.
       inputs:
         spine: source('lake', 'monthly_population')
+        # The SAME per-table pruning as training (ADR-25). Scoring must prune
+        # identically or the champion would meet columns it never saw - and
+        # the three identically-named etl_loaded_at columns would collide in
+        # the scoring batch exactly as they would in the training panel.
         features:
           - source: source('lake', 'demographic_history')
             using: [customer_id, inference_date]
+            exclude: [etl_loaded_at]
           - source: source('lake', 'login_history')
             using: [customer_id, inference_date]
+            exclude: [etl_loaded_at]
           - source: source('lake', 'transaction_history')
             using: [safe_id, inference_date]
+            exclude: [etl_loaded_at]
       time_column: inference_date
       window: "-31d:now"           # exactly the newest month-start cohort
       sample_key: customer_id

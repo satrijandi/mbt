@@ -38,7 +38,7 @@ Start where a data scientist would: open JupyterLab and run `project/notebooks/d
 `make monthly` runs the second, cluster-free cadence: the `tag:monthly` churn pipeline trains, promotes, and scores entirely on the DuckDB batch plane over the synced S3 parquet lake.
 `make wide` runs the third, wide batch-monthly cadence (ADR-22): a monthly population spine with an entity crosswalk, three feature histories joined by different keys, matured labels keyed by each cohort's own `inference_date`, a ds-helper LightGBM selection funnel committed as a reviewable diff, DS-declared categorical codes cast by a shared hooks file, sparkling H2O AutoML on the selected columns, and Evidently feature-stability gates (exit 2 blocks promotion; every scored batch re-checks against the exported baseline) beside mbt's own enforcing monitors.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
-The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); phases P1-P6 of its plan are implemented (the k3d/ArgoCD fidelity profile local-only behind its own gate), and a P7 Snowflake warehouse variant is scoped but deliberately parked.
+The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); every phase of its plan is implemented (the k3d/ArgoCD fidelity profile local-only behind its own gate, and P7's Snowflake warehouse plane needing credentials on top of the stack).
 
 ## What it proves
 
@@ -104,7 +104,7 @@ make snowflake-seed     # load the demo tables into your Snowflake sandbox
 make snowflake          # build -> promote -> score -> monitor, on the warehouse
 ```
 
-This is the strong form of the claim `examples/snowflake_wide` makes about the ADR-22 wide shape being data-plane-agnostic: here it is enforced by a test that asserts both planes materialize the same panel, rather than asserted in prose.
+The ADR-22 wide shape is data-plane-agnostic by construction, and here that is enforced rather than asserted: a test asserts both planes materialize the same panel.
 
 Because it needs credentials, it is gated one level beyond the rest of the tier - `MBT_LIVE_SHOWCASE=1` **and** `MBT_LIVE_SNOWFLAKE=1` **and** complete `SNOWFLAKE_*`:
 

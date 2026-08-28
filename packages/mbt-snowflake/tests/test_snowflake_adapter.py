@@ -619,6 +619,49 @@ def test_base_relation_single_source_is_the_table_ref() -> None:
     )
 
 
+def test_feature_entry_projection_pushes_down_both_flavors() -> None:
+    """ADR-25: per-table pruning becomes a projecting subquery, not a
+    post-materialization filter, so pruned columns are never scanned.
+
+    Both flavors are unit-tested here rather than left to whichever example
+    happens to use them - the keep-list branch previously had no coverage of
+    its own and went dark the moment its only example was removed.
+    """
+    refs = {LABEL_UID: "ANALYTICS.GOLD.CHURN_LABELS", USAGE_UID: "ANALYTICS.GOLD.USAGE_FEATURES"}
+
+    keep = _spec(
+        inputs={
+            "population": LABEL_UID,
+            "label": {"source": LABEL_UID, "using": ["customer_id"]},
+            "features": [
+                {"source": USAGE_UID, "using": ["customer_id"], "columns": ["monthly_usage"]}
+            ],
+            "join_key": ["customer_id"],
+        }
+    )
+    relation, _ = base_relation(keep, refs)
+    # The join key rides along automatically - a keep-list that dropped it
+    # would produce a subquery the USING clause could not join on.
+    assert "(SELECT customer_id, monthly_usage FROM ANALYTICS.GOLD.USAGE_FEATURES)" in relation
+
+    drop = _spec(
+        inputs={
+            "population": LABEL_UID,
+            "label": {"source": LABEL_UID, "using": ["customer_id"]},
+            "features": [
+                {"source": USAGE_UID, "using": ["customer_id"], "exclude": ["etl_loaded_at"]}
+            ],
+            "join_key": ["customer_id"],
+        }
+    )
+    relation, _ = base_relation(drop, refs)
+    assert "(SELECT * EXCLUDE (etl_loaded_at) FROM ANALYTICS.GOLD.USAGE_FEATURES)" in relation
+
+    # No projection declared: the bare table, no wrapping subquery.
+    relation, _ = base_relation(_spec(), refs)
+    assert "(SELECT" not in relation
+
+
 def test_random_split_carves_a_validation_bucket() -> None:
     spec = _spec(
         inputs=None,
@@ -752,7 +795,7 @@ def test_concurrent_connect_opens_exactly_one_connection(
     (compile/compiler.py). An unguarded lazy init let every thread that
     arrived during the handshake open its own connection - under
     `authenticator: externalbrowser` that is one browser window per source
-    table (five for examples/snowflake_wide), with all but the last leaked.
+    table, with all but the last leaked.
     """
     import snowflake.connector
 

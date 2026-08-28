@@ -287,7 +287,7 @@ All three built-in data adapters (local, snowflake, spark) ship them, so this fi
 
 **Why:** two different causes, and the window count tells them apart.
 
-*One window per source table, all at once* (five for `examples/snowflake_wide`) was an mbt bug: the compiler pins every source's snapshot concurrently on one shared adapter, and the adapter's lazy connection setup was unsynchronized, so each thread opened its own connection.
+*One window per source table, all at once* (one per table in the project) was an mbt bug: the compiler pins every source's snapshot concurrently on one shared adapter, and the adapter's lazy connection setup was unsynchronized, so each thread opened its own connection.
 Fixed - the adapter now serializes connection setup, so a compile costs one connection no matter how many sources it pins.
 If you still see it, you are on an older mbt.
 

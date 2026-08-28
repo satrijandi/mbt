@@ -13,9 +13,9 @@ adapter with its generated SQL executed in DuckDB (the shared stub), and the
 identifiers are cross-checked against the seeding script. The credentialed
 end-to-end proof lives in tests/test_showcase_snowflake.py.
 
-The wide shape here is richer than examples/snowflake_wide's: the three
-feature histories join by DIFFERENT entity keys (transactions only match
-through safe_id), which is the case a single shared join key would not cover.
+The wide shape here uses DIFFERENT entity keys per feature history
+(transactions match only through safe_id), which a single shared join key
+would not cover, plus per-table source pruning (ADR-25).
 """
 
 import re
@@ -146,14 +146,21 @@ def _synthetic() -> dict[str, tuple[str, pa.Table]]:
             "LOADED_AT_TIME": [datetime(2026, 6, 1)] * rows,
         }
     )
-    by_customer = {"CUSTOMER_ID": cid, "INFERENCE_DATE": inf}
-    by_safe = {"SAFE_ID": sid, "INFERENCE_DATE": inf}
+    # Every feature table carries the SAME-named ingest audit column, as gold
+    # tables do. Three of them would collide in the panel; the specs' per-table
+    # `exclude:` prunes each inside its own subquery (ADR-25), so none arrives.
+    audit = {"ETL_LOADED_AT": [datetime(2026, 6, 2)] * rows}
+    keys_by_customer = {"CUSTOMER_ID": cid, "INFERENCE_DATE": inf}
+    # Feature tables carry the audit column; the label table does not (the real
+    # monthly_labels has none, and no `exclude:` would prune it).
+    by_customer = {**keys_by_customer, **audit}
+    by_safe = {"SAFE_ID": sid, "INFERENCE_DATE": inf, **audit}
 
     return {
         "monthly_population": ("MBT_SHOWCASE_MONTHLY_POPULATION", spine),
         "monthly_labels": (
             "MBT_SHOWCASE_MONTHLY_LABELS",
-            pa.table({**by_customer, "IS_CHURN": [i % 2 for i in range(rows)]}),
+            pa.table({**keys_by_customer, "IS_CHURN": [i % 2 for i in range(rows)]}),
         ),
         "demographic_history": (
             "MBT_SHOWCASE_DEMOGRAPHIC_HISTORY",
@@ -239,12 +246,39 @@ def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> 
         "txn_cnt_30d",
         "is_churn",
     }
+    # ADR-25: all three feature tables carry an identically-named
+    # etl_loaded_at, and none of them reaches the panel - each was pruned
+    # inside its own source subquery, so they never collided in the first
+    # place. A model's features.exclude could not have saved this: the
+    # collision would happen during the join, before any model sees it.
+    assert "etl_loaded_at" not in panel.column_names
     # Spine-driven row counts: 10 customers x 2 month-starts in the train
     # window, 10 x 1 in test. transaction_history joined through safe_id
     # alone, so a broken crosswalk would show up as nulls or dropped rows.
     assert panel.num_rows == CUSTOMERS * 2
     assert handle.read("test").num_rows == CUSTOMERS
     assert panel.column("txn_cnt_30d").null_count == 0
+
+
+def test_no_profile_env_var_default_is_a_bare_number() -> None:
+    """env_var() taints; redact() censors tainted strings out of ALL serialized
+    output by plain substring replacement. A short numeric value is therefore a
+    footgun: `env_var('SHOWCASE_MLFLOW_PORT', '5501')` made "5501" a secret,
+    and redaction then ate those digits out of the middle of an unrelated PSI
+    float, producing `"value":0.1***234` and an unparseable job result.
+
+    It fails far from the cause (the scoring job's monitor_stats carry enough
+    high-precision floats to make a collision likely) and only for some runs,
+    so a static check is worth more than a runtime one. Compose ports stay in
+    compose; profiles reference whole URIs.
+    """
+    text = (PROJECT / "profiles.yml").read_text()
+    defaults = re.findall(r"env_var\('[A-Z_0-9]+',\s*'([^']*)'\)", text)
+    numeric = [d for d in defaults if d.strip() and d.strip().isdigit()]
+    assert not numeric, (
+        f"purely numeric env_var defaults in profiles.yml: {numeric}. "
+        "Use a whole URI/path so redaction cannot collide with a float."
+    )
 
 
 def test_wide_tables_is_exactly_what_the_wide_specs_reference() -> None:

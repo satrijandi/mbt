@@ -43,7 +43,7 @@ AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 # in your shell, externalbrowser SSO needs a real browser, and the runner
 # image does not ship mbt-snowflake. The host reaches the stack over its
 # published ports, which the `snowflake` target reads from these same vars.
-HOST_MBT := SHOWCASE_MLFLOW_PORT=$(or $(SHOWCASE_MLFLOW_PORT),5501) \
+HOST_MBT := SHOWCASE_MLFLOW_URI=http://localhost:$(or $(SHOWCASE_MLFLOW_PORT),5501) \
   SHOWCASE_S3_PORT=$(or $(SHOWCASE_S3_PORT),8333) \
   AWS_ACCESS_KEY_ID=$(or $(SHOWCASE_S3_KEY),mbtadmin) \
   AWS_SECRET_ACCESS_KEY=$(or $(SHOWCASE_S3_SECRET),mbtsecret) \

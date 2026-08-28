@@ -156,11 +156,21 @@ churn_lake:
       tracking:
         adapter: mlflow
         config:
-          uri: "http://localhost:{{ env_var('SHOWCASE_MLFLOW_PORT', '5501') }}"
+          # A WHOLE URI, never a bare port. env_var() taints its value, and
+          # redact() replaces every tainted string anywhere in serialized
+          # output - so a 4-digit port becomes a "secret" that gets censored
+          # out of the middle of unrelated floats, corrupting the job-result
+          # JSON ("value":0.1***234). A full URI cannot collide with a number.
+          uri: "{{ env_var('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
       registry:
         adapter: mlflow
         config:
-          uri: "http://localhost:{{ env_var('SHOWCASE_MLFLOW_PORT', '5501') }}"
+          # A WHOLE URI, never a bare port. env_var() taints its value, and
+          # redact() replaces every tainted string anywhere in serialized
+          # output - so a 4-digit port becomes a "secret" that gets censored
+          # out of the middle of unrelated floats, corrupting the job-result
+          # JSON ("value":0.1***234). A full URI cannot collide with a number.
+          uri: "{{ env_var('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
       compute: {adapter: local}
       # Its own prefix in the same SeaweedFS bucket the lake plane uses, so
       # both planes' artifacts live in one store but never interleave.

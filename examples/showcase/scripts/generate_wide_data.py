@@ -21,9 +21,15 @@ by their producer to the inference_date they serve; the balances they
 describe are as of inference_date - 1 day (a batch run has complete data
 only through the end of the previous day), which the spine records in its
 informational as_of_date column - a lineage column, not a join key.
-loaded_at_time is the lakehouse ingest audit column (spine only:
-shared-name audit columns on joined tables would collide in the panel);
-both are excluded from features.
+loaded_at_time is the spine's lakehouse ingest audit column; it and
+as_of_date are excluded from features.
+
+Every FEATURE table additionally carries its own ``etl_loaded_at`` ingest
+audit column, under the same name on all three - which is what real gold
+tables look like, and which would collide in the joined panel if it reached
+it. It does not: the wide specs prune it per table at the source (ADR-25), so
+it is never scanned, transferred, or materialized. That pruning is the reason
+these columns can exist here at all.
 
 monthly_labels follows the gold-layer label contract: each row is keyed by
 the cohort's OWN inference_date, and rows appear only once the outcome
@@ -31,8 +37,7 @@ window has closed (one calendar month later) - so the newest cohort is
 deliberately absent from monthly_labels; its outcomes live only in
 wide_churn_outcomes until the monitor anchor. A raw upstream feed keyed by
 observation date would instead be joined with the dataset spec's
-`time_offset` (ADR-22), which the snowflake_wide example still
-demonstrates.
+`time_offset` (ADR-22).
 
 demographic_history carries one NUMERIC-CODED categorical on purpose:
 contract_code (int8, 0 = month-to-month ... 3 = two-year). Its churn effect
@@ -183,6 +188,12 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
                 "contract_code": contract_code[idx],
                 "household_size": rng.integers(1, 6, n),
                 "tenure_months": np.full(n, month_idx) + rng.integers(1, 60, n),
+                # Per-table ingest audit column, pruned AT THE SOURCE by the
+                # specs' per-table `exclude:` (ADR-25). Every feature table
+                # carries one under the same name, exactly as real gold tables
+                # do; without source-side pruning they would collide in the
+                # joined panel, which is why they could not exist here before.
+                "etl_loaded_at": np.full(n, loaded_at, dtype="datetime64[us]"),
                 **_filler(rng, "dem", filler_columns, n),
             }
         )
@@ -194,6 +205,7 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
                 "days_since_login": days_since_login,
                 "sessions_30d": (login_days * np.clip(rng.normal(2.2, 0.6, n), 0.5, None)).round(0),
                 "avg_session_min": np.clip(rng.normal(9.0, 3.5, n), 0.5, None).round(1),
+                "etl_loaded_at": np.full(n, loaded_at, dtype="datetime64[us]"),
                 **_filler(rng, "log", filler_columns, n),
             }
         )
@@ -208,6 +220,7 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
                     (txn_cnt / 4.0) + rng.normal(0, 1.5, n), 1.0, None
                 ).round(0),
                 "top_category": top_category[idx],
+                "etl_loaded_at": np.full(n, loaded_at, dtype="datetime64[us]"),
                 **_filler(rng, "txn", filler_columns, n),
             }
         )
@@ -236,7 +249,10 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
 
     total = sum(len(p["customer_id"]) for p in demo_parts)
     rate = np.concatenate(labels["is_churn"]).mean()
-    width = len(demo_parts[0]) + len(login_parts[0]) + len(txn_parts[0]) - 4
+    # Minus the 4 duplicated join keys, and minus the 3 per-table
+    # etl_loaded_at columns the specs prune at the source (ADR-25) - they are
+    # generated but never reach the panel, so counting them would overstate it.
+    width = len(demo_parts[0]) + len(login_parts[0]) + len(txn_parts[0]) - 4 - 3
     print(f"population rows: {total}, churn rate: {rate:.1%}, joined feature columns: ~{width}")
     print(f"newest cohort (scoring batch {MONTHS[-1]:%Y-%m-%d}): {newest_cohort.size} customers")
 

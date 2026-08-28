@@ -13,8 +13,9 @@
 # outcome window has closed (one calendar month later), so the newest
 # cohort has no label rows yet at the build anchor and the plain inner
 # join below cannot leak immature outcomes. A raw upstream feed keyed by
-# observation date would instead declare `time_offset: "1mo"` here - the
-# snowflake_wide example still demonstrates that shape.
+# observation date would instead declare `time_offset: "1mo"` here to shift
+# the join off the spine's date (ADR-22); this project models the matured
+# gold-layer shape, so it does not need one.
 datasets:
   - name: wide_churn_training
     description: Monthly churn panel joined from population + labels + three feature histories.
@@ -23,13 +24,28 @@ datasets:
       label:
         source: source('lake', 'monthly_labels')
         using: [customer_id, inference_date]
+      # Each feature table carries its own `etl_loaded_at` ingest audit
+      # column, under the SAME name on all three - which is what gold tables
+      # actually look like. A per-table `exclude:` prunes it inside the source
+      # query (ADR-25), so it is never scanned, transferred, or materialized.
+      # This is source-side reduction, distinct from the models'
+      # `features.exclude`, which drops columns AFTER materialization: three
+      # identically-named columns would collide in the panel long before a
+      # model could ignore them.
+      #
+      # Drop-list rather than a `columns:` keep-list here because the tables'
+      # width is a knob (`--filler-columns`), so an enumerated keep-list would
+      # go stale every time the stress shape changed.
       features:
         - source: source('lake', 'demographic_history')
           using: [customer_id, inference_date]
+          exclude: [etl_loaded_at]
         - source: source('lake', 'login_history')
           using: [customer_id, inference_date]
+          exclude: [etl_loaded_at]
         - source: source('lake', 'transaction_history')
           using: [safe_id, inference_date]
+          exclude: [etl_loaded_at]
     label:
       column: is_churn
       definition: "churned during the month after inference_date"

@@ -544,9 +544,11 @@ def test_full_local_training_loop_from_live_snowflake(live: LiveWarehouse, tmp_p
     assert reproduced["model.live_snowflake.churn_classifier"]["metrics"] == baseline
 
 
-# -- the wide multi-table example (examples/snowflake_wide) -----------------------------
+# -- the wide multi-table cadence (examples/showcase) -------------------------------------
 
-EXAMPLE_WIDE = Path(__file__).resolve().parents[3] / "examples" / "snowflake_wide"
+SHOWCASE_PROJECT = Path(__file__).resolve().parents[3] / "examples" / "showcase" / "project"
+#: The showcase's committed windows span a year; narrow them to the months this
+#: fixture seeds, so the split boundaries stay meaningful at 4 cohorts.
 WIDE_WINDOWS = {
     "train": ("2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z"),
     "test": ("2026-03-01T00:00:00Z", "2026-05-01T00:00:00Z"),
@@ -555,8 +557,13 @@ WIDE_TEST_WINDOW_START = date(2026, 3, 1)
 
 
 def _seed_wide_rows(n_customers: int = 120) -> list[dict[str, Any]]:
-    """One row per customer per month-start (Jan-Apr 2026), for all five wide
-    tables; every table shares (customer_id, snapshot_date)."""
+    """One row per customer per month-start (Jan-Apr 2026) for the wide tables.
+
+    The showcase shape: the spine carries the customer_id-to-safe_id crosswalk,
+    demographics/logins join by customer_id, and transactions join by safe_id
+    ALONE - so a broken crosswalk shows up as dropped rows rather than as a
+    column error.
+    """
     months = [date(2026, m, 1) for m in (1, 2, 3, 4)]
     rows: list[dict[str, Any]] = []
     for c in range(n_customers):
@@ -565,57 +572,72 @@ def _seed_wide_rows(n_customers: int = 120) -> list[dict[str, Any]]:
             rows.append(
                 {
                     "customer_id": c,
-                    "snapshot_date": month,
+                    "safe_id": f"S{c:06d}",
+                    "inference_date": month,
+                    "as_of_date": month - timedelta(days=1),
+                    "loaded_at_time": month + timedelta(days=2),
+                    "etl_loaded_at": month + timedelta(days=2),
                     "is_churn": 1 if signal > 0.6 else 0,
-                    "age": 20 + (c % 50),
-                    "tenure_months": c % 36,
-                    "logins_30d": (c * 3) % 40,
-                    "avg_session_min": float((c % 25) + 1),
-                    "monthly_spend": float(10 + (c % 90)),
-                    "plan_tier": ["basic", "pro", "enterprise"][c % 3],
+                    "age_years": 20 + (c % 50),
+                    "contract_code": c % 4,
+                    "login_days_30d": (c * 3) % 30,
+                    "txn_cnt_30d": (c * 7) % 40,
                 }
             )
     return rows
 
 
-#: logical name (as used in examples/snowflake_wide/sources.yml) -> (DDL, row->values)
+#: logical name (as in examples/showcase/project/sources.yml) -> (DDL, row->values).
+#: Each FEATURE table carries the same-named ETL_LOADED_AT audit column: three
+#: of them would collide in the panel, and the specs' per-table `exclude:`
+#: (ADR-25) is what stops them ever arriving. That is the point of this fixture.
 _WIDE_TABLES: dict[str, tuple[str, Any]] = {
-    "customer_population": (
-        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE",
-        lambda r: (r["customer_id"], r["snapshot_date"]),
-    ),
-    "churn_labels": (
-        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, IS_CHURN INTEGER",
-        lambda r: (r["customer_id"], r["snapshot_date"], r["is_churn"]),
-    ),
-    "demographic_features": (
-        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, AGE INTEGER, TENURE_MONTHS INTEGER",
-        lambda r: (r["customer_id"], r["snapshot_date"], r["age"], r["tenure_months"]),
-    ),
-    "engagement_features": (
-        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, LOGINS_30D INTEGER, AVG_SESSION_MIN FLOAT",
-        lambda r: (r["customer_id"], r["snapshot_date"], r["logins_30d"], r["avg_session_min"]),
-    ),
-    # etl_loaded_at exists so the example's per-table `exclude:` (ADR-25) has
-    # something real to prune on the live engine.
-    "billing_features": (
-        "CUSTOMER_ID INTEGER, SNAPSHOT_DATE DATE, MONTHLY_SPEND FLOAT, PLAN_TIER STRING, "
-        "ETL_LOADED_AT DATE",
+    "monthly_population": (
+        "CUSTOMER_ID INTEGER, SAFE_ID STRING, INFERENCE_DATE DATE, "
+        "AS_OF_DATE DATE, LOADED_AT_TIME DATE",
         lambda r: (
             r["customer_id"],
-            r["snapshot_date"],
-            r["monthly_spend"],
-            r["plan_tier"],
-            r["snapshot_date"] + timedelta(days=2),
+            r["safe_id"],
+            r["inference_date"],
+            r["as_of_date"],
+            r["loaded_at_time"],
         ),
+    ),
+    "monthly_labels": (
+        "CUSTOMER_ID INTEGER, INFERENCE_DATE DATE, IS_CHURN INTEGER",
+        lambda r: (r["customer_id"], r["inference_date"], r["is_churn"]),
+    ),
+    "demographic_history": (
+        "CUSTOMER_ID INTEGER, INFERENCE_DATE DATE, AGE_YEARS INTEGER, "
+        "CONTRACT_CODE INTEGER, ETL_LOADED_AT DATE",
+        lambda r: (
+            r["customer_id"],
+            r["inference_date"],
+            r["age_years"],
+            r["contract_code"],
+            r["etl_loaded_at"],
+        ),
+    ),
+    "login_history": (
+        "CUSTOMER_ID INTEGER, INFERENCE_DATE DATE, LOGIN_DAYS_30D INTEGER, ETL_LOADED_AT DATE",
+        lambda r: (
+            r["customer_id"],
+            r["inference_date"],
+            r["login_days_30d"],
+            r["etl_loaded_at"],
+        ),
+    ),
+    "transaction_history": (
+        "SAFE_ID STRING, INFERENCE_DATE DATE, TXN_CNT_30D INTEGER, ETL_LOADED_AT DATE",
+        lambda r: (r["safe_id"], r["inference_date"], r["txn_cnt_30d"], r["etl_loaded_at"]),
     ),
 }
 
 
 @pytest.fixture(scope="session")
 def wide_tables(live: LiveWarehouse) -> dict[str, str]:
-    """Seed the five wide-example tables (population + label + three features),
-    all keyed on (customer_id, snapshot_date); dropped by the `live` teardown."""
+    """Seed the wide cadence's tables (spine + label + three feature histories);
+    dropped by the `live` teardown."""
     rows = _seed_wide_rows()
     names: dict[str, str] = {}
     for logical, (ddl, to_values) in _WIDE_TABLES.items():
@@ -630,17 +652,20 @@ def wide_tables(live: LiveWarehouse) -> dict[str, str]:
     return names
 
 
-def test_wide_example_multi_table_join_live(
+def test_wide_cadence_multi_table_join_live(
     live: LiveWarehouse, wide_tables: dict[str, str], tmp_path: Path
 ) -> None:
-    """The committed examples/snowflake_wide dataset spec against real Snowflake:
-    a population spine, a label table, and three feature tables (all joined on
-    [customer_id, snapshot_date]) push down to one query per split, with the
-    label's join columns projected away."""
-    doc = yaml.safe_load((EXAMPLE_WIDE / "datasets" / "wide_churn_training.yml").read_text())
+    """The showcase's committed wide dataset spec against real Snowflake.
+
+    Distinct from tests/test_showcase_snowflake.py, which proves the same
+    cadence with the docker stack up: this needs only warehouse credentials, so
+    it is the laptop-only proof that the multi-table join, the heterogeneous
+    entity keys, and the ADR-25 source-side pruning all hold on the real engine.
+    """
+    doc = yaml.safe_load((SHOWCASE_PROJECT / "datasets" / "wide_churn_training.yml").read_text())
     spec = DatasetSpec.model_validate(doc["datasets"][0])
 
-    # Remap the example's source() refs onto the uniquely-named seeded tables.
+    # Remap the project's source() refs onto the uniquely-named seeded tables.
     refs = [
         spec.inputs.spine,
         spec.inputs.label_source,
@@ -654,7 +679,7 @@ def test_wide_example_multi_table_join_live(
     adapter = SnowflakeDataAdapter(live.config)
     pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
     node = ManifestNode(
-        unique_id="dataset.snowflake_wide.wide_churn_training",
+        unique_id="dataset.churn_lake.wide_churn_training",
         resource_type="dataset",
         name="wide_churn_training",
         path="datasets/wide_churn_training.yml",
@@ -674,25 +699,33 @@ def test_wide_example_multi_table_join_live(
 
     train = pq.read_table(ctx.output_dir / "train.parquet")
     test = pq.read_table(ctx.output_dir / "test.parquet")
-    # Join keys merged, every feature column present, label projected in, and
-    # the label's join columns projected away - identifiers normalized to lower.
+    # Spine crosswalk + lineage columns, each history's payload, the label
+    # projected in, its join columns projected away - identifiers lowercased.
     expected_columns = {
         "customer_id",
-        "snapshot_date",
-        "age",
-        "tenure_months",
-        "logins_30d",
-        "avg_session_min",
-        "monthly_spend",
-        "plan_tier",
+        "safe_id",
+        "inference_date",
+        "as_of_date",
+        "loaded_at_time",
+        "age_years",
+        "contract_code",
+        "login_days_30d",
+        "txn_cnt_30d",
         "is_churn",
     }
     assert set(train.column_names) == expected_columns
     assert set(test.column_names) == expected_columns
-    # Every (customer, snapshot) in the population joined its label + features,
-    # split exactly by the example's temporal windows.
+    # ADR-25 on the real engine: three identically-named ETL_LOADED_AT columns
+    # existed in the sources and none reached the panel. Without source-side
+    # pruning this join would have failed outright on duplicate columns.
+    assert "etl_loaded_at" not in train.column_names
+    # transaction_history joined through safe_id alone, so a broken crosswalk
+    # would show as nulls here rather than as a missing column.
+    assert train.column("txn_cnt_30d").null_count == 0
+    # Every (customer, inference_date) in the spine joined its label and
+    # features, split exactly by the windows above.
     all_rows = _seed_wide_rows()
-    expected_test = sum(1 for r in all_rows if r["snapshot_date"] >= WIDE_TEST_WINDOW_START)
+    expected_test = sum(1 for r in all_rows if r["inference_date"] >= WIDE_TEST_WINDOW_START)
     assert test.num_rows == expected_test
     assert train.num_rows == len(all_rows) - expected_test
     assert handle.snapshot_id == ctx.node.snapshot_id
