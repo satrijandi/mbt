@@ -665,6 +665,51 @@ def test_connect_passes_config_through_and_caches(monkeypatch: pytest.MonkeyPatc
     assert calls == [{"account": "acct", "user": "u", "role": "R", "login_timeout": 5}]
 
 
+def test_connect_drops_empty_connect_args_but_keeps_falsy_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset env_var default renders '' - which is a VALUE, not "unset".
+
+    profiles.yml renders whole whichever target is selected, so a target that
+    offers key-pair auth carries private_key_file: "" whenever the env var is
+    absent. Passing that to the connector alongside authenticator:
+    externalbrowser is wrong (it only survives today because the connector
+    happens to test truthiness), so empty strings are dropped here the way
+    empty top-level keys are.
+
+    False and 0 must NOT be dropped: they are meaningful connector settings,
+    and the empty-string rule must not quietly become a falsy rule.
+    """
+    import snowflake.connector
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_connect(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(snowflake.connector, "connect", fake_connect)
+
+    SnowflakeDataAdapter(
+        {
+            "account": "acct",
+            "user": "u",
+            "authenticator": "externalbrowser",
+            "connect_args": {
+                "private_key_file": "",  # the unset-env-var artifact
+                "private_key_file_pwd": "",
+                "login_timeout": 0,  # falsy but meaningful
+                "insecure_mode": False,  # falsy but meaningful
+            },
+        }
+    )._connect()
+
+    assert "private_key_file" not in calls[-1], calls[-1]
+    assert "private_key_file_pwd" not in calls[-1], calls[-1]
+    assert calls[-1]["login_timeout"] == 0
+    assert calls[-1]["insecure_mode"] is False
+
+
 def test_connect_externalbrowser_defaults_sso_token_caching(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

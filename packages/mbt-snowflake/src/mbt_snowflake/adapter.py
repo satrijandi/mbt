@@ -140,7 +140,16 @@ class SnowflakeDataAdapter:
         kwargs: dict[str, Any] = {
             key: self.config[key] for key in _CONNECT_KEYS if self.config.get(key)
         }
-        kwargs.update(self.config.get("connect_args", {}))
+        # Drop empty-string connect_args the way the keys above are dropped.
+        # profiles.yml renders WHOLE whichever target is selected, so every
+        # env_var() a non-selected auth mode references carries a '' default -
+        # and '' is not "unset" to the connector, it is a value (an empty
+        # private_key_file alongside authenticator: externalbrowser).
+        # ONLY empty strings: False and 0 are meaningful connector settings
+        # (client_store_temporary_credential, login_timeout), and an explicit
+        # connect_args value must keep winning over the defaults below.
+        connect_args = self.config.get("connect_args", {})
+        kwargs.update({key: value for key, value in connect_args.items() if value != ""})
         # SSO must survive mbt's execution model: every job subprocess opens
         # its own connection, so without cached tokens `externalbrowser`
         # would pop one browser window PER NODE. Cache by default (an
