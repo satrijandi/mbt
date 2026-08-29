@@ -5,7 +5,6 @@ are traced; job-facing orchestration is exercised for real on the fake
 adapters where cheap and monkeypatched where only the CLI wiring matters.
 """
 
-import importlib
 import json
 import os
 import runpy
@@ -41,24 +40,30 @@ def test_missing_project_dir_is_hard_error(tmp_path: Path) -> None:
     assert "is not a directory" in result.stderr
 
 
-def test_import_falls_back_to_real_click_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Older typer has no vendored click; the module must fall back to the
-    real click exception types (the dual except tuples in main)."""
+def test_resolution_falls_back_when_typer_does_not_vendor_click(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """typer < 0.20 (the declared floor is 0.16) has no ``typer._click`` at
+    all, so resolving must survive that import failing rather than propagating
+    ImportError out of module setup, and must still find the real click's
+    types.
+
+    Simulated rather than asserted against the installed typer on purpose:
+    pinning "vendored" outright would encode the newer typer into a test whose
+    whole subject is that both are supported, and would red the floors job.
+
+    Note this does not prove the vendored classes are gone from the result -
+    a vendoring typer re-exports them as ``typer.Exit``, so they arrive via
+    the ``typer`` source anyway. That is correct: the point of the fallback is
+    that resolution keeps working, not that it finds less.
+    """
     from mbt.cli import main as cli_main
 
-    original = cli_main.typer_click_exc
-    monkeypatch.setitem(sys.modules, "typer._click", None)
-    try:
-        reloaded = importlib.reload(cli_main)
-        assert reloaded.typer_click_exc is click.exceptions
-    finally:
-        monkeypatch.undo()
-        importlib.reload(cli_main)
-    # Restored to whatever THIS typer provides: the vendored module on >= 0.20,
-    # the real click below it. Asserting "vendored" outright would encode the
-    # newer typer into a test whose whole subject is that main() supports both,
-    # and would red the floors job against the declared typer>=0.16.
-    assert cli_main.typer_click_exc is original
+    monkeypatch.setitem(sys.modules, "typer._click", None)  # import raises
+
+    resolved = cli_main._control_flow_exceptions("Exit")
+
+    assert click.exceptions.Exit in resolved
 
 
 # -- init ---------------------------------------------------------------------------

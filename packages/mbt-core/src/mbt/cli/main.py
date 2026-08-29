@@ -20,12 +20,6 @@ import typer
 import yaml
 from rich.table import Table
 
-try:  # newer typer vendors click: its commands raise the vendored exception
-    # types, which are NOT subclasses of the real click's - catch both.
-    from typer._click import exceptions as typer_click_exc
-except ImportError:  # older typer drives the real click directly
-    from click import exceptions as typer_click_exc  # type: ignore[no-redef]
-
 from mbt.cli.common import (
     CLIContext,
     err_console,
@@ -38,6 +32,59 @@ from mbt.cli.common import (
     setup_bus,
 )
 from mbt.exceptions import ConfigError, MbtError
+
+
+def _control_flow_exceptions(name: str) -> tuple[type[BaseException], ...]:
+    """Every distinct class called ``name`` that a typer/click command might
+    raise, across the places different versions keep them.
+
+    typer >= 0.20 vendors click, and its commands raise the VENDORED exception
+    types, which are not subclasses of the real click's - so both have to be
+    caught or ``mbt`` exits on its own control flow. But which module holds
+    which name is not stable either: typer 0.27 moved ``Exit`` and ``Abort``
+    out of ``typer._click.exceptions`` into ``typer.exceptions`` as plain
+    RuntimeErrors, leaving ``UsageError``/``ClickException`` where they were.
+
+    The previous shape guarded the IMPORT (`except ImportError`), which that
+    move sails straight through: the module still imports, it has simply lost
+    two attributes - so every single `mbt` invocation died with
+    `AttributeError: module 'typer._click.exceptions' has no attribute 'Exit'`
+    while evaluating the except clause. Not a test failure: the CLI, gone, for
+    anyone installing unpinned. The nightly upstream-resolution tier caught it
+    before a release did.
+
+    So: probe by name, take whatever is there, and stay indifferent to which
+    module upstream keeps it in. A name found nowhere yields an empty tuple,
+    which `except ()` simply never matches - degrading to "we stop special-
+    casing this control-flow exception" rather than to a crash on the way to
+    reporting some other error. tests/test_cli_exception_sources.py asserts
+    none of them are actually empty, so the degradation cannot pass unnoticed.
+    """
+    sources: list[Any] = [click.exceptions, click, typer]
+    try:  # absent on typer < 0.20, which drives the real click directly
+        from typer._click import exceptions as vendored
+
+        sources.append(vendored)
+    except ImportError:  # typer < 0.20 drives the real click directly
+        pass
+
+    found: list[type[BaseException]] = []
+    for source in sources:
+        candidate = getattr(source, name, None)
+        if (
+            isinstance(candidate, type)
+            and issubclass(candidate, BaseException)
+            and candidate not in found
+        ):
+            found.append(candidate)
+    return tuple(found)
+
+
+#: Resolved once at import; see _control_flow_exceptions for why by name.
+EXIT_EXCEPTIONS = _control_flow_exceptions("Exit")
+USAGE_ERROR_EXCEPTIONS = _control_flow_exceptions("UsageError")
+CLICK_EXCEPTIONS = _control_flow_exceptions("ClickException")
+ABORT_EXCEPTIONS = _control_flow_exceptions("Abort")
 
 app = typer.Typer(
     name="mbt",
@@ -1051,15 +1098,15 @@ def main() -> None:
         result = app(standalone_mode=False)
         # click returns the code from ctx.exit()/typer.Exit in this mode.
         sys.exit(result if isinstance(result, int) else 0)
-    except (click.exceptions.Exit, typer_click_exc.Exit) as exc:
-        sys.exit(exc.exit_code)
-    except (click.UsageError, typer_click_exc.UsageError) as exc:
-        exc.show(file=sys.stderr)
+    except EXIT_EXCEPTIONS as exc:
+        sys.exit(getattr(exc, "exit_code", 0))
+    except USAGE_ERROR_EXCEPTIONS as exc:
+        exc.show(file=sys.stderr)  # type: ignore[attr-defined]
         sys.exit(1)
-    except (click.ClickException, typer_click_exc.ClickException) as exc:
-        exc.show(file=sys.stderr)
+    except CLICK_EXCEPTIONS as exc:
+        exc.show(file=sys.stderr)  # type: ignore[attr-defined]
         sys.exit(1)
-    except (click.Abort, typer_click_exc.Abort):
+    except ABORT_EXCEPTIONS:
         err_console.print("aborted")
         sys.exit(1)
     except Exception as exc:
