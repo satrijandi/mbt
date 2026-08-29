@@ -86,6 +86,60 @@ Pushing the tag runs `release.yml`, which re-runs the whole CI as a gate (it cal
 There is no hand-written `CHANGELOG.md`: it belongs to the deferred release
 pipeline, not a manual edit.
 
+### Enabling the PyPI publish (one-time, maintainer-only)
+
+Until this is done a tag still produces a fully green run and a GitHub release
+with all 20 wheels/sdists attached - the publish step is skipped by an explicit
+opt-in gate rather than failing. That ordering is deliberate: an unconfigured
+Trusted Publisher fails `invalid-publisher`, and when the publish ran *before*
+the release step it took the GitHub release down with it.
+
+Trusted Publishing uses OIDC, so there is no API token to store anywhere.
+On PyPI, for **each of the ten projects** below, add a GitHub publisher with
+exactly these values:
+
+| field | value |
+|---|---|
+| Owner | `satrijandi` |
+| Repository | `mbt` |
+| Workflow name | `release.yml` |
+| Environment | `release` |
+
+The ten projects (all must exist and all must carry the publisher, or a tag
+publishes partially):
+
+`mbt-adapter-base`, `mbt-core`, `mbt-h2o`, `mbt-lightgbm`, `mbt-mlflow`,
+`mbt-optuna`, `mbt-snowflake`, `mbt-spark`, `mbt-testing`, `mbt-xgboost`
+
+Then, in the GitHub repo:
+
+1. create the `release` environment (Settings -> Environments) - the publish job
+   declares it, and an environment that does not exist is created implicitly
+   with no protection rules, which is not what you want for a publish gate;
+2. set the repository **variable** (not secret) `PYPI_TRUSTED_PUBLISHING` to
+   `enabled`.
+
+Leave step 2 for last. It is the switch: with it unset the publish is skipped,
+with it set a publish failure fails the run loudly, which is the right
+behaviour once the publisher really is configured.
+
+`tests/test_release_workflow.py` pins the workflow name and environment above
+to what `release.yml` actually declares, so this table cannot quietly drift out
+of date and send you to PyPI with the wrong values.
+
+### Protecting `main`
+
+CI is only a gate if something enforces it. `main` should require a pull
+request and these status checks, which are the jobs `ci.yml` runs on every
+push (`docs-publish` is deliberately excluded - it is main-only and would
+deadlock a PR):
+
+`lint-type`, `test (3.11)`, `test (3.12)`, `test (3.13)`, `test (3.14)`,
+`floors`, `e2e`, `security`, `secrets-scan`, `docs`
+
+This is not hypothetical hygiene: CI ran red on `main` for eight consecutive
+commits in August 2026 because nothing stopped a push and nothing announced it.
+
 ## License
 
 By contributing, you agree that your contributions are licensed under the [Apache License 2.0](LICENSE) that covers the project.
