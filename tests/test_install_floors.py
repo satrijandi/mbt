@@ -105,3 +105,61 @@ def test_verify_ignores_a_declared_package_that_is_not_installed(
         floors, "declared_floors", lambda root, group="dev": {"not-a-real-package": "1.0"}
     )
     assert floors.verify(REPO_ROOT) == []
+
+
+# -- the job that runs it (.github/workflows/ci.yml) ---------------------------
+#
+# The script above is only as good as the job invoking it, and that half had no
+# guard: `uv venv` in the floors job started failing outright when setup-uv
+# began creating and activating a .venv of its own, and every CI run on main was
+# red for two days before anyone read a log. These are static reads of the
+# workflow, so they fail in the fast tier instead.
+
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def _floors_job() -> dict:
+    import yaml
+
+    job = yaml.safe_load(CI_WORKFLOW.read_text())["jobs"]["floors"]
+    assert isinstance(job, dict)
+    return job
+
+
+def _floors_commands() -> list[str]:
+    return [step["run"] for step in _floors_job()["steps"] if "run" in step]
+
+
+def test_the_floors_job_creates_its_venv_unconditionally() -> None:
+    """setup-uv creates and activates a .venv whenever `python-version` is set,
+    so a bare `uv venv` exits 2 with "A virtual environment already exists".
+
+    --clear is also the honest thing here regardless of setup-uv's behaviour:
+    this job must start from an empty environment, never inherit a populated
+    one, or it stops measuring the floors.
+    """
+    venv_commands = [
+        line.strip()
+        for command in _floors_commands()
+        for line in command.splitlines()
+        if line.strip().startswith("uv venv")
+    ]
+    assert venv_commands, "the floors job no longer creates a venv"
+    for command in venv_commands:
+        assert "--clear" in command, (
+            f"{command!r} must pass --clear: setup-uv already made a .venv, so a "
+            f"bare `uv venv` fails the job outright"
+        )
+
+
+def test_every_floors_step_bypasses_the_project_environment() -> None:
+    """Without --no-project, uv re-syncs from uv.lock before running and
+    silently replaces the floors with the locked versions - the job stays green
+    for the wrong reason, which is the exact failure mode it exists to end."""
+    offenders = [
+        line.strip()
+        for command in _floors_commands()
+        for line in command.splitlines()
+        if line.strip().startswith("uv run") and "--no-project" not in line
+    ]
+    assert not offenders, f"floors steps missing --no-project: {offenders}"

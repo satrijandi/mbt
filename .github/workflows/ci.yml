@@ -103,8 +103,14 @@ jobs:
           python-version: "3.11"
           enable-cache: true
       - name: Install workspace at dependency floors
+        # --clear, not a bare `uv venv`: setup-uv creates and activates a .venv
+        # of its own whenever `python-version` is set, so a bare `uv venv` exits
+        # 2 with "A virtual environment already exists" (it did, on every run,
+        # from 2026-08-27 until this line was fixed). Recreating unconditionally
+        # is also the honest thing for this job: it must start from an empty
+        # environment, never inherit one somebody else populated.
         run: |
-          uv venv
+          uv venv --clear
           uv run --no-project python scripts/install_floors.py
       - name: Assert the floors actually got installed
         # Cheap belt-and-braces: if the install path ever silently reverts to
