@@ -1,0 +1,11 @@
+# blank_issues_enabled stays true on purpose: plenty of worthwhile reports
+# ("is this the intended behaviour?") fit neither template, and forcing them
+# into one costs more than the tidiness is worth.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/satrijandi/mbt/security/advisories/new
+    about: Report privately - never in a public issue. See SECURITY.md.
+  - name: Troubleshooting runbook
+    url: https://github.com/satrijandi/mbt/blob/main/docs/troubleshooting.md
+    about: Indexed by exact error text; every entry came from a real reproduction.

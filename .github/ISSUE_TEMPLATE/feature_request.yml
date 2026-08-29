@@ -1,0 +1,40 @@
+name: Feature request
+description: Something mbt should do and does not
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Two things worth checking first, because they answer a lot of these:
+        [docs/roadmap.md](https://github.com/satrijandi/mbt/blob/main/docs/roadmap.md)
+        for what is already planned, and
+        [docs/adr/](https://github.com/satrijandi/mbt/tree/main/docs/adr) for
+        what was deliberately decided against and why. A request that argues
+        with a specific ADR is a much better issue than one that does not know
+        about it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to do, and where does mbt stop you? Describe the
+        situation rather than the feature - the best shape for a fix is often
+        not the one the reporter had in mind.
+    validations: {required: true}
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today instead
+      description: >
+        The workaround and what it costs you. "There is none" is a useful
+        answer too.
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What it might look like
+      description: >
+        Optional. If it touches specs or profiles, a YAML sketch is worth
+        several paragraphs.

@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in mbt behaves differently from what its docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Please do **not** file security reports here - use
+        [private vulnerability reporting](https://github.com/satrijandi/mbt/security/advisories/new)
+        instead (see SECURITY.md).
+
+
+        Before filing, it is worth a look at
+        [docs/troubleshooting.md](https://github.com/satrijandi/mbt/blob/main/docs/troubleshooting.md):
+        it is indexed by the exact error text, and several things that look
+        like bugs are documented behaviour with a documented fix.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, what you got, and the command you ran.
+    validations: {required: true}
+
+  - type: textarea
+    id: error
+    attributes:
+      label: Error output
+      description: >
+        Paste the full stderr. If it says "Internal error", re-run with
+        MBT_DEBUG=1 for the traceback - that is what makes it diagnosable.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: mbt version
+      description: "`mbt --version`, or the commit if you run from a checkout."
+    validations: {required: true}
+
+  - type: input
+    id: adapters
+    attributes:
+      label: Adapters in play
+      description: >
+        The data / training / tracking / registry / compute adapters from the
+        target you ran against - most bugs live in one adapter's seam.
+      placeholder: "data: snowflake, training: xgboost, registry: mlflow"
+    validations: {required: true}
+
+  - type: input
+    id: python
+    attributes:
+      label: Python and OS
+      placeholder: "3.11.9, macOS 15.5 (arm64)"
+    validations: {required: true}
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Smallest reproduction you have
+      description: >
+        Ideally the spec/profile snippet, redacted. `mbt init` scaffolds a
+        complete project, so a repro on top of it is usually short - and it is
+        the difference between a fix this week and a fix eventually.
+
+  - type: checkboxes
+    id: narrowing
+    attributes:
+      label: Narrowing (optional, but each one saves a round trip)
+      options:
+        - label: It reproduces on a fresh `mbt init` project
+        - label: It fails at `mbt compile`, before anything executes
+        - label: It reproduces with a different adapter for the same seam
