@@ -165,51 +165,58 @@ def test_the_image_installs_only_extras_the_closure_pins() -> None:
     )
 
 
+def _committed_lock_versions() -> dict[str, set[str]]:
+    """{canonical name: every version uv.lock pins} from the COMMITTED lock.
+
+    Deliberately the committed file rather than the working tree's, and read
+    directly rather than through `uv export`, for one reason: the
+    upstream-resolution tier runs `uv lock --upgrade` and then the fast suite,
+    so in that tier the working tree's lock is a throwaway re-resolution that
+    is never committed. Comparing the committed image closure against it fails
+    by construction and says nothing - which is exactly what it did the first
+    time this test met that tier.
+
+    A set, not a version, because the lock legitimately pins several versions
+    of one package: `[tool.uv] conflicts` forks numpy/scipy/pyspark/xgboost so
+    mbt-h2o[sparkling] can hold Spark 3.5 (ADR-17). Any of them satisfies pip.
+    """
+    import subprocess
+    import tomllib
+
+    committed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", "HEAD:uv.lock"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    raw = committed.stdout if committed.returncode == 0 else (REPO_ROOT / "uv.lock").read_text()
+
+    versions: dict[str, set[str]] = {}
+    for package in tomllib.loads(raw).get("package", []):
+        versions.setdefault(_canon(package["name"]), set()).add(package["version"])
+    return versions
+
+
 def test_the_extras_closure_agrees_with_uv_lock_on_shared_packages() -> None:
     """image-extras.txt is resolved AGAINST uv.lock's pins, so the two must
     agree on every package they both name - pip is handed both as constraint
     files and two different pins for one package is an unsatisfiable build.
 
-    This is the drift alarm: a `uv lock` that moves numpy/pandas/scikit-learn
-    invalidates the committed closure, and it should fail here - in the fast
-    suite, in a second, naming the fix - rather than five minutes into a docker
-    build in an opt-in tier.
+    This is the drift alarm: a commit that moves numpy/pandas/scikit-learn in
+    the lock invalidates the committed closure, and it should fail here - in
+    the fast suite, in a second, naming the fix - rather than five minutes into
+    a docker build in an opt-in tier.
     """
     extras = _requirements(EXTRAS_TXT)
     assert extras, "image-extras.txt has no pins; run scripts/lock_image_extras.sh"
 
-    import subprocess
-
-    exported = subprocess.run(
-        [
-            "uv",
-            "export",
-            "--frozen",
-            "--no-emit-workspace",
-            "--no-hashes",
-            "--no-annotate",
-            "--no-header",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if exported.returncode != 0:  # pragma: no cover - uv is always present in CI
-        import pytest
-
-        pytest.skip(f"uv export unavailable: {exported.stderr.strip()[:200]}")
-
-    locked: dict[str, str] = {}
-    for line in exported.stdout.splitlines():
-        match = re.match(r"^([A-Za-z0-9._-]+)==([^;\s]+)", line.strip())
-        if match:
-            locked.setdefault(_canon(match.group(1)), match.group(2))
+    locked = _committed_lock_versions()
+    assert locked, "could not read any package pins out of uv.lock"
 
     disagreements = {
-        name: (locked[name], extras[name])
+        name: (sorted(locked[name]), extras[name])
         for name in locked.keys() & extras.keys()
-        if locked[name] != extras[name]
+        if extras[name] not in locked[name]
     }
     assert not disagreements, (
         f"uv.lock and image-extras.txt disagree on {disagreements} (locked, extras). "
