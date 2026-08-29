@@ -24,7 +24,7 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mbt_adapter_base import (
     DatasetLocator,
@@ -79,6 +79,48 @@ def _project_feature_frame(frame: "DataFrame", entry: FeatureEntry) -> "DataFram
     return frame
 
 
+#: Which of a source table's two addresses this adapter reads it by.
+SourceAddress = Literal["path", "identifier"]
+
+
+def resolve_source_address(
+    source: SourceTableLike, configured: SourceAddress | None = None
+) -> SourceAddress:
+    """Decide whether to read ``source`` by ``path`` or by ``identifier``.
+
+    Spark is the only adapter that understands both (object-store/local
+    directories AND catalog tables), so it is the only one that can be handed
+    an ambiguous table. Declaring both is a legitimate thing to do - it is how
+    one project serves a file plane and a warehouse plane off a single
+    ``sources.yml`` - but which one *this* target reads is then a property of
+    the target, not of the table, and only the operator knows it.
+
+    So: a table declaring one address is read by that address, and a table
+    declaring both is an error unless the adapter's ``source_address`` config
+    says which. Guessing is not an option here. Until this function existed
+    ``_read`` silently preferred ``identifier`` while ``snapshot_id`` hashed
+    the ``path``, so an ambiguous table pinned one dataset and trained on
+    another - and adding a warehouse identifier to a shared ``sources.yml``
+    redirected the file planes at catalog tables that did not exist.
+    """
+    has_path = source.path is not None
+    has_identifier = source.identifier is not None
+    if has_path and has_identifier:
+        if configured is None:
+            raise SparkAdapterError(
+                f"source table {source.name!r} declares both 'path' and 'identifier', "
+                f"and the Spark adapter can read either",
+                hint="set source_address: path (or: identifier) in this target's "
+                "spark adapter config in profiles.yml to say which address it reads",
+            )
+        return configured
+    if has_path:
+        return "path"
+    if has_identifier:
+        return "identifier"
+    raise SparkAdapterError(f"source table {source.name!r} needs 'path' or 'identifier'")
+
+
 def _quote(column: str) -> str:
     return "`" + column.replace("`", "``") + "`"
 
@@ -125,6 +167,16 @@ class SparkDataAdapter:
         self.master: str = str(config.get("master", "local[*]"))
         self.conf: dict[str, Any] = dict(config.get("conf", {}))
         self.root: str | None = config.get("root")  # optional prefix for path sources
+        #: Tie-breaker for source tables that declare BOTH ``path`` and
+        #: ``identifier`` (see ``resolve_source_address``). Unset is the right
+        #: default: it means "no table may be ambiguous", which is only a
+        #: constraint on projects that address the same table two ways.
+        address: Any = config.get("source_address")
+        if address is not None and address not in ("path", "identifier"):
+            raise SparkAdapterError(
+                f"source_address must be 'path' or 'identifier', got {address!r}"
+            )
+        self.source_address: SourceAddress | None = address
         from mbt_adapter_base.predictions import resolve_predictions_root
 
         #: Where staged prediction runs land (contract 1.1); joined with the
@@ -167,21 +219,27 @@ class SparkDataAdapter:
             return f"{self.root.rstrip('/')}/{source.path}"
         return source.path
 
+    def _address(self, source: SourceTableLike) -> SourceAddress:
+        return resolve_source_address(source, self.source_address)
+
     def _read(self, source: SourceTableLike) -> "DataFrame":
+        # Resolve the address OUTSIDE the try: an ambiguous or address-less
+        # table is a config error, and wrapping it as "cannot read source"
+        # would bury the hint that names the fix.
+        address = self._address(source)
         spark = self._spark()
         try:
-            if source.identifier is not None:
+            if address == "identifier":
+                assert source.identifier is not None
                 return spark.table(source.identifier)
-            if source.path is not None:
-                fmt = "delta" if source.format == "delta" else "parquet"
-                return spark.read.format(fmt).load(self._resolve_path(source))
+            fmt = "delta" if source.format == "delta" else "parquet"
+            return spark.read.format(fmt).load(self._resolve_path(source))
         except Exception as exc:
             raise SparkAdapterError(
                 f"cannot read source {source.name!r}: {exc}",
                 hint="check the path/identifier and, for Delta, that "
                 "delta-spark is installed and configured",
             ) from exc
-        raise SparkAdapterError(f"source table {source.name!r} needs 'path' or 'identifier'")
 
     # -- snapshots ------------------------------------------------------------------
 
@@ -196,9 +254,14 @@ class SparkDataAdapter:
 
         The branch is decided on the RESOLVED path: a relative table path
         under a URI root (e.g. root s3://lake + path t/*.parquet) is a URI
-        source, and locally globbing it would always find nothing."""
+        source, and locally globbing it would always find nothing.
+
+        It is also decided on the address this adapter actually READS the
+        table by, not merely on ``path`` being present: pinning the local
+        parquet files of a table that ``_read`` then serves from the catalog
+        would pin a snapshot of data the run never touches."""
         digest = hashlib.sha256()
-        resolved = self._resolve_path(source) if source.path is not None else None
+        resolved = self._resolve_path(source) if self._address(source) == "path" else None
         if resolved is not None and "://" not in resolved:
             pattern = resolved
             root = Path(pattern.split("*", 1)[0]).parent if "*" in pattern else Path(pattern)

@@ -13,10 +13,18 @@
 #                the very same parquet the lake is seeded from).
 #
 # Declaring both is legal and load-bearing: SourceTable rejects only a table
-# that declares NEITHER, so the spark/local planes never see `identifier:`
-# and the Snowflake plane never sees `path:`. That is what lets one project,
-# one DAG, and one set of dataset/model/scoring specs serve every plane -
-# swapping planes really is just `--target`.
+# that declares NEITHER. That is what lets one project, one DAG, and one set
+# of dataset/model/scoring specs serve every plane - swapping planes really is
+# just `--target`.
+#
+# The local and Snowflake adapters each read exactly one of the two fields and
+# ignore the other, so for them a table carrying both is unambiguous. SPARK IS
+# NOT: it reads object-store paths AND catalog tables, so it refuses to guess
+# and every spark target here sets `source_address: path` in profiles.yml.
+# Leaving it unset fails the compile with a hint naming the knob - which is the
+# designed behaviour, and much better than what it replaced: adding these
+# identifiers for the Snowflake plane silently redirected the lake planes at
+# catalog tables that do not exist, and only the nightly live run caught it.
 #
 # ALL tables carry an identifier, not only the wide ones the Snowflake plane
 # actually trains on: compile pins a snapshot for every source referenced by

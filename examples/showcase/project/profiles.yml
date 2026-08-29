@@ -42,6 +42,11 @@ churn_lake:
         config:
           master: local[2]
           root: s3://mbt-lake
+          # Every table in sources.yml declares BOTH a lake `path:` and a
+          # Snowflake `identifier:` so one project serves both planes, and
+          # Spark is the one adapter that can read either - so it refuses to
+          # guess. This says the lake planes read the lake.
+          source_address: path
           conf: &s3a_conf
             spark.hadoop.fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
             spark.hadoop.fs.s3a.endpoint: http://seaweedfs:8333
@@ -65,6 +70,7 @@ churn_lake:
         config:
           master: local[2]
           root: s3://mbt-lake
+          source_address: path        # as on dev
           conf: *s3a_conf
       # Relative config paths resolve against the project directory (the CI
       # clone), so every PR gets a fresh empty registry and artifact store
@@ -85,6 +91,7 @@ churn_lake:
         config:
           master: spark://spark-master:7077
           root: s3://mbt-lake
+          source_address: path        # as on dev
           conf:
             <<: *s3a_conf
             # The runner entrypoint exports SPARK_DRIVER_HOST=$(hostname -i),

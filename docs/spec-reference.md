@@ -299,6 +299,17 @@ Snapshots pin `SYSTEM$LAST_CHANGE_COMMIT_TIME` per table at compile
 as Arrow batches into the standard local materialization, so training jobs
 never need warehouse credentials. See `packages/mbt-snowflake/README.md`.
 
+#### Declaring both addresses
+
+A table may declare `path:` **and** `identifier:` - that is how one `sources.yml`
+serves a file plane and a warehouse plane, with `--target` choosing between them
+(`examples/showcase` does exactly this across three planes).
+Each adapter reads the field it understands and ignores the other, with one
+exception: **Spark reads both**, so a target using the Spark data adapter must
+say which via `source_address: path` (or `identifier`) in its adapter config.
+Leaving it unset fails the compile, naming the table - mbt will not guess which
+address a target reads. Tables declaring only one address are unaffected.
+
 ## models/*.yml
 
 ```yaml

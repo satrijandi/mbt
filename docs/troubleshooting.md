@@ -202,6 +202,41 @@ If it is not expected, treat it as an incident: something wrote to a table your 
 **This applies to datasets only.** A scoring input (`mbt score`) and the arriving labels (`mbt monitor`) are expected to change every run, so they are exempt: a pinned manifest scores/monitors the live data instead of raising (R2-10).
 That is what makes `mbt score --manifest` / `mbt monitor --manifest` usable as the reviewed, pinned artifact a scheduled job runs from - only the training data is held immutable.
 
+## `source table '<name>' declares both 'path' and 'identifier'` (Spark)
+
+**Symptom:**
+
+```text
+Error: source table 'churn_outcomes' declares both 'path' and 'identifier', and
+the Spark adapter can read either
+  hint: set source_address: path (or: identifier) in this target's spark adapter
+  config in profiles.yml to say which address it reads
+```
+
+**Why:** Spark is the one data adapter that reads *both* object-store/local directories (`path:`) and catalog tables (`identifier:`).
+The local and Snowflake adapters each read one field and ignore the other, so for them a table carrying both is unambiguous - for Spark it is not, and which address a target reads is a property of the target, not of the table.
+Rather than guess, mbt fails during compile-time snapshot pinning, before any job runs.
+
+**Fix:** say which address this target reads, once, in `profiles.yml`:
+
+```yaml
+data:
+  adapter: spark
+  config:
+    root: s3://mbt-lake
+    source_address: path        # or: identifier
+```
+
+Tables declaring only one address are unaffected - `source_address` is only a tie-breaker, so a project mixing catalog tables and file tables still resolves both.
+
+**If you did not mean to declare both:** the usual cause is adding an `identifier:` to a shared `sources.yml` so a warehouse target can resolve it.
+That is a supported pattern (one project, several planes), and this error is the prompt to configure the plane rather than a reason to undo it.
+The alternative is worse and is what this replaced: Spark used to prefer `identifier` silently while snapshot pinning still hashed the `path`, so the run pinned one dataset and trained on another - or, if the catalog table did not exist, failed far from the cause with:
+
+```text
+[TABLE_OR_VIEW_NOT_FOUND] The table or view `MBT_SHOWCASE_CHURN_OUTCOMES` cannot be found.
+```
+
 ## `no champion of 'churn_model' in stage 'production' to score with`
 
 **Symptom (hard error, exit 1):**

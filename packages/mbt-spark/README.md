@@ -12,6 +12,7 @@ data:
     master: local[*]              # or spark://..., yarn
     conf: {spark.executor.memory: 8g}
     predictions_root: s3://lake/predictions   # optional; batch-scoring sink base
+    source_address: path          # optional; only for tables declaring BOTH
 
 # sources.yml - paths (parquet/delta) or catalog identifiers
 sources:
@@ -22,6 +23,23 @@ sources:
       - name: features
         identifier: gold.customer_features    # Hive/Unity catalog table
 ```
+
+### Tables that declare both a path and an identifier
+
+Spark is the only adapter that reads both object-store directories and catalog
+tables, so it is the only one that can be handed an ambiguous source. Declaring
+both addresses is a supported pattern - it is how one `sources.yml` serves a
+file plane and a warehouse plane, with the target choosing - but *which* one a
+given target reads is a property of the target, not of the table, so mbt will
+not guess:
+
+- a table declaring one address is read by that address, `source_address` or not;
+- a table declaring **both** fails the compile unless `source_address` says which.
+
+Set it once per target (`source_address: path` on the lake targets,
+`identifier` on the catalog ones). The error names the table and the knob, and
+it fires during compile-time snapshot pinning rather than partway through a
+build.
 
 Joins (`inputs:` feature+label form), filters, deterministic `sample_key`
 sampling, and split windows all push down as Spark SQL; splits land in the

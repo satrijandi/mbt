@@ -104,7 +104,7 @@ One `sources.yml` must serve the Spark training targets, the local-adapter scori
 - Spark data adapter `root: "s3://mbt-lake"` (the `s3://` prefix is exempt from `normalized_adapter_config` project-dir path resolution; a raw `s3a://` root would be mangled).
 - Scheme mapping via conf: `spark.hadoop.fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem`, `fs.s3a.endpoint: http://seaweedfs:8333`, `fs.s3a.path.style.access: "true"`.
 - Table paths stay **relative** (`gold/subscribers/*.parquet`), so the local adapter serves the same tables from `root: /workspace/lake_local`.
-- Every table ALSO declares `identifier: MBT_SHOWCASE_<TABLE>` for the `snowflake` target (section 11, P7). Declaring both is legal - `SourceTable` rejects only a table with neither - and each adapter reads only its own field, which is what lets one project and one set of specs cover all three planes. All 12 tables carry an identifier even though only the wide cadence trains on Snowflake, because compile pins every referenced source regardless of `--select`.
+- Every table ALSO declares `identifier: MBT_SHOWCASE_<TABLE>` for the `snowflake` target (section 11, P7). Declaring both is legal - `SourceTable` rejects only a table with neither - which is what lets one project and one set of specs cover all three planes. The local and Snowflake adapters each read one field and ignore the other; Spark reads either, so the spark targets say which via `source_address: path` (see P7's consequences below). All 12 tables carry an identifier even though only the wide cadence trains on Snowflake, because compile pins every referenced source regardless of `--select`.
 
 ### 4.3 Targets (profiles.yml, committed and secret-free)
 
@@ -269,7 +269,7 @@ tests/
    **P7(b) was superseded, and that is the load-bearing change.**
    The parked scope called for a separate host-run project BESIDE the showcase, on the grounds that "snowflake sources use `identifier:` and cannot build on the spark `ci`/`dev` targets".
    That assumed a table must choose one addressing scheme.
-   It does not: `SourceTable` rejects only a table declaring NEITHER `path:` nor `identifier:`, and each adapter reads only the field it understands.
+   It does not: `SourceTable` rejects only a table declaring NEITHER `path:` nor `identifier:`.
    So every table in `sources.yml` now carries both, and the Snowflake plane is a TARGET INSIDE this project - same DAG, same dataset/model/scoring specs, not one line of spec duplicated.
    Switching planes is `--target snowflake`, so the wide shape's data-plane independence is enforced by a test rather than asserted in prose.
 
@@ -280,6 +280,10 @@ tests/
    - Registered names are namespaced per plane via the `plane_suffix` var (`""` everywhere, `"_snowflake"` on the new target). Both planes train the same spec, and without this their versions would interleave in the shared registry and quietly corrupt champion resolution. It reaches the spec through `var()`, so it enters the config hash by design - the two planes are genuinely different nodes.
    - Host-run, still. `externalbrowser` SSO needs a real browser and a localhost callback, and the runner image does not ship `mbt-snowflake` (its sparkling extra pins pyspark 3.5.x, which does not resolve cleanly against the connector's `cryptography>=46.0.5` floor). The target reaches the stack's MLflow and S3 over published ports, so `make snowflake` runs mbt on the host rather than through `$(EXEC)`.
    - Adding `identifier:` is state-neutral for the lake planes: source config lives on `ManifestSource`, and node `config_hash` covers only node config. Verified by diffing every resolved node config before and after the change.
+   - It is NOT read-neutral for Spark, which is the one adapter that reads both object-store paths and catalog tables.
+     The local and Snowflake adapters each read one field and ignore the other, so for them a both-addresses table is unambiguous; Spark refuses to guess, so all three spark targets set `source_address: path`.
+     This was learned the hard way: the first cut of P7 shipped without it, Spark's `_read` silently preferred `identifier` (while `snapshot_id` kept hashing the `path`, so the pin described data the run never read), and the whole lake plane went looking for `MBT_SHOWCASE_*` catalog tables that do not exist.
+     Push CI stayed green - every mbt-spark test was JVM-gated behind the `e2e` marker - and only the nightly live tier caught it, which is why the precedence rule now has a fast-tier test of its own (`packages/mbt-spark/tests/test_spark_source_address.py`).
 
    Testing is two-tier, and the hermetic half is the one that runs by default.
    `packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py` builds the committed wide spec through the real Snowflake adapter with its SQL executed in DuckDB (no account), and holds the both-addresses invariant plus seeder/sources agreement.
