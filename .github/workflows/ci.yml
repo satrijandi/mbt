@@ -229,3 +229,66 @@ jobs:
     steps:
       - uses: actions/deploy-pages@v4
         id: deployment
+
+  notify:
+    # A red main that nobody sees is the same failure as no CI at all: the
+    # floors job broke on 2026-08-27 and main stayed red for eight consecutive
+    # commits, because the break was in the one job nobody's change is ever
+    # about and nothing announced it. Branch protection does not close this on
+    # its own - required checks are not enforced for admins, by choice, so a
+    # maintainer push can still land on red.
+    #
+    # Same mechanism as upstream.yml and live.yml: one tracking issue,
+    # commented on rather than duplicated, closed when main is green again.
+    # Push-to-main only - a PR already shows its own checks, and a red gate on
+    # a release tag is reported by the tag run itself.
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint-type, test, floors, e2e, security, secrets-scan, docs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Raise or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "CI is failing on main"
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+
+          case " $RESULTS " in
+            *" failure "*) failed=yes ;;
+            *) failed="" ;;
+          esac
+
+          if [ -z "$failed" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "main is green again: $RUN_URL"
+            fi
+            exit 0
+          fi
+
+          body=$(printf '%s\n' \
+            "CI is red on main at \`$SHA\`." \
+            "" \
+            "Job results, in the order they are declared: $RESULTS" \
+            "" \
+            "Run: $RUN_URL" \
+            "" \
+            "Every commit pushed while this is open lands on a red main, so" \
+            "triage it before merging anything else. If the failing job is one" \
+            "nobody's change is about (floors, security, secrets-scan), suspect" \
+            "the environment rather than the diff - that is what the eight-red-" \
+            "commit streak in August 2026 turned out to be.")
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi
