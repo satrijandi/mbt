@@ -79,7 +79,16 @@ read with `getattr(..., False)`); each has a `@runtime_checkable` protocol in
 a capability adds a `_capability_conformance` mypy variable (see mbt-xgboost /
 mbt-lightgbm) so strict mypy rejects a drifted signature. The compliance suite
 also checks `feature_importance` output when present - see the
-[Adapter API reference](api-reference.md). Shared implementation helpers
+[Adapter API reference](api-reference.md).
+
+Every mbt package ships a PEP 561 `py.typed` marker, so those protocols are
+real types in *your* checkout too: run mypy over your adapter and a drifted
+signature is an error in your own build, not a surprise at runtime inside mbt.
+(Up to and including v0.1.0 the marker was missing, and a consumer's mypy
+silently skipped every `mbt_*` import - if you have an adapter written against
+an older release, expect a first strict run to surface real findings.)
+
+Shared implementation helpers
 (`mbt_adapter_base.training_helpers`) cover the common `evaluate()` body,
 `{{ auto }}` scale_pos_weight resolution, and the staged-parquet fallback
 for `data_access="path"` frameworks - prefer them over re-implementing.

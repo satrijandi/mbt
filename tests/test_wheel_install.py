@@ -250,3 +250,24 @@ def test_wheels_install_and_run_the_quickstart(tmp_path: Path) -> None:
         "model.quickstart.churn_classifier": "success",
     }
     assert (project / "target" / "manifest.json").is_file()
+
+
+def test_every_built_wheel_carries_its_pep_561_marker(built_dist: tuple[Path, Path]) -> None:
+    """tests/test_version_sync.py asserts the marker is in the source tree;
+    this asserts the build actually ships it, which is the half that decides
+    whether a consumer's type checker sees mbt's types at all.
+
+    Worth proving against a real wheel rather than trusting hatchling's
+    default include: a stray `[tool.hatch.build] include`/`exclude` on any one
+    package would drop the marker silently, and the failure mode downstream is
+    not an error - it is types quietly degrading to Any.
+    """
+    import zipfile
+
+    dist, _ = built_dist
+    wheels = sorted(dist.glob("mbt*-py3-none-any.whl"))
+    assert len(wheels) == 10, [w.name for w in wheels]
+    for wheel in wheels:
+        with zipfile.ZipFile(wheel) as archive:
+            markers = [name for name in archive.namelist() if name.endswith("/py.typed")]
+        assert markers, f"{wheel.name} ships no py.typed; downstream types degrade to Any"

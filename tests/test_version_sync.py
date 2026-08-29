@@ -47,3 +47,26 @@ def test_every_package_declares_and_ships_the_license() -> None:
         # hatchling's default license-file globs pick this up into the wheel
         assert (pyproject.parent / "LICENSE").is_file(), f"{pyproject.parent.name}: no LICENSE"
     assert (REPO_ROOT / "LICENSE").is_file()
+
+
+def test_every_package_ships_a_pep_561_marker() -> None:
+    """Without ``py.typed`` in the installed package, a consumer's type checker
+    treats every mbt import as ``Any`` - the repo is mypy --strict across all
+    ten packages internally and shipped none of that outward.
+
+    It matters most for ``mbt-adapter-base``, whose entire purpose is the typed
+    protocols third-party adapters implement (docs/adapter-authoring.md): an
+    adapter author who got the signatures wrong would have learned it at
+    runtime, in mbt, rather than from their own type checker.
+
+    Hatchling includes every file under the wheel's package dir, so the marker
+    reaching the source tree is what puts it in the distribution;
+    tests/test_wheel_install.py proves that end of it against a real wheel.
+    """
+    for pyproject in PACKAGE_PYPROJECTS:
+        (package_dir,) = (path.parent for path in (pyproject.parent / "src").glob("*/__init__.py"))
+        marker = package_dir / "py.typed"
+        assert marker.is_file(), (
+            f"{pyproject.parent.name}: no {marker.relative_to(REPO_ROOT)} - PEP 561 "
+            f"requires it or downstream type checkers ignore this package entirely"
+        )
