@@ -70,3 +70,25 @@ def test_every_package_ships_a_pep_561_marker() -> None:
             f"{pyproject.parent.name}: no {marker.relative_to(REPO_ROOT)} - PEP 561 "
             f"requires it or downstream type checkers ignore this package entirely"
         )
+
+
+def test_readme_badges_track_main_and_point_at_workflows_that_exist() -> None:
+    """The README badges are the only place a reader sees whether main is
+    green, and CI sat red on main for eight commits before anyone noticed.
+
+    ``?branch=main`` is the load-bearing part: without it a badge renders the
+    most recent run on ANY ref, so a green feature branch can paint over a red
+    main - a status signal that lies is worse than none.
+    """
+    readme = (REPO_ROOT / "README.md").read_text()
+    badges = re.findall(r"actions/workflows/([a-z]+\.yml)/badge\.svg(\?[^)\s]*)?", readme)
+    assert badges, "the README no longer shows workflow status"
+
+    for workflow, query in badges:
+        assert (REPO_ROOT / ".github" / "workflows" / workflow).is_file(), (
+            f"README badges a workflow that does not exist: {workflow}"
+        )
+        assert query and "branch=main" in query, (
+            f"the {workflow} badge does not pin ?branch=main, so it can show a "
+            f"green run from another ref while main is broken"
+        )

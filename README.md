@@ -1,5 +1,11 @@
 # mbt - Model Build Tool
 
+[![CI](https://github.com/satrijandi/mbt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/satrijandi/mbt/actions/workflows/ci.yml?query=branch%3Amain)
+[![Live integration](https://github.com/satrijandi/mbt/actions/workflows/live.yml/badge.svg?branch=main)](https://github.com/satrijandi/mbt/actions/workflows/live.yml?query=branch%3Amain)
+[![Upstream resolution](https://github.com/satrijandi/mbt/actions/workflows/upstream.yml/badge.svg?branch=main)](https://github.com/satrijandi/mbt/actions/workflows/upstream.yml?query=branch%3Amain)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%20--%203.14-blue)](https://github.com/satrijandi/mbt/blob/main/pyproject.toml)
+[![License Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/satrijandi/mbt/blob/main/LICENSE)
+
 **"dbt for machine learning models."**
 A model is a reviewed YAML spec - data, algorithm, hyperparameters, quality gates, registration target.
 Pluggable adapters execute training; a compiled manifest pins data snapshots, config hashes, seeds, and environment digests so runs are reproducible; state-aware selection retrains only what changed.

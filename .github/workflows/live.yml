@@ -17,6 +17,10 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  issues: write   # the failure notice below; a red nightly nobody reads is not a detector
+
 jobs:
   snowflake:
     runs-on: ubuntu-latest
@@ -105,3 +109,67 @@ jobs:
           path: |
             showcase-*.log
             showcase-containers.log
+
+  notify:
+    # This tier is the only thing that exercises mbt against real external
+    # systems, and nothing here runs on a PR - so a regression it catches is
+    # visible ONLY if someone opens the Actions tab. Twice now that has not
+    # happened: six consecutive red nightlies on the 0600 atomic-write bug,
+    # and a whole day of red on an unpinned transitive. upstream.yml already
+    # files a notice for exactly this reason; this is the same mechanism on
+    # the tier that actually needed it first.
+    #
+    # One issue, commented on rather than duplicated, closed automatically
+    # when the nightly goes green again.
+    needs: [snowflake, showcase]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Raise or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "Live integration is failing"
+          SNOWFLAKE_OUTCOME: ${{ needs.snowflake.result }}
+          SHOWCASE_OUTCOME: ${{ needs.showcase.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+
+          failed=""
+          if [ "$SNOWFLAKE_OUTCOME" = "failure" ]; then failed="$failed snowflake"; fi
+          if [ "$SHOWCASE_OUTCOME" = "failure" ]; then failed="$failed showcase"; fi
+
+          if [ -z "$failed" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "Live integration is green again: $RUN_URL"
+            fi
+            exit 0
+          fi
+
+          body=$(printf '%s\n' \
+            "Failing job(s):$failed" \
+            "" \
+            "Run (failure diagnostics are attached as the \`showcase-diagnostics\`" \
+            "artifact - every container's logs): $RUN_URL" \
+            "" \
+            "Triage notes:" \
+            "- This tier runs on Linux; the showcase passes on macOS Docker Desktop" \
+            "  even when it is broken, because bind mounts there present host-user" \
+            "  ownership regardless of the in-container uid. Judge a fix on Linux." \
+            "- live.yml has workflow_dispatch: never wait for the 03:17 UTC cron to" \
+            "  check a fix." \
+            "- \"Task failed with exception / mbt_monitor.monitor try 2/2\" in a" \
+            "  showcase log is the DAG exit-code-routing test driving a deliberate" \
+            "  failure, not a real one." \
+            "- The snowflake job passes vacuously when SNOWFLAKE_* secrets are not" \
+            "  configured; a failure there is a real one.")
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi
