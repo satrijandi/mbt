@@ -215,6 +215,9 @@ Every mbt surface is a batch job that exits, so there is no live scrape target; 
 - Switching an existing target's artifact-store scheme strands registered champions (fetch rejects cross-scheme refs); the showcase never flips schemes mid-life.
 - MLflow UI shows pointers/tags, not model binaries (mbt only `log_artifact`s file:// stores); the README explains where the bytes live.
 - The dev uv lock resolves pyspark 4.x; the runner image builds the sparkling fork (`mbt-h2o[sparkling]` pins pyspark 3.5.x) in its own resolution with `uv export --frozen` constraints, and the cluster runs the matching Spark 3.5.8 binaries.
+- The image build resolves NOTHING fresh, and that is load-bearing rather than tidiness: the base is digest-pinned, mbt's dependencies come from `uv.lock`, and the two deps that are neither (evidently, jupyterlab) have their closure pinned in the committed `images/runner/image-extras.txt`.
+  Before that file existed, the pip layer resolved against live PyPI on every build, so an upstream release minutes earlier could break it - which is exactly what happened on 2026-08-27, when statsmodels 0.15.0 shipped macOS wheels at 10:34 UTC and Linux cp311 wheels at 14:30, and the 14:12 nightly fell back to the sdist against an image that carries no compiler.
+  `scripts/lock_image_extras.sh` regenerates the closure against uv.lock's pins; `tests/test_showcase_image_pins.py` fails in the fast tier if the two drift apart.
 - Woodpecker trusted-repo volumes, the docker socket on the agent, and insecure-registry config are demo-tier security postures; the README says so.
 
 ## 10. Repo layout
@@ -228,7 +231,10 @@ examples/showcase/
   DESIGN.md                    # this file
   Makefile                     # up, down, image, seed, demo, score, monitor, monthly, wide, inject-drift, clean
   .env.example
-  images/runner/{Dockerfile,constraints.txt,entrypoint.sh}
+  images/runner/{Dockerfile,entrypoint.sh}
+  images/runner/image-extras.{in,txt}  # the non-mbt image deps and their pinned closure
+                               # (constraints.txt is derived from uv.lock at build time,
+                               #  by scripts/build_image.sh - it is not a committed file)
   compose/docker-compose.yml   # profiles: core, spark, orch, obs, dev, ci (+ argocd)
   compose/{gitea,seaweedfs,prometheus,grafana,airflow}/...
   bootstrap/{seed_lake.py,sync_lake.py,inject_drift.py,webhook_sink.py}

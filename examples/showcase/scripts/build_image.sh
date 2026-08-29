@@ -51,6 +51,7 @@ runner = root / "examples" / "showcase" / "images" / "runner"
 paths += [
     runner / "Dockerfile",
     runner / "entrypoint.sh",
+    runner / "image-extras.txt",
     root / "examples" / "showcase" / "scripts" / "build_image.sh",
 ]
 digest = hashlib.sha256()
@@ -88,7 +89,10 @@ grep -vE '^(pyspark|h2o|h2o-pysparkling-3-5)==' "$CACHE_DIR/constraints-full.txt
     echo "$PYSPARKLING_PIN"
 } >> "$CACHE_DIR/constraints.txt"
 
-cp "$RUNNER_DIR/Dockerfile" "$RUNNER_DIR/entrypoint.sh" "$CACHE_DIR/"
+# image-extras.txt is committed, not derived here: it pins the closure of the
+# non-mbt image deps (evidently, jupyterlab), which uv.lock cannot cover.
+# Regenerate it with lock_image_extras.sh, never by rebuilding.
+cp "$RUNNER_DIR/Dockerfile" "$RUNNER_DIR/entrypoint.sh" "$RUNNER_DIR/image-extras.txt" "$CACHE_DIR/"
 
 echo "==> docker build $IMAGE_TAG (content $CONTENT_HASH)"
 docker build -t "$IMAGE_TAG" --label "$CONTENT_LABEL=$CONTENT_HASH" "$CACHE_DIR"

@@ -1,0 +1,15 @@
+# Packages the showcase runner image installs from PyPI that mbt does NOT
+# depend on, so uv.lock says nothing about them and cannot pin them.
+#
+#   evidently   - drives the feature-stability gates in scripts/evidently_gate.py
+#                 (a showcase-local DS report; mbt's own monitors are the
+#                 enforcement path, see DESIGN.md)
+#   jupyterlab  - the DS inner loop, notebooks/ds_inner_loop.ipynb
+#
+# This file is the intent; image-extras.txt beside it is the resolved closure
+# and is what the image build actually reads. Regenerate after editing:
+#
+#   examples/showcase/scripts/lock_image_extras.sh
+#
+evidently==0.7.20
+jupyterlab

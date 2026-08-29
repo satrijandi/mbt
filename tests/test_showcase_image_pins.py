@@ -97,6 +97,135 @@ def test_the_h2o_client_pin_matches_the_backend_pysparkling_embeds() -> None:
     )
 
 
+# -- the non-mbt image deps and their pinned closure ---------------------------
+
+RUNNER_DIR = REPO_ROOT / "examples" / "showcase" / "images" / "runner"
+DOCKERFILE = RUNNER_DIR / "Dockerfile"
+EXTRAS_IN = RUNNER_DIR / "image-extras.in"
+EXTRAS_TXT = RUNNER_DIR / "image-extras.txt"
+
+
+def _requirements(path: Path) -> dict[str, str]:
+    """{canonical name: version} from a pinned requirements/constraints file.
+
+    Markered lines (`numpy==2.4.6 ; python_full_version < '3.12'`) appear once
+    per marker; the first wins, which is enough for an agreement check because
+    both files are resolved for the same interpreter set.
+    """
+    pins: dict[str, str] = {}
+    for raw in path.read_text().splitlines():
+        stripped = raw.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        requirement = stripped.split(";", 1)[0].strip()
+        match = re.match(r"^([A-Za-z0-9._-]+)==(.+)$", requirement)
+        if match:
+            pins.setdefault(_canon(match.group(1)), match.group(2).strip())
+    return pins
+
+
+def test_the_image_installs_only_extras_the_closure_pins() -> None:
+    """Anything the Dockerfile pip-installs from PyPI that is not an mbt wheel
+    must be declared in image-extras.in, or its closure is unpinned and the
+    build inherits whatever upstream published that day - which is how a
+    statsmodels release with macOS wheels only (Linux wheels followed four
+    hours later) took down the 2026-08-27 nightly against an image that ships
+    no compiler."""
+    install = re.search(
+        r"pip install (.*?)(?=\n\n|\nRUN|\nENV|\nCOPY)", DOCKERFILE.read_text(), re.S
+    )
+    assert install is not None, "could not find the pip install layer in the Dockerfile"
+    tokens = install.group(1).replace("\\\n", " ").split()
+
+    #: pip flags that consume the next token, so it is a value and not a package.
+    takes_a_value = {"--timeout", "--retries", "--find-links", "--constraint", "-c"}
+    requested: set[str] = set()
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-"):
+            skip_next = token in takes_a_value
+            continue
+        # `"mbt-core[s3]"` -> mbt-core; `evidently==1.2` -> evidently
+        name = token.strip('"').split("==")[0].split("[")[0]
+        requested.add(_canon(name))
+    from_pypi = {name for name in requested if not name.startswith("mbt-")}
+
+    declared = {
+        _canon(line.split("==")[0])
+        for line in EXTRAS_IN.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    assert from_pypi == declared, (
+        f"the Dockerfile installs {sorted(from_pypi)} from PyPI but image-extras.in "
+        f"declares {sorted(declared)}; every non-mbt package must be declared there "
+        f"so lock_image_extras.sh pins its closure"
+    )
+
+
+def test_the_extras_closure_agrees_with_uv_lock_on_shared_packages() -> None:
+    """image-extras.txt is resolved AGAINST uv.lock's pins, so the two must
+    agree on every package they both name - pip is handed both as constraint
+    files and two different pins for one package is an unsatisfiable build.
+
+    This is the drift alarm: a `uv lock` that moves numpy/pandas/scikit-learn
+    invalidates the committed closure, and it should fail here - in the fast
+    suite, in a second, naming the fix - rather than five minutes into a docker
+    build in an opt-in tier.
+    """
+    extras = _requirements(EXTRAS_TXT)
+    assert extras, "image-extras.txt has no pins; run scripts/lock_image_extras.sh"
+
+    import subprocess
+
+    exported = subprocess.run(
+        [
+            "uv",
+            "export",
+            "--frozen",
+            "--no-emit-workspace",
+            "--no-hashes",
+            "--no-annotate",
+            "--no-header",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if exported.returncode != 0:  # pragma: no cover - uv is always present in CI
+        import pytest
+
+        pytest.skip(f"uv export unavailable: {exported.stderr.strip()[:200]}")
+
+    locked: dict[str, str] = {}
+    for line in exported.stdout.splitlines():
+        match = re.match(r"^([A-Za-z0-9._-]+)==([^;\s]+)", line.strip())
+        if match:
+            locked.setdefault(_canon(match.group(1)), match.group(2))
+
+    disagreements = {
+        name: (locked[name], extras[name])
+        for name in locked.keys() & extras.keys()
+        if locked[name] != extras[name]
+    }
+    assert not disagreements, (
+        f"uv.lock and image-extras.txt disagree on {disagreements} (locked, extras). "
+        f"pip gets both as constraint files, so the runner image cannot build. "
+        f"Regenerate: examples/showcase/scripts/lock_image_extras.sh"
+    )
+
+
+def test_the_closure_pins_the_transitives_uv_lock_cannot_see() -> None:
+    """The point of the file: packages nothing else in the repo pins.
+    statsmodels is the one that actually broke a nightly."""
+    extras = _requirements(EXTRAS_TXT)
+    for package in ("evidently", "jupyterlab", "statsmodels", "plotly", "nltk"):
+        assert package in extras, f"image-extras.txt does not pin {package}"
+
+
 # -- S3 credential defaults (three files, one truth) ---------------------------
 
 COMPOSE = REPO_ROOT / "examples" / "showcase" / "compose" / "docker-compose.yml"

@@ -21,21 +21,30 @@ RUN apt-get update \
 
 COPY dist/ /opt/mbt/dist/
 COPY constraints.txt /opt/mbt/constraints.txt
+COPY image-extras.txt /opt/mbt/image-extras.txt
 
 # The sparkling extra resolves the whole env to pyspark 3.5.x (ADR-17);
 # constraints.txt pins everything else to uv.lock versions. The cache mount
 # survives rebuilds so the ~800MB of JVM sdists download once; timeouts are
 # generous because pypi serves those sdists slowly.
+#
 # mbt-lightgbm powers the wide cadence's feature-selection probe and the
-# ds-helper funnel in scripts/select_features.py; evidently (pinned here -
-# it is a showcase-image dep, never an mbt dep) drives the feature-stability
-# gates in scripts/evidently_gate.py.
+# ds-helper funnel in scripts/select_features.py; evidently drives the
+# feature-stability gates in scripts/evidently_gate.py and jupyterlab the DS
+# inner loop. Those last two are showcase-image deps, never mbt deps, so
+# uv.lock says nothing about them or their closure - image-extras.txt pins it
+# (source of truth: image-extras.in; regenerate with scripts/lock_image_extras.sh).
+# Without it this layer resolved fresh against PyPI on every build and
+# inherited whatever upstream had published that morning, which is exactly how
+# a sdist-only statsmodels release took the nightly down against an image that
+# deliberately ships no compiler.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout 300 --retries 10 \
     --find-links /opt/mbt/dist \
     --constraint /opt/mbt/constraints.txt \
+    --constraint /opt/mbt/image-extras.txt \
     "mbt-core[s3]" "mbt-h2o[sparkling]" mbt-spark mbt-xgboost mbt-lightgbm \
-    mbt-mlflow evidently==0.7.20 \
+    mbt-mlflow evidently \
     jupyterlab
 
 # s3a support for the SeaweedFS lake: hadoop-aws must match the hadoop client
