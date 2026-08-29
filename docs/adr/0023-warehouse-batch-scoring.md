@@ -1,6 +1,6 @@
 # ADR-23: Warehouse-native batch scoring (Snowflake), staged vs native prediction stores
 
-**Status:** accepted; the SQL-read half is shipped and hermetically verified, the native prediction store is designed but pending live-credential verification (see "Verification").
+**Status:** accepted; the SQL-read half is shipped and hermetically verified for **both** Snowflake and Spark (see "Spark"), the native prediction store is designed but pending live-credential verification (see "Verification").
 
 ADR-20/21 defined the batch-scoring contract (contract 1.1: `build_scoring_input` and `open_predictions`) but implemented it only for the local (path/parquet) adapter.
 A Snowflake-native team could therefore train, gate, register, and promote entirely in-warehouse, yet `mbt score` and `mbt monitor` refused to run against a Snowflake data adapter: `require_scoring_capability` fails the `hasattr` probe before any job runs.
@@ -45,7 +45,10 @@ What is **not** yet verified: end-to-end `mbt score`/`mbt monitor` against a liv
 
 ## Spark
 
-Spark warehouse scoring has the same shape (a label-free scoring DataFrame, predictions staged or written to a table) and is deferred to a follow-up so it can be designed against Spark's DataFrame-native write path rather than transliterated from the SQL adapter.
+Spark warehouse scoring has the same shape (a label-free scoring DataFrame, predictions staged or written to a table) and was deferred to a follow-up so it could be designed against Spark's DataFrame-native write path rather than transliterated from the SQL adapter.
+
+**That follow-up landed** (`6c399c9`): `mbt_spark.data` implements both halves of contract 1.1 - `build_scoring_input` mirrors `build_dataset` (spine + feature joins, filters, key sampling, the `score` window, zero rows a warning) with no label and no snapshot verification, and `open_predictions` takes the same v1 staged-parquet stance as Snowflake, with a lakehouse-table store left to v2.
+So the deferral above is history, not current state: `mbt score` / `mbt monitor` run against a Spark data adapter today, and the contract-1.1 refusal fires for neither warehouse adapter.
 
 ## Consequences
 
