@@ -30,7 +30,12 @@ dependencies = [
     # transitively strands cryptography on a vulnerable 46.0.x. 4.4.0 is the
     # first release requiring cryptography>=46.0.5 with no pyOpenSSL ceiling,
     # which lets the pair resolve clean.
-    "snowflake-connector-python>=4.4.0",
+    # Raised 4.4.0 -> 4.7.1 for GHSA-5cc2-282f-jjq2 (critical): the connector
+    # did not verify TLS hostnames on <4.7.1 (and <3.18.1 on the 3.x line), so
+    # a floor inside that range means the floors job installs a client that
+    # accepts any well-formed certificate. The lock already ships 4.7.2; only
+    # the declared floor was exposed.
+    "snowflake-connector-python>=4.7.1",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +43,7 @@ dependencies = [
 # through keyring (its secure-local-storage extra, available since well
 # before our 3.7 floor). Without it client_store_temporary_credential is a
 # silent no-op and every connection re-prompts the browser.
-sso = ["snowflake-connector-python[secure-local-storage]>=4.4.0"]
+sso = ["snowflake-connector-python[secure-local-storage]>=4.7.1"]
 
 [project.urls]
 Homepage = "https://github.com/satrijandi/mbt"

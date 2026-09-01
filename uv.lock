@@ -2365,8 +2365,8 @@ sso = [
 [package.metadata]
 requires-dist = [
     { name = "mbt-adapter-base", editable = "packages/mbt-adapter-base" },
-    { name = "snowflake-connector-python", specifier = ">=4.4.0" },
-    { name = "snowflake-connector-python", extras = ["secure-local-storage"], marker = "extra == 'sso'", specifier = ">=4.4.0" },
+    { name = "snowflake-connector-python", specifier = ">=4.7.1" },
+    { name = "snowflake-connector-python", extras = ["secure-local-storage"], marker = "extra == 'sso'", specifier = ">=4.7.1" },
 ]
 provides-extras = ["sso"]
 

@@ -67,6 +67,18 @@ ACCEPTED: dict[str, str] = {
         "bumps us onto it; this script's staleness check will then fail and "
         "force the entry out."
     ),
+    "CVE-2026-71211": (
+        "GHSA-h7x2-h6g9-p789: SSRF in MLflow's AI Gateway - a request to the "
+        "gateway can reach an arbitrary host because api_base is not validated. "
+        "No fixed release exists: the advisory covers mlflow >= 3.13.0 <= 3.15.2 "
+        "and 3.15.2 is the newest, with first_patched_version null. Not in mbt's "
+        "execute path: the AI Gateway is a separate server mbt neither runs nor "
+        "configures, and mbt-mlflow imports exactly two things from mlflow - "
+        "mlflow.tracking.MlflowClient and mlflow.exceptions.MlflowException - "
+        "with no reference anywhere to mlflow.gateway, mlflow.deployments or "
+        "api_base. Ends when an mlflow release ships the fix and Renovate bumps "
+        "us onto it; this script's staleness check will then force the entry out."
+    ),
     "PYSEC-2026-352": _SPARKLING_FLOOR,
     "PYSEC-2026-349": _SPARKLING_FLOOR,
     "PYSEC-2026-2180": _SPARKLING_FLOOR,
@@ -88,12 +100,26 @@ FLOOR_ONLY: frozenset[str] = frozenset({"PYSEC-2026-352", "PYSEC-2026-349", "PYS
 
 
 def findings_from(report: dict) -> set[str]:
-    """Advisory IDs reported against non-editable dependencies."""
-    return {
-        vuln["id"]
-        for dependency in report.get("dependencies", [])
-        for vuln in dependency.get("vulns", [])
-    }
+    """Advisory IDs reported against non-editable dependencies.
+
+    Each finding is reported under whichever identifier ACCEPTED already knows
+    it by, because pip-audit's primary ``id`` is NOT stable across resolutions:
+    the same MLflow SSRF advisory reports as CVE-2026-71211 against the locked
+    environment and as GHSA-h7x2-h6g9-p789 against the floors one, each
+    demoting the other spelling to an alias. Matching the raw ``id`` therefore
+    let an acceptance hold in the `test` job and fail in the `floors` job on the
+    identical advisory - so one entry could not turn both green.
+
+    Anything not accepted keeps pip-audit's own id, which is the string the
+    operator will search for.
+    """
+    found: set[str] = set()
+    for dependency in report.get("dependencies", []):
+        for vuln in dependency.get("vulns", []):
+            names = {vuln["id"], *(vuln.get("aliases") or [])}
+            known = sorted(names & set(ACCEPTED))
+            found.add(known[0] if known else vuln["id"])
+    return found
 
 
 def classify(found: set[str]) -> tuple[list[str], list[str]]:

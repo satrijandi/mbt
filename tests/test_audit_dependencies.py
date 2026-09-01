@@ -39,6 +39,39 @@ def test_packages_without_vulns_contribute_nothing() -> None:
     assert audit.findings_from({}) == set()
 
 
+def _vuln_report(vuln: dict) -> dict:
+    return {"dependencies": [{"name": "a", "version": "1.0", "vulns": [vuln]}]}
+
+
+def test_an_advisory_is_matched_by_alias_not_just_primary_id() -> None:
+    """pip-audit's primary id is not stable across resolutions.
+
+    The same MLflow SSRF advisory reports as CVE-2026-71211 against the locked
+    environment and as GHSA-h7x2-h6g9-p789 against the floors one, each
+    demoting the other spelling to an alias. Matching the raw id made one
+    ACCEPTED entry cover the `test` job and miss the `floors` job on the
+    identical advisory, so no single entry could turn both green.
+    """
+    accepted = sorted(set(audit.ACCEPTED) - audit.FLOOR_ONLY)[0]
+    found = audit.findings_from(_vuln_report({"id": "OTHER-SPELLING-1", "aliases": [accepted]}))
+    assert found == {accepted}
+    unaccepted, _ = audit.classify(found)
+    assert unaccepted == []
+
+
+def test_an_unaccepted_finding_keeps_pip_audits_own_id() -> None:
+    """The operator searches for the id pip-audit printed, so do not rewrite it."""
+    vuln = {"id": "PYSEC-9999-3", "aliases": ["CVE-9999-3"]}
+    assert audit.findings_from(_vuln_report(vuln)) == {"PYSEC-9999-3"}
+
+
+def test_a_null_alias_list_is_tolerated() -> None:
+    """pip-audit emits `aliases: null` for some sources; that is not an alias."""
+    assert audit.findings_from(_vuln_report({"id": "PYSEC-9999-4", "aliases": None})) == {
+        "PYSEC-9999-4"
+    }
+
+
 def test_an_unaccepted_finding_fails() -> None:
     unaccepted, stale = audit.classify({"PYSEC-9999-1"})
     assert unaccepted == ["PYSEC-9999-1"]
