@@ -171,6 +171,52 @@ def test_dataset_error_branches(demo_project: Path, fake_registry: AdapterRegist
     assert unknown_check and unknown_check[0].hint == "did you mean 'not_null'?"
 
 
+def test_editor_dot_dirs_are_not_discovered(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """JupyterLab's checkpoint copy of a spec must not re-declare its resource.
+
+    Opening `datasets/churn_training.yml` in the JupyterLab editor writes
+    `datasets/.ipynb_checkpoints/churn_training-checkpoint.yml`; discovery used
+    to rglob into it and fail the parse with `duplicate dataset`, blaming the
+    real file. Reproduced from the showcase's own DS notebook path.
+    """
+    original = (demo_project / "datasets/churn_training.yml").read_text()
+    checkpoint = demo_project / "datasets/.ipynb_checkpoints/churn_training-checkpoint.yml"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text(original)
+
+    parsed = parse(demo_project, fake_registry)
+    assert not any("duplicate dataset" in m for m in error_messages(parsed))
+    assert parsed.resource("churn_training") is not None
+
+
+def test_hidden_resource_dir_is_still_honored(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """Only dot-dirs BELOW a resource dir are skipped, not a configured one."""
+    write(
+        demo_project / "mbt_project.yml",
+        """
+        name: demo
+        version: "1.0"
+        dataset_paths: [".hidden_datasets"]
+        """,
+    )
+    write(
+        demo_project / ".hidden_datasets/ds.yml",
+        """
+        datasets:
+          - name: tucked_away
+            source: source('lakehouse', 'subscribers')
+            label: {column: churned}
+            split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
+        """,
+    )
+    parsed = parse(demo_project, fake_registry)
+    assert parsed.resource("tucked_away") is not None
+
+
 def test_unknown_data_test_binding(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     write(
         demo_project / "datasets/tested.yml",

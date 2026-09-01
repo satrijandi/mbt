@@ -238,6 +238,22 @@ def parse_project(
 # -- discovery ---------------------------------------------------------------
 
 
+def _in_hidden_dir(path: Path, resource_dir: Path) -> bool:
+    """True if `path` sits under a dot-directory BELOW `resource_dir`.
+
+    Discovery rglobs the configured resource dirs, and rglob descends into
+    dot-directories. Editors and tooling keep copies of the very files we parse
+    there - JupyterLab writes `.ipynb_checkpoints/<name>-checkpoint.yml` as soon
+    as a DS opens a spec in its editor - so every such copy re-declared its
+    resource and the parse died with a `duplicate <kind>` error that blamed the
+    REAL file (the checkpoint sorts first, so it registers first).
+
+    Only components below `resource_dir` are tested, so a project that
+    deliberately configures a hidden resource dir still works.
+    """
+    return any(part.startswith(".") for part in path.relative_to(resource_dir).parts[:-1])
+
+
 def _discover_and_load(
     project_dir: Path, project: ProjectConfig, report: ParseReport
 ) -> dict[str, list[tuple[str, int, dict[str, Any]]]]:
@@ -250,9 +266,11 @@ def _discover_and_load(
     for path_list in (project.dataset_paths, project.model_paths, project.scoring_paths):
         for dir_name in path_list:
             resource_dir = project_dir / dir_name
-            if resource_dir.is_dir():
-                files.extend(sorted(resource_dir.rglob("*.yml")))
-                files.extend(sorted(resource_dir.rglob("*.yaml")))
+            if not resource_dir.is_dir():
+                continue
+            for pattern in ("*.yml", "*.yaml"):
+                found = resource_dir.rglob(pattern)
+                files.extend(sorted(p for p in found if not _in_hidden_dir(p, resource_dir)))
 
     out: dict[str, list[tuple[str, int, dict[str, Any]]]] = {t: [] for t in TOP_LEVEL_KEYS.values()}
     for path in sorted(set(files)):
