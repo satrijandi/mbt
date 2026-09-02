@@ -714,6 +714,16 @@ Internal error: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa7 in posi
 
 **Verification.** `test_init_ignores_bytecode_left_beside_the_template` plants a non-UTF-8 `.pyc` in the real template and asserts `mbt init` succeeds and does not copy it. Confirmed it fails without the fix (`UnicodeDecodeError`) and passes with it.
 
+### Post-commit: two defects the sweep itself shipped, found on the first CI run
+
+Both were invisible locally and turned main red on the commit that closed this review. Recording them because each is an instance of a pattern this review is about: a check that passes in the environment it was written in and nowhere else.
+
+**D-3 asserted the thing its own design says not to assert.** `test_the_script_runs_as_a_subprocess` ran `generate_changelog.py --check` and demanded exit 0. But `--check` compares the whole file, and the "Unreleased" section gains a line on every commit - which is exactly why `release.yml` runs it at tag time, as its own comment explains. So the fast suite was guaranteed to go red on the first commit after any regeneration, and did: the sweep commit. The test now asserts the entrypoint *reaches a verdict* rather than which verdict (a bad flag still exits 2, and a crash exits 1 with no verdict printed, so both are still caught). Whole-file agreement stays where it is stable: `release.yml` at the tag, and `test_the_committed_changelog_is_in_sync_for_released_tags` for the part below the newest tag.
+
+**The changelog guards read git history that CI does not check out.** `actions/checkout` clones depth-1 with no tags, so `released_tags()` returned `[]` and five more tests failed - three of them with `IndexError`, which reads as a generator bug rather than as a checkout that fetched nothing. The changelog is generated *from* git, so these guards have no other source of truth: the fix is to give CI the history, not to weaken them. `fetch-depth: 0` on the two jobs that run the fast suite (`test`, `floors`), the shared `_NEEDS_TAGS` message so a tagless clone says so, and `test_every_job_running_this_suite_checks_out_tags` pinning the workflow half - the same two-halves-could-decouple shape as B-3's coverage floor.
+
+**Also fixed: the guard hardened in G-2 was blind to the file `CLAUDE.md` tells you to create.** `COVERAGE_FILE=.coverage.<name>` is the documented way to run two tiers without clobbering one `.coverage`. That name is not in `.gitignore` (which lists `.coverage` exactly) and not in the guard's now-exact `_TOOLING` set, so it dirtied `git status` and the session guard never fired - pytest-cov writes the file after the fixture's teardown. Added `.coverage.*` to both, as an explicit pattern rather than by loosening `_TOOLING` back to prefix matching. Coverage's own parallel mode writes `.coverage.<host>.<pid>.<random>`, which the same pattern covers.
+
 ### G-1. 447 KB of review logs in the repo root
 
 **Symptom.** `FEEDBACK.md` (284 KB) and `FEEDBACK_v2.md` (163 KB) dominated the root file listing at roughly fifteen times every other root document combined.

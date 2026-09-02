@@ -34,6 +34,19 @@ _TOOLING = frozenset(
     }
 )
 
+#: The one tooling name that cannot be spelled exactly. `CLAUDE.md` tells you
+#: to pass `COVERAGE_FILE=.coverage.<name>` when two tiers would otherwise
+#: clobber one `.coverage`, and coverage's own parallel mode writes
+#: `.coverage.<host>.<pid>.<random>`. Neither name is knowable in advance.
+#: Kept as an explicit pattern list rather than by loosening `_TOOLING` back to
+#: prefix matching, which is what excused unrelated names before.
+_TOOLING_PATTERNS = (".coverage.*",)
+
+
+def _is_tooling(name: str) -> bool:
+    return name in _TOOLING or any(fnmatch.fnmatch(name, pat) for pat in _TOOLING_PATTERNS)
+
+
 #: Root entries that are always litter, whenever they appeared. Generated
 #: project state (`target/`, `mlruns/`, stray dbs) plus the JVM leftovers the
 #: Spark and H2O tiers can drop - `.gitignore` lists those five, which keeps
@@ -55,7 +68,7 @@ _KNOWN_LITTER = (
 
 
 def _snapshot() -> set[str]:
-    entries = {p.name for p in REPO_ROOT.iterdir() if p.name not in _TOOLING}
+    entries = {p.name for p in REPO_ROOT.iterdir() if not _is_tooling(p.name)}
     # new writes into a pre-existing ./target must be caught too
     target = REPO_ROOT / "target"
     if target.is_dir():

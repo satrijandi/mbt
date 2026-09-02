@@ -19,12 +19,27 @@ import generate_changelog as gen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: The changelog is generated FROM git, so these guards have no source of truth
+#: other than the real repository. A tagless clone makes them fail in ways that
+#: read as generator bugs (IndexError on `tags[0]`) rather than as a checkout
+#: that fetched no tags, which is what `actions/checkout` does by default.
+_NEEDS_TAGS = (
+    "no v* tags in this clone - the changelog guards read real git history. "
+    "CI checks out with fetch-depth: 0 for exactly this reason; locally, "
+    "run `git fetch --tags`."
+)
+
+
+def _tags() -> list[str]:
+    tags = gen.released_tags()
+    assert tags, _NEEDS_TAGS
+    return tags
+
 
 def test_every_released_tag_gets_a_section() -> None:
     """A shipped version with no entry is the failure mode being fixed."""
     rendered = gen.render()
-    tags = gen.released_tags()
-    assert tags, "expected at least one v* tag in this repo"
+    tags = _tags()
     for tag in tags:
         assert f"## {tag} - " in rendered, f"{tag} missing from the changelog"
 
@@ -36,6 +51,7 @@ def test_every_section_states_its_retraining_impact() -> None:
     hashing (ADR-7), so the next `state:modified` build retrains everything.
     A changelog that lists commits but not that is worse than none.
     """
+    _tags()
     rendered = gen.render()
     headings = [line for line in rendered.splitlines() if line.startswith("## ")]
     assert headings
@@ -45,7 +61,7 @@ def test_every_section_states_its_retraining_impact() -> None:
 def test_curated_impacts_reference_real_tags() -> None:
     """RETRAINING_IMPACT is hand-maintained, so it can rot; a key that is not a
     tag means someone recorded impact for a release that does not exist."""
-    assert set(gen.RETRAINING_IMPACT) <= set(gen.released_tags())
+    assert set(gen.RETRAINING_IMPACT) <= set(_tags())
 
 
 def test_merge_and_version_bump_commits_are_dropped() -> None:
@@ -104,7 +120,7 @@ def test_the_committed_changelog_is_in_sync_for_released_tags() -> None:
     read and the part `release.yml --check` enforces at tag time."""
     committed = (REPO_ROOT / "CHANGELOG.md").read_text()
     rendered = gen.render()
-    newest = gen.released_tags()[0]
+    newest = _tags()[0]
     assert (
         committed[committed.index(f"## {newest} - ") :]
         == (rendered[rendered.index(f"## {newest} - ") :])
@@ -113,18 +129,54 @@ def test_the_committed_changelog_is_in_sync_for_released_tags() -> None:
 
 def test_the_script_runs_as_a_subprocess() -> None:
     """It is invoked by the release workflow, not imported, so the entrypoint
-    has to work standalone."""
+    has to work standalone.
+
+    Asserts that it *reaches a verdict*, not which verdict. `--check` compares
+    the whole file, and the "Unreleased" section gains a line on every commit,
+    so demanding exit 0 here fails the fast suite on the first commit after any
+    regeneration - which is precisely why `release.yml` runs `--check` at tag
+    time instead, where that section is empty and the comparison is stable.
+    The committed file's stable part is pinned by
+    `test_the_committed_changelog_is_in_sync_for_released_tags` above.
+    """
     proc = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "generate_changelog.py"), "--check"],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    report = proc.stdout + proc.stderr
+    assert proc.returncode in (0, 1), report
+    assert "CHANGELOG.md is up to date" in report or "CHANGELOG.md is out of date" in report
+
+
+def test_every_job_running_this_suite_checks_out_tags() -> None:
+    """The other half of `_NEEDS_TAGS`, pinned so it cannot regress silently.
+
+    These guards read git, and `actions/checkout` fetches a depth-1 clone with
+    no tags by default, so the whole module passed locally and failed in every
+    CI job that ran it. A job that runs the fast suite must ask for history.
+    """
+    import yaml
+
+    ci = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    for name, job in ci["jobs"].items():
+        steps = job.get("steps") or []
+        runs_fast_suite = any(
+            "pytest" in str(step.get("run", "")) and "not e2e" in str(step.get("run", ""))
+            for step in steps
+        )
+        if not runs_fast_suite:
+            continue
+        checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+        assert (checkout.get("with") or {}).get("fetch-depth") == 0, (
+            f"job {name!r} runs the fast suite but checks out without tags; "
+            "tests/test_generate_changelog.py reads real git history"
+        )
 
 
 def test_subjects_between_reads_the_tag_span() -> None:
-    tags = gen.released_tags()
+    tags = _tags()
     subjects = gen.subjects_between(None, tags[-1])
     assert subjects, "the first release should have commits"
     assert all(not gen._SKIP.match(s) for s in subjects)

@@ -17,6 +17,10 @@ site/
 .pytest_cache/
 .hypothesis/
 .coverage
+# COVERAGE_FILE=.coverage.<name> (CLAUDE.md's way of running two tiers without
+# clobbering one data file) and coverage's own parallel-mode .coverage.<host>.
+# <pid>.<random>; both are the same cache under an unpredictable name.
+.coverage.*
 htmlcov/
 
 # mbt project artifacts (demo/e2e runs)

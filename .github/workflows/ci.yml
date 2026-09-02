@@ -61,6 +61,12 @@ jobs:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # tests/test_generate_changelog.py reads real tags and commit spans:
+          # the changelog is generated FROM git, so its guards have no other
+          # source of truth. The default checkout is a tagless depth-1 clone,
+          # which made every one of them fail here while passing locally.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python }}
@@ -98,6 +104,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for the changelog guards - see the test job
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
