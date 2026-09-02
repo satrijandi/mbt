@@ -1,6 +1,21 @@
-"""``target/run_results.json`` (TSD §10.8, FR-RUN-04)."""
+"""``target/run_results.json`` (TSD §10.8, FR-RUN-04).
+
+Every command writes two files: ``run_results.json``, which always holds the
+most recent run of *any* command and is the documented integration contract,
+and ``run_results.<command>.json``, which holds that command's own last run.
+
+The second one exists because the first is latest-write-wins across commands.
+``mbt score`` and ``mbt monitor`` write only their own nodes, so after a
+serving run the shared file no longer contains the model metrics ``mbt build``
+produced - which made ``mbt docs generate`` emit model cards claiming "no run
+results yet" to a user who had just built (FEEDBACK v3 A-2). Consumers that
+want a specific command's output ask for it by name via
+:func:`read_latest_results`; consumers that genuinely want "whatever ran last"
+keep reading ``run_results.json``.
+"""
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -131,4 +146,34 @@ class RunResults(BaseModel):
         return redact(json.dumps(self.model_dump(mode="json"), indent=2, sort_keys=True) + "\n")
 
     def write(self, path: Path) -> None:
-        atomic_write_text(path, self.to_json())
+        """Write the shared latest-run file and this command's own sibling."""
+        payload = self.to_json()
+        atomic_write_text(path, payload)
+        atomic_write_text(command_results_path(path, self.metadata.command), payload)
+
+
+def command_results_path(results_path: Path, command: str) -> Path:
+    """``target/run_results.json`` + ``build`` -> ``run_results.build.json``."""
+    return results_path.with_name(f"{results_path.stem}.{command}.json")
+
+
+def read_latest_results(
+    results_path: Path, commands: Sequence[str] | None = None
+) -> "RunResults | None":
+    """Newest results written by any of ``commands``, else the shared file.
+
+    ``commands`` names the writers whose output the caller can actually use -
+    ``mbt docs generate`` wants model metrics, so it asks for the commands that
+    train. The newest matching sibling wins by mtime, so re-running any of them
+    updates the answer. With no match (or no ``commands``) this falls back to
+    ``run_results.json``, which is what a fresh project has.
+    """
+    candidates: list[Path] = []
+    for command in commands or ():
+        candidate = command_results_path(results_path, command)
+        if candidate.is_file():
+            candidates.append(candidate)
+    chosen = max(candidates, key=lambda p: p.stat().st_mtime) if candidates else results_path
+    if not chosen.is_file():
+        return None
+    return RunResults.model_validate_json(chosen.read_text())

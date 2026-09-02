@@ -163,8 +163,9 @@ class SnowflakeDataAdapter:
         if "account" not in kwargs:
             raise SnowflakeAdapterError(
                 "snowflake adapter config needs at least 'account' and 'user'",
-                hint="set them in profiles.yml via env_var(), e.g. "
-                "account: \"{{ env_var('SNOWFLAKE_ACCOUNT') }}\"",
+                hint="set them in profiles.yml from the environment, e.g. "
+                "account: \"{{ env('SNOWFLAKE_ACCOUNT') }}\" "
+                "(env() for identifiers, env_var() for the password/key)",
             )
         try:
             self._connection = snowflake.connector.connect(**kwargs)

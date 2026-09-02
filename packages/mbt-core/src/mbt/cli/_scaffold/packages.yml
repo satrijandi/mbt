@@ -1,4 +1,9 @@
 # Adapter packages this project depends on; install with `mbt deps`.
+#
+# Swapping a model to another framework is a spec edit (`adapter: lightgbm`)
+# plus a line here. Available today: mbt-xgboost, mbt-lightgbm, mbt-sklearn,
+# mbt-h2o, mbt-spark for training; mbt-snowflake, mbt-spark for warehouse and
+# lakehouse data; mbt-optuna for tuning.
 packages:
   - package: mbt-xgboost
     version: "~=0.1"

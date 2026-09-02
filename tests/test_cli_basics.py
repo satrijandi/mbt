@@ -12,6 +12,20 @@ from e2e_utils import DEMO_ANCHOR, run_mbt
 
 import mbt
 
+SCAFFOLD = Path(mbt.__file__).resolve().parent / "cli" / "_scaffold"
+
+
+def _scaffold_var(name: str) -> object:
+    """A var default read from the scaffold the test just stamped out.
+
+    Asserting a literal here made a scaffold tuning change (raising the demo
+    gate after the sample data got a real signal, FEEDBACK v3 E-7) look like a
+    regression. The invariant under test is "the var resolves", not its value.
+    """
+    import yaml
+
+    return yaml.safe_load((SCAFFOLD / "mbt_project.yml").read_text())["vars"][name]
+
 
 @pytest.fixture()
 def scaffold(tmp_path: Path) -> Path:
@@ -39,6 +53,34 @@ def scaffold(tmp_path: Path) -> Path:
     )
     assert data.returncode == 0, data.stderr
     return project
+
+
+def test_init_ignores_bytecode_left_beside_the_template(tmp_path: Path, monkeypatch) -> None:
+    """`mbt init` must survive a `__pycache__` inside the scaffold tree.
+
+    The template ships as source, so in an editable or checked-out install
+    anything that imports `scripts/generate_sample_data.py` writes a `.pyc`
+    next to it. The scaffold walk reads every file as text, so one stray `.pyc`
+    turned the first command a new user runs into
+    "Internal error: UnicodeDecodeError ... this is a bug in mbt".
+    """
+    import mbt as mbt_pkg
+    from mbt.cli.scaffold import scaffold_project
+
+    template = Path(mbt_pkg.__file__).resolve().parent / "cli" / "_scaffold"
+    cache = template / "scripts" / "__pycache__"
+    cache.mkdir(parents=True, exist_ok=True)
+    pyc = cache / "generate_sample_data.cpython-311.pyc"
+    pyc.write_bytes(b"\xa7\x0d\x0d\x0a not utf-8")
+    try:
+        home = tmp_path / "home"
+        home.mkdir()
+        project = scaffold_project("bytecode_probe", tmp_path, home=home)
+        assert (project / "mbt_project.yml").is_file()
+        assert not (project / "scripts" / "__pycache__").exists()
+    finally:
+        pyc.unlink()
+        cache.rmdir()
 
 
 def test_init_scaffold_is_complete_and_parses(scaffold: Path, tmp_path: Path) -> None:
@@ -218,7 +260,9 @@ def test_ls_outputs(scaffold: Path) -> None:
 
 def test_show_renders_compiled_config(scaffold: Path) -> None:
     payload = json.loads(run_mbt(["show", "churn_classifier", "--output", "json"], scaffold).stdout)
-    assert payload["config"]["evaluation"]["gates"][0]["threshold"] == 0.25  # var resolved
+    # the scaffold's own pr_auc_floor, read from the scaffold so a threshold
+    # change is a one-line edit rather than a test failure
+    assert payload["config"]["evaluation"]["gates"][0]["threshold"] == _scaffold_var("pr_auc_floor")
     assert payload["config_hash"].startswith("sha256:")
 
     proc = run_mbt(["show", "churn_classifer"], scaffold, expect_exit=1)

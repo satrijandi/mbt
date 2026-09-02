@@ -1,6 +1,6 @@
 # ADR-23: Warehouse-native batch scoring (Snowflake), staged vs native prediction stores
 
-**Status:** accepted; the SQL-read half is shipped and hermetically verified for **both** Snowflake and Spark (see "Spark"), the native prediction store is designed but pending live-credential verification (see "Verification").
+**Status:** accepted; the SQL-read half is shipped and hermetically verified for **both** Snowflake and Spark (see "Spark"), and additionally proven against a real account by the first credentialed `live_snowflake` run on 2026-08-28. The native prediction store is designed but pending live verification of the serving leg (see "Verification").
 
 ADR-20/21 defined the batch-scoring contract (contract 1.1: `build_scoring_input` and `open_predictions`) but implemented it only for the local (path/parquet) adapter.
 A Snowflake-native team could therefore train, gate, register, and promote entirely in-warehouse, yet `mbt score` and `mbt monitor` refused to run against a Snowflake data adapter: `require_scoring_capability` fails the `hasattr` probe before any job runs.
@@ -41,7 +41,13 @@ So v1 ships the verifiable read half plus the sanctioned staged store, and v2's 
 ## Verification
 
 The scoring-SQL generation and `build_scoring_input` are covered hermetically (DuckDB execution of the generated SQL; the `mbt-snowflake` package stays at 100% line coverage), and `open_predictions` round-trips through the compliance-tested local store.
-What is **not** yet verified: end-to-end `mbt score`/`mbt monitor` against a live Snowflake account (the `live_snowflake` tier has never had a credentialed run), and therefore the native (v2) prediction store, which is designed above but deliberately unimplemented until that verification is possible.
+
+**Updated 2026-09-01.** The `live_snowflake` tier had its first credentialed run on **2026-08-28**, so the "never had a credentialed run" blocker recorded here originally is closed.
+That run proved the warehouse **read** path end to end against a real account: connection and auth, `base_relation`/`split_queries` execution, multi-table joins, push-down sampling reproducibility, snapshot tokens, and a full local-training loop on warehouse-materialized data.
+
+What is **still** not verified: end-to-end `mbt promote` / `mbt score` / `mbt monitor` against a live account.
+The native (v2) prediction store stays designed-but-unimplemented until that half is verified, for the reason in "Why staged-first, not native-first": a stateful table store's correctness rests on real `MERGE`/`DELETE`/transaction semantics that a DuckDB emulation approximates rather than proves.
+The gate is therefore narrower than it was, not gone: it is now "extend `live_snowflake` to cover the serving leg", tracked in issue #1.
 
 ## Spark
 

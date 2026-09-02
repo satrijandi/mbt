@@ -73,3 +73,39 @@ def test_adr_23_does_not_claim_a_shipped_capability_is_deferred() -> None:
         "ADR-23 still presents Spark warehouse scoring as deferred, but "
         "mbt_spark implements build_scoring_input and open_predictions"
     )
+
+
+# -- the JVM coverage floor must stay wired in (FEEDBACK v3 B-3) ---------------
+
+
+def test_the_jvm_coverage_floor_is_real_and_enforced() -> None:
+    """`docs/v0.1-status.md` claims the e2e tier covers mbt-spark/mbt-h2o.
+
+    That was an assertion nobody measured until 2026-09-01. It is now a
+    measured floor, and this guards the two halves that could silently
+    decouple: the config must declare a floor over exactly those packages, and
+    the e2e job must actually pass the config.
+    """
+    import configparser
+
+    config = configparser.ConfigParser()
+    config.read(REPO_ROOT / "tests" / "coverage-jvm.cfg")
+    packages = config["run"]["source_pkgs"].split()
+    assert sorted(packages) == ["mbt_h2o", "mbt_spark"], packages
+    assert int(config["report"]["fail_under"]) >= 80, "the floor must stay a real bar"
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "--cov-config=tests/coverage-jvm.cfg" in workflow, (
+        "the e2e job stopped passing the JVM coverage config, so the floor is inert"
+    )
+
+
+def test_the_jvm_packages_are_outside_the_fast_suite_gate() -> None:
+    """The two configs must not overlap: mbt-spark/mbt-h2o in the fast suite's
+    source_pkgs would make its 100% gate unreachable, which is why they are
+    measured separately in the first place."""
+    import tomllib
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    fast = set(pyproject["tool"]["coverage"]["run"]["source_pkgs"])
+    assert not fast & {"mbt_spark", "mbt_h2o"}, fast

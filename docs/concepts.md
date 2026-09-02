@@ -52,8 +52,10 @@ does mark the node modified.
 `profiles.yml` defines targets (dev/prod) with data/tracking/registry/compute
 adapters, an artifact store, threads, and per-target vars like
 `sample_fraction` and `max_tuning_trials`. Secrets resolve via
-`{{ env_var('NAME') }}` and never enter the manifest - the target config is
-stored unrendered.
+`{{ env_var('NAME') }}`, which also marks the value for redaction everywhere
+it could be printed; non-secret environment values use `{{ env('NAME') }}`,
+which resolves identically but stays readable in logs. Neither enters the
+manifest - the target config is stored unrendered.
 
 ## Quality gates
 
@@ -120,5 +122,5 @@ downgrades this to a warning, transitive-drift mismatches always warn).
 All seeds derive from the model's mandatory `seed`: the adapter uses `seed`,
 tuning samples with `seed + 1`, implicit validation carves with `seed + 2`,
 and champion-gate bootstrap resampling uses `seed + 3` (ADR-18).
-Each adapter documents a determinism tier - exact (XGBoost/LightGBM on CPU,
-single-threaded) or tolerance bands.
+Each adapter documents a determinism tier - exact (XGBoost, LightGBM, and
+scikit-learn on CPU, single-threaded) or tolerance bands.

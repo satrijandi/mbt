@@ -1,13 +1,27 @@
 # Design history
 
-These are **pre-implementation planning documents** for mbt, kept for provenance.
-They describe the project as it was envisioned before v0.1 shipped and are **not maintained**.
+Provenance, not documentation.
+Nothing in this directory is maintained, and nothing in it should be treated as a description of how mbt works today.
+
+## Pre-implementation planning documents
+
+These describe the project as it was envisioned before v0.1 shipped.
 Two files remain, and only because code and docs still cite their identifiers:
 
 - `PRD.md` - product requirements; defines the `FR-*`/`NFR-*` IDs cited in code comments and docs (`FR-RUN-07`, `NFR-08`, ...).
 - `TSD.md` - the original technical-design sketch; defines the `TSD §N` section anchors cited throughout the source.
 
 The original vision doc (`PLAN.md`) and task breakdown (`TASK.md`) were removed: they carried no live references and are recoverable from git history.
+
+## Closed review cycles
+
+`reviews/` holds whole-repo reviews whose findings have been worked through and closed.
+They carry the reasoning behind a large share of the current design, and several code comments cite them by section (`FEEDBACK 2.6`, `FEEDBACK 3.6`, `R2-7`, `F17`, ...), which is why they are kept rather than deleted.
+
+- `reviews/feedback-v1.md` - reviews 1 and 2, closed 2026-07-20. Section IDs `2.6`, `3.6`, ... and `R2-*`.
+- `reviews/feedback-v2.md` - review 3, closed 2026-07-22. Finding IDs `F1`-`F27`, `P3`.
+
+The review currently being worked through stays at the repo root (`FEEDBACK_v3.md`) and moves here once its progress log is closed.
 
 ## Authoritative sources instead
 

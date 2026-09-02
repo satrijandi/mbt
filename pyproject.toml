@@ -31,6 +31,7 @@ mbt-h2o = { workspace = true }
 mbt-spark = { workspace = true }
 mbt-optuna = { workspace = true }
 mbt-lightgbm = { workspace = true }
+mbt-sklearn = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -46,6 +47,7 @@ dev = [
     "mbt-spark",
     "mbt-optuna",
     "mbt-lightgbm",
+    "mbt-sklearn",
     "pytest>=9.0.3",  # 9.0.3 clears PYSEC-2026-1845
     "pytest-timeout>=2.3",
     "hypothesis>=6.100",
@@ -64,6 +66,14 @@ dev = [
     # 9.7: below it mkdocs-material pins pymdown-extensions~=10.2, which caps
     # out below the PYSEC-2026-3609/3654 fix in 11.0.1.
     "mkdocs-material>=9.7",
+    # Declared explicitly (it would otherwise arrive only transitively through
+    # mkdocs-material) so the ceiling below has somewhere to live. MkDocs 2.0
+    # removes the plugin system, rewrites theming, and ships with "no migration
+    # path exists - existing projects cannot be upgraded"
+    # (squidfunk.github.io/mkdocs-material/blog/2026/02/18/mkdocs-2.0/). This
+    # site is built on plugins and theme config, so 1.x is a deliberate ceiling,
+    # not a stale pin: lift it only if 2.x ever gains a migration path.
+    "mkdocs>=1.6,<2",
     # generated API reference for adapter authors (docs/api-reference.md)
     "mkdocstrings[python]>=0.26",
     "moto[s3]>=5",
@@ -120,7 +130,7 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 show_error_codes = true
-mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-snowflake/src:packages/mbt-h2o/src:packages/mbt-spark/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src"
+mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-snowflake/src:packages/mbt-h2o/src:packages/mbt-spark/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src:packages/mbt-sklearn/src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -137,6 +147,7 @@ module = [
     "pysparkling.*",
     "optuna.*",
     "sklearn.*",
+    "joblib.*",
     "jsonschema.*",
     "boto3.*",
     "botocore.*",
@@ -152,6 +163,13 @@ ignore_missing_imports = true
 # 25.0.1 dropped it (so pyarrow is Any again and the same ignore became an
 # unused-ignore error under strict). disable_error_code is inert when the
 # error does not fire, so it stays correct across that flip.
+#
+# `attr-defined` used to be disabled here too and no longer is: it was not
+# needed by any module in this list, and a broad error code switched off for
+# mbt.execute.job (the largest module on the execution path) is the same rot
+# scripts/audit_dependencies.py exists to prevent one layer up - a suppression
+# that outlives its reason and reads to the next person as "recently reviewed".
+# Re-test this list when the pyarrow pin moves; keep it as narrow as it will go.
 [[tool.mypy.overrides]]
 module = [
     "mbt_adapter_base.materialization",
@@ -164,7 +182,7 @@ module = [
     "mbt_spark.training",
     "mbt.execute.job",
 ]
-disable_error_code = ["no-untyped-call", "attr-defined"]
+disable_error_code = ["no-untyped-call"]
 
 [tool.coverage.run]
 # Coordinator-process coverage; training-job subprocesses are not traced.
@@ -177,6 +195,7 @@ source_pkgs = [
     "mbt_lightgbm",
     "mbt_mlflow",
     "mbt_optuna",
+    "mbt_sklearn",
     "mbt_snowflake",
     "mbt_testing",
 ]
@@ -201,6 +220,7 @@ testpaths = [
     "packages/mbt-spark/tests",
     "packages/mbt-optuna/tests",
     "packages/mbt-lightgbm/tests",
+    "packages/mbt-sklearn/tests",
     "packages/mbt-testing/tests",
     "tests",
 ]

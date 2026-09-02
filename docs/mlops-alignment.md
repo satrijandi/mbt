@@ -65,7 +65,7 @@ Online (request/response) serving is an explicit non-goal ([roadmap](roadmap.md)
 - Scoring runs are idempotent: same-anchor reruns overwrite a single `run_key`, new anchors partition (ADR-21).
 - Exit codes carry meaning everywhere: 0 success, 1 hard error, 2 quality failure, and CI/schedulers preserve the distinction.
 - Events go to stderr (human or JSON lines); stdout stays machine-readable command data.
-- Secrets resolve via `env_var()` only, are tainted and redacted in output, and never enter manifests.
+- Secrets resolve via `env_var()` only, are tainted and redacted in output, and never enter manifests; `env()` is the non-secret sibling for configuration that should stay readable.
 
 ## Governance
 

@@ -57,7 +57,7 @@ Every mbt-running container has an entrypoint preflight that hard-fails if the m
 ### Spark driver reachability
 
 Spark standalone does not support cluster deploy-mode for Python apps, so every driver runs client-mode inside a dynamically named container and executors must connect back.
-The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `spark.driver.host: "{{ env_var('SPARK_DRIVER_HOST') }}"`, `spark.driver.port: 40400`, `spark.blockManager.port: 40401` (one driver per container IP, so fixed ports are safe).
+The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; profiles fix `spark.driver.host: "{{ env('SPARK_DRIVER_HOST') }}"`, `spark.driver.port: 40400`, `spark.blockManager.port: 40401` (one driver per container IP, so fixed ports are safe).
 
 ## 3. Service inventory
 
@@ -108,7 +108,7 @@ One `sources.yml` must serve the Spark training targets, the local-adapter scori
 
 ### 4.3 Targets (profiles.yml, committed and secret-free)
 
-`profiles.yml` is committed with pure `{{ env_var(...) }}` values (the scaffold gitignores profiles, so CI checkouts have none otherwise); container env supplies `MLFLOW_TRACKING_URI=http://mlflow:5000`, `AWS_ENDPOINT_URL_S3=http://seaweedfs:8333`, keys, region.
+`profiles.yml` is committed with pure `{{ env_var(...) }}` / `{{ env(...) }}` values (the scaffold gitignores profiles, so CI checkouts have none otherwise); container env supplies `MLFLOW_TRACKING_URI=http://mlflow:5000`, `AWS_ENDPOINT_URL_S3=http://seaweedfs:8333`, keys, region.
 Note: boto3's env chain is the only S3 endpoint mechanism (nothing in mbt parses endpoints), so one process talks to exactly one S3 endpoint; fine here since SeaweedFS is the only object store.
 
 | Target | Data | Compute/training | Registry/artifacts | Use |

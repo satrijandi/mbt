@@ -1,0 +1,139 @@
+"""The generated changelog (FEEDBACK v3 D-3).
+
+Ten packages ship from this repo with `generate_release_notes: true` deriving
+notes from merged pull requests - of which this repo has none, so a release's
+notes came out empty. The changelog is generated from git instead, which is why
+these tests are about the *generator's* invariants rather than the file's text:
+the file moves with every commit, the rules do not.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+import generate_changelog as gen
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_every_released_tag_gets_a_section() -> None:
+    """A shipped version with no entry is the failure mode being fixed."""
+    rendered = gen.render()
+    tags = gen.released_tags()
+    assert tags, "expected at least one v* tag in this repo"
+    for tag in tags:
+        assert f"## {tag} - " in rendered, f"{tag} missing from the changelog"
+
+
+def test_every_section_states_its_retraining_impact() -> None:
+    """The one fact git cannot derive, and the most expensive one to omit.
+
+    A release that adds a spec field flips every config hash under full-dump
+    hashing (ADR-7), so the next `state:modified` build retrains everything.
+    A changelog that lists commits but not that is worse than none.
+    """
+    rendered = gen.render()
+    headings = [line for line in rendered.splitlines() if line.startswith("## ")]
+    assert headings
+    assert rendered.count("**Retraining impact:**") == len(headings)
+
+
+def test_curated_impacts_reference_real_tags() -> None:
+    """RETRAINING_IMPACT is hand-maintained, so it can rot; a key that is not a
+    tag means someone recorded impact for a release that does not exist."""
+    assert set(gen.RETRAINING_IMPACT) <= set(gen.released_tags())
+
+
+def test_merge_and_version_bump_commits_are_dropped() -> None:
+    assert gen._SKIP.match("Merge pull request #3 from x")
+    assert gen._SKIP.match("Bump version to 0.2.0")
+    assert not gen._SKIP.match("Fix the scoring window resolution")
+
+
+def test_check_mode_passes_on_a_freshly_generated_file(tmp_path: Path) -> None:
+    """--check must agree with what the generator just wrote, or the release
+    job is unpassable."""
+    target = tmp_path / "CHANGELOG.md"
+    target.write_text(gen.render())
+    original = gen.CHANGELOG
+    try:
+        gen.CHANGELOG = target
+        assert gen.main(["--check"]) == 0
+    finally:
+        gen.CHANGELOG = original
+
+
+def test_check_mode_fails_when_the_file_drifts(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "CHANGELOG.md"
+    target.write_text("# Changelog\n\nhand-edited\n")
+    original = gen.CHANGELOG
+    try:
+        gen.CHANGELOG = target
+        assert gen.main(["--check"]) == 1
+    finally:
+        gen.CHANGELOG = original
+    assert "out of date" in capsys.readouterr().err
+
+
+def test_a_missing_file_is_out_of_date_not_a_crash(tmp_path: Path) -> None:
+    original = gen.CHANGELOG
+    try:
+        gen.CHANGELOG = tmp_path / "nope.md"
+        assert gen.main(["--check"]) == 1
+    finally:
+        gen.CHANGELOG = original
+
+
+def test_writing_produces_the_rendered_document(tmp_path: Path) -> None:
+    original = gen.CHANGELOG
+    try:
+        gen.CHANGELOG = tmp_path / "out.md"
+        assert gen.main([]) == 0
+        assert (tmp_path / "out.md").read_text() == gen.render()
+    finally:
+        gen.CHANGELOG = original
+
+
+def test_the_committed_changelog_is_in_sync_for_released_tags() -> None:
+    """The "Unreleased" section moves with every commit, so the committed file
+    is only pinned from the newest tag downwards - which is the part consumers
+    read and the part `release.yml --check` enforces at tag time."""
+    committed = (REPO_ROOT / "CHANGELOG.md").read_text()
+    rendered = gen.render()
+    newest = gen.released_tags()[0]
+    assert (
+        committed[committed.index(f"## {newest} - ") :]
+        == (rendered[rendered.index(f"## {newest} - ") :])
+    )
+
+
+def test_the_script_runs_as_a_subprocess() -> None:
+    """It is invoked by the release workflow, not imported, so the entrypoint
+    has to work standalone."""
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "generate_changelog.py"), "--check"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_subjects_between_reads_the_tag_span() -> None:
+    tags = gen.released_tags()
+    subjects = gen.subjects_between(None, tags[-1])
+    assert subjects, "the first release should have commits"
+    assert all(not gen._SKIP.match(s) for s in subjects)
+
+
+@pytest.mark.parametrize("impact", ["", "x"])
+def test_sections_render_with_or_without_commits(impact: str) -> None:
+    empty = gen._section("v9.9.9", "2026-01-01", [], impact)
+    assert "No user-visible changes." in empty
+    filled = gen._section("v9.9.9", None, ["did a thing"], impact)
+    assert "- did a thing" in filled
+    assert " - " not in filled.splitlines()[0]  # no date -> no dash suffix

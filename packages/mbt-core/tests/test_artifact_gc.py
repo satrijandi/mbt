@@ -121,6 +121,53 @@ def test_gc_handles_missing_store_and_reads_run_results(tmp_path: Path) -> None:
     assert run_results_artifact_uris(tmp_path / "empty") == set()
 
 
+def _results_file(target: Path, name: str, uri: str) -> Path:
+    path = target / name
+    path.write_text(json.dumps({"results": [{"unique_id": "model.p.m", "artifact": {"uri": uri}}]}))
+    return path
+
+
+def test_gc_keep_set_survives_a_scoring_run(tmp_path: Path) -> None:
+    """A `mbt score` between build and clean must not blank the keep-set.
+
+    The shared run_results.json is latest-write-wins across commands, so it
+    holds only the scoring node afterwards - and scoring nodes record no
+    artifact (FEEDBACK v3 A-2). The per-command sibling is what keeps the
+    build's artifact protected.
+    """
+    target = tmp_path / "target"
+    target.mkdir()
+    _results_file(target, "run_results.build.json", "file:///a/model.bin")
+    # what `mbt score` leaves behind: its own nodes, no artifacts
+    (target / "run_results.json").write_text(
+        json.dumps({"results": [{"unique_id": "scoring.p.s"}]})
+    )
+    (target / "run_results.score.json").write_text(
+        json.dumps({"results": [{"unique_id": "scoring.p.s"}]})
+    )
+    assert run_results_artifact_uris(tmp_path) == {"file:///a/model.bin"}
+
+
+def test_gc_prefers_the_newest_training_command(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    old = _results_file(target, "run_results.build.json", "file:///a/old.bin")
+    new = _results_file(target, "run_results.run.json", "file:///a/new.bin")
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+    assert run_results_artifact_uris(tmp_path) == {"file:///a/new.bin"}
+
+
+def test_gc_tolerates_an_unreadable_results_file(tmp_path: Path) -> None:
+    """`mbt clean` must not hard-fail on a file another mbt version wrote."""
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "run_results.build.json").write_text("{not json")
+    assert run_results_artifact_uris(tmp_path) == set()
+    (target / "run_results.build.json").write_bytes(b"\xff\xfe")
+    assert run_results_artifact_uris(tmp_path) == set()
+
+
 # -- champion keep-set (ADR-10: GC must never delete a champion artifact) ---------
 
 

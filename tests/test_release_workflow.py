@@ -2,7 +2,7 @@
 
 R2-1: `release.yml` had no test gate and no `skip-existing`, so pushing a
 `vX.Y.Z` tag on a commit that would fail CI published broken, unfixable wheels
-for all 10 packages, and a re-run after a partial upload hard-failed on the
+for all 11 packages, and a re-run after a partial upload hard-failed on the
 packages that had already landed. This turns the fix into a permanent
 invariant, in the spirit of the version-sync and cli-reference drift guards:
 the release stays gated on the repo's real CI, and the publish stays idempotent.
@@ -148,7 +148,7 @@ def test_every_package_is_listed_for_publisher_configuration() -> None:
         tomllib.loads(path.read_text())["project"]["name"]
         for path in (root / "packages").glob("*/pyproject.toml")
     }
-    assert len(names) == 10, sorted(names)
+    assert len(names) == 11, sorted(names)
     contributing = CONTRIBUTING.read_text()
     missing = sorted(name for name in names if f"`{name}`" not in contributing)
     assert not missing, f"CONTRIBUTING's publisher list is missing {missing}"
@@ -180,3 +180,38 @@ def test_the_recommended_branch_protection_checks_are_real_ci_jobs() -> None:
         f"CONTRIBUTING's branch-protection list does not mention {missing}; "
         f"an unlisted job is a gate nobody is actually requiring"
     )
+
+
+def test_every_published_artifact_carries_build_provenance() -> None:
+    """Wheels users install must be attestable (FEEDBACK v3 D-1).
+
+    The repo already scans dependencies, sources, and git history, and the
+    showcase publishes oras provenance for its deployable unit. The artifacts
+    that actually leave this repo had none, which is the wrong way round. The
+    attestation must cover the same file set the release attaches, and must
+    run before the publish so a failure cannot ship unattested wheels.
+    """
+    job = _load("release.yml")["jobs"]["release"]
+    steps = job["steps"]
+    attest = next(s for s in steps if "attest-build-provenance" in str(s.get("uses", "")))
+    subjects = (attest.get("with") or {}).get("subject-path", "")
+    assert "dist/*.whl" in subjects and "dist/*.tar.gz" in subjects, attest
+
+    order = {
+        kind: next(i for i, s in enumerate(steps) if kind in str(s.get("uses", "")))
+        for kind in ("attest-build-provenance", "gh-release", "pypi-publish")
+    }
+    assert order["attest-build-provenance"] < order["gh-release"] < order["pypi-publish"], order
+
+
+def test_the_attestation_permission_is_actually_granted() -> None:
+    """`attestations: write` is not implied by `contents: write`; without it the
+    attest step fails at run time, which is exactly the class of error that
+    made the first v0.1.0 tag fail at startup."""
+    release = _load("release.yml")
+    granted = {
+        **(release.get("permissions") or {}),
+        **(release["jobs"]["release"].get("permissions") or {}),
+    }
+    assert granted.get("attestations") == "write", granted
+    assert granted.get("id-token") == "write", granted

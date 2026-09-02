@@ -7,6 +7,7 @@ from core_helpers import write
 
 from mbt.config.profiles import find_profiles_path, load_profiles
 from mbt.exceptions import ConfigError
+from mbt.secrets import clear_taints, redact
 
 MINIMAL = """
 demo:
@@ -80,6 +81,31 @@ def test_env_var_rendering_and_required_env(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setenv("MBT_PROF_STORE_ZZZ", "file:///from-env")
     loaded = load_profiles("demo", tmp_path)
     assert loaded.target.artifact_store == "file:///from-env"
+
+
+def test_env_rendering_tracks_required_env_without_tainting(tmp_path: Path, monkeypatch) -> None:
+    """`env()` is a first-class profiles accessor, not a second-class one.
+
+    It must feed `required_env` exactly like `env_var()` (the job subprocess
+    re-resolves both), report the same missing-value error naming its own
+    function, and leave the value untainted (FEEDBACK v3 A-1).
+    """
+    monkeypatch.delenv("MBT_PROF_PLAIN_ZZZ", raising=False)
+    write_profiles(tmp_path, store="\"{{ env('MBT_PROF_PLAIN_ZZZ') }}\"")
+    with pytest.raises(ConfigError, match=r"env\('MBT_PROF_PLAIN_ZZZ', 'fallback'\)"):
+        load_profiles("demo", tmp_path)
+
+    monkeypatch.setenv("MBT_PROF_PLAIN_ZZZ", "file:///d")
+    clear_taints()
+    loaded = load_profiles("demo", tmp_path)
+    assert loaded.target.artifact_store == "file:///d"
+    assert loaded.required_env == ["MBT_PROF_PLAIN_ZZZ"]
+    assert redact("file:///d stays readable") == "file:///d stays readable"
+
+    write_profiles(tmp_path, store="\"{{ env_var('MBT_PROF_PLAIN_ZZZ') }}\"")
+    clear_taints()
+    load_profiles("demo", tmp_path)
+    assert redact("file:///d stays readable") == "*** stays readable"
 
 
 def test_var_rendering_scopes(tmp_path: Path) -> None:

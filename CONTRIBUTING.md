@@ -19,18 +19,23 @@ The JVM end-to-end tier (Spark, H2O) additionally needs Java 17 on PATH (`JAVA_H
 CI runs all of these; running them locally first saves a round trip.
 
 ```bash
-uv run pytest -q -m "not e2e"            # fast suite (~1 min)
-uv run pytest -q -m e2e --timeout 1800   # e2e tier incl. JVM; needs Java 17
+uv run pytest -q -m "not e2e" --cov       # fast suite + the 100% coverage gate (~3 min)
+uv run pytest -q -m e2e --timeout 1800    # e2e tier incl. JVM; needs Java 17
 uv run ruff check . && uv run ruff format --check .
 uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
   packages/mbt-xgboost/src packages/mbt-mlflow/src packages/mbt-optuna/src \
-  packages/mbt-lightgbm/src packages/mbt-testing/src packages/mbt-snowflake/src \
-  packages/mbt-spark/src packages/mbt-h2o/src
+  packages/mbt-lightgbm/src packages/mbt-sklearn/src packages/mbt-testing/src \
+  packages/mbt-snowflake/src packages/mbt-spark/src packages/mbt-h2o/src
 uv run pre-commit run --all-files
-uv run mkdocs build --strict             # for docs changes
+uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" \
+  packages examples tests/fixtures .github
+uv run python scripts/audit_dependencies.py   # dependency advisories; needs network
+uv run mkdocs build --strict              # for docs changes
 ```
 
-The fast suite enforces 100% line coverage on the coordinator-process packages; a PR that adds uncovered lines fails CI.
+**Run the fast suite with `--cov`.**
+The 100% line-coverage gate on the coordinator-process packages lives in `[tool.coverage.report] fail_under`, so a bare `pytest -m "not e2e"` does not evaluate it: the run goes green locally and the PR then fails CI on coverage.
+This is not hypothetical - it is how a 99.7% run reached main once.
 
 ## Conventions that will save you time
 
@@ -62,9 +67,9 @@ The ship bar is the compliance suite in `mbt-adapter-base`: subclass `TrainingAd
 A release is a version bump plus a tag; the automated PyPI publish is gated on
 the release-readiness work (see `release.yml`).
 
-The one version string lives in **11 `pyproject.toml` files** (the repo root and
-each of the ten `packages/*/`) and in **each package's runtime `__version__`**
-(`packages/*/src/*/__init__.py`) - 21 strings that must stay in lockstep.
+The one version string lives in **12 `pyproject.toml` files** (the repo root and
+each of the eleven `packages/*/`) and in **each package's runtime `__version__`**
+(`packages/*/src/*/__init__.py`) - 23 strings that must stay in lockstep.
 Bump them all with one command:
 
 ```bash
@@ -75,7 +80,7 @@ It rewrites every version string (failing loudly if any file does not carry the
 current version exactly once, so a dependency pin is never touched) and prints
 the changed files.
 `tests/test_version_sync.py` then fails the suite until the root `pyproject.toml`,
-all ten package `pyproject.toml`, and every package's `__init__.__version__`
+all eleven package `pyproject.toml`, and every package's `__init__.__version__`
 agree (it also checks each package declares `license = "Apache-2.0"` and ships a
 `LICENSE`), so it is the backstop if a version is ever edited by hand.
 
@@ -83,19 +88,44 @@ After the bump lands green, tag the release commit `vX.Y.Z` - the scaffold pins
 projects to `git+https://github.com/satrijandi/mbt@vX.Y.Z`, so the tag is what
 makes a fresh `mbt init` project installable.
 Pushing the tag runs `release.yml`, which re-runs the whole CI as a gate (it calls `ci.yml` via `workflow_call`) before it builds or publishes anything, so a tag on a red commit cannot ship broken wheels; the publish uses `skip-existing`, so re-running it after a partial upload is safe.
-There is no hand-written `CHANGELOG.md`: it belongs to the deferred release
-pipeline, not a manual edit.
+Every wheel and sdist is attested with `actions/attest-build-provenance`, so an
+installer can verify where an artifact came from:
+`gh attestation verify mbt_core-0.2.0-py3-none-any.whl --repo satrijandi/mbt`.
+
+### The changelog
+
+`CHANGELOG.md` is **generated from git**, never edited by hand:
+
+```bash
+python scripts/generate_changelog.py           # rewrite it
+python scripts/generate_changelog.py --check   # what release.yml runs at a tag
+```
+
+Before tagging, do two things:
+
+1. add the release's entry to `RETRAINING_IMPACT` in `scripts/generate_changelog.py`.
+   This is the one judgement git cannot make, and it is the most expensive fact
+   in the file: mbt hashes the whole spec dump, so a release that merely adds a
+   spec field flips every config hash and signals a full retrain on the next
+   `state:modified` build (ADR-7). Unrecorded, it defaults to the conservative
+   answer, which is a worse experience than a real one.
+2. regenerate and commit the file.
+
+`release.yml` verifies it with `--check` at tag time rather than on every push:
+the generated "Unreleased" section is derived from commits after the newest tag,
+so it legitimately changes with each commit, and only at a tag is it empty and
+the check stable.
 
 ### Enabling the PyPI publish (one-time, maintainer-only)
 
 Until this is done a tag still produces a fully green run and a GitHub release
-with all 20 wheels/sdists attached - the publish step is skipped by an explicit
+with all 22 wheels/sdists attached - the publish step is skipped by an explicit
 opt-in gate rather than failing. That ordering is deliberate: an unconfigured
 Trusted Publisher fails `invalid-publisher`, and when the publish ran *before*
 the release step it took the GitHub release down with it.
 
 Trusted Publishing uses OIDC, so there is no API token to store anywhere.
-On PyPI, for **each of the ten projects** below, add a GitHub publisher with
+On PyPI, for **each of the eleven projects** below, add a GitHub publisher with
 exactly these values:
 
 | field | value |
@@ -105,11 +135,12 @@ exactly these values:
 | Workflow name | `release.yml` |
 | Environment | `release` |
 
-The ten projects (all must exist and all must carry the publisher, or a tag
+The eleven projects (all must exist and all must carry the publisher, or a tag
 publishes partially):
 
 `mbt-adapter-base`, `mbt-core`, `mbt-h2o`, `mbt-lightgbm`, `mbt-mlflow`,
-`mbt-optuna`, `mbt-snowflake`, `mbt-spark`, `mbt-testing`, `mbt-xgboost`
+`mbt-optuna`, `mbt-sklearn`, `mbt-snowflake`, `mbt-spark`, `mbt-testing`,
+`mbt-xgboost`
 
 Then, in the GitHub repo:
 

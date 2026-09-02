@@ -180,10 +180,25 @@ class StageTransitioned(Event):
 
 
 class PromotionApplied(Event):
+    """The registry transition itself.
+
+    Emitted at debug level because ``mbt promote`` already prints the outcome
+    to stdout as command data: at info level the terminal showed the identical
+    sentence twice, once from the event stream on stderr and once from the
+    command (FEEDBACK v3 E-4). The level only gates the *console* sink, so the
+    JSON-lines stream and any machine consumer still receive it unconditionally
+    - and ``-v`` brings it back for anyone debugging a promotion.
+
+    A FORCED promotion is different: it bypasses the quality contract, so it
+    stays visible, and ``promote_model`` emits its own warn-level message for
+    that case before this one.
+    """
+
     name: str = ""
     version: str = ""
     to_stage: str = ""
     forced: bool = False
+    level: Literal["debug", "info", "warn", "error"] = "debug"
 
     def human(self) -> str:
         forced = " (FORCED)" if self.forced else ""

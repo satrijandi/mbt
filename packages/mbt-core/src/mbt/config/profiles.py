@@ -90,18 +90,26 @@ def _render_profiles_text(
     used_env: list[str] = []
     _missing = object()
 
-    def env_var(name: str, default: str | None = None) -> str:
+    def lookup_env(name: str, default: str | None, *, secret: bool) -> str:
         used_env.append(name)
         value = os.environ.get(name, _missing)
         if value is _missing:
             if default is None:
+                fn = "env_var" if secret else "env"
                 raise ConfigError(
                     f"environment variable {name!r} referenced in profiles.yml is not set",
                     path=path,
-                    hint=f"export {name}=... or provide a default: env_var('{name}', 'fallback')",
+                    hint=f"export {name}=... or provide a default: {fn}('{name}', 'fallback')",
                 )
             return default
-        return taint(str(value))
+        return taint(str(value)) if secret else str(value)
+
+    def env_var(name: str, default: str | None = None) -> str:
+        return lookup_env(name, default, secret=True)
+
+    def env(name: str, default: str | None = None) -> str:
+        """Non-secret environment value: same lookup, no taint."""
+        return lookup_env(name, default, secret=False)
 
     def var(name: str, default: Any = _missing) -> Any:
         if name in cli_vars:
@@ -116,9 +124,10 @@ def _render_profiles_text(
             )
         return default
 
-    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
+    jinja_env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
     try:
-        return env.from_string(text).render(env_var=env_var, var=var), sorted(set(used_env))
+        rendered = jinja_env.from_string(text).render(env_var=env_var, env=env, var=var)
+        return rendered, sorted(set(used_env))
     except ConfigError:
         raise
     except jinja2.TemplateError as exc:

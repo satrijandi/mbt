@@ -266,7 +266,11 @@ def test_every_built_wheel_carries_its_pep_561_marker(built_dist: tuple[Path, Pa
 
     dist, _ = built_dist
     wheels = sorted(dist.glob("mbt*-py3-none-any.whl"))
-    assert len(wheels) == 10, [w.name for w in wheels]
+    # Derived from the workspace, not a literal: this assertion is about
+    # "every package ships its marker", and hard-coding the count made adding
+    # the 11th package look like a packaging regression.
+    expected = len(list((REPO_ROOT / "packages").glob("*/pyproject.toml")))
+    assert len(wheels) == expected, [w.name for w in wheels]
     for wheel in wheels:
         with zipfile.ZipFile(wheel) as archive:
             markers = [name for name in archive.namelist() if name.endswith("/py.typed")]

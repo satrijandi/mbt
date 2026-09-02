@@ -43,7 +43,7 @@ example source/dataset/model/scoring specs, `profiles.yml` with `dev` and `prod`
 **Your job in this step** is `profiles.yml`, the only file that describes environments:
 
 - `dev` points at local files and a sqlite MLflow, with cheap per-target vars (`sample_fraction`, `max_tuning_trials: 5`) so PR builds are small by construction.
-- `prod` resolves `MBT_DATA_ROOT` and `MLFLOW_TRACKING_URI` through `{{ env_var(...) }}`.
+- `prod` resolves `MBT_DATA_ROOT` and `MLFLOW_TRACKING_URI` through `{{ env(...) }}` - neither is a secret, so they stay readable in logs; `{{ env_var(...) }}` is the sibling that marks a value secret and redacts it everywhere.
   Secrets never enter any artifact; the target config is stored unrendered.
 
 **Verify:** the tree above exists, and `mbt parse` exits 0 once data exists (step 2).

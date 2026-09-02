@@ -9,7 +9,11 @@ from test_compile import compile_demo
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.artifacts.manifest import read_manifest
-from mbt.artifacts.run_results import RunResults
+from mbt.artifacts.run_results import (
+    RunResults,
+    command_results_path,
+    read_latest_results,
+)
 from mbt.docsgen.generator import generate_docs
 from mbt.execute.orchestrator import InvocationOptions, run_command
 
@@ -140,3 +144,78 @@ def test_docs_generate_redacts_env_var_secret(
     assert secret not in card, "secret leaked into the published model card"
     assert secret not in index, "secret leaked into the published index"
     assert "***" in card and "***" in index  # the owner field was masked
+
+
+def test_model_card_keeps_metrics_after_a_scoring_run(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """The A-2 regression, driven through the real orchestrator.
+
+    `mbt score`/`mbt monitor` rewrite the shared run_results.json with only
+    their own nodes, so a docs run afterwards used to render "no run results
+    yet - run mbt build" at a user who had just built. The card must survive
+    any command running in between.
+    """
+    run_command(
+        InvocationOptions(command="run", project_dir=demo_project, anchor=TEST_ANCHOR),
+        registry=fake_registry,
+    )
+    results_path = demo_project / "target" / "run_results.json"
+    build_results = json.loads(results_path.read_text())
+    assert any(r["metrics"] for r in build_results["results"])
+
+    # Stand in for a later serving command: same shared file, no model nodes.
+    shared = json.loads(results_path.read_text())
+    shared["metadata"]["command"] = "monitor"
+    shared["results"] = []
+    results_path.write_text(json.dumps(shared))
+    (demo_project / "target" / "run_results.monitor.json").write_text(json.dumps(shared))
+
+    manifest = read_manifest(demo_project / "target" / "manifest.json", source="test")
+    recovered = read_latest_results(results_path, commands=("build", "run", "evaluate"))
+    assert recovered is not None
+    generate_docs(manifest, recovered, demo_project / "target" / "docs")
+
+    card = (demo_project / "target" / "docs" / "model_churn_model.html").read_text()
+    assert "no metrics for this model" not in card
+    assert "pr_auc" in card
+
+
+def test_read_latest_results_falls_back_to_the_shared_file(demo_project: Path) -> None:
+    """A project that has never run, and one whose only file is the shared one."""
+    results_path = demo_project / "target" / "run_results.json"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    assert read_latest_results(results_path, commands=("build",)) is None
+
+    metadata = {
+        "run_id": "r1",
+        "mbt_version": "0.1.0",
+        "target": "dev",
+        "manifest_hash": "sha256:x",
+        "anchor": "2026-01-01T00:00:00Z",
+        "started_at": "2026-01-01T00:00:00Z",
+        "command": "build",
+    }
+    results_path.write_text(json.dumps({"metadata": metadata, "results": []}))
+    loaded = read_latest_results(results_path, commands=("build",))
+    assert loaded is not None and loaded.metadata.command == "build"
+    # no `commands` at all is the "whatever ran last" reading
+    assert read_latest_results(results_path) is not None
+
+
+def test_write_emits_both_the_shared_file_and_the_command_sibling(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    run_command(
+        InvocationOptions(command="run", project_dir=demo_project, anchor=TEST_ANCHOR),
+        registry=fake_registry,
+    )
+    target = demo_project / "target"
+    assert (target / "run_results.json").is_file()
+    assert (target / "run_results.run.json").is_file()
+    assert (target / "run_results.json").read_text() == (
+        target / "run_results.run.json"
+    ).read_text()
+    assert command_results_path(target / "run_results.json", "score").name == (
+        "run_results.score.json"
+    )

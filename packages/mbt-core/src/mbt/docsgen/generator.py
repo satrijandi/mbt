@@ -18,7 +18,25 @@ from mbt.secrets import redact
 
 _CSS = """
 :root { --bg:#ffffff; --fg:#1f2430; --muted:#6b7280; --line:#e5e7eb;
-        --accent:#2563eb; --ok:#15803d; --bad:#b91c1c; --warn:#a16207; }
+        --accent:#2563eb; --ok:#15803d; --bad:#b91c1c; --warn:#a16207;
+        --chip:#f3f4f6; --chip-ok:#dcfce7; --chip-bad:#fee2e2;
+        --chip-warn:#fef9c3; --chip-accent:#eef2ff; --chip-ds:#ecfdf5;
+        --chip-exp:#fef3c7; --edge:#cbd5e1; }
+/* Model cards are read on whatever the reader's OS is set to; a card that is
+   a white rectangle at night is the one part of mbt's output nobody can
+   configure. Every colour above is a variable so this override is complete -
+   the palette shifts, the markup does not.
+   Both palettes were checked against WCAG: every text/background pair clears
+   AA, and body, muted, accent, and code text clear AAA in the dark one. If you
+   retune a colour, re-check the pair it is used against rather than eyeballing
+   it - the badge foregrounds sit on tinted chips, not on --bg. */
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0f1419; --fg:#e6e8eb; --muted:#9aa4b2; --line:#242c38;
+          --accent:#7aa2f7; --ok:#5dc98a; --bad:#f07178; --warn:#e0af68;
+          --chip:#1b2230; --chip-ok:#123524; --chip-bad:#3b1a1d;
+          --chip-warn:#3a2f14; --chip-accent:#1a2436; --chip-ds:#12301f;
+          --chip-exp:#332813; --edge:#3a4657; }
+}
 * { box-sizing: border-box; }
 body { font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
        color: var(--fg); background: var(--bg); margin: 0; }
@@ -34,20 +52,20 @@ th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(-
          font-size: .92rem; vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-              font-size: .85em; background: #f3f4f6; padding: .1em .35em;
+              font-size: .85em; background: var(--chip); padding: .1em .35em;
               border-radius: 4px; }
 .badge { display: inline-block; padding: .1em .55em; border-radius: 999px;
          font-size: .8rem; font-weight: 600; }
-.badge.ok { background: #dcfce7; color: var(--ok); }
-.badge.bad { background: #fee2e2; color: var(--bad); }
-.badge.warn { background: #fef9c3; color: var(--warn); }
-.badge.plain { background: #eef2ff; color: var(--accent); }
-svg .node rect { fill: #eef2ff; stroke: var(--accent); rx: 6; }
-svg .node.dataset rect { fill: #ecfdf5; stroke: var(--ok); }
-svg .node.source rect { fill: #f3f4f6; stroke: var(--muted); }
-svg .node.exposure rect { fill: #fef3c7; stroke: var(--warn); }
+.badge.ok { background: var(--chip-ok); color: var(--ok); }
+.badge.bad { background: var(--chip-bad); color: var(--bad); }
+.badge.warn { background: var(--chip-warn); color: var(--warn); }
+.badge.plain { background: var(--chip-accent); color: var(--accent); }
+svg .node rect { fill: var(--chip-accent); stroke: var(--accent); rx: 6; }
+svg .node.dataset rect { fill: var(--chip-ds); stroke: var(--ok); }
+svg .node.source rect { fill: var(--chip); stroke: var(--muted); }
+svg .node.exposure rect { fill: var(--chip-exp); stroke: var(--warn); }
 svg text { font: 12px ui-monospace, Menlo, monospace; fill: var(--fg); }
-svg .edge { stroke: #cbd5e1; stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
+svg .edge { stroke: var(--edge); stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
 """
 
 
@@ -76,7 +94,9 @@ def _lineage_svg(manifest: Manifest) -> str:
         f'<svg viewBox="0 0 {width} {height}" width="100%" xmlns="http://www.w3.org/2000/svg">',
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
         'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#cbd5e1"/></marker></defs>',
+        # var(--edge), not a literal, so the arrowhead follows the dark palette
+        # along with the edge it terminates.
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--edge)"/></marker></defs>',
     ]
     for u, v in graph.edges:
         x1, y1 = positions[u][0] + box_w, positions[u][1] + box_h // 2
@@ -112,7 +132,14 @@ def _page(title: str, body: str) -> str:
 
 def _metric_table(result: NodeResult | None) -> str:
     if result is None or not result.metrics:
-        return "<p class='muted'>no run results yet - run <code>mbt build</code></p>"
+        # Naming the file matters: this used to read "run mbt build" and was
+        # shown to users who HAD just built, because a later `mbt score`
+        # overwrote the shared results file (FEEDBACK v3 A-2).
+        return (
+            "<p class='muted'>no metrics for this model in "
+            "<code>target/run_results.build.json</code> - run <code>mbt build</code> "
+            "(or <code>mbt run</code>), then <code>mbt docs generate</code></p>"
+        )
     # A cross-validated fold mean sits beside the single-split value (R2-7), so
     # an optimistic single split is visible at a glance.
     backtest = result.backtest_metrics

@@ -155,3 +155,52 @@ def test_a_clean_locked_run_reports_no_misfiled_floor_only() -> None:
     unaccepted, stale = audit.classify(set(audit.ACCEPTED))
     assert audit.misfiled_floor_only(set(audit.ACCEPTED) - audit.FLOOR_ONLY) == []
     assert audit.report(unaccepted, stale, check_stale=True, misfiled=[]) == 0
+
+
+def test_a_floor_only_entry_that_stopped_firing_at_the_floors_fails() -> None:
+    """The half nothing used to check.
+
+    A FLOOR_ONLY acceptance claims the declared lower bound still carries the
+    advisory. The floors job runs --no-check-stale, so the ordinary staleness
+    check skips these by design; --require-floor-only is what makes the claim
+    falsifiable in the one environment that can judge it.
+    """
+    advisory = sorted(audit.FLOOR_ONLY)[0]
+    still_firing = set(audit.FLOOR_ONLY)
+    assert audit.unearned_floor_only(still_firing) == []
+
+    risen_past = still_firing - {advisory}
+    assert audit.unearned_floor_only(risen_past) == [advisory]
+    assert audit.report([], [], check_stale=False, unearned=[advisory]) == 1
+
+
+def test_require_floor_only_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the flag, the floors job's own resolution must stay green.
+
+    Only the floors environment can judge these; the locked audit and the
+    upstream tier resolve something else, so demanding the entries fire there
+    would be permanently red for the wrong reason.
+    """
+    report = {
+        "dependencies": [
+            {"vulns": [{"id": advisory, "aliases": []}]} for advisory in audit.ACCEPTED
+        ]
+    }
+    monkeypatch.setattr(audit, "run_pip_audit", lambda: report)
+    # The floors environment: every acceptance fires, floor-only ones included.
+    assert audit.main(["--no-check-stale"]) == 0
+    assert audit.main(["--no-check-stale", "--require-floor-only"]) == 0
+    # The same report judged as if it were the LOCK is a different verdict:
+    # a floor-only entry firing there means the floor-only story is false.
+    assert audit.main([]) == 1
+
+    # Now the floors have risen past one of them: only the opt-in run notices.
+    advisory = sorted(audit.FLOOR_ONLY)[0]
+    thinner = {
+        "dependencies": [
+            {"vulns": [{"id": a, "aliases": []}]} for a in audit.ACCEPTED if a != advisory
+        ]
+    }
+    monkeypatch.setattr(audit, "run_pip_audit", lambda: thinner)
+    assert audit.main(["--no-check-stale"]) == 0
+    assert audit.main(["--no-check-stale", "--require-floor-only"]) == 1

@@ -98,7 +98,7 @@ churn_lake:
             # so the prod target works from ANY container on the network -
             # jupyterlab, a Woodpecker step, or an Airflow-launched unit
             # (DESIGN.md section 2: executors connect back to the driver).
-            spark.driver.host: "{{ env_var('SPARK_DRIVER_HOST', 'jupyterlab') }}"
+            spark.driver.host: "{{ env('SPARK_DRIVER_HOST', 'jupyterlab') }}"
             spark.driver.port: "40400"
             spark.blockManager.port: "40401"
             spark.executor.memory: 1g
@@ -113,7 +113,7 @@ churn_lake:
         h2o_backend: sparkling
         spark_master: spark://spark-master:7077
         spark_conf:
-          spark.driver.host: "{{ env_var('SPARK_DRIVER_HOST', 'jupyterlab') }}"
+          spark.driver.host: "{{ env('SPARK_DRIVER_HOST', 'jupyterlab') }}"
           spark.driver.port: "40402"
           spark.blockManager.port: "40403"
           spark.executor.memory: 2g
@@ -145,39 +145,35 @@ churn_lake:
       data:
         adapter: snowflake
         config:
-          account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
-          user: "{{ env_var('SNOWFLAKE_USER', '') }}"
+          account: "{{ env('SNOWFLAKE_ACCOUNT', '') }}"
+          user: "{{ env('SNOWFLAKE_USER', '') }}"
           # Key-pair is the practical choice for this plane: a make target
           # runs several mbt commands, and browser SSO re-prompts per process
           # unless the account has ALLOW_ID_TOKEN enabled (docs/troubleshooting.md).
-          authenticator: "{{ env_var('SNOWFLAKE_AUTHENTICATOR', '') }}"
-          warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', '') }}"
-          database: "{{ env_var('SNOWFLAKE_DATABASE', '') }}"
-          schema: "{{ env_var('SNOWFLAKE_SCHEMA', '') }}"
-          role: "{{ env_var('SNOWFLAKE_ROLE', '') }}"
+          authenticator: "{{ env('SNOWFLAKE_AUTHENTICATOR', '') }}"
+          warehouse: "{{ env('SNOWFLAKE_WAREHOUSE', '') }}"
+          database: "{{ env('SNOWFLAKE_DATABASE', '') }}"
+          schema: "{{ env('SNOWFLAKE_SCHEMA', '') }}"
+          role: "{{ env('SNOWFLAKE_ROLE', '') }}"
           connect_args:
-            private_key_file: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE', '') }}"
+            private_key_file: "{{ env('SNOWFLAKE_PRIVATE_KEY_FILE', '') }}"
           # ADR-23 v1 stages prediction runs as parquet; the warehouse-native
           # store is v2 (issue #1). Host path, so it is NOT the container's.
-          predictions_root: "{{ env_var('SHOWCASE_SNOWFLAKE_PREDICTIONS', './target/snowflake_predictions') }}"
+          predictions_root: "{{ env('SHOWCASE_SNOWFLAKE_PREDICTIONS', './target/snowflake_predictions') }}"
       tracking:
         adapter: mlflow
         config:
-          # A WHOLE URI, never a bare port. env_var() taints its value, and
-          # redact() replaces every tainted string anywhere in serialized
-          # output - so a 4-digit port becomes a "secret" that gets censored
-          # out of the middle of unrelated floats, corrupting the job-result
-          # JSON ("value":0.1***234). A full URI cannot collide with a number.
-          uri: "{{ env_var('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
+          # env(), not env_var(): the tracking URI is not a secret, and
+          # env_var() would redact it out of every log line and out of the
+          # middle of unrelated floats in run_results.json (FEEDBACK v3 A-1).
+          uri: "{{ env('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
       registry:
         adapter: mlflow
         config:
-          # A WHOLE URI, never a bare port. env_var() taints its value, and
-          # redact() replaces every tainted string anywhere in serialized
-          # output - so a 4-digit port becomes a "secret" that gets censored
-          # out of the middle of unrelated floats, corrupting the job-result
-          # JSON ("value":0.1***234). A full URI cannot collide with a number.
-          uri: "{{ env_var('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
+          # env(), not env_var(): the tracking URI is not a secret, and
+          # env_var() would redact it out of every log line and out of the
+          # middle of unrelated floats in run_results.json (FEEDBACK v3 A-1).
+          uri: "{{ env('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
       compute: {adapter: local}
       # Its own prefix in the same SeaweedFS bucket the lake plane uses, so
       # both planes' artifacts live in one store but never interleave.

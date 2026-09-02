@@ -45,8 +45,28 @@ macro_paths: [macros]
 ```
 
 Search order: `--profiles-dir`, `$MBT_PROFILES_DIR`, `./profiles.yml`,
-`~/.mbt/profiles.yml`. Jinja renders before validation; secrets via
-`{{ env_var('NAME') }}` only.
+`~/.mbt/profiles.yml`. Jinja renders before validation.
+
+### Reading the environment: `env_var()` vs `env()`
+
+Two accessors, same lookup, one difference that matters:
+
+| | Marks the value secret | Use for |
+|---|---|---|
+| `{{ env_var('NAME') }}` | **yes** - tainted, then redacted from every serialized surface | passwords, tokens, private keys, connection strings that embed one |
+| `{{ env('NAME') }}` | no | schema and database names, hosts, ports, roots, region, environment name |
+
+Both accept a default (`env('NAME', 'fallback')`), both are re-resolved inside
+the training-job subprocess, and both are recorded in the manifest's
+`required_env`. Neither ever stores its *value* in the manifest: the target
+config is kept unrendered.
+
+**Pick deliberately.** Redaction is exact-substring, so it is unforgiving in
+both directions. Use `env_var()` for something that is not a secret and every
+occurrence of that string disappears from your logs, your `run_results.json`,
+and your model cards - a value of `1` rewrites `0.1234` to `0.***234`. Use
+`env()` for something that *is* a secret and it will be printed. When in
+doubt, `env_var()`: a redacted log is recoverable, a leaked credential is not.
 
 ## sources.yml
 
@@ -279,8 +299,9 @@ datasets:
 data:
   adapter: snowflake
   config:
-    account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
-    user: "{{ env_var('SNOWFLAKE_USER') }}"
+    # env() for the identifiers (they belong in logs), env_var() for the secret
+    account: "{{ env('SNOWFLAKE_ACCOUNT') }}"
+    user: "{{ env('SNOWFLAKE_USER') }}"
     password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
     warehouse: ML_WH
     database: ANALYTICS
@@ -417,8 +438,8 @@ calibrate: a trial calibrator would fit on the very split the objective is
 scored on, making a `brier`/`ece` objective circularly optimal. Calibration is
 a monotonic transform (ranking metrics like `roc_auc` are preserved) and
 travels with the model, so champion and challenger calibrate identically and
-the paired gate stays apples-to-apples. All four training adapters (xgboost,
-lightgbm, spark, h2o) support it; support is probed at parse.
+the paired gate stays apples-to-apples. All five training adapters (xgboost,
+lightgbm, sklearn, spark, h2o) support it; support is probed at parse.
 
 `protocol.backtest_folds: N` adds a cross-validated backtest (R2-7): the model
 is refit and evaluated across `N` folds of the training window - time-ordered
@@ -441,7 +462,7 @@ for a temporal split the inner tuning uses only each fold's PAST). It needs
 `backtest_folds` and a `tuning` block, works on either split, and re-tunes per
 fold, so it is the most expensive option.
 
-Regression (`task: regression`, all four adapters) uses `rmse`, `mae`, `r2`,
+Regression (`task: regression`, all five adapters) uses `rmse`, `mae`, `r2`,
 `mape`; the target must be a numeric column (no 0/1 label check, no
 `scale_pos_weight`). Spark trains a `GBTRegressor` and H2O AutoML detects
 regression from the numeric target - the same spec runs on every adapter. Lower-is-better: `rmse`, `mae`, `mape`; `r2` is

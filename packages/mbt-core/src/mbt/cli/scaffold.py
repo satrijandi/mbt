@@ -17,6 +17,17 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: reliably across build backends).
 _RENAMES = {"gitignore": ".gitignore"}
 
+#: Never copied into a scaffolded project, and never read.
+#:
+#: The template is *source*, so in an editable or checked-out install anything
+#: that imports `scripts/generate_sample_data.py` leaves a `__pycache__` beside
+#: it. The walk below reads every file as text, so one stray `.pyc` turned
+#: `mbt init` - the first command a new user ever runs - into
+#: "Internal error: UnicodeDecodeError ... this is a bug in mbt".
+#: Found exactly that way while verifying the sample-data generator.
+_SKIP_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+_SKIP_SUFFIXES = (".pyc", ".pyo")
+
 
 def _walk(root: object, prefix: str = "") -> list[tuple[str, str]]:
     """(relative_path, content) for every template file."""
@@ -24,8 +35,9 @@ def _walk(root: object, prefix: str = "") -> list[tuple[str, str]]:
     for entry in root.iterdir():  # type: ignore[attr-defined]
         rel = f"{prefix}{entry.name}"
         if entry.is_dir():
-            out.extend(_walk(entry, prefix=f"{rel}/"))
-        else:
+            if entry.name not in _SKIP_DIRS:
+                out.extend(_walk(entry, prefix=f"{rel}/"))
+        elif not entry.name.endswith(_SKIP_SUFFIXES):
             out.append((rel, entry.read_text()))
     return out
 

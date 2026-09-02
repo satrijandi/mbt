@@ -15,8 +15,9 @@ my_project:
       data:
         adapter: snowflake
         config:
-          account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
-          user: "{{ env_var('SNOWFLAKE_USER') }}"
+          # env() for identifiers (they belong in logs), env_var() for the secret
+          account: "{{ env('SNOWFLAKE_ACCOUNT') }}"
+          user: "{{ env('SNOWFLAKE_USER') }}"
           password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
           warehouse: ML_WH
           database: ANALYTICS
@@ -93,8 +94,11 @@ dir) joined with the scoring node's `output.path`.
 Staging reuses mbt's shared prediction-store layout (per-run directories,
 idempotent-by-`run_key` writes, the ground-truth ledger). A warehouse-native
 store that writes predictions back into Snowflake tables is designed in ADR-23
-and gated on the first credentialed `live_snowflake` run - until then predictions
-land in the staging path, not a Snowflake table.
+and gated on live verification of the serving leg (`promote` / `score` /
+`monitor` against a real account). The first credentialed `live_snowflake` run
+happened on 2026-08-28 and proved the warehouse *read* path; the serving leg is
+still unproven, so until then predictions land in the staging path, not a
+Snowflake table. Tracked in issue #1.
 
 ```yaml
 # profiles.yml (data adapter)
@@ -115,8 +119,8 @@ The browser lands on whatever IdP your Snowflake account federates to (JumpCloud
 
 ```yaml
 config:
-  account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
-  user: "{{ env_var('SNOWFLAKE_USER') }}"
+  account: "{{ env('SNOWFLAKE_ACCOUNT') }}"
+  user: "{{ env('SNOWFLAKE_USER') }}"
   authenticator: externalbrowser
   warehouse: ML_WH
   database: ANALYTICS
@@ -144,13 +148,13 @@ Key-pair for CI and service users (new Snowflake accounts enforce MFA on passwor
 
 ```yaml
 config:
-  account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
-  user: "{{ env_var('SNOWFLAKE_USER') }}"
+  account: "{{ env('SNOWFLAKE_ACCOUNT') }}"
+  user: "{{ env('SNOWFLAKE_USER') }}"
   warehouse: ML_WH
   database: ANALYTICS
   schema: GOLD
   connect_args:
-    private_key_file: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_FILE') }}"
+    private_key_file: "{{ env('SNOWFLAKE_PRIVATE_KEY_FILE') }}"
 ```
 
 ## Live integration tests
@@ -159,7 +163,7 @@ The unit tests run the adapter's generated SQL in DuckDB and need no account.
 `tests/test_snowflake_live.py` additionally proves the dialect surfaces (`MD5_NUMBER_LOWER64` sampling, snapshot tokens, Arrow streaming, case rules), the wide multi-table join from `examples/showcase` (a population spine, a label table, and three feature histories joined by different entity keys, with per-table source pruning), and the full local-training loop against a real Snowflake account.
 It is double-gated: every test skips unless `MBT_LIVE_SNOWFLAKE=1`, and once opted in, incomplete configuration fails loudly instead of skipping.
 
-Credentials live in environment variables, never in `profiles.yml` (it is committed and secret-free; values flow in through `env_var()`).
+Credentials live in environment variables, never in `profiles.yml` (it is committed and secret-free; values flow in through `env_var()` for secrets and `env()` for identifiers - see docs/spec-reference.md for which is which).
 Copy [`.env.example`](.env.example) to `.env` next to it (gitignored - the repo ignores `.env` and `.env.*` everywhere) and load it, or export the variables directly:
 
 ```bash

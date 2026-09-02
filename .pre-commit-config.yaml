@@ -23,13 +23,13 @@ repos:
   - repo: local
     hooks:
       - id: mypy
-        name: mypy --strict (all 10 packages, matching CI)
+        name: mypy --strict (all 11 packages, matching CI)
         entry: >-
           uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src
           packages/mbt-xgboost/src packages/mbt-mlflow/src
           packages/mbt-optuna/src packages/mbt-lightgbm/src
-          packages/mbt-testing/src packages/mbt-snowflake/src
-          packages/mbt-spark/src packages/mbt-h2o/src
+          packages/mbt-sklearn/src packages/mbt-testing/src
+          packages/mbt-snowflake/src packages/mbt-spark/src packages/mbt-h2o/src
         language: system
         pass_filenames: false
         files: '\.py$'

@@ -20,7 +20,7 @@ PACKAGE_PYPROJECTS = sorted(REPO_ROOT.glob("packages/*/pyproject.toml"))
 
 
 def test_workspace_has_the_expected_packages() -> None:
-    assert len(PACKAGE_PYPROJECTS) == 10, [p.parent.name for p in PACKAGE_PYPROJECTS]
+    assert len(PACKAGE_PYPROJECTS) == 11, [p.parent.name for p in PACKAGE_PYPROJECTS]
 
 
 def test_all_package_versions_match_the_root_and_the_runtime() -> None:
@@ -52,7 +52,7 @@ def test_every_package_declares_and_ships_the_license() -> None:
 def test_every_package_ships_a_pep_561_marker() -> None:
     """Without ``py.typed`` in the installed package, a consumer's type checker
     treats every mbt import as ``Any`` - the repo is mypy --strict across all
-    ten packages internally and shipped none of that outward.
+    eleven packages internally and shipped none of that outward.
 
     It matters most for ``mbt-adapter-base``, whose entire purpose is the typed
     protocols third-party adapters implement (docs/adapter-authoring.md): an

@@ -29,7 +29,10 @@ mbt show churn_classifier
   sink + shift monitors + delayed ground-truth evaluation (1 config = 1 pipeline)
 - `tests/` - Python data tests (`def test_*(dataset, spec) -> TestResult`)
 - `macros/` - Jinja macros usable in any spec
-- `profiles.yml` - environments (dev/prod); keep secrets in `{{ env_var(...) }}`
+- `profiles.yml` - environments (dev/prod). Secrets go through
+  `{{ env_var(...) }}`, which redacts the value everywhere it could be printed;
+  non-secret environment values (roots, hosts, schema names) go through
+  `{{ env(...) }}` so they stay readable in logs
 - `requirements.in` / `requirements.txt` - pinned toolchain for CI; regenerate
   with hashes via `uv pip compile --generate-hashes requirements.in -o requirements.txt`.
   The pins reference the mbt release tag `v__MBT_VERSION__`; until that tag

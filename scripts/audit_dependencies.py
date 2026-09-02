@@ -92,10 +92,12 @@ ACCEPTED: dict[str, str] = {
 #: direction: if one of these ever DOES fire against the lock, the "floor only"
 #: story is wrong and it must become a real acceptance.
 #:
-#: The one rot risk this cannot close: if the floor later rises past them,
-#: nothing here forces the entry out, because the environment that would prove
-#: it (the floors job) deliberately runs with --no-check-stale. Raising an h2o
-#: floor is the moment to re-read this set.
+#: Both halves of the claim are now checked, in the only environment that can
+#: check each. "Not in the lock" is `misfiled_floor_only`, run by the locked
+#: audit. "Present at the floors" is `unearned_floor_only`, run by the floors
+#: job via --require-floor-only: if a floor rises past one of these, the entry
+#: stops being earned and that job says so. Before that flag existed, nothing
+#: could force one of these out, because the floors job runs --no-check-stale.
 FLOOR_ONLY: frozenset[str] = frozenset({"PYSEC-2026-352", "PYSEC-2026-349", "PYSEC-2026-2180"})
 
 
@@ -145,6 +147,20 @@ def misfiled_floor_only(found: set[str]) -> list[str]:
     return sorted(FLOOR_ONLY & found)
 
 
+def unearned_floor_only(found: set[str]) -> list[str]:
+    """FLOOR_ONLY entries that do NOT fire in THIS resolution.
+
+    The mirror of :func:`misfiled_floor_only`, and only meaningful where the
+    resolution IS the floors one. A floor-only acceptance claims the declared
+    lower bound still carries the advisory; once a floor rises past it, the
+    entry is a stale suppression with a plausible-sounding reason attached,
+    which is the exact failure this whole script exists to prevent. Nothing
+    used to force these out - the floors job runs --no-check-stale, so the
+    ordinary staleness check skips them by design.
+    """
+    return sorted(FLOOR_ONLY - found)
+
+
 def run_pip_audit() -> dict:
     """Run pip-audit and return its JSON report.
 
@@ -168,9 +184,14 @@ def run_pip_audit() -> dict:
 
 
 def report(
-    unaccepted: list[str], stale: list[str], check_stale: bool, misfiled: list[str] | None = None
+    unaccepted: list[str],
+    stale: list[str],
+    check_stale: bool,
+    misfiled: list[str] | None = None,
+    unearned: list[str] | None = None,
 ) -> int:
     misfiled = misfiled or []
+    unearned = unearned or []
     for advisory in unaccepted:
         print(f"FAIL new vulnerability, not accepted: {advisory}")
     if unaccepted:
@@ -199,7 +220,17 @@ def report(
             "why the fix is unreachable for the version we actually ship."
         )
 
-    if unaccepted or misfiled or (stale and check_stale):
+    for advisory in unearned:
+        print(f"FAIL floor-only acceptance no longer fires at the floors: {advisory}")
+    if unearned:
+        print(
+            f"\nThose entries are in FLOOR_ONLY in {__file__}, which claims the "
+            "DECLARED FLOOR still carries them. This environment is the floors "
+            "one and does not report them, so a floor has risen past the fix. "
+            "Delete the entries - the acceptance is no longer earned."
+        )
+
+    if unaccepted or misfiled or unearned or (stale and check_stale):
         return 1
     accepted = ", ".join(sorted(ACCEPTED)) or "none"
     print(f"pip-audit clean; still-accepted advisories: {accepted}")
@@ -218,13 +249,33 @@ def main(argv: list[str] | None = None) -> int:
             "not apply there)."
         ),
     )
+    parser.add_argument(
+        "--require-floor-only",
+        action="store_true",
+        help=(
+            "Fail when a FLOOR_ONLY acceptance does NOT fire here. Pass this "
+            "ONLY in the floors job: those entries are accepted precisely "
+            "because the declared lower bound still carries the advisory, so "
+            "if the floors environment stops reporting one, the floor has "
+            "risen past the fix and the entry must be deleted."
+        ),
+    )
     args = parser.parse_args(argv)
     found = findings_from(run_pip_audit())
     unaccepted, stale = classify(found)
-    # Only the locked resolution can judge a floor-only claim; the floors job
-    # and the upstream tier deliberately resolve something else.
+    # Each half of a floor-only claim is checkable in exactly one environment.
+    # "Absent from the lock" needs the locked resolution; "present at the
+    # floors" needs the floors one, which is what --require-floor-only says
+    # this run is.
     misfiled = [] if args.no_check_stale else misfiled_floor_only(found)
-    return report(unaccepted, stale, check_stale=not args.no_check_stale, misfiled=misfiled)
+    unearned = unearned_floor_only(found) if args.require_floor_only else []
+    return report(
+        unaccepted,
+        stale,
+        check_stale=not args.no_check_stale,
+        misfiled=misfiled,
+        unearned=unearned,
+    )
 
 
 if __name__ == "__main__":

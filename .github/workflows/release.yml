@@ -18,8 +18,9 @@ on:
       - "v*"
 
 permissions:
-  contents: write  # create the GitHub release
-  id-token: write  # PyPI Trusted Publishing (OIDC) - no long-lived API token
+  contents: write       # create the GitHub release
+  id-token: write       # PyPI Trusted Publishing (OIDC) - no long-lived API token
+  attestations: write   # SLSA build provenance for the wheels (see below)
 
 jobs:
   ci:
@@ -48,11 +49,35 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # generate_changelog.py reads tags and commit history
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+      - name: Changelog matches the tag history
+        # Checked HERE and not in ci.yml on purpose: the generated file carries
+        # an "Unreleased" section derived from commits after the newest tag, so
+        # on an ordinary push it legitimately differs on every commit. At a tag
+        # that section is empty by construction, which makes this the one place
+        # the check is both stable and meaningful.
+        run: |
+          git fetch --tags --force
+          uv run --no-project python scripts/generate_changelog.py --check
       - name: Build all workspace wheels and sdists
         run: uv build --all-packages
+      - name: Attest build provenance
+        # Signed, verifiable SLSA provenance for every artifact a user can
+        # install: which workflow, which commit, which runner produced it.
+        # The rest of the supply chain was already covered (pip-audit, CodeQL,
+        # gitleaks over full history, digest-pinned images and oras provenance
+        # in the showcase); the published wheels were the one gap, which is
+        # backwards - they are the only artifacts that leave this repo.
+        # Verify with: gh attestation verify <file> --repo satrijandi/mbt
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
       # The GitHub release comes FIRST: it needs nothing but the wheels, and a
       # failed (or gated-off) PyPI publish must never block the artifact users
       # actually consume today - the tag's release with wheels attached.

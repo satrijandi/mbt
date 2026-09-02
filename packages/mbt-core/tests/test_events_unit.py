@@ -231,6 +231,72 @@ def test_console_sink_redacts_tainted_values() -> None:
     assert "***" in output
 
 
+def test_console_sink_defaults_to_stderr() -> None:
+    """ "Events go to stderr, stdout is command data" is a load-bearing
+    invariant, and it should hold by construction rather than only because
+    every caller remembers to pass an stderr console (FEEDBACK v3 E-2)."""
+    assert ConsoleSink().console.stderr is True
+
+
+def test_console_sink_hangs_wrapped_lines_under_the_message() -> None:
+    """A wrapped continuation used to restart in column zero, so it read as a
+    new event with a missing timestamp (FEEDBACK v3 E-5)."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=40)
+    sink = ConsoleSink(console=console)
+    sink.write(LogMessage(message="alpha beta gamma delta epsilon zeta eta theta"))
+    first, *rest = [line for line in buffer.getvalue().splitlines() if line.strip()]
+    assert first.startswith(" ") is False
+    assert rest, "expected the message to wrap at width 40"
+    assert all(line.startswith(" " * 10) for line in rest), rest
+
+
+def test_console_sink_keeps_long_paths_whole_when_they_fit() -> None:
+    """The one thing a user most often copies out of a log is an absolute
+    path; Rich's default wrapping split them mid-token."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=80)
+    path = "/very/long/directory/name/target/manifest.json"
+    ConsoleSink(console=console).write(LogMessage(message=f"compiled 3 nodes -> {path}"))
+    assert path in buffer.getvalue().replace("\n", "").replace(" " * 10, "")
+
+
+def test_a_path_longer_than_the_line_is_hard_split_rather_than_dropped() -> None:
+    """The fallback when even a whole line cannot hold the token.
+
+    Preferring word boundaries is the point, but a 200-character path on an
+    80-column terminal has no boundary to prefer - it has to break somewhere,
+    and every character must survive the break.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=50)
+    path = "/" + "seg/" * 40 + "manifest.json"
+    ConsoleSink(console=console).write(LogMessage(message=f"wrote {path}"))
+    rendered = buffer.getvalue()
+    assert path in rendered.replace("\n", "").replace(" ", "")
+
+
+def test_console_sink_does_not_fight_a_very_narrow_terminal() -> None:
+    """Below a usable width, wrapping shreds the message into fragments; emit
+    it on one line and let the terminal do whatever it does."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=12)
+    ConsoleSink(console=console).write(LogMessage(message="alpha beta gamma"))
+    assert "alpha beta gamma" in buffer.getvalue().replace("\n", "")
+
+
+def test_console_sink_renders_local_time_not_bare_utc() -> None:
+    """event.ts is UTC-aware; strftime would print the UTC wall clock with no
+    marker, next to third-party lines in local time (FEEDBACK v3 E-3)."""
+    import datetime as dt
+
+    sink, buffer = _console_sink()
+    event = LogMessage(message="x", ts=dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC))
+    sink.write(event)
+    expected = event.ts.astimezone().strftime("%H:%M:%S")
+    assert expected in buffer.getvalue()
+
+
 def test_json_lines_sink_writes_one_redacted_object_per_line() -> None:
     default_sink = JsonLinesSink()  # defaults to stdout; never written to here
     assert default_sink.stream is not None
@@ -243,3 +309,33 @@ def test_json_lines_sink_writes_one_redacted_object_per_line() -> None:
     payload = json.loads(lines[0])
     assert payload["event"] == "LogMessage"
     assert payload["message"] == "uri is ***"
+
+
+def test_console_sink_treats_embedded_newlines_as_hard_breaks() -> None:
+    """No built-in event renders a newline, but LogMessage carries whatever a
+    hook or adapter error hands it; a "a\\nb" word would otherwise wreck the
+    width accounting for the whole line."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=60)
+    ConsoleSink(console=console).write(LogMessage(message="first line\nsecond line"))
+    body = [line for line in buffer.getvalue().splitlines() if line.strip()]
+    assert body[0].endswith("first line")
+    assert body[1] == " " * 10 + "second line"
+
+
+def test_narrow_terminal_still_splits_on_embedded_newlines() -> None:
+    """Below the wrap floor mbt stops laying out and lets the terminal cope -
+    but a hard newline is content, not layout, so it still separates lines.
+
+    The assertion is deliberately about content rather than columns: at width
+    12 the 10-column gutter alone overflows, so Rich re-wraps the indented
+    continuation. That is the "do not fight it" case working as intended.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=12)
+    ConsoleSink(console=console).write(LogMessage(message="alpha\nbeta"))
+    rendered = buffer.getvalue()
+    assert "alpha" in rendered
+    assert "beta" in rendered.replace("\n", "").replace(" ", "")
+    # two logical lines, not one run-on
+    assert rendered.count("\n") >= 2

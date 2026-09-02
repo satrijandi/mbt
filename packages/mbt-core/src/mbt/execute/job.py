@@ -67,10 +67,10 @@ _TUNING_BOOTSTRAP_CONFIDENCE = 0.95
 
 
 def _render_adapter_ref(ref: AdapterRef, job_vars: dict[str, Any]) -> AdapterRef:
-    """Re-render env_var()/var() in an unrendered adapter config (TSD §18)."""
-    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
+    """Re-render env_var()/env()/var() in an unrendered adapter config (TSD §18)."""
+    jinja_env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
 
-    def env_var(name: str, default: str | None = None) -> str:
+    def lookup_env(name: str, default: str | None, *, secret: bool) -> str:
         value = os.environ.get(name)
         if value is None:
             if default is None:
@@ -79,14 +79,21 @@ def _render_adapter_ref(ref: AdapterRef, job_vars: dict[str, Any]) -> AdapterRef
                     hint="the job re-resolves secrets from its own environment (TSD §18)",
                 )
             return default
-        return taint(value)
+        return taint(value) if secret else value
+
+    def env_var(name: str, default: str | None = None) -> str:
+        return lookup_env(name, default, secret=True)
+
+    def env(name: str, default: str | None = None) -> str:
+        """Non-secret environment value: same lookup, no taint."""
+        return lookup_env(name, default, secret=False)
 
     def var(name: str, default: Any = None) -> Any:
         return job_vars.get(name, default)
 
     def render(value: Any) -> Any:
         if isinstance(value, str) and ("{{" in value or "{%" in value):
-            return env.from_string(value).render(env_var=env_var, var=var)
+            return jinja_env.from_string(value).render(env_var=env_var, env=env, var=var)
         if isinstance(value, dict):
             return {k: render(v) for k, v in value.items()}
         if isinstance(value, list):

@@ -159,7 +159,7 @@ StateIncludeEnvOpt = Annotated[
 ]
 ManifestOpt = Annotated[
     str | None,
-    typer.Option("--manifest", help="Execute a stored manifest verbatim (FR-RUN-11)."),
+    typer.Option("--manifest", help="Execute a stored manifest verbatim (ADR-19)."),
 ]
 AllowEnvMismatchOpt = Annotated[
     bool,
@@ -246,7 +246,7 @@ def init(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Scaffold a golden-path project (FR-PROJ-01)."""
+    """Scaffold a golden-path project: specs, profiles, CI workflows, sample data."""
     from mbt.cli.scaffold import scaffold_project
 
     # chdir=False: project_dir is the parent to scaffold into, not a project
@@ -267,7 +267,7 @@ def deps(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Install adapter packages pinned in packages.yml (FR-PROJ-04)."""
+    """Install the adapter packages pinned in packages.yml."""
     from mbt.deps import install_packages, load_packages
 
     cli = make_ctx(project_dir, None, None, None, log_format, quiet, verbose)
@@ -383,7 +383,7 @@ def parse(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Validate all configs and build the DAG; no execution (FR-PARSE-01)."""
+    """Validate all configs and build the DAG; nothing executes."""
     from mbt.events import get_bus
     from mbt.events.models import ParseCompleted, ParseStarted
     from mbt.parsing import parse_project
@@ -425,7 +425,7 @@ def compile(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Resolve Jinja + profiles + snapshots into target/manifest.json (FR-COMP-01)."""
+    """Resolve Jinja + profiles + snapshots into target/manifest.json."""
     from mbt.compile.compiler import CompileOptions, compile_project
     from mbt.parsing import parse_project
 
@@ -497,11 +497,9 @@ def _register_execution_command(command: str, help_text: str) -> None:
             raise typer.Exit(code)
 
 
-_register_execution_command("run", "Build datasets and train models in DAG order (FR-RUN-01).")
-_register_execution_command(
-    "build", "run + test interleaved in DAG order - the CI workhorse (FR-RUN-01)."
-)
-_register_execution_command("test", "Data tests + model quality gates; never trains (FR-TEST-01).")
+_register_execution_command("run", "Build datasets and train models in DAG order.")
+_register_execution_command("build", "run + test interleaved in DAG order - the CI workhorse.")
+_register_execution_command("test", "Data tests + model quality gates; never trains.")
 _register_execution_command(
     "score", "Batch-score fresh data with registered champions + shift monitors (ADR-20)."
 )
@@ -531,7 +529,7 @@ def evaluate(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Re-evaluate a registered artifact on freshly built data (FR-RUN-07)."""
+    """Re-evaluate a registered artifact on freshly built data; never trains."""
     from mbt.execute.orchestrator import run_evaluate
 
     cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
@@ -708,7 +706,7 @@ def promote(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Transition a registered version, verifying recorded gate passes (FR-REG-03)."""
+    """Transition a registered version, verifying recorded gate passes."""
     from mbt.adapters.registry import get_registry
     from mbt.contracts import Stage
     from mbt.exceptions import ConfigError
@@ -814,7 +812,7 @@ def ls(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """List resources with selector support (FR-PARSE-05)."""
+    """List resources, with the same selectors --select accepts."""
     from mbt.dag.selector import SelectableNode, select_nodes
     from mbt.parsing import parse_project
 
@@ -880,7 +878,7 @@ def show(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Print one resource's compile-rendered config (FR-PARSE-05)."""
+    """Print one resource's compile-rendered config."""
     from mbt.compile.compiler import compile_project
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
@@ -933,7 +931,7 @@ def state_diff(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """What changed vs a previous manifest, with components (FR-STATE-02)."""
+    """What changed vs a previous manifest, and which component changed."""
     from mbt.artifacts.manifest import read_manifest
     from mbt.compile.compiler import CompileOptions, compile_project
     from mbt.events import get_bus
@@ -1002,9 +1000,9 @@ def docs_generate(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Render model cards + lineage into target/docs (FR-DOCS-01)."""
+    """Render model cards + lineage into target/docs."""
     from mbt.artifacts.manifest import read_manifest
-    from mbt.artifacts.run_results import RunResults
+    from mbt.artifacts.run_results import read_latest_results
     from mbt.compile.compiler import compile_project
     from mbt.docsgen import generate_docs
     from mbt.parsing import parse_project
@@ -1016,10 +1014,13 @@ def docs_generate(
     else:
         parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
         current = compile_project(parsed, cli.profiles(parsed), cli_vars=cli.cli_vars)
-    run_results = None
-    results_path = cli.project_dir / "target" / "run_results.json"
-    if results_path.is_file():
-        run_results = RunResults.model_validate_json(results_path.read_text())
+    # Model cards want the metrics a TRAINING command produced, which is not
+    # necessarily the last command that ran: `mbt score`/`mbt monitor` rewrite
+    # the shared run_results.json with only their own nodes (A-2).
+    run_results = read_latest_results(
+        cli.project_dir / "target" / "run_results.json",
+        commands=("build", "run", "evaluate"),
+    )
     index = generate_docs(current, run_results, cli.project_dir / "target" / "docs")
     out_console.print(f"wrote {index}")
 
@@ -1030,7 +1031,7 @@ def docs_serve(
     project_dir: ProjectDirOpt = Path("."),
     port: Annotated[int, typer.Option("--port", "-p")] = 8080,
 ) -> None:
-    """Serve target/docs locally (FR-DOCS-02)."""
+    """Serve target/docs over HTTP on localhost."""
     import functools as ft
     import http.server
 
@@ -1062,7 +1063,7 @@ def run_operation(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Render a macro with the full compile context (FR-RUN-08)."""
+    """Render a macro with the full compile context."""
     from mbt.compile.compiler import build_resolve_context
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project

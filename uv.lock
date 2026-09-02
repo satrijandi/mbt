@@ -29,6 +29,7 @@ members = [
     "mbt-lightgbm",
     "mbt-mlflow",
     "mbt-optuna",
+    "mbt-sklearn",
     "mbt-snowflake",
     "mbt-spark",
     "mbt-testing",
@@ -2349,6 +2350,26 @@ requires-dist = [
 ]
 
 [[package]]
+name = "mbt-sklearn"
+version = "0.1.0"
+source = { editable = "packages/mbt-sklearn" }
+dependencies = [
+    { name = "joblib" },
+    { name = "mbt-adapter-base", extra = ["metrics"] },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-7-mbt-h2o-sparkling' and extra == 'group-13-mbt-workspace-dev')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-7-mbt-h2o-sparkling' and extra == 'group-13-mbt-workspace-dev')" },
+    { name = "scikit-learn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "joblib", specifier = ">=1.3" },
+    { name = "mbt-adapter-base", extras = ["metrics"], editable = "packages/mbt-adapter-base" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "scikit-learn", specifier = ">=1.5" },
+]
+
+[[package]]
 name = "mbt-snowflake"
 version = "0.1.0"
 source = { editable = "packages/mbt-snowflake" }
@@ -2423,10 +2444,12 @@ dev = [
     { name = "mbt-lightgbm" },
     { name = "mbt-mlflow" },
     { name = "mbt-optuna" },
+    { name = "mbt-sklearn" },
     { name = "mbt-snowflake", extra = ["sso"], marker = "extra == 'group-13-mbt-workspace-dev'" },
     { name = "mbt-spark" },
     { name = "mbt-testing" },
     { name = "mbt-xgboost" },
+    { name = "mkdocs" },
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"], marker = "extra == 'group-13-mbt-workspace-dev'" },
     { name = "moto", extra = ["s3"], marker = "extra == 'group-13-mbt-workspace-dev'" },
@@ -2453,10 +2476,12 @@ dev = [
     { name = "mbt-lightgbm", editable = "packages/mbt-lightgbm" },
     { name = "mbt-mlflow", editable = "packages/mbt-mlflow" },
     { name = "mbt-optuna", editable = "packages/mbt-optuna" },
+    { name = "mbt-sklearn", editable = "packages/mbt-sklearn" },
     { name = "mbt-snowflake", extras = ["sso"], editable = "packages/mbt-snowflake" },
     { name = "mbt-spark", editable = "packages/mbt-spark" },
     { name = "mbt-testing", editable = "packages/mbt-testing" },
     { name = "mbt-xgboost", editable = "packages/mbt-xgboost" },
+    { name = "mkdocs", specifier = ">=1.6,<2" },
     { name = "mkdocs-material", specifier = ">=9.7" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=0.26" },
     { name = "moto", extras = ["s3"], specifier = ">=5" },

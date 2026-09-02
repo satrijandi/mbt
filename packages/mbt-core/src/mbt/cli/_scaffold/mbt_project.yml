@@ -4,11 +4,11 @@ version: "0.1.0"
 
 # Vars usable in specs via {{ var('...') }}; targets may override them.
 vars:
-  # A gate below the base rate never gates. The sample data is ~22% positive
-  # (random-baseline PR-AUC ~0.22) and the model scores ~0.32, so this floor
-  # sits meaningfully above chance with headroom to spare; raise it as your
-  # real model improves.
-  pr_auc_floor: 0.25
+  # A gate below the base rate never gates. The sample data is ~20% positive
+  # (random-baseline PR-AUC ~0.20) and the model scores ~0.50, so this floor
+  # sits well above chance while still leaving room for run-to-run variation;
+  # raise it as your real model improves.
+  pr_auc_floor: 0.40
 
 model_defaults:
   adapter: xgboost

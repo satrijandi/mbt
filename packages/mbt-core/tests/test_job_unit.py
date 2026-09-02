@@ -55,6 +55,7 @@ from mbt.execute.job import (
     main,
     run_job,
 )
+from mbt.secrets import clear_taints, redact
 
 SOURCES_WITH_BATCH = """
 sources:
@@ -148,6 +149,32 @@ def test_render_adapter_ref_missing_env_raises(monkeypatch: pytest.MonkeyPatch) 
     ref = AdapterRef(adapter="fake", config={"k": "{{ env_var('MBT_UNIT_ABSENT') }}"})
     with pytest.raises(ConfigError, match="MBT_UNIT_ABSENT"):
         _render_adapter_ref(ref, {})
+    ref = AdapterRef(adapter="fake", config={"k": "{{ env('MBT_UNIT_ABSENT') }}"})
+    with pytest.raises(ConfigError, match="MBT_UNIT_ABSENT"):
+        _render_adapter_ref(ref, {})
+
+
+def test_render_adapter_ref_env_resolves_without_tainting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job re-resolves both accessors, and must keep the split (A-1).
+
+    A job that re-tainted a non-secret would corrupt its own result JSON on
+    the way back to the coordinator, which is exactly the reported symptom.
+    """
+    monkeypatch.setenv("MBT_UNIT_PLAIN", "1")
+    monkeypatch.delenv("MBT_UNIT_MISSING", raising=False)
+    ref = AdapterRef(
+        adapter="fake",
+        config={
+            "port": "{{ env('MBT_UNIT_PLAIN') }}",
+            "fallback": "{{ env('MBT_UNIT_MISSING', 'dflt') }}",
+        },
+    )
+    clear_taints()
+    rendered = _render_adapter_ref(ref, {})
+    assert rendered.config == {"port": "1", "fallback": "dflt"}
+    assert redact('{"pr_auc":0.1234}') == '{"pr_auc":0.1234}'
 
 
 # -- run_job dispatch and error handling --------------------------------------------

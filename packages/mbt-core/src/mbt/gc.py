@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from mbt.artifacts.run_results import command_results_path
 from mbt.exceptions import MbtError
 
 
@@ -24,11 +25,33 @@ class GcPlan:
 
 
 def run_results_artifact_uris(project_dir: Path) -> set[str]:
-    """Artifact URIs recorded by the latest run (target/run_results.json)."""
-    path = project_dir / "target" / "run_results.json"
-    if not path.is_file():
+    """Artifact URIs recorded by the latest *training* run.
+
+    Prefers the per-command siblings over the shared ``run_results.json``:
+    only training commands record artifacts, and a ``mbt score`` in between
+    would otherwise blank this keep-set out (FEEDBACK v3 A-2). Champions are
+    protected separately by :func:`champion_artifact_uris` (ADR-10), so this
+    is defence in depth for the not-yet-promoted artifact of a recent build.
+
+    Parsed as raw JSON rather than through the pydantic model on purpose:
+    ``mbt clean`` must not hard-fail on a results file written by another mbt
+    version, the same tolerance ``mbt monitor`` gives a malformed prediction
+    sidecar (R2-19). A file it cannot read contributes nothing to the
+    keep-set, and the champion half still protects what matters.
+    """
+    results_path = project_dir / "target" / "run_results.json"
+    candidates = [
+        path
+        for path in (command_results_path(results_path, c) for c in ("build", "run", "evaluate"))
+        if path.is_file()
+    ]
+    chosen = max(candidates, key=lambda p: p.stat().st_mtime) if candidates else results_path
+    if not chosen.is_file():
         return set()
-    payload = json.loads(path.read_text())
+    try:
+        payload = json.loads(chosen.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return set()
     return {
         entry["artifact"]["uri"] for entry in payload.get("results", []) if entry.get("artifact")
     }

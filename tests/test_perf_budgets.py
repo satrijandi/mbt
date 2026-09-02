@@ -7,6 +7,24 @@ build never flakes on them. The measurement is still principled: each is the
 BEST of a few runs after a warmup, because a single sample on a shared CI runner
 measures the noisy neighbor, not the code (FEEDBACK 2.7). The threshold numbers
 are the NFR-03 contract and stay untouched.
+
+## Why the absolute budgets are not enough on their own
+
+Measured on a 2026 laptop, parse at 50 resources takes ~0.04 s against its 2 s
+budget and compile ~0.19 s against its 10 s budget - roughly 50x headroom
+(FEEDBACK v3 B-5). So the thing these tests are *for*, an accidental O(n^2),
+would have to be a 50x regression before a threshold noticed.
+
+Tightening the thresholds is the wrong fix: they are the published NFR-03
+contract, and a tight wall-clock budget on a shared runner flakes. Committing a
+measured wall-clock baseline is also wrong: it bakes in one machine's speed, and
+CI runners are several times slower than a laptop.
+
+`test_parse_scales_linearly` / `test_compile_scales_linearly` close the gap
+without either problem. They measure the SAME operation at two project sizes on
+the SAME machine in the SAME run and assert the growth is near-linear. Machine
+speed cancels out of a ratio, so there is no baseline to maintain and nothing to
+recalibrate: an O(n^2) parse fails on a fast laptop and a slow runner alike.
 """
 
 import time
@@ -45,7 +63,10 @@ def _write(path: Path, text: str) -> None:
 
 @pytest.fixture(scope="module")
 def big_project(tmp_path_factory) -> Path:
-    project = tmp_path_factory.mktemp("perf") / "big"
+    return _build_project(tmp_path_factory.mktemp("perf") / "big", N_MODELS)
+
+
+def _build_project(project: Path, n_models: int) -> Path:
     _write(project / "mbt_project.yml", 'name: perf\nversion: "1.0"\n')
     _write(
         project / "profiles.yml",
@@ -86,7 +107,7 @@ def big_project(tmp_path_factory) -> Path:
             "    split:\n      strategy: temporal\n      time_column: ts\n"
             '      train: "-150d:-28d"\n      test: "-28d:now"\n',
         )
-    for m in range(N_MODELS):
+    for m in range(n_models):
         _write(
             project / "models" / f"m_{m}.yml",
             f"models:\n  - name: m_{m}\n"
@@ -148,3 +169,64 @@ def test_per_node_overhead_under_2s(big_project: Path) -> None:
             best[uid] = min(elapsed, best.get(uid, float("inf")))
     for uid, elapsed in best.items():
         assert elapsed < 2.0, f"{uid} overhead {elapsed:.2f}s best-of-2 (budget 2s, NFR-03)"
+
+
+# -- scaling guards: machine-independent, so an O(n^2) cannot hide in headroom --
+
+#: Model counts for the scaling probes. 4x apart, both large enough that the
+#: fixed per-run cost (imports, profile load, source glob) is a small share of
+#: the total - otherwise that constant dominates and the ratio measures nothing.
+SCALE_SMALL = 20
+SCALE_LARGE = 80
+
+#: Allowed growth for a 4x size increase. Linear is 4x; the shared per-run
+#: constant pulls the observed ratio BELOW 4x, and noise pushes it around, so
+#: 8x leaves generous room. Quadratic would be ~16x, which this rejects.
+MAX_GROWTH = 8.0
+
+
+@pytest.fixture(scope="module")
+def scaling_projects(tmp_path_factory) -> tuple[Path, Path]:
+    root = tmp_path_factory.mktemp("perf_scale")
+    return (
+        _build_project(root / "small", SCALE_SMALL),
+        _build_project(root / "large", SCALE_LARGE),
+    )
+
+
+def _growth(small: float, large: float) -> float:
+    return large / small if small > 0 else float("inf")
+
+
+def test_parse_scales_linearly(scaling_projects: tuple[Path, Path]) -> None:
+    """Parse must stay near-linear in resource count.
+
+    The absolute NFR-03 budget has ~50x headroom, so it cannot see a 10x
+    algorithmic regression. This can, and it does so without a committed
+    wall-clock baseline: both measurements happen on the same machine in the
+    same run, so machine speed cancels out of the ratio (FEEDBACK v3 B-5).
+    """
+    small, large = scaling_projects
+    growth = _growth(best_of(lambda: parse_project(small)), best_of(lambda: parse_project(large)))
+    size_ratio = SCALE_LARGE / SCALE_SMALL
+    assert growth < MAX_GROWTH, (
+        f"parse grew {growth:.1f}x for a {size_ratio:.0f}x bigger project "
+        f"(limit {MAX_GROWTH}x) - that is superlinear, not a slow machine"
+    )
+
+
+def test_compile_scales_linearly(scaling_projects: tuple[Path, Path]) -> None:
+    small, large = scaling_projects
+    anchor = datetime.fromisoformat(DEMO_ANCHOR.replace("Z", "+00:00")).astimezone(UTC)
+
+    def compile_once(project: Path) -> Callable[[], object]:
+        parsed = parse_project(project)
+        profiles = load_profiles("perf", project, project_vars=parsed.project.vars)
+        return lambda: compile_project(parsed, profiles, options=CompileOptions(anchor=anchor))
+
+    growth = _growth(best_of(compile_once(small)), best_of(compile_once(large)))
+    size_ratio = SCALE_LARGE / SCALE_SMALL
+    assert growth < MAX_GROWTH, (
+        f"compile grew {growth:.1f}x for a {size_ratio:.0f}x bigger project "
+        f"(limit {MAX_GROWTH}x) - that is superlinear, not a slow machine"
+    )

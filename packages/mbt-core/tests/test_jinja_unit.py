@@ -7,6 +7,7 @@ from core_helpers import write
 
 from mbt.exceptions import CompilationError, ConfigError
 from mbt.jinja.environment import ResolveContext, SpecRenderer, TargetContext
+from mbt.secrets import clear_taints, redact
 
 
 def make_ctx(**kwargs) -> ResolveContext:
@@ -107,6 +108,23 @@ def test_capture_env_var_defaults(tmp_path: Path, monkeypatch) -> None:
     assert captured.rendered == {"set": "present", "defaulted": "fallback", "empty": ""}
 
 
+def test_capture_env_defaults(tmp_path: Path, monkeypatch) -> None:
+    """`env()` is `env_var()` minus the taint, so its branches must match."""
+    monkeypatch.delenv("MBT_UNSET_ZZZ", raising=False)
+    monkeypatch.setenv("MBT_SET_ZZZ", "present")
+    renderer = SpecRenderer()
+    captured = renderer.capture(
+        {
+            "set": "{{ env('MBT_SET_ZZZ') }}",
+            "defaulted": "{{ env('MBT_UNSET_ZZZ', 'fallback') }}",
+            "empty": "{{ env('MBT_UNSET_ZZZ') }}",
+        },
+        resource="r",
+        path=tmp_path / "s.yml",
+    )
+    assert captured.rendered == {"set": "present", "defaulted": "fallback", "empty": ""}
+
+
 # -- resolve phase --------------------------------------------------------------------
 
 
@@ -129,6 +147,50 @@ def test_resolve_env_var_branches(tmp_path: Path, monkeypatch) -> None:
         renderer.resolve(
             {"v": "{{ env_var('MBT_UNSET_ZZZ') }}"}, ctx, resource="r", path=tmp_path / "s.yml"
         )
+
+
+def test_resolve_env_branches(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("MBT_UNSET_ZZZ", raising=False)
+    monkeypatch.setenv("MBT_SET_ZZZ", "present")
+    renderer = SpecRenderer()
+    ctx = make_ctx()
+    rendered = renderer.resolve(
+        {
+            "set": "{{ env('MBT_SET_ZZZ') }}",
+            "defaulted": "{{ env('MBT_UNSET_ZZZ', 'fallback') }}",
+        },
+        ctx,
+        resource="r",
+        path=tmp_path / "s.yml",
+    )
+    assert rendered == {"set": "present", "defaulted": "fallback"}
+    with pytest.raises(CompilationError, match="environment variable 'MBT_UNSET_ZZZ' is not set"):
+        renderer.resolve(
+            {"v": "{{ env('MBT_UNSET_ZZZ') }}"}, ctx, resource="r", path=tmp_path / "s.yml"
+        )
+
+
+def test_env_does_not_taint_but_env_var_does(tmp_path: Path, monkeypatch) -> None:
+    """The whole point of the split (FEEDBACK v3 A-1).
+
+    Redaction is exact-substring, so tainting a short non-secret rewrites
+    unrelated text - including the floats in run_results.json. `env_var()`
+    must still taint (it is the credential path); `env()` must not.
+    """
+    monkeypatch.setenv("MBT_PORT_ZZZ", "1")
+    renderer = SpecRenderer()
+    ctx = make_ctx()
+    payload = '{"pr_auc":0.1234}'
+
+    clear_taints()
+    renderer.resolve(
+        {"v": "{{ env_var('MBT_PORT_ZZZ') }}"}, ctx, resource="r", path=tmp_path / "s.yml"
+    )
+    assert redact(payload) == '{"pr_auc":0.***234}'
+
+    clear_taints()
+    renderer.resolve({"v": "{{ env('MBT_PORT_ZZZ') }}"}, ctx, resource="r", path=tmp_path / "s.yml")
+    assert redact(payload) == payload
 
 
 def test_resolve_renders_refs_sources_and_target(tmp_path: Path) -> None:

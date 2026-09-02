@@ -1,5 +1,10 @@
 # Environments for __PROJECT_NAME__. Keep this file OUT of git when it holds
 # secrets; resolve them via env_var('NAME') Jinja calls - never write values here.
+#
+# env_var() marks the value SECRET: it is redacted from every log line, event,
+# manifest, model card, and run_results.json. Use env() for the environment
+# values that are not secrets (roots, hosts, schema names) so they stay
+# readable when you are debugging. See docs/spec-reference.md.
 __PROJECT_NAME__:
   target: dev
   outputs:
@@ -15,9 +20,9 @@ __PROJECT_NAME__:
         sample_fraction: 0.5
         max_tuning_trials: 5
     prod:
-      data: {adapter: local, config: {root: "{{ env_var('MBT_DATA_ROOT', '.') }}"}}
-      tracking: {adapter: mlflow, config: {uri: "{{ env_var('MLFLOW_TRACKING_URI', 'sqlite:///mlflow.db') }}"}}
-      registry: {adapter: mlflow, config: {uri: "{{ env_var('MLFLOW_TRACKING_URI', 'sqlite:///mlflow.db') }}"}}
+      data: {adapter: local, config: {root: "{{ env('MBT_DATA_ROOT', '.') }}"}}
+      tracking: {adapter: mlflow, config: {uri: "{{ env('MLFLOW_TRACKING_URI', 'sqlite:///mlflow.db') }}"}}
+      registry: {adapter: mlflow, config: {uri: "{{ env('MLFLOW_TRACKING_URI', 'sqlite:///mlflow.db') }}"}}
       compute: {adapter: local}
       artifact_store: file://./target/artifacts
       threads: 4

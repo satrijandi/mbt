@@ -33,8 +33,8 @@ jobs:
           uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src
           packages/mbt-xgboost/src packages/mbt-mlflow/src
           packages/mbt-optuna/src packages/mbt-lightgbm/src
-          packages/mbt-testing/src packages/mbt-snowflake/src
-          packages/mbt-spark/src packages/mbt-h2o/src
+          packages/mbt-sklearn/src packages/mbt-testing/src
+          packages/mbt-snowflake/src packages/mbt-spark/src packages/mbt-h2o/src
       - name: yamllint
         run: 'uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples tests/fixtures .github'
       - name: No ML frameworks in mbt-core (NFR-04)
@@ -128,7 +128,17 @@ jobs:
         # locked one: an accepted advisory may legitimately not apply to these
         # versions, and that is not a reason to fail. The locked environment is
         # the authority on whether an acceptance is still earned.
-        run: uv run --no-project python scripts/audit_dependencies.py --no-check-stale
+        #
+        # --require-floor-only is the exception that flag would otherwise
+        # create. A FLOOR_ONLY acceptance claims "the shipped resolution is
+        # clear of this, only the declared FLOOR is not" - and THIS is the
+        # floors environment, the only one that can check the second half. Once
+        # a floor rises past the fix, the entry is a stale suppression with a
+        # plausible reason attached, and until this flag existed nothing could
+        # force it out (the script's own docstring said so).
+        run: >-
+          uv run --no-project python scripts/audit_dependencies.py
+          --no-check-stale --require-floor-only
 
   e2e:
     # The JVM tier (Spark 4.x per the locked resolution, H2O) runs once on
@@ -148,7 +158,14 @@ jobs:
       - name: Sync workspace
         run: uv sync
       - name: End-to-end (XGBoost/LightGBM/H2O/Spark + MLflow sqlite)
-        run: uv run pytest -q -m e2e --timeout 1800 --durations=10
+        # Under coverage, with its own config: mbt-spark and mbt-h2o are out of
+        # the fast suite's source_pkgs (they need a JVM), and the claim that
+        # "the e2e tier covers them instead" was published in
+        # docs/v0.1-status.md without anything measuring it. tests/coverage-jvm.cfg
+        # carries the floor and the first measurement; see its header.
+        run: >-
+          uv run pytest -q -m e2e --timeout 1800 --durations=10
+          --cov --cov-config=tests/coverage-jvm.cfg --cov-report=term
       - name: Upload failure diagnostics
         # Manifests, run results, and logs from the pytest tmp trees; without
         # these a red e2e run can only be debugged by rerunning locally.

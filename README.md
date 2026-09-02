@@ -76,7 +76,7 @@ to model building:
 | dbt | mbt |
 |---|---|
 | model = SQL + config | model = **declarative YAML** (+ optional `hooks.py`) |
-| adapters: Snowflake, BigQuery... | adapters: **XGBoost, LightGBM, H2O AutoML, SparkML**, sklearn/PyTorch later |
+| adapters: Snowflake, BigQuery... | adapters: **XGBoost, LightGBM, scikit-learn, H2O AutoML, SparkML**, PyTorch later |
 | `dbt run` materializes tables | `mbt run` trains & registers **model artifacts** |
 | `dbt test` | `mbt test`: data checks + **metric gates vs the champion** |
 | `ref()` DAG of models | `ref()` DAG of **datasets -> models** |
@@ -118,6 +118,7 @@ determinism tiers per adapter otherwise).
 | `packages/mbt-adapter-base` | Versioned adapter contracts + interchange types + **compliance suite** |
 | `packages/mbt-xgboost` | XGBoost training adapter (exact determinism tier, ONNX extra) |
 | `packages/mbt-lightgbm` | LightGBM adapter - built against public contracts only (the extensibility proof) |
+| `packages/mbt-sklearn` | scikit-learn adapter: LogisticRegression/Ridge, RandomForest, HistGradientBoosting (no new dependency - `[metrics]` already installs sklearn) |
 | `packages/mbt-mlflow` | MLflow tracking + registry adapters |
 | `packages/mbt-snowflake` | Snowflake data adapter: warehouse-native datasets with push-down sampling |
 | `packages/mbt-spark` | Spark adapters: lakehouse data, spark-submit compute, distributed SparkML training |
@@ -134,7 +135,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full loop; the short version:
 ```bash
 git clone https://github.com/satrijandi/mbt && cd mbt
 uv sync                                   # whole workspace, all extras
-uv run pytest -m "not e2e"               # fast suite
+uv run pytest -m "not e2e" --cov          # fast suite + the 100% coverage gate
 uv run pytest -m e2e                      # full CLI E2E incl. JVM adapters (Java 17)
 uv run ruff check . && uv run mypy packages/mbt-core/src
 uv run pre-commit install                 # hooks: ruff, yamllint, mypy
@@ -142,9 +143,12 @@ uv run pre-commit install                 # hooks: ruff, yamllint, mypy
 
 CI tests what the metadata claims: the fast suite runs on every CPython the
 packages advertise (`requires-python = ">=3.11"`, matrix over 3.11-3.14), and
-a `floors` job re-resolves every direct dependency at its declared lower bound
-(`uv sync --resolution lowest-direct`) and runs the suite against that, so a
-floor nobody actually supports fails CI instead of a user install.
+a `floors` job installs every direct dependency at its declared lower bound
+(`scripts/install_floors.py`, which flattens the workspace into a single
+`uv pip install --resolution lowest-direct` so every requirement really is
+direct) and runs the fast suite plus the advisory audit against it. The job
+then re-asserts with `--verify` that the floors are what actually got
+installed, so a floor nobody supports fails CI instead of a user install.
 
 Tests write only under pytest tmp dirs; a session guard in the root
 `conftest.py` fails any run that leaves new entries in the repo root
@@ -169,7 +173,7 @@ sources).
 The loop is proven by tests, not promises:
 
 - **Loop**: PR check -> CI build -> registry -> gate-verified promotion -> batch scoring -> ground-truth monitoring, for binary classification and regression.
-- **Backends**: Parquet/DuckDB, Snowflake, or Spark lakehouse data; XGBoost, LightGBM, SparkML, and H2O AutoML training (Sparkling Water for distributed); MLflow tracking + registry.
+- **Backends**: Parquet/DuckDB, Snowflake, or Spark lakehouse data; XGBoost, LightGBM, scikit-learn, SparkML, and H2O AutoML training (Sparkling Water for distributed); MLflow tracking + registry.
 - **Proof**: an enforced 100% coverage gate on the fast suite, a JVM e2e tier, and a dockerized showcase (`examples/showcase`) that runs the loop nightly against real services (S3 lake, MLflow, Spark cluster, Gitea + Woodpecker CI, Airflow CD, Grafana).
 
 Goal-by-goal evidence: [docs/v0.1-status.md](docs/v0.1-status.md).

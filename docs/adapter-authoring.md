@@ -2,9 +2,12 @@
 
 An mbt adapter is a pip package exposing an `AdapterPlugin` descriptor
 through the `mbt.adapters` entry-point group. It depends only on
-**mbt-adapter-base** - never on mbt-core. The LightGBM adapter
-(`packages/mbt-lightgbm`) was built exactly this way as the extensibility
-proof; use it as the reference implementation.
+**mbt-adapter-base** - never on mbt-core. Two adapters were built exactly this
+way and are the reference implementations: `packages/mbt-lightgbm` (the
+original extensibility proof, one estimator) and `packages/mbt-sklearn` (which
+selects among several estimators in the spec, so it shows how to model
+per-estimator hyperparameters and how the encoding a model needs can depend on
+the estimator family rather than on the data).
 
 ## 1. Package skeleton
 

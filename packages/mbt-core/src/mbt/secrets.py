@@ -6,6 +6,15 @@ manifests, the generated docs site, and CLI output - error messages and
 ``mbt show``) passes its text through :func:`redact` as defense in depth; the
 manifest additionally stores profile configs *unrendered* so secrets never
 reach it in the first place.
+
+Redaction is exact-substring, which is what makes it robust against a secret
+appearing anywhere in a serialized blob - and also what makes tainting a
+*non*-secret actively harmful: taint ``"1"`` and every ``1`` in every log line
+and every float in ``run_results.json`` is rewritten to ``***``. That is why
+Jinja exposes two accessors and not one: ``env_var()`` taints (the safe
+default, for credentials) and ``env()`` does not (for ordinary configuration
+that is expected to appear in output - schema names, hosts, roots, ports).
+See ``docs/spec-reference.md`` and ``SECURITY.md``.
 """
 
 import threading

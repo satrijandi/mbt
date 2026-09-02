@@ -2,8 +2,8 @@
 
 ## v0.1 (this release)
 
-A tabular vertical done extremely well: declarative **binary classification and regression** on all four training adapters, with the full PR → CI → registry → promotion → batch scoring → ground-truth monitoring loop, exact reproducibility via stored manifests, and state-aware retraining.
-Data comes from local Parquet, **Snowflake**, or a **Spark lakehouse**; training adapters cover **XGBoost/LightGBM** plus **SparkML** and **H2O AutoML** (optionally distributed via Sparkling Water); **MLflow** tracks and registers; **Optuna** tunes.
+A tabular vertical done extremely well: declarative **binary classification and regression** on all five training adapters, with the full PR → CI → registry → promotion → batch scoring → ground-truth monitoring loop, exact reproducibility via stored manifests, and state-aware retraining.
+Data comes from local Parquet, **Snowflake**, or a **Spark lakehouse**; training adapters cover **XGBoost/LightGBM/scikit-learn** plus **SparkML** and **H2O AutoML** (optionally distributed via Sparkling Water); **MLflow** tracks and registers; **Optuna** tunes.
 The dockerized showcase (`examples/showcase`) proves the loop nightly in CI against real services end to end.
 
 ## v1 candidates (architecture already accommodates)
@@ -11,8 +11,12 @@ The dockerized showcase (`examples/showcase`) proves the loop nightly in CI agai
 - **Remote compute** - shipped for Spark (`mbt-spark` compute adapter:
   spark-submit'd jobs); K8s/Ray reuse the same serialized `TrainingJob`
   seam.
-- **sklearn / PyTorch adapters** - new packages against the same contract;
-  PyTorch declares a tolerance determinism tier.
+- **sklearn adapter** - shipped (`mbt-sklearn`): LogisticRegression/Ridge,
+  RandomForest, and HistGradientBoosting against the same public contract,
+  exact determinism tier, zero mbt-core changes. It adds no dependency a
+  metric-computing install does not already have.
+- **PyTorch adapter** - a new package against the same contract, declaring a
+  tolerance determinism tier.
 - **Survival & ranking tasks** - adapters register task schemas via
   `AdapterPlugin.task_schemas`; no core changes.
 - **Feast DataAdapter** - `source()` gains a feature-view form behind the

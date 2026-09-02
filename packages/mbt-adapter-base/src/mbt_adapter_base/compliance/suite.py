@@ -180,6 +180,13 @@ class TrainingAdapterCompliance:
     framework_modules: ClassVar[tuple[str, ...]]
     #: Hyperparameters guaranteed valid for this adapter's param model.
     valid_hyperparameters: ClassVar[dict[str, Any]] = {}
+    #: Overrides for the REGRESSION task, when an adapter's valid binary
+    #: hyperparameters are not also valid for regression. Most adapters take
+    #: the same knobs for both and leave this None; an adapter that selects an
+    #: estimator in the spec (mbt-sklearn: `estimator: logistic` is binary-only,
+    #: `linear` is regression-only) cannot, and would otherwise be untestable
+    #: for one of its two declared tasks.
+    regression_hyperparameters: ClassVar[dict[str, Any] | None] = None
     #: A hyperparameter that supports the AUTO sentinel, if any.
     auto_hyperparameter: ClassVar[str | None] = None
 
@@ -228,7 +235,10 @@ class TrainingAdapterCompliance:
         )
 
     def model_spec(self, task: TaskType, **overrides: Any) -> ModelSpec:
-        hyperparameters = dict(self.valid_hyperparameters)
+        if task == TaskType.REGRESSION and self.regression_hyperparameters is not None:
+            hyperparameters = dict(self.regression_hyperparameters)
+        else:
+            hyperparameters = dict(self.valid_hyperparameters)
         hyperparameters.update(overrides.pop("hyperparameters", {}))
         seed = overrides.pop("seed", 1234)
         return ModelSpec(

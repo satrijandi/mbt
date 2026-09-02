@@ -1,10 +1,16 @@
 """The shared Jinja environment and its two rendering phases (TSD §6).
 
 1. **Capture phase (parse):** ``ref``/``source`` record DAG edges and render
-   to themselves; ``var``/``env_var`` return inert placeholders, so parsing
-   needs neither profiles nor environment.
+   to themselves; ``var``/``env_var``/``env`` return inert placeholders, so
+   parsing needs neither profiles nor environment.
 2. **Resolve phase (compile):** full rendering against the selected target;
-   ``ref``/``source`` render to unique_ids, ``var``/``env_var`` to values.
+   ``ref``/``source`` render to unique_ids, ``var``/``env_var``/``env`` to
+   values.
+
+``env_var()`` marks its result secret (tainted, then redacted everywhere);
+``env()`` is the same lookup without the taint, for configuration that is
+meant to be readable in logs. See :mod:`mbt.secrets` for why the distinction
+is load-bearing rather than cosmetic.
 
 Rendering uses a sandboxed *native* environment so ``{{ var('n', 400) }}``
 stays an int instead of becoming the string ``"400"``.
@@ -177,11 +183,19 @@ class SpecRenderer:
                 return taint(value)
             return default if default is not None else ""
 
+        def env(name: str, default: str | None = None) -> str:
+            """Non-secret environment value: same lookup, no taint."""
+            value = os.environ.get(name)
+            if value is not None:
+                return value
+            return default if default is not None else ""
+
         context = {
             "ref": ref,
             "source": source,
             "var": var,
             "env_var": env_var,
+            "env": env,
             "target": TargetContext(name=""),
             "auto": AUTO,
         }
@@ -200,7 +214,7 @@ class SpecRenderer:
     ) -> dict[str, Any]:
         """Fully render a spec mapping against the selected target."""
 
-        def env_var(name: str, default: str | None = None) -> str:
+        def lookup_env(name: str, default: str | None, *, secret: bool) -> str:
             value = os.environ.get(name)
             if value is None:
                 if default is None:
@@ -210,13 +224,21 @@ class SpecRenderer:
                         hint=f"export {name}=... or provide a default",
                     )
                 return default
-            return taint(value)
+            return taint(value) if secret else value
+
+        def env_var(name: str, default: str | None = None) -> str:
+            return lookup_env(name, default, secret=True)
+
+        def env(name: str, default: str | None = None) -> str:
+            """Non-secret environment value: same lookup, no taint."""
+            return lookup_env(name, default, secret=False)
 
         context = {
             "ref": ctx.ref_resolver,
             "source": ctx.source_resolver,
             "var": ctx.lookup_var,
             "env_var": env_var,
+            "env": env,
             "target": ctx.target,
             "auto": AUTO,
         }
@@ -270,7 +292,9 @@ class SpecRenderer:
                 f"undefined Jinja name in {template_text!r}: {exc.message}",
                 resource=resource,
                 path=path,
-                hint="available: ref, source, var, env_var, target, auto, and project macros",
+                hint=(
+                    "available: ref, source, var, env_var, env, target, auto, and project macros"
+                ),
             ) from exc
         except jinja2.TemplateError as exc:
             raise error_cls(

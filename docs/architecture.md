@@ -222,7 +222,18 @@ The engine writes two artifacts to `target/`, and the difference matters:
 - **`manifest.json`** is the *plan*: the pinned, hashed, reproducible description of what *would* run. Deterministic at a given anchor.
 - **`run_results.json`** is the *outcome*: per-node status, metrics, gate results, registrations, and timings from what *did* run.
 
-`mbt docs generate` (`docsgen/`) reads both to produce model cards and lineage.
+### `run_results.json` is latest-write-wins; the siblings are not
+
+Every command writes `run_results.json` **and** `run_results.<command>.json` with identical content.
+The shared file always describes the most recent run of any command, which is what an operator watching one pipeline wants and what the PR bot reads.
+It is also, for the same reason, not a place to look for a *particular* command's output: `mbt score` and `mbt monitor` write only their own nodes, so after a serving run the shared file no longer contains the model metrics `mbt build` produced.
+
+That is why the per-command siblings exist.
+A consumer that needs a specific command's output asks for it by name through `read_latest_results(path, commands=(...))`, which picks the newest matching sibling and falls back to the shared file.
+`mbt docs generate` and `mbt clean --artifacts-older-than` both do this, asking for the training commands (`build`, `run`, `evaluate`).
+Before they did, a `docs generate` after a `score` rendered model cards claiming there were no run results at all.
+
+`mbt docs generate` (`docsgen/`) reads the manifest plus the latest training results to produce model cards and lineage.
 
 ## Promotion
 
