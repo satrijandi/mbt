@@ -156,23 +156,40 @@ def test_every_job_running_this_suite_checks_out_tags() -> None:
     These guards read git, and `actions/checkout` fetches a depth-1 clone with
     no tags by default, so the whole module passed locally and failed in every
     CI job that ran it. A job that runs the fast suite must ask for history.
+
+    Scans EVERY workflow, not just ci.yml. The first version of this test read
+    ci.yml alone, so it went green while upstream.yml - which also runs the
+    fast suite - stayed red for two nights, reporting the missing tags as
+    "the newest versions our constraints allow no longer pass". A guard that
+    covers one file of a repo-wide invariant is how that red got misattributed.
     """
     import yaml
 
-    ci = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
-    for name, job in ci["jobs"].items():
-        steps = job.get("steps") or []
-        runs_fast_suite = any(
-            "pytest" in str(step.get("run", "")) and "not e2e" in str(step.get("run", ""))
-            for step in steps
-        )
-        if not runs_fast_suite:
-            continue
-        checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
-        assert (checkout.get("with") or {}).get("fetch-depth") == 0, (
-            f"job {name!r} runs the fast suite but checks out without tags; "
-            "tests/test_generate_changelog.py reads real git history"
-        )
+    checked = []
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text())
+        for name, job in (workflow.get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            runs_fast_suite = any(
+                "pytest" in str(step.get("run", "")) and "not e2e" in str(step.get("run", ""))
+                for step in steps
+            )
+            if not runs_fast_suite:
+                continue
+            where = f"{path.name}:{name}"
+            checked.append(where)
+            checkout = next(
+                (s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")), None
+            )
+            assert checkout is not None, f"{where} runs the fast suite with no checkout step"
+            assert (checkout.get("with") or {}).get("fetch-depth") == 0, (
+                f"{where} runs the fast suite but checks out without tags; "
+                "tests/test_generate_changelog.py reads real git history"
+            )
+
+    # Non-vacuity: a rename or a restructure that stops matching any job would
+    # otherwise turn this into a test that passes by finding nothing.
+    assert len(checked) >= 3, f"expected to find the fast-suite jobs, found {checked}"
 
 
 def test_subjects_between_reads_the_tag_span() -> None:

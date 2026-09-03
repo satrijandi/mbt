@@ -38,6 +38,14 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This tier runs the fast suite, and the changelog guards in it read
+          # real tags and commit spans. The default depth-1 tagless clone made
+          # them fail here for two nights while ci.yml was green - a red that
+          # said "upstream broke" when nothing upstream had. Same reason as
+          # ci.yml's test and floors jobs; pinned by
+          # tests/test_generate_changelog.py, which now scans every workflow.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
