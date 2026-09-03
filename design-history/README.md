@@ -20,8 +20,10 @@ They carry the reasoning behind a large share of the current design, and several
 
 - `reviews/feedback-v1.md` - reviews 1 and 2, closed 2026-07-20. Section IDs `2.6`, `3.6`, ... and `R2-*`.
 - `reviews/feedback-v2.md` - review 3, closed 2026-07-22. Finding IDs `F1`-`F27`, `P3`.
+- `reviews/feedback-v3.md` - review 4, closed 2026-09-01. Finding IDs `A-1`-`G-2`, cited as `FEEDBACK v3 A-1`.
 
-The review currently being worked through stays at the repo root (`FEEDBACK_v3.md`) and moves here once its progress log is closed.
+There is no review in flight right now.
+While one is, it lives at the repo root as `FEEDBACK_v<n>.md` so it is impossible to miss, and moves here once its progress log is closed.
 
 ## Authoritative sources instead
 

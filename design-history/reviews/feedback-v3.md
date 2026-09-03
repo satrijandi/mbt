@@ -4,7 +4,7 @@ Review date: 2026-09-01, against `main` (`591f5de`).
 Perspective: a senior MLOps engineer, a senior data scientist, and a release/supply-chain reviewer, each reading the tree from their own workflow.
 Method: full verification battery run locally first, then a code and docs read, then the product driven end to end as a new user through the real CLI (`mbt init` -> `build` -> `promote` -> `score` -> `monitor` -> `docs generate`) in a throwaway directory.
 Every finding carries file evidence, and every one of them was reproduced or proven by experiment rather than inferred.
-Findings already closed in `FEEDBACK.md` or `FEEDBACK_v2.md` are not re-litigated.
+Findings already closed in the two earlier cycles are not re-litigated (they were `FEEDBACK.md` and `FEEDBACK_v2.md` at the repo root when this review was written; G-1 below moved them to `feedback-v1.md` and `feedback-v2.md` beside this file).
 
 ## The tree is green
 
@@ -730,7 +730,7 @@ Both were invisible locally and turned main red on the commit that closed this r
 
 **Fix.** Moved to `design-history/reviews/{feedback-v1,feedback-v2}.md` - outside `docs/`, so 447 KB of review log does not land on the published site, and inside the directory that already exists for frozen provenance. Kept rather than deleted because code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`). `design-history/README.md` gained a "Closed review cycles" section explaining the convention; `CLAUDE.md` now points at the in-flight review at the root and says closed ones move here.
 
-**This file moves there too** once it is superseded.
+**This file moved there too**, on 2026-09-03, once its own progress log closed and the sweep was on `main` and green - it is `design-history/reviews/feedback-v3.md`, which is what you are reading. Its findings are cited in code as `FEEDBACK v3 <id>`.
 
 ---
 
