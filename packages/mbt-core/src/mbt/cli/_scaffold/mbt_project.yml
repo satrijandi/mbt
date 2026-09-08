@@ -4,11 +4,13 @@ version: "0.1.0"
 
 # Vars usable in specs via {{ var('...') }}; targets may override them.
 vars:
-  # A gate below the base rate never gates. The sample data is ~20% positive
-  # (random-baseline PR-AUC ~0.20) and the model scores ~0.50, so this floor
-  # sits well above chance while still leaving room for run-to-run variation;
-  # raise it as your real model improves.
-  pr_auc_floor: 0.40
+  # A gate below the base rate never gates. On the default 5000 rows the
+  # temporal test split is ~20% positive (random-baseline PR-AUC ~0.20) and
+  # the model scores ~0.40, so this floor sits about half again above chance.
+  # Change n_rows and the split changes with it: across 400-5000 rows the
+  # same model spans 0.36-0.49 PR-AUC, so the floor is set for that whole
+  # spread, not for the default alone. Raise it as your real model improves.
+  pr_auc_floor: 0.30
 
 model_defaults:
   adapter: xgboost

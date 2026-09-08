@@ -3,15 +3,21 @@
 Usage: python scripts/generate_sample_data.py [n_rows]
 
 The signal is a logistic model over tenure, usage, support tickets, and plan
-tier. Measured on the default 5000 rows, the scaffold's XGBoost model fits it
-to **0.81 ROC AUC / 0.50 PR AUC** at a ~20% base rate (the Bayes-optimal
-ceiling for this generator is 0.88 / 0.65, so the demo model leaves visible
-headroom rather than pretending to be perfect).
+tier. Measured on the default 5000 rows, scored on the dataset spec's own
+temporal test split (~20% positive), the scaffold's XGBoost model fits it to
+**0.78 ROC AUC / 0.40 PR AUC**, against a Bayes-optimal ceiling of 0.85 /
+0.63 on that same split - so the demo model leaves visible headroom rather
+than pretending to be perfect.
 
 That is deliberate: this is the first model anyone sees, and an earlier
 version's near-flat score function produced 0.66 ROC AUC / 0.30 PR AUC, which
 made the quickstart look like the tool could not learn and made its example
 gate (a 0.25 PR AUC threshold) teach nothing about what a real gate does.
+
+Both numbers move with `n_rows`, because the test window is the last 28 of
+200 days - at 400 rows that is ~50 rows. Across 400-5000 rows the same model
+spans 0.36-0.49 PR AUC, and `pr_auc_floor` in mbt_project.yml is set for that
+whole spread rather than for the default alone - measure before raising it.
 """
 
 import sys
