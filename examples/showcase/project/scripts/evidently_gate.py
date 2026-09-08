@@ -37,7 +37,6 @@ Usage (from the project root):
 """
 
 import argparse
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -70,14 +69,21 @@ def read_selected_features(model_file: Path) -> list[str]:
     return features
 
 
-def load_categorical_codes(model_file: Path) -> list[str]:
-    hooks_file = model_file.resolve().parent / "wide_hooks.py"
-    spec = importlib.util.spec_from_file_location("_gate_wide_hooks", hooks_file)
-    if spec is None or spec.loader is None:
-        sys.exit(f"error: cannot import {hooks_file}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return list(module.CATEGORICAL_CODES)
+def load_categorical(model_file: Path) -> list[str]:
+    """The model's declared categoricals, from `features.categorical` (ADR-27).
+
+    The gate must bin these as categories rather than as magnitudes, exactly
+    as training does, or its stability verdict is measuring a different
+    feature than the model consumes.
+    """
+    import yaml
+
+    payload = yaml.safe_load(model_file.read_text())
+    models = payload.get("models") or []
+    if not models:
+        sys.exit(f"error: no models in {model_file}")
+    declared = (models[0].get("features") or {}).get("categorical") or []
+    return [str(name) for name in declared]
 
 
 def newest_dir(root: Path, required: tuple[str, ...], hint: str, by: str = "mtime") -> Path:
@@ -99,7 +105,8 @@ def newest_dir(root: Path, required: tuple[str, ...], hint: str, by: str = "mtim
 def load_frame(path: Path, features: list[str], codes: list[str]) -> pd.DataFrame:
     """The frame restricted to the selected features, hook-cast applied.
 
-    Casting the categorical codes on BOTH sides mirrors wide_hooks.py, so
+    Casting the categorical codes on BOTH sides mirrors what core does for
+    a declared `features.categorical` column (ADR-27), so
     Evidently compares them as categories, exactly as the trainers see them.
     """
     frame = pd.read_parquet(path)
@@ -183,7 +190,7 @@ def main() -> None:
     args = parser.parse_args()
 
     features = read_selected_features(args.model_file)
-    codes = load_categorical_codes(args.model_file)
+    codes = load_categorical(args.model_file)
 
     if args.phase == "train":
         split_dir = newest_dir(

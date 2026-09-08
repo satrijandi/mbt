@@ -285,6 +285,7 @@
           ]
         },
         "features": {
+          "categorical": null,
           "exclude": [
             "user_id",
             "upgraded_90d",
@@ -293,7 +294,9 @@
           ],
           "include": [
             "*"
-          ]
+          ],
+          "monotonic": {},
+          "transforms": {}
         },
         "hooks": null,
         "hyperparameters": {
@@ -319,13 +322,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:55dd910e6b817edf857f128668b20cb8d558766b899dbd011e72ab156854c17a",
+      "config_hash": "sha256:5c1085e3db30358da802d3719848b66774ce4e7112ab78968dc70af2edd239d2",
       "depends_on": [
         "dataset.churn_demo.churn_training_set"
       ],
       "hooks_hash": "sha256:b69c77c89439a1112e3432f4e582a64be217e42fa4afa8c5f173495bf55954e4",
       "hooks_path": "models/churn_classifier.py",
-      "input_hash": "sha256:b9b065c3b1023f882c4aa981cd1506571af4a798abb3374d3df0391e7d06a12e",
+      "input_hash": "sha256:b57854260eb928f9291411910bee2a7f3c165c1a9533ec9cfb4d2f7f675259d0",
       "name": "churn_classifier",
       "path": "models/churn_classifier.yml",
       "resolved": {},
@@ -370,6 +373,7 @@
           "slices": []
         },
         "features": {
+          "categorical": null,
           "exclude": [
             "user_id",
             "upgraded_90d",
@@ -378,7 +382,9 @@
           ],
           "include": [
             "*"
-          ]
+          ],
+          "monotonic": {},
+          "transforms": {}
         },
         "hooks": null,
         "hyperparameters": {
@@ -399,13 +405,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:901a5eba703a581a050e8fb2fe362c0e02e74303fa6091ad0392a0f592450f8d",
+      "config_hash": "sha256:f307d167ffb19b31b5a1541f0c3b69d3656f703b6c90f83c17cb569bb2c1ee09",
       "depends_on": [
         "dataset.churn_demo.churn_training_set"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:67c6f23b9efc161efff9ab0361d2654fe2d4073ecfc9dcfa281c32f9efef1839",
+      "input_hash": "sha256:db7cb7da71e2766f702198a0d72d1267a0780ed9ae3a9461a92b4b424c5766b1",
       "name": "churn_classifier_deep",
       "path": "models/churn_classifier_deep.yml",
       "resolved": {},
@@ -450,6 +456,7 @@
           "slices": []
         },
         "features": {
+          "categorical": null,
           "exclude": [
             "user_id",
             "churned_90d",
@@ -457,7 +464,9 @@
           ],
           "include": [
             "*"
-          ]
+          ],
+          "monotonic": {},
+          "transforms": {}
         },
         "hooks": null,
         "hyperparameters": {
@@ -482,13 +491,13 @@
         "task": "binary_classification",
         "tuning": null
       },
-      "config_hash": "sha256:733d39c119e69923ad50c76886c3b8c4905d4d5e179fdf27152484ab01fb22f8",
+      "config_hash": "sha256:c5e73698067776936dbc0e56c27b697132117b362ddb4b8423b9dd9ccf8fef10",
       "depends_on": [
         "dataset.churn_demo.upsell_training_set"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:ca009468cade3d367903371015bce09a569e4962700f215bd4b926b009ac74de",
+      "input_hash": "sha256:90bf18f5b8eb827b410c8ff11782a8bc56484ac9dd786b9ae989615bf291c515",
       "name": "upsell_classifier",
       "path": "models/upsell_classifier.yml",
       "resolved": {},
@@ -586,7 +595,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:cdd8d39b4a0f73ee3c551253cf49ecc73b10911ec6b35048fc73b4b530392a98",
+      "input_hash": "sha256:1e3b0001377287d1e5c443cbceff779311190c55db315e67568f433a9931b6bd",
       "name": "retention_scoring",
       "path": "scoring/retention_scoring.yml",
       "resolved": {

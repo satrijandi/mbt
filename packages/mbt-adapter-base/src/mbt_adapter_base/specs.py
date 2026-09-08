@@ -11,7 +11,7 @@ parser layer turns those rejections into did-you-mean suggestions.
 import re
 from typing import Any, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mbt_adapter_base.types import Materialization, SplitStrategy, Stage, TaskType
 
@@ -430,11 +430,263 @@ class DatasetSpec(_SpecModel):
         return self
 
 
+#: The pooled level a rare or undeclared categorical value maps to (ADR-27).
+OTHER_LEVEL = "__other__"
+
+#: The explicit level NULLs map to under ``null_as_level`` (ADR-27).
+MISSING_LEVEL = "__missing__"
+
+#: Monotone constraint directions (ADR-27); words, not the frameworks' +-1.
+MonotonicDirection = Literal["increasing", "decreasing"]
+
+
+class CapSpec(_SpecModel):
+    """A two-sided plateau cap (ADR-27); the scalar form ``cap: 365`` is an
+    upper plateau and normalizes to ``max``."""
+
+    min: float | None = None
+    max: float | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> "CapSpec":
+        if self.min is None and self.max is None:
+            raise ValueError("'cap' must set 'min', 'max', or both")
+        if self.min is not None and self.max is not None and self.min >= self.max:
+            raise ValueError(f"cap min ({self.min}) must be below cap max ({self.max})")
+        return self
+
+
+class CategoricalPolicy(_SpecModel):
+    """How one declared categorical column is levelled (ADR-27).
+
+    Every field is optional; ``categorical: [plan_type]`` is sugar for
+    ``categorical: {plan_type: {}}``, which declares the column categorical
+    and takes the default treatment (levels learned from the train split,
+    NULLs left to the framework's missing branch).
+    """
+
+    #: Pin the level set in the spec instead of learning it from train, so a
+    #: new production value is a declared, hash-visible change rather than a
+    #: silent unseen-level-to-missing. Values are compared as strings.
+    levels: list[str | int | bool] | None = None
+    #: Pool train levels below this share into ``__other__``, so a long tail
+    #: of one-off values cannot each become a split. Needs the train-fitted
+    #: level map, so it is supported only by the adapters that share
+    #: ``mbt_adapter_base.encoding`` (probed at parse).
+    min_frequency: float | None = Field(default=None, gt=0.0, lt=1.0)
+    #: Fail when the column has more distinct train levels than this - the
+    #: guard that catches a user_id declared categorical by accident.
+    max_levels: int | None = Field(default=None, ge=2)
+    #: Map NULL to an explicit ``__missing__`` level, so "we don't know" is a
+    #: category the model can learn from rather than a missing-branch fallthrough.
+    null_as_level: bool = False
+
+    @property
+    def level_strings(self) -> list[str] | None:
+        """``levels`` as the strings the encoders compare against."""
+        if self.levels is None:
+            return None
+        return [str(v) for v in self.levels]
+
+    @model_validator(mode="after")
+    def _shape(self) -> "CategoricalPolicy":
+        if self.levels is not None:
+            if not self.levels:
+                raise ValueError("'levels' must name at least one level, or be omitted")
+            seen = [str(v) for v in self.levels]
+            duplicates = sorted({v for v in seen if seen.count(v) > 1})
+            if duplicates:
+                raise ValueError(f"'levels' repeats {duplicates}: levels compare as strings")
+            reserved = sorted(set(seen) & {OTHER_LEVEL, MISSING_LEVEL})
+            if reserved:
+                raise ValueError(
+                    f"'levels' may not name the reserved level(s) {reserved}: mbt "
+                    "adds them itself for pooled and missing values"
+                )
+            if self.min_frequency is not None:
+                raise ValueError(
+                    "'levels' and 'min_frequency' both decide the level set - set at "
+                    "most one ('levels' pins it in the spec, 'min_frequency' learns it "
+                    "from the train split)"
+                )
+            if self.max_levels is not None and len(self.levels) > self.max_levels:
+                raise ValueError(
+                    f"'levels' names {len(self.levels)} levels, above max_levels "
+                    f"({self.max_levels})"
+                )
+        return self
+
+
+class FeatureTransform(_SpecModel):
+    """Drift-mitigating treatment of one numeric feature (ADR-27).
+
+    Applied in core, to the same table at train and at score time, in the
+    fixed order ``cap`` -> ``log`` -> ``percentile``. Every step is stateless
+    by construction: no reference distribution is fitted or persisted, so the
+    two sides agree without a side-car artifact.
+    """
+
+    #: Plateau cap: ``365`` clamps above, ``{min: 0, max: 365}`` clamps both
+    #: ends. A declared constant, never a fitted quantile - a train-fitted
+    #: ``p99`` would need persisted state (see ADR-27's rejected alternatives).
+    #: The scalar shorthand normalizes to ``{max: N}`` before validation, so a
+    #: malformed cap reports CapSpec's error rather than a union branch the
+    #: user never wrote.
+    cap: CapSpec | None = None
+    #: ``log1p`` compression of the tail, so a doubling of the raw value moves
+    #: the feature by a constant instead of proportionally.
+    log: bool = False
+    #: Rank the value within the split or batch being read, into [0, 1]. This
+    #: is the self-normalizing lever: a uniform population shift cancels,
+    #: because every batch is ranked against itself. ``batch`` is the only
+    #: member today; ``train`` is the reserved name for the fitted variant.
+    percentile: Literal["batch"] | None = None
+    #: Constrain the model's response to this feature to be monotone. Not a
+    #: data rewrite - it reaches the adapter as a booster constraint, and is
+    #: equivalent to naming the column in ``features.monotonic``.
+    monotonic: MonotonicDirection | None = None
+
+    @field_validator("cap", mode="before")
+    @classmethod
+    def _scalar_cap_is_an_upper_plateau(cls, value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return value
+        return {"max": float(value)}
+
+    @property
+    def rewrites_values(self) -> bool:
+        """Whether this entry changes the data (as opposed to only constraining
+        the model), which is what decides if the column must be numeric."""
+        return self.cap is not None or self.log or self.percentile is not None
+
+    @model_validator(mode="after")
+    def _shape(self) -> "FeatureTransform":
+        if self.log and self.percentile is not None:
+            raise ValueError(
+                "'log' has no effect alongside 'percentile': a rank is invariant "
+                "under any monotone transform, so drop 'log'"
+            )
+        if not self.rewrites_values and self.monotonic is None:
+            raise ValueError(
+                "a transform entry must set at least one of 'cap', 'log', "
+                "'percentile', or 'monotonic'"
+            )
+        return self
+
+
 class FeatureSelection(_SpecModel):
-    """Feature include/exclude globs against the post-hook column set."""
+    """Which columns a model consumes and how each is treated.
+
+    ``include``/``exclude`` are globs against the post-hook column set and
+    decide membership; ``categorical``, ``transforms`` and ``monotonic`` are
+    per-column treatment of the columns that survive (ADR-27). The three
+    treatment blocks are kept apart because they act at three different
+    seams: ``categorical`` retypes a column, ``transforms`` rewrites its
+    values, and ``monotonic`` constrains the model rather than the data.
+    """
 
     include: list[str] = Field(default_factory=lambda: ["*"])
     exclude: list[str] = Field(default_factory=list)
+    #: DS-declared categoricals. **Absent** keeps dtype inference (string
+    #: columns are categorical, everything else numeric). **Present** is
+    #: authoritative: listed columns are categorical even when int-coded, and
+    #: an undeclared string feature is an error rather than a silent guess.
+    #: ``[]`` is therefore a meaningful assertion that the model has none.
+    #: The bare-list shorthand normalizes to ``{name: {}}`` before validation
+    #: (same reason as ``FeatureTransform.cap``).
+    categorical: dict[str, CategoricalPolicy] | None = None
+    #: Per-column numeric treatment, keyed by column name.
+    transforms: dict[str, FeatureTransform] = Field(default_factory=dict)
+    #: Monotone constraints, keyed by column name. The same constraint may be
+    #: written inline under ``transforms``; both spellings resolve to one map.
+    monotonic: dict[str, MonotonicDirection] = Field(default_factory=dict)
+
+    @property
+    def declares_categorical(self) -> bool:
+        """Whether the spec takes over from dtype inference (``[]`` counts)."""
+        return self.categorical is not None
+
+    @property
+    def categorical_policies(self) -> dict[str, CategoricalPolicy]:
+        """The declared categoricals as column -> policy; empty when the block
+        is absent (which means "infer", not "none" - see ``declares_categorical``)."""
+        return {} if self.categorical is None else dict(self.categorical)
+
+    @property
+    def monotonic_constraints(self) -> dict[str, MonotonicDirection]:
+        """The canonical constraint map, merging the inline ``transforms``
+        spelling with the standalone ``monotonic`` block."""
+        merged: dict[str, MonotonicDirection] = {
+            name: entry.monotonic
+            for name, entry in self.transforms.items()
+            if entry.monotonic is not None
+        }
+        merged.update(self.monotonic)
+        return merged
+
+    @property
+    def treated_columns(self) -> list[str]:
+        """Every column named by a treatment block, in a stable order."""
+        names = [
+            *self.categorical_policies,
+            *self.transforms,
+            *self.monotonic,
+        ]
+        return list(dict.fromkeys(names))
+
+    @field_validator("categorical", mode="before")
+    @classmethod
+    def _bare_list_takes_default_policies(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        names = [v for v in value if isinstance(v, str)]
+        if len(names) != len(value):
+            return value  # let the dict-shaped error report the real problem
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError(f"'categorical' repeats {duplicates}")
+        return {name: {} for name in names}
+
+    @model_validator(mode="after")
+    def _treatments_are_coherent(self) -> "FeatureSelection":
+        for field_name, names in (
+            ("categorical", list(self.categorical_policies)),
+            ("transforms", list(self.transforms)),
+            ("monotonic", list(self.monotonic)),
+        ):
+            if any(not name for name in names):
+                raise ValueError(f"'{field_name}' must name non-empty columns")
+        categorical = set(self.categorical_policies)
+        rewritten = {name for name, entry in self.transforms.items() if entry.rewrites_values}
+        clash = sorted(categorical & rewritten)
+        if clash:
+            raise ValueError(
+                f"column(s) {clash} are declared categorical and also given a numeric "
+                "transform (cap/log/percentile) - a category has no magnitude to cap, "
+                "scale, or rank"
+            )
+        constrained = sorted(categorical & set(self.monotonic_constraints))
+        if constrained:
+            raise ValueError(
+                f"monotone constraint on categorical column(s) {constrained}: the "
+                "levels are unordered, so 'increasing'/'decreasing' has no meaning"
+            )
+        for name, direction in self.monotonic.items():
+            inline = self.transforms.get(name)
+            if inline is not None and inline.monotonic not in (None, direction):
+                raise ValueError(
+                    f"column '{name}' declares monotonic '{inline.monotonic}' under "
+                    f"'transforms' and '{direction}' under 'monotonic' - they must agree"
+                )
+        # A treated column that the model never sees is always a mistake, and
+        # 'exclude' is the one membership rule knowable without the data.
+        excluded = sorted(set(self.treated_columns) & set(self.exclude))
+        if excluded:
+            raise ValueError(
+                f"column(s) {excluded} are treated under 'categorical'/'transforms'/"
+                "'monotonic' but also listed in 'exclude', so the model never sees them"
+            )
+        return self
 
 
 class GateSpec(_SpecModel):

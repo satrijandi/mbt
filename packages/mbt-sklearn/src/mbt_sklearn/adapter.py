@@ -55,6 +55,7 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
+from mbt_adapter_base.training_helpers import monotone_vector
 from mbt_sklearn.params import (
     BINARY_PARAMS,
     REGRESSION_PARAMS,
@@ -73,6 +74,11 @@ ARTIFACT_FORMAT = "sklearn_joblib"
 #: Estimators whose fitted attributes expose a usable global importance.
 #: `coef_` for the linear models, `feature_importances_` for the trees.
 _COEF_ESTIMATORS = frozenset({"logistic", "linear"})
+
+#: The one sklearn estimator that takes ``monotonic_cst`` (ADR-27). The linear
+#: models are monotone in a coefficient's sign but offer no way to constrain it,
+#: and RandomForest has no equivalent at all.
+_MONOTONIC_ESTIMATOR = "hist_gradient_boosting"
 
 
 class SklearnModel:
@@ -114,6 +120,11 @@ class SklearnTrainingAdapter:
     }
     #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
     supports_calibration: ClassVar[bool] = True
+    #: Probed by the parser (ADR-27). Monotone constraints are a property of the
+    #: ESTIMATOR, not of sklearn, so the blunt yes here is refined per estimator
+    #: in ``validate`` - only the histogram booster takes ``monotonic_cst``.
+    supports_monotonic_constraints: ClassVar[bool] = True
+    supports_categorical_pooling: ClassVar[bool] = True
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -127,7 +138,7 @@ class SklearnTrainingAdapter:
         return SklearnBinaryParams
 
     def validate(self, spec: ModelSpec) -> list[ValidationIssue]:
-        return [
+        issues = [
             ValidationIssue(
                 severity="warning",
                 resource=spec.name,
@@ -137,6 +148,27 @@ class SklearnTrainingAdapter:
             )
             for warning in self.nondeterminism_warnings(spec)
         ]
+        # The parser's blunt supports_monotonic_constraints probe says yes for
+        # sklearn as a whole; only the histogram booster can actually honour a
+        # constraint, and a constraint silently dropped is worse than none
+        # (ADR-27), so refine it here where the estimator is known.
+        estimator = self._estimator_name(spec)
+        if spec.features.monotonic_constraints and estimator != _MONOTONIC_ESTIMATOR:
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    resource=spec.name,
+                    field_path="/features/monotonic",
+                    message=(
+                        f"sklearn estimator {estimator!r} cannot enforce monotone constraints"
+                    ),
+                    hint=(
+                        f"set hyperparameters.estimator: {_MONOTONIC_ESTIMATOR}, use the "
+                        "xgboost or lightgbm adapter, or drop features.monotonic"
+                    ),
+                )
+            )
+        return issues
 
     def nondeterminism_warnings(self, spec: ModelSpec) -> list[str]:
         jobs = spec.hyperparameters.get("n_jobs", 1)
@@ -181,7 +213,9 @@ class SklearnTrainingAdapter:
         default = "linear" if spec.task == TaskType.REGRESSION else "logistic"
         return str(spec.hyperparameters.get("estimator", default))
 
-    def _build_estimator(self, spec: ModelSpec, ctx: RunContext) -> Any:
+    def _build_estimator(
+        self, spec: ModelSpec, ctx: RunContext, monotonic: list[int] | None = None
+    ) -> Any:
         from sklearn.ensemble import (
             HistGradientBoostingClassifier,
             HistGradientBoostingRegressor,
@@ -210,6 +244,11 @@ class SklearnTrainingAdapter:
         extra: dict[str, Any] = {}
         if rounds is not None:
             extra = {"early_stopping": True, "n_iter_no_change": rounds}
+        if monotonic is not None:
+            # Aligned to the design matrix, which for this estimator is the
+            # feature list 1:1 - only the linear estimators one-hot expand, and
+            # validate() has already refused a constraint on those.
+            extra["monotonic_cst"] = monotonic
         if regression:
             return HistGradientBoostingRegressor(**kwargs, **extra)
         weight = getattr(params, "class_weight", None)
@@ -273,7 +312,7 @@ class SklearnTrainingAdapter:
         features, categorical = split_feature_columns(
             table, target=spec.target, slices=spec.evaluation.slices, adapter="sklearn"
         )
-        categories = train_categories(table, categorical)
+        categories = train_categories(table, categorical, spec.features.categorical_policies)
         model = SklearnModel(
             estimator=None,
             estimator_name=self._estimator_name(spec),
@@ -285,7 +324,7 @@ class SklearnTrainingAdapter:
         x, owners = self._design_matrix(model, table)
         y = table.column(spec.target).to_numpy(zero_copy_only=False).astype(np.float64)
 
-        model.estimator = self._build_estimator(spec, ctx)
+        model.estimator = self._build_estimator(spec, ctx, monotone_vector(spec, owners))
         model.estimator.fit(x, y)
         model.column_owners = owners
         if spec.calibration is not None:

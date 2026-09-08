@@ -286,7 +286,92 @@ Scoring through different feature transforms than the champion learned on is sil
 
 **Fix:** retrain and promote so the champion matches the current hooks, or run the scoring pipeline from the commit the champion was built from (`--manifest` keeps that reproducible).
 A champion registered before this release has no `mbt.hooks_hash` tag; scoring then proceeds with a warning that parity cannot be verified.
-ADDING a hooks file to a model that had none triggers this too (the hash goes from empty to set): for example, a long-lived showcase stack whose wide champion predates `models/wide_hooks.py` fails wide scoring until `make wide` retrains and promotes.
+ADDING or REMOVING a hooks file triggers this too, because the hash goes from empty to set or back: a long-lived stack whose champion predates the change fails scoring until a retrain and promote. The showcase hit this in both directions - once when the wide models gained a shared hooks file, and again when ADR-27's `features.categorical` let them drop it.
+
+## `string feature(s) not declared in features.categorical`
+
+**Symptom (hard error, exit 1, during the training job):**
+
+```text
+string feature(s) not declared in features.categorical: signup_channel
+  resource: spend_regressor
+  hint: features.categorical is declared, so it is authoritative - add these
+        columns to it, or drop them via features.exclude
+```
+
+**Why:** `features.categorical` is absent-or-authoritative (ADR-27).
+Omit the key and mbt infers categoricals from dtype exactly as before; write it - **including as an empty list** - and the list becomes the whole truth, so a string column you did not name is a decision you have not made rather than one mbt should guess.
+
+**Fix:** add the column to `features.categorical`, or drop it with `features.exclude`.
+`categorical: []` is the right spelling for "this model has no categoricals" and will keep failing until that is actually true.
+Declared `evaluation.slices` are not features, so a string slice column never triggers this.
+
+## `feature treatment names column(s) the model does not consume`
+
+**Symptom (hard error, exit 1, during the training job):**
+
+```text
+feature treatment names column(s) the model does not consume: nope
+  resource: spend_regressor
+  hint: 'categorical', 'transforms' and 'monotonic' treat the columns that
+        survive features.include/exclude, which here are: tenure_days,
+        monthly_usage, support_tickets, plan_type, weekly_logins, signup_channel
+```
+
+**Why:** treatment applies to the post-selection feature set, so a name that is not in it is silently doing nothing - almost always a typo, or a column an `include` glob never matched.
+The hint lists exactly what the model does consume.
+
+**Fix:** correct the name, or widen `features.include`.
+The parse-time half of this check catches the other direction: naming a column in a treatment block *and* in `features.exclude` fails at `mbt parse`, before any data is read.
+
+## `categorical '<column>' has N distinct levels in the train split, above max_levels`
+
+**Symptom (hard error, exit 1, during the training job):**
+
+```text
+categorical 'signup_channel' has 4 distinct levels in the train split, above max_levels (2)
+  resource: spend_regressor
+  hint: a column with this many levels is usually an identifier rather than a
+        category - drop it via features.exclude, or pool the tail with min_frequency
+```
+
+**Why:** `max_levels` is the guard that catches a `user_id` or an email declared categorical by accident, which would otherwise become a memorization channel.
+
+**Fix:** raise `max_levels` if the cardinality is genuinely intended, pool the tail with `min_frequency`, pin the level set with `levels`, or exclude the column.
+The guard is measured on the **train split only**: a scoring batch that widens later is the shift monitor's job, not a reason to fail a production run.
+
+## `feature '<column>' has log: true but its minimum value is <x>`
+
+**Symptom (hard error, exit 1, during the training job):**
+
+```text
+feature 'usage_delta' has log: true but its minimum value is -120.0
+  resource: spend_regressor
+  hint: log1p(x) is undefined at or below x = -1; give the column a floor
+        first, e.g. cap: {min: 0}
+```
+
+**Why:** `log: true` is `log1p`, which is undefined at or below -1. mbt refuses rather than emitting silent NaNs into the feature matrix, where they would read as "missing" and quietly change the model.
+
+**Fix:** give the column a floor in the same entry - `{cap: {min: 0}, log: true}` - since `cap` runs before `log`.
+If the negative values are meaningful, shift the column in `hooks.py` instead of clamping them away.
+
+## `adapter '<name>' cannot enforce monotone constraints`
+
+**Symptom (parse error, exit 1):**
+
+```text
+Error: parsing failed with 1 error(s):
+  - models/spend_regressor.yml  at /features/monotonic: adapter 'spark' cannot
+    enforce monotone constraints
+    hint: use the xgboost or lightgbm adapter, or drop features.monotonic
+```
+
+**Why:** a monotone constraint is only worth declaring if it is actually enforced, so mbt probes the adapter at parse time rather than dropping the constraint at train time (ADR-27).
+xgboost and lightgbm support it natively; sklearn only through `estimator: hist_gradient_boosting` (the other estimators produce the same error naming the estimator); Spark's GBT and H2O AutoML not at all.
+
+**Fix:** switch adapter or estimator, or drop `features.monotonic`.
+The sibling error `adapter '<name>' cannot pool rare categorical levels (min_frequency)` is the same probe for `categorical: {col: {min_frequency: ...}}`, which needs the train-fitted level map that only the `mbt_adapter_base.encoding` adapters keep. Pin the level set with `levels:` instead - it needs no fitted map and works everywhere.
 
 ## `WARN champion has no monitoring baseline (registered by an older mbt)`
 

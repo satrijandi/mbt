@@ -89,6 +89,12 @@ class SparkMLTrainingAdapter:
     }
     #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
     supports_calibration: ClassVar[bool] = True
+    #: Declared False rather than left to the getattr default (ADR-27):
+    #: SparkML's GBT takes no monotone constraint, and StringIndexer owns its
+    #: own level handling, so a level map pooled elsewhere is not the one it
+    #: indexes against.
+    supports_monotonic_constraints: ClassVar[bool] = False
+    supports_categorical_pooling: ClassVar[bool] = False
     determinism = DeterminismTier(kind="tolerance", tolerances={"*": 0.01})
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:

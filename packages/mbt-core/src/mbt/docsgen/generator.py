@@ -130,6 +130,54 @@ def _page(title: str, body: str) -> str:
     )
 
 
+def _treatment_row(name: str, features: dict[str, Any]) -> str:
+    """One column's declared treatment, in the order it is applied (ADR-27)."""
+    policy = (features.get("categorical") or {}).get(name)
+    transform = (features.get("transforms") or {}).get(name) or {}
+    parts: list[str] = []
+    if policy is not None:
+        parts.append("categorical")
+        if policy.get("levels"):
+            parts.append(f"levels {policy['levels']}")
+        if policy.get("min_frequency") is not None:
+            parts.append(f"pool below {policy['min_frequency']}")
+        if policy.get("max_levels") is not None:
+            parts.append(f"max {policy['max_levels']} levels")
+        if policy.get("null_as_level"):
+            parts.append("null is a level")
+    cap = transform.get("cap") or {}
+    if cap.get("min") is not None:
+        parts.append(f"floor at {cap['min']}")
+    if cap.get("max") is not None:
+        parts.append(f"cap at {cap['max']}")
+    if transform.get("log"):
+        parts.append("log1p")
+    if transform.get("percentile"):
+        parts.append(f"percentile within {transform['percentile']}")
+    direction = (features.get("monotonic") or {}).get(name) or transform.get("monotonic")
+    if direction:
+        parts.append(f"monotone {direction}")
+    return (
+        f"<tr><td><code>{html.escape(name)}</code></td>"
+        f"<td>{html.escape(', '.join(parts))}</td></tr>"
+    )
+
+
+def _treatment_table(features: dict[str, Any]) -> str:
+    """The per-column treatment block, so a card reader can see what the model
+    actually consumed without opening the YAML."""
+    named = [
+        *(features.get("categorical") or {}),
+        *(features.get("transforms") or {}),
+        *(features.get("monotonic") or {}),
+    ]
+    ordered = list(dict.fromkeys(named))
+    if not ordered:
+        return ""
+    rows = "".join(_treatment_row(name, features) for name in ordered)
+    return f"<table><tr><th>column</th><th>treatment</th></tr>{rows}</table>"
+
+
 def _metric_table(result: NodeResult | None) -> str:
     if result is None or not result.metrics:
         # Naming the file matters: this used to read "run mbt build" and was
@@ -313,6 +361,7 @@ def _model_card(manifest: Manifest, uid: str, result: NodeResult | None) -> str:
     <h2>Features</h2>
     <p>include: <code>{html.escape(str(features.get("include", ["*"])))}</code><br>
        exclude: <code>{html.escape(str(features.get("exclude", [])))}</code></p>
+    {_treatment_table(features)}
     {_importance_table(result)}
     {_partial_dependence_section(result)}
     <h2>Hyperparameters</h2>

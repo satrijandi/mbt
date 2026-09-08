@@ -25,9 +25,18 @@ models:
       # loaded_at_time audit columns, and the time-anchored tenure_months.
       exclude: [customer_id, safe_id, as_of_date, loaded_at_time, tenure_months]
 
-    # Shared with churn_wide_automl: casts DS-declared numeric-coded
-    # categoricals (contract_code) to string before feature filtering.
-    hooks: models/wide_hooks.py
+      # The DS's categorical declaration over the FULL candidate width
+      # (ADR-27). contract_code is int8-coded (0 = month-to-month ...
+      # 3 = two-year) and its churn effect is deliberately non-monotone in
+      # the code, so read as a magnitude it costs real signal; declaring it
+      # here makes every adapter's native handling pick it up (LightGBM
+      # native categoricals, H2O asfactor, SparkML StringIndexer).
+      # The block is authoritative once present, so region and income_band
+      # must be listed too - a string feature left undeclared is an error,
+      # not a guess. scripts/select_features.py reads THIS list as the
+      # funnel's candidate set and writes the surviving subset into
+      # churn_wide_automl's generated block.
+      categorical: [contract_code, region, income_band]
 
     hyperparameters:
       n_estimators: 120

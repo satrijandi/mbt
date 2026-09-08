@@ -67,3 +67,27 @@ def test_staged_split_path_stages_handles_without_disk_backing() -> None:
     out = staged_split_path(handle, "train", prefix="mbt-test-stage-")
     assert out.is_file() and out.name == "train.parquet"
     assert pq.read_table(out).num_rows == handle.read("train").num_rows
+
+
+def test_pooling_leaves_a_level_set_alone_when_nothing_is_rare() -> None:
+    """No level below the threshold means no `__other__` bucket - a pooled
+    level would shift every other level's code for no reason, and codes are a
+    persisted part of the artifact (ADR-27)."""
+    import pyarrow as pa
+
+    from mbt_adapter_base.encoding import train_categories
+    from mbt_adapter_base.specs import CategoricalPolicy
+
+    table = pa.table({"r": ["north"] * 50 + ["south"] * 50})
+    levels = train_categories(table, ["r"], {"r": CategoricalPolicy(min_frequency=0.1)})
+    assert levels["r"] == ["north", "south"]
+
+
+def test_pooling_of_an_empty_column_is_a_no_op() -> None:
+    import pyarrow as pa
+
+    from mbt_adapter_base.encoding import train_categories
+    from mbt_adapter_base.specs import CategoricalPolicy
+
+    table = pa.table({"r": pa.array([None, None], type=pa.string())})
+    assert train_categories(table, ["r"], {"r": CategoricalPolicy(min_frequency=0.1)})["r"] == []

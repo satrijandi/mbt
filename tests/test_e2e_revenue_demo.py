@@ -4,9 +4,16 @@ The classification path is covered by test_e2e_churn_demo.py; this exercises
 what regression changes: the regression metric set, an rmse (lower-is-better)
 ceiling gate, and delayed ground-truth monitoring against a continuous target
 (R2-4). Real XGBoost regression training in subprocesses, MLflow on sqlite.
+
+The fixture also carries the ADR-27 feature-treatment block, so this is where
+capping, log compression, batch percentile ranking, monotone constraints and a
+declared categorical are proven to survive the whole real pipeline - not just
+to train, but to reach the exported monitoring baseline and the scoring job
+that reads it back.
 """
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -22,6 +29,13 @@ SCORING = "scoring.revenue_demo.spend_scoring"
 def _results(project: Path) -> dict[str, dict]:
     payload = json.loads((project / "target" / "run_results.json").read_text())
     return {r["unique_id"]: r for r in payload["results"]}
+
+
+def _baseline(project: Path) -> dict:
+    """The monitoring baseline the last training job exported (ADR-21)."""
+    exported = sorted(project.glob("**/baseline.json"))
+    assert exported, "training exports a baseline on every run"
+    return json.loads(exported[-1].read_text())
 
 
 def test_regression_build_score_and_monitor(revenue_copy: Path) -> None:
@@ -44,6 +58,25 @@ def test_regression_build_score_and_monitor(revenue_copy: Path) -> None:
     assert metrics["r2"] > 0.8
     assert "plan_type=enterprise" in model["slices"]  # per-segment error reported
     baseline_rmse = metrics["rmse"]
+
+    # ---- 1b. the ADR-27 treatment reached the artifact path ----
+    # The monitoring baseline is built from the POST-treatment train split, so
+    # its own numbers are the proof that treatment ran inside the job rather
+    # than only in a unit test.
+    baseline = _baseline(revenue_copy)
+    tenure = baseline["features"]["tenure_days"]
+    assert tenure["kind"] == "numeric"
+    # cap: 730 then log1p, so nothing can exceed log1p(730)...
+    assert max(tenure["quantiles"]) == pytest.approx(math.log1p(730), abs=1e-9)
+    # ...and the capped tail is a real plateau, not a rounding artifact.
+    assert tenure["quantiles"].count(max(tenure["quantiles"])) > 1
+    # weekly_logins is a raw 0..40 count; ranked, every quantile lands in
+    # (0, 1]. It does not reach 1.0 exactly because the top value is a large
+    # tie group and ties take the group's average rank.
+    logins = baseline["features"]["weekly_logins"]
+    assert 0.0 < min(logins["quantiles"]) <= max(logins["quantiles"]) <= 1.0
+    # A declared categorical is retyped, so the baseline profiles it as one.
+    assert baseline["features"]["signup_channel"]["kind"] == "categorical"
 
     # exact reproduction via --manifest (same seed, same data -> same metrics)
     run_mbt(["run", "--manifest", "target/manifest.json"], revenue_copy, timeout=600)

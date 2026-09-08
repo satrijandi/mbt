@@ -4,9 +4,12 @@ import pytest
 from pydantic import ValidationError
 
 from mbt.contracts import (
+    CapSpec,
+    CategoricalPolicy,
     DatasetSpec,
     EvaluationProtocol,
     EvaluationSpec,
+    FeatureSelection,
     GateSpec,
     ModelSpec,
     ScoringOutputSpec,
@@ -188,3 +191,103 @@ def test_search_dimension_shapes() -> None:
     with pytest.raises(ValidationError, match="loguniform"):
         SearchDimension(type="loguniform", low=0, high=1)
     assert SearchDimension(type="int", low=3, high=10).high == 10
+
+
+# -- feature treatment (ADR-27) --------------------------------------------------
+
+
+def test_categorical_bare_list_is_sugar_for_default_policies() -> None:
+    spec = FeatureSelection.model_validate({"categorical": ["plan", "region"]})
+    assert list(spec.categorical_policies) == ["plan", "region"]
+    assert spec.categorical_policies["plan"] == CategoricalPolicy()
+
+
+def test_absent_categorical_infers_while_empty_list_asserts_none() -> None:
+    """The distinction the whole authoritative rule rests on: omitting the key
+    keeps dtype inference, writing `[]` takes it over and claims there are no
+    categoricals."""
+    assert FeatureSelection().declares_categorical is False
+    assert FeatureSelection.model_validate({"categorical": []}).declares_categorical is True
+
+
+def test_categorical_rejects_repeats_and_non_string_entries() -> None:
+    with pytest.raises(ValidationError, match=r"'categorical' repeats \['a'\]"):
+        FeatureSelection.model_validate({"categorical": ["a", "a"]})
+    with pytest.raises(ValidationError, match="valid dictionary"):
+        FeatureSelection.model_validate({"categorical": ["a", 3]})
+
+
+def test_scalar_cap_normalizes_to_an_upper_plateau() -> None:
+    spec = FeatureSelection.model_validate({"transforms": {"x": {"cap": 365}}})
+    assert spec.transforms["x"].cap == CapSpec(max=365.0)
+
+
+def test_cap_must_be_ordered_and_non_empty() -> None:
+    with pytest.raises(ValidationError, match="must be below cap max"):
+        FeatureSelection.model_validate({"transforms": {"x": {"cap": {"min": 5, "max": 1}}}})
+    with pytest.raises(ValidationError, match="must set 'min', 'max', or both"):
+        FeatureSelection.model_validate({"transforms": {"x": {"cap": {}}}})
+
+
+def test_log_with_percentile_is_rejected_as_a_no_op() -> None:
+    with pytest.raises(ValidationError, match="rank is invariant"):
+        FeatureSelection.model_validate({"transforms": {"x": {"log": True, "percentile": "batch"}}})
+
+
+def test_an_empty_transform_entry_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="at least one of 'cap'"):
+        FeatureSelection.model_validate({"transforms": {"x": {}}})
+
+
+def test_numeric_transform_on_a_declared_categorical_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="no magnitude to cap"):
+        FeatureSelection.model_validate({"categorical": ["c"], "transforms": {"c": {"cap": 3}}})
+
+
+def test_monotonic_on_a_declared_categorical_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="levels are unordered"):
+        FeatureSelection.model_validate({"categorical": ["c"], "monotonic": {"c": "increasing"}})
+
+
+def test_the_two_monotonic_spellings_merge_and_must_agree() -> None:
+    spec = FeatureSelection.model_validate(
+        {"transforms": {"a": {"monotonic": "increasing"}}, "monotonic": {"b": "decreasing"}}
+    )
+    assert spec.monotonic_constraints == {"a": "increasing", "b": "decreasing"}
+    with pytest.raises(ValidationError, match="they must agree"):
+        FeatureSelection.model_validate(
+            {"transforms": {"a": {"monotonic": "increasing"}}, "monotonic": {"a": "decreasing"}}
+        )
+
+
+def test_treating_an_excluded_column_is_rejected_at_parse() -> None:
+    with pytest.raises(ValidationError, match="also listed in 'exclude'"):
+        FeatureSelection.model_validate({"exclude": ["x"], "transforms": {"x": {"cap": 1}}})
+
+
+def test_pinned_levels_reject_repeats_reserved_names_and_min_frequency() -> None:
+    with pytest.raises(ValidationError, match="repeats"):
+        CategoricalPolicy(levels=["p", "p"])
+    with pytest.raises(ValidationError, match="reserved level"):
+        CategoricalPolicy(levels=["__other__"])
+    with pytest.raises(ValidationError, match="both decide the level set"):
+        CategoricalPolicy(levels=["p"], min_frequency=0.1)
+    with pytest.raises(ValidationError, match="at least one level"):
+        CategoricalPolicy(levels=[])
+    with pytest.raises(ValidationError, match="above max_levels"):
+        CategoricalPolicy(levels=["a", "b", "c"], max_levels=2)
+
+
+def test_treatment_blocks_reject_an_empty_column_name() -> None:
+    blocks = (
+        {"categorical": [""]},
+        {"transforms": {"": {"cap": 1}}},
+        {"monotonic": {"": "increasing"}},
+    )
+    for block in blocks:
+        with pytest.raises(ValidationError, match="must name non-empty columns"):
+            FeatureSelection.model_validate(block)
+
+
+def test_levels_compare_as_strings_so_int_codes_are_accepted() -> None:
+    assert CategoricalPolicy(levels=[0, 1, 2]).level_strings == ["0", "1", "2"]

@@ -16,7 +16,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -33,7 +32,6 @@ def _import(path: Path, name: str):
 
 select_features = _import(PROJECT / "scripts" / "select_features.py", "wide_select_features")
 evidently_gate = _import(PROJECT / "scripts" / "evidently_gate.py", "wide_evidently_gate")
-wide_hooks = _import(PROJECT / "models" / "wide_hooks.py", "wide_hooks_module")
 
 
 MODEL_YAML = """\
@@ -44,8 +42,20 @@ models:
       include:
         - avg_session_min
         - contract_code
+      categorical: [contract_code]
       # END selected-features
       exclude: [customer_id, safe_id]
+"""
+
+#: The probe's shape: every candidate column, and the declaration the funnel
+#: filters against (ADR-27).
+PROBE_YAML = """\
+models:
+  - name: churn_wide_probe
+    features:
+      include: ["*"]
+      exclude: [customer_id, safe_id]
+      categorical: [contract_code, region, income_band]
 """
 
 
@@ -231,6 +241,47 @@ def test_rewrite_include_round_trips_through_read(tmp_path: Path) -> None:
     assert text.count("include:") == 1
 
 
+def test_rewrite_include_narrows_the_categorical_block_to_the_winners() -> None:
+    """`features.categorical` is authoritative once present (ADR-27), so it may
+    not name a column the funnel dropped - the two generated lists have to be
+    written together or the next build fails."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        model_file = Path(tmp) / "model.yml"
+        model_file.write_text(MODEL_YAML)
+        select_features.rewrite_include(
+            model_file, ["alpha", "contract_code"], ["contract_code", "region"]
+        )
+        text = model_file.read_text()
+        # region lost the funnel, so it is not declared...
+        assert "categorical: [contract_code]" in text
+        assert "region" not in text
+        assert evidently_gate.load_categorical(model_file) == ["contract_code"]
+
+        # ...and a run where no categorical survives writes no block at all.
+        model_file.write_text(MODEL_YAML)
+        select_features.rewrite_include(model_file, ["alpha"], ["contract_code"])
+        assert "categorical:" not in model_file.read_text()
+        assert evidently_gate.load_categorical(model_file) == []
+
+
+def test_the_funnel_reads_its_candidates_from_the_probe_declaration(tmp_path: Path) -> None:
+    probe = tmp_path / "churn_wide_probe.yml"
+    probe.write_text(PROBE_YAML)
+    assert select_features.load_categorical(probe) == ["contract_code", "region", "income_band"]
+
+    undeclared = tmp_path / "bare.yml"
+    undeclared.write_text("models:\n  - name: p\n    features: {include: ['*']}\n")
+    with pytest.raises(SystemExit):
+        select_features.load_categorical(undeclared)
+
+    empty = tmp_path / "empty.yml"
+    empty.write_text("models: []\n")
+    with pytest.raises(SystemExit):
+        select_features.load_categorical(empty)
+
+
 def test_marker_block_must_exist_and_be_nonempty(tmp_path: Path) -> None:
     no_markers = tmp_path / "plain.yml"
     no_markers.write_text("models:\n  - name: x\n")
@@ -337,25 +388,29 @@ def test_gate_load_frame_restricts_and_casts(tmp_path: Path) -> None:
     assert loaded["contract_code"].tolist() == ["0", "3"]
 
 
-# -- the shared categorical hook --------------------------------------------
+# -- the declared categoricals, end to end -----------------------------------
 
 
-def test_wide_hooks_casts_declared_codes_and_preserves_the_rest() -> None:
-    table = pa.table(
-        {
-            "contract_code": pa.array([0, 1, 3], type=pa.int8()),
-            "is_churn": pa.array([0, 1, 0]),
-            "avg_session_min": pa.array([9.5, 8.1, 7.7]),
-        }
-    )
-    out = wide_hooks.transform_features(table, ctx=None)
-    assert out.schema.field("contract_code").type == pa.string()
-    assert out.column("contract_code").to_pylist() == ["0", "1", "3"]
-    assert out.column("is_churn").to_pylist() == [0, 1, 0]
-    assert out.schema.field("avg_session_min").type == pa.float64()
+def test_the_shipped_wide_specs_declare_their_categoricals_consistently() -> None:
+    """The probe declares the full candidate width; the AutoML model's
+    generated block must be exactly the subset that survived selection, or
+    the authoritative rule (ADR-27) fails one of the two builds."""
+    import yaml
 
-    untouched = pa.table({"other": pa.array([1, 2])})
-    assert wide_hooks.transform_features(untouched, ctx=None) is untouched
+    probe = yaml.safe_load((PROJECT / "models" / "churn_wide_probe.yml").read_text())
+    automl = yaml.safe_load((PROJECT / "models" / "churn_wide_automl.yml").read_text())
+    declared = probe["models"][0]["features"]["categorical"]
+    assert "contract_code" in declared
+
+    selected = automl["models"][0]["features"]["include"]
+    narrowed = automl["models"][0]["features"]["categorical"]
+    assert narrowed == [name for name in declared if name in set(selected)]
+    assert set(narrowed) <= set(selected)
+
+    # The hooks file this replaced is gone, and nothing still points at it.
+    assert not (PROJECT / "models" / "wide_hooks.py").exists()
+    for spec in (probe, automl):
+        assert "hooks" not in spec["models"][0]
 
 
 def test_ds_notebooks_are_committed_clean() -> None:

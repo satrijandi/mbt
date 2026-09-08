@@ -13,6 +13,38 @@ models:
       include: ["*"]
       exclude: [user_id]   # identifier, no predictive content
 
+      # Declared categoricals (ADR-27). Present, so this list is authoritative:
+      # any string feature missing from it is a parse-time error rather than a
+      # dtype guess. plan_type is a slice, not a feature, so it is not listed.
+      categorical: [signup_channel]
+
+      transforms:
+        # tenure_days is the drifting time feature this demo exists to show.
+        # It grows a day per day for every surviving subscriber, so an
+        # untreated model extrapolates into a range it never trained on.
+        #   cap: 730  freezes the two-year-plus tail at one plateau. It is NOT
+        #             free here - the generator's spend signal stays linear out
+        #             to 1000 days, so capping costs rmse 7.6 -> 8.1. That is
+        #             the trade the lever exists to make, and the ceiling below
+        #             still holds comfortably.
+        #   log       compresses the remaining range; monotone, so a tree loses
+        #             nothing by it.
+        #   monotonic pins the response direction, so the model cannot learn a
+        #             squiggle that inverts once the population ages past the
+        #             training range. Spend really does rise with tenure in the
+        #             generator, so the constraint is true, not just safe.
+        tenure_days: {cap: 730, log: true, monotonic: increasing}
+        # The self-normalizing lever: ranked within each split or batch, so a
+        # uniform shift in login volume cancels. The cost is that PSI on this
+        # column goes near-zero by construction - both sides are uniform ranks -
+        # so it trades monitorability for stability (ADR-27).
+        weekly_logins: {percentile: batch}
+
+      # The standalone spelling of the same constraint mechanism; spend falls
+      # with support load in the generator.
+      monotonic:
+        support_tickets: decreasing
+
     hyperparameters:
       max_depth: 5
       learning_rate: 0.1

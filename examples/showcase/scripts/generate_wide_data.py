@@ -43,7 +43,7 @@ demographic_history carries one NUMERIC-CODED categorical on purpose:
 contract_code (int8, 0 = month-to-month ... 3 = two-year). Its churn effect
 is deliberately non-monotone (highest hazard at 0, second-highest at 3), so
 treating the code as a number costs real signal - the wide models' shared
-hooks file (project/models/wide_hooks.py) casts it to string before
+specs declare it under `features.categorical`, so core retypes it before
 training, which is the showcase's DS-declared-categorical pattern.
 
 Signal lives in a handful of named columns (low login/transaction activity
@@ -109,7 +109,7 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
     plan_tier = PLAN_TIERS[rng.integers(0, len(PLAN_TIERS), pool)]
     top_category = TOP_CATEGORIES[rng.integers(0, len(TOP_CATEGORIES), pool)]
     # Numeric-coded contract term (0 = month-to-month ... 3 = two-year): the
-    # DS-declared categorical that wide_hooks.py casts to string at train time.
+    # DS-declared categorical: features.categorical retypes it at train time.
     contract_code = rng.integers(0, 4, pool).astype(np.int8)
     login_base = np.clip(rng.normal(16.0, 7.0, pool), 0.5, 30.0)
     txn_base = np.clip(rng.normal(28.0, 14.0, pool), 1.0, 120.0)

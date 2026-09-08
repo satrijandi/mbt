@@ -43,6 +43,7 @@ models:
         - txn_f00
         - txn_f05
         - txn_f09
+      categorical: [contract_code, income_band]
       # END selected-features
       # DS-declared ignored columns, honored by the selection funnel too:
       # entity ids are join keys (mbt auto-drops only the split time
@@ -55,11 +56,6 @@ models:
       # baseline) breaches on it at serving no matter how predictive it
       # looks inside the training window.
       exclude: [customer_id, safe_id, as_of_date, loaded_at_time, tenure_months]
-
-    # Shared with churn_wide_probe: casts DS-declared numeric-coded
-    # categoricals (contract_code) to string before feature filtering, at
-    # train time and again at scoring time (hooks parity, ADR-20).
-    hooks: models/wide_hooks.py
 
     # The known-deterministic spec shape (no time budgets, no CV): H2O's
     # documented determinism tier is 0.02 tolerance on all metrics.

@@ -15,11 +15,32 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mbt_adapter_base.interchange import DatasetProfile, MetricResults
-from mbt_adapter_base.specs import MetricSpec
+from mbt_adapter_base.specs import MetricSpec, ModelSpec
 
 if TYPE_CHECKING:
     import numpy as np
     import pyarrow as pa
+
+
+def monotone_vector(spec: ModelSpec, features: list[str]) -> list[int] | None:
+    """``features.monotonic`` as the frameworks' aligned +1/-1/0 vector (ADR-27).
+
+    xgboost, LightGBM and sklearn's histogram booster all take the constraint
+    the same way - one entry per feature, in the model's own feature order -
+    so the alignment is done once here rather than three times, slightly
+    differently. Returns None when nothing is constrained, so callers can
+    leave the framework's own default in place instead of passing an
+    all-zero vector.
+
+    The order is the adapter's post-``split_feature_columns`` feature list,
+    which is also what the artifact persists, so a reloaded model's columns
+    and its constraints cannot drift apart.
+    """
+    declared = spec.features.monotonic_constraints
+    if not declared:
+        return None
+    direction = {"increasing": 1, "decreasing": -1}
+    return [direction.get(declared.get(name, ""), 0) for name in features]
 
 
 def top_k_explanations(shap_values: "np.ndarray", features: list[str], top_k: int) -> list[str]:

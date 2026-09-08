@@ -68,7 +68,7 @@ The wide batch-monthly cadence makes the split concrete:
 | ID columns: `sample_key: customer_id` (panel sampling) and entity ids as non-features | DS | dataset `sample_key` + model `features.exclude` |
 | The split date column and exact train/test cohort boundaries (ISO ranges) | DS | the dataset's `split:` block |
 | Ignored columns the selection funnel must never offer, including the time-anchored `tenure_months` | DS | the model's `features.exclude` (honored by `select_features.py`) |
-| Numeric-coded categorical features | DS | `CATEGORICAL_CODES` in `project/models/wide_hooks.py` |
+| Numeric-coded categorical features | DS | `features.categorical` in `project/models/churn_wide_probe.yml` (the funnel narrows it into the AutoML spec) |
 | Algorithm, AutoML budget, seed, metrics, gate floors, registration target | DS | `project/models/churn_wide_*.yml` |
 | Shift-monitor thresholds, ground-truth maturity and realized gates, the Evidently `--max-drift-share` policy | DS | `project/scoring/wide_retention_scoring.yml` + the `make wide` gate flags |
 | The selected feature list itself | DS | rerunning `scripts/select_features.py`; the rewritten include list is the PR diff reviewers see |

@@ -390,6 +390,19 @@ models:
       # Spark indexes strings to ordinal codes instead (not native), so a
       # categorical-heavy model is NOT apples-to-apples across Spark and a
       # tree adapter - see the mbt-spark README's parity caveat
+
+      # --- per-column treatment (ADR-27), all optional ---
+      categorical: [plan_type, contract_code]   # bare list...
+      # categorical:                            # ...or a mapping, per column:
+      #   plan_type:     {levels: [basic, pro, enterprise]}
+      #   region:        {min_frequency: 0.01, null_as_level: true}
+      #   contract_code: {max_levels: 20}
+      transforms:
+        days_since_onboard: {cap: 365, log: true, monotonic: increasing}
+        recency_days:       {percentile: batch}
+        order_value:        {cap: {min: 0, max: 5000}}
+      monotonic:                    # same constraint, standalone spelling
+        support_tickets: decreasing
     hyperparameters:                # validated by the adapter's param model
       max_depth: 6
       scale_pos_weight: "{{ auto }}"
@@ -511,6 +524,48 @@ metric engine dispatches on the metric name (ADR-24).
 forecasting) with an `rmse` ceiling gate and delayed ground-truth monitoring -
 the `task: regression` twin of `tests/fixtures/churn_demo`, and both are built
 end to end by the E2E suite on every run.
+
+### Feature treatment (ADR-27)
+
+`include`/`exclude` decide *membership*; `categorical`, `transforms` and `monotonic` decide *treatment* of the columns that survive.
+They are separate keys because they act at three different seams: `categorical` retypes a column, `transforms` rewrites its values, and `monotonic` constrains the model rather than the data.
+
+**`transforms`** exists for time-anchored features - `days_since_onboard`, `tenure_days`, `recency_days` - whose distribution translates every month as the population ages, so the model extrapolates into a range it never trained on and the shift monitors fire forever.
+Steps apply in the fixed order `cap` -> `log` -> `percentile`, on the same table at train and at score time:
+
+| key | meaning |
+| --- | --- |
+| `cap: 365` | plateau above 365. `cap: {min: 0, max: 365}` clamps both ends. Declared constants only - a fitted `p99` would need persisted state, so it is deliberately not supported (use `hooks.py`). |
+| `log: true` | `log1p`, compressing the tail so a doubling of the raw value moves the feature by a constant. |
+| `percentile: batch` | rank within the split or batch being read, into (0, 1], ties taking the group's average rank. Self-normalizing: a uniform shift cancels, because every batch is ranked against itself. |
+| `monotonic: increasing` | pin the model's response direction. Equivalent to naming the column in `features.monotonic`. |
+
+Nulls survive every step as nulls, so tree adapters keep using their own missing branch.
+Every step is monotone increasing, so a `monotonic` direction composes with them.
+`log` alongside `percentile` is a parse error: a rank is invariant under any monotone transform, so the `log` would do nothing.
+
+Two things worth knowing before reaching for `percentile: batch`.
+It makes PSI on that column near-zero *by construction* - both sides become uniform ranks - so it trades monitorability for stability.
+And capping is not free: it discards whatever signal lived in the tail, which is the trade the lever exists to make.
+
+**`monotonic`** reaches the booster, not the data. xgboost and lightgbm support it natively; sklearn only through `estimator: hist_gradient_boosting`; Spark and H2O not at all.
+An adapter that cannot honour a declared constraint fails at `mbt parse` naming the adapter, rather than training silently unconstrained.
+
+**`categorical`** is how a DS takes over from dtype inference.
+Omit it and nothing changes: string columns are categorical, everything else is a magnitude.
+Write it - **including as an empty list** - and it becomes authoritative: a listed column is categorical even when int-coded, and an undeclared string feature is an error rather than a guess.
+`categorical: []` therefore asserts "this model has no categoricals" and fails if one appears.
+
+Per-column options, all optional:
+
+| key | meaning |
+| --- | --- |
+| `levels: [...]` | pin the level set in the spec; anything else becomes `__other__`. A new production value is then a declared, hash-visible change instead of a silent unseen-level-to-missing. |
+| `min_frequency: 0.01` | pool train levels below this share into `__other__`. Needs the train-fitted level map, so it is supported on xgboost, lightgbm and sklearn only (Spark and H2O fail at parse). |
+| `max_levels: 100` | fail when the train split has more distinct levels than this - the guard that catches a `user_id` declared categorical by accident. Measured on the train split only. |
+| `null_as_level: true` | map NULL to an explicit `__missing__` level, so "we don't know" is a category the model can learn from. |
+
+Declared slice columns are not features, so they are never treated and never subject to the authoritative rule.
 
 ## scoring/*.yml
 

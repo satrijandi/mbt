@@ -32,13 +32,27 @@ Instead of hand-picking, you run one script that does a four-stage funnel: drop 
 The script writes the winning list INTO the model's YAML file.
 So your feature selection shows up as a normal code diff that a senior DS reviews in your pull request - "why did `contract_code` come in, why did `avg_session_min` fall out" is a review conversation, not a mystery.
 
-Some columns are banned from ever entering: the ids (they are join keys, not signals), audit columns like `loaded_at_time`, and - a real lesson from the showcase - `tenure_months`, which looks predictive in training but is anchored to calendar time, so it ALWAYS looks "drifted" in production a month later.
+Some columns are banned from ever entering: the ids (they are join keys, not signals) and audit columns like `loaded_at_time`.
 Those live in an `exclude:` list in the YAML, and the funnel respects it.
+
+Calendar-anchored features like `tenure_months` are a different problem, and you do NOT have to throw them away.
+They are genuinely predictive, but every surviving customer's value grows a day per day, so a month later the column always looks "drifted" and the model is extrapolating past anything it trained on.
+You treat them instead, in the same YAML:
+
+```yaml
+features:
+  transforms:
+    tenure_months: {cap: 24, log: true, monotonic: increasing}
+```
+
+`cap` freezes the drifting tail at a plateau, `log` compresses what is left, and `monotonic` stops the model learning a squiggle that inverts once the population ages out of the training range.
+If the whole population shifts together rather than the tail growing, `percentile: batch` is the stronger lever: it ranks the value inside each scoring batch, so a uniform shift cancels entirely.
+Capping does cost you the signal in the tail; that is the trade, and it is written down in the spec where a reviewer can argue with it.
 
 ## Step 3: Train, with every random choice pinned
 
 You run one command: `mbt build`.
-It joins the tables, applies the split, runs your `hooks.py` (small versioned Python transforms, e.g. casting a numeric code like `contract_code` to a category), and trains - for churn, an H2O AutoML that tries a few models and keeps the best.
+It joins the tables, applies the split, applies your declared feature treatment (`categorical: [contract_code]` tells mbt a numeric code is a category, so no adapter reads it as a magnitude), runs your `hooks.py` if you have one, and trains - for churn, an H2O AutoML that tries a few models and keeps the best.
 The spec has `seed: 42`, and every random decision in the whole pipeline (sampling, splits, the search, validation carves) is derived from that one seed.
 Combined with pinned data snapshots, this means anyone can rerun your exact experiment and get the same numbers.
 "It worked on my machine" stops being a sentence anyone says.

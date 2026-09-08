@@ -65,7 +65,7 @@ def test_probe_selects_the_committed_feature_list(wide) -> None:
     assert model_file.read_text() == committed, (
         "select_features.py produced a different selection than the committed list"
     )
-    # the numeric-coded categorical (cast by wide_hooks.py) must survive
+    # the numeric-coded categorical (features.categorical, ADR-27) must survive
     assert "        - contract_code\n" in committed
 
     report = json.loads(

@@ -31,9 +31,12 @@ different data adapters may order rows differently, and the search is
 single-threaded and LightGBM-deterministic so the committed list is
 byte-identical across host and runner image.
 
-Numeric-coded categoricals: CATEGORICAL_CODES is imported from
-``models/wide_hooks.py`` (the same hook that casts them at train and
-scoring time), so the funnel sees exactly the dtypes the trainers see.
+Numeric-coded categoricals: the candidate list is read from the PROBE
+spec's ``features.categorical`` (ADR-27), the same declaration core honours
+at train and scoring time, so the funnel sees exactly the dtypes the
+trainers see. The winners are written back into the AutoML spec's generated
+block alongside the include list, because that block is authoritative once
+present and may not name a column the funnel dropped.
 
 Usage (from the project root, after `mbt build --select churn_wide_probe`):
 
@@ -41,7 +44,6 @@ Usage (from the project root, after `mbt build --select churn_wide_probe`):
 """
 
 import argparse
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -74,15 +76,25 @@ GRID = {
 LEAF_LADDER = [20, 100, 200, 500, 2000]
 
 
-def load_categorical_codes(model_file: Path) -> list[str]:
-    """The DS-declared numeric-coded categoricals, from the shared hooks file."""
-    hooks_file = model_file.resolve().parent / "wide_hooks.py"
-    spec = importlib.util.spec_from_file_location("_selection_wide_hooks", hooks_file)
-    if spec is None or spec.loader is None:
-        sys.exit(f"error: cannot import {hooks_file}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return list(module.CATEGORICAL_CODES)
+def load_categorical(model_file: Path) -> list[str]:
+    """The model's DS-declared categoricals, from `features.categorical` (ADR-27).
+
+    The funnel reads the PROBE's declaration, because the probe is the model
+    that sees every candidate column (`include: ["*"]`); the AutoML model's
+    own list is generated from the winners by ``rewrite_include`` below, so
+    one declaration governs selection, training, and scoring.
+    """
+    import yaml
+
+    payload = yaml.safe_load(model_file.read_text())
+    models = payload.get("models") or []
+    if not models:
+        sys.exit(f"error: no models in {model_file}")
+    declared = (models[0].get("features") or {}).get("categorical")
+    if declared is None:
+        sys.exit(f"error: {model_file} declares no features.categorical")
+    # The bare-list and mapping spellings both iterate to column names.
+    return [str(name) for name in declared]
 
 
 def load_excluded(model_file: Path) -> list[str]:
@@ -237,14 +249,23 @@ def probe_overlap(run_results: Path, selected: list[str], top_k: int) -> int | N
     return len(probe_top & set(selected))
 
 
-def rewrite_include(model_file: Path, features: list[str]) -> None:
+def rewrite_include(model_file: Path, features: list[str], categorical: list[str] = ()) -> None:
+    """Rewrite the generated block: the winning `include` list, plus the
+    `categorical` declaration narrowed to the winners that survived.
+
+    Both are generated together because `features.categorical` is
+    authoritative once present (ADR-27): it may not name a column the funnel
+    dropped, and it must still name every categorical the funnel kept.
+    """
     lines = model_file.read_text().splitlines(keepends=True)
     begin = next((i for i, line in enumerate(lines) if BEGIN in line), None)
     end = next((i for i, line in enumerate(lines) if END in line), None)
     if begin is None or end is None or end <= begin:
         sys.exit(f"error: {model_file} has no '{BEGIN}' ... '{END}' marker block")
     indent = lines[begin][: len(lines[begin]) - len(lines[begin].lstrip())]
+    kept = [name for name in categorical if name in set(features)]
     block = [f"{indent}include:\n"] + [f"{indent}  - {name}\n" for name in features]
+    block += [f"{indent}categorical: [{', '.join(kept)}]\n"] if kept else []
     model_file.write_text("".join(lines[: begin + 1] + block + lines[end:]))
 
 
@@ -253,6 +274,13 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=24)
     parser.add_argument("--train-parquet", type=Path, default=None)
     parser.add_argument("--model-file", type=Path, default=Path("models/churn_wide_automl.yml"))
+    parser.add_argument(
+        "--probe-file",
+        type=Path,
+        default=None,
+        help=f"the probe spec whose features.categorical declares the candidates "
+        f"(default: <model-file dir>/{PROBE}.yml)",
+    )
     parser.add_argument("--report", type=Path, default=Path("target/feature_selection_report.json"))
     parser.add_argument("--run-results", type=Path, default=Path("target/run_results.json"))
     parser.add_argument("--seed", type=int, default=42, help="defaults to the wide specs' seed")
@@ -269,7 +297,10 @@ def main() -> None:
             newest_materialization(root, ("train.parquet", "test.parquet")) / "train.parquet"
         )
 
-    codes = load_categorical_codes(args.model_file)
+    # The probe is the model that sees every candidate column, so its
+    # features.categorical is the declaration the funnel filters against.
+    probe_file = args.probe_file or args.model_file.parent / f"{PROBE}.yml"
+    codes = load_categorical(probe_file)
     excluded = load_excluded(args.model_file)
     features, y = load_frames(train_parquet, codes, excluded)
     n_candidates = features.shape[1]
@@ -303,7 +334,7 @@ def main() -> None:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
 
-    rewrite_include(args.model_file, selected)
+    rewrite_include(args.model_file, selected, codes)
     print(
         f"funnel: {n_candidates} candidates"
         f" -{len(high_missing)} high-missing -{len(single_unique)} single-value"

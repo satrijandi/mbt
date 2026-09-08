@@ -26,6 +26,22 @@ pytestmark = pytest.mark.e2e
 #: mlflow; mbt-adapter-base must arrive transitively from --find-links.
 QUICKSTART_WHEELS = ("mbt_core", "mbt_xgboost", "mbt_mlflow")
 
+#: Every workspace distribution, passed to `uv pip install --refresh-package`.
+#: Workspace versions do not move between commits, so uv's cache happily
+#: satisfies `mbt-adapter-base==0.1.0` with a wheel built from OLDER sources -
+#: and a transitively resolved package (adapter-base is never named on the
+#: install line, by design) is exactly where that bites. The symptom is an
+#: ImportError for a newly added function; the danger is the other direction,
+#: a stale wheel that still imports and makes the whole test vacuous. Refresh
+#: pins the resolution to the wheels this test just built.
+WORKSPACE_DISTRIBUTIONS = tuple(
+    sorted(p.name for p in (REPO_ROOT / "packages").iterdir() if p.is_dir())
+)
+
+
+def _refresh_flags() -> list[str]:
+    return [flag for name in WORKSPACE_DISTRIBUTIONS for flag in ("--refresh-package", name)]
+
 
 def _run(
     cmd: list[str],
@@ -145,6 +161,7 @@ def test_each_package_installs_standalone_with_a_complete_closure(
         str(dist),
         "--constraint",
         str(constraints),
+        *_refresh_flags(),
         str(dist / f"{package}-{mbt.__version__}-py3-none-any.whl"),
     ]
     offline = _run([*install, "--offline"], cwd=tmp_path, env=env, check=False)
@@ -172,9 +189,10 @@ def test_wheels_install_and_run_the_quickstart(tmp_path: Path) -> None:
     # verifies sdist completeness) and check nothing is missing or misnamed.
     dist = tmp_path / "dist"
     _run([uv, "build", "--all-packages", "--out-dir", str(dist)], cwd=REPO_ROOT, env=clean_env)
-    packages = sorted(p.name for p in (REPO_ROOT / "packages").iterdir() if p.is_dir())
     built = {wheel.name for wheel in dist.glob("*.whl")}
-    expected = {f"{p.replace('-', '_')}-{mbt.__version__}-py3-none-any.whl" for p in packages}
+    expected = {
+        f"{p.replace('-', '_')}-{mbt.__version__}-py3-none-any.whl" for p in WORKSPACE_DISTRIBUTIONS
+    }
     assert built == expected, f"built wheels {built} != workspace packages {expected}"
 
     # Pin third-party deps to the locked versions so the install is
@@ -209,6 +227,7 @@ def test_wheels_install_and_run_the_quickstart(tmp_path: Path) -> None:
         str(dist),
         "--constraint",
         str(constraints),
+        *_refresh_flags(),
         *(str(dist / f"{name}-{mbt.__version__}-py3-none-any.whl") for name in QUICKSTART_WHEELS),
     ]
     offline = _run([*install, "--offline"], cwd=tmp_path, env=clean_env, check=False)

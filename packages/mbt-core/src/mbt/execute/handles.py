@@ -4,6 +4,14 @@
 exclude`` then applies to the post-hook column set. The table an adapter
 finally reads contains exactly: selected features + target + declared slice
 columns; the split time column is always dropped from features (TSD §5.6).
+
+Declarative feature treatment (ADR-27) runs last, on the projected table:
+``features.categorical`` retypes, ``features.transforms`` rewrites values.
+Doing it here rather than in each adapter is what makes it uniform - every
+construction site of this class (train, the validation and calibration
+carves, each walk-forward fold, and scoring) goes through one code path, and
+``_materialize_for_path_adapter`` stages this table for the JVM adapters, so
+Spark and H2O see treated data without knowing the feature exists.
 """
 
 from collections.abc import Callable
@@ -19,6 +27,7 @@ from mbt.contracts import (
     ModelSpec,
 )
 from mbt.exceptions import ConfigError
+from mbt.execute.feature_treatment import apply_treatment
 from mbt.quality.hooks import ModelHooks
 
 
@@ -106,6 +115,17 @@ class TransformedDatasetHandle:
                 hint="transform_features must preserve the target column",
             )
         table = table.select(keep)
+        # Declared slice columns ride along for evaluation but are not features
+        # (the adapters drop them), so they are neither treatable nor subject to
+        # the authoritative-categorical rule.
+        slices = set(self._spec.evaluation.slices)
+        table = apply_treatment(
+            table,
+            self._spec.features,
+            [c for c in features if c not in slices],
+            split,
+            resource=self._spec.name,
+        )
         self._cache[split] = table
         return table
 

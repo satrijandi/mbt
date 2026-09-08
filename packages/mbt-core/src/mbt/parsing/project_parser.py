@@ -603,6 +603,8 @@ def _check_adapter(
             hint="drop 'calibration', or use a built-in adapter (all support it)",
         )
         return
+    if not _check_feature_capabilities(spec, adapter, uid, rel, report):
+        return
     validate_hyperparameters(
         adapter,
         spec.task,
@@ -624,6 +626,56 @@ def _check_adapter(
     for issue in task_schema.validate_spec(spec):
         add = report.error if issue.severity == "error" else report.warning
         add(issue.message, file=rel, resource=uid, field_path=issue.field_path, hint=issue.hint)
+
+
+#: Feature-treatment capabilities probed on the adapter class (ADR-27), as
+#: (what the spec asks for, the ClassVar, the field, what to say). A
+#: declaration the adapter cannot honour fails at parse rather than being
+#: dropped at train time: a constraint the DS believes is protecting them but
+#: that silently does not exist is worse than no constraint at all.
+_FEATURE_CAPABILITIES = (
+    (
+        "monotonic_constraints",
+        "supports_monotonic_constraints",
+        "/features/monotonic",
+        "enforce monotone constraints",
+        "use the xgboost or lightgbm adapter, or drop features.monotonic",
+    ),
+    (
+        "pooled_categoricals",
+        "supports_categorical_pooling",
+        "/features/categorical",
+        "pool rare categorical levels (min_frequency)",
+        "pin the level set with 'levels' instead, which needs no fitted level map, "
+        "or use the xgboost, lightgbm, or sklearn adapter",
+    ),
+)
+
+
+def _requested_feature_capability(spec: ModelSpec, name: str) -> bool:
+    if name == "monotonic_constraints":
+        return bool(spec.features.monotonic_constraints)
+    return any(p.min_frequency is not None for p in spec.features.categorical_policies.values())
+
+
+def _check_feature_capabilities(
+    spec: ModelSpec, adapter: Any, uid: str, rel: str, report: ParseReport
+) -> bool:
+    """False when a declaration the adapter cannot honour was reported."""
+    for name, attribute, field_path, capability, hint in _FEATURE_CAPABILITIES:
+        if not _requested_feature_capability(spec, name):
+            continue
+        if getattr(adapter, attribute, False):
+            continue
+        report.error(
+            f"adapter {spec.adapter!r} cannot {capability}",
+            file=rel,
+            resource=uid,
+            field_path=field_path,
+            hint=hint,
+        )
+        return False
+    return True
 
 
 def _is_deferred_value(value: Any) -> bool:

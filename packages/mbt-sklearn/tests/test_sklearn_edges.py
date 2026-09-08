@@ -18,6 +18,7 @@ from mbt_adapter_base import (
     ArtifactRef,
     EvaluationProtocol,
     EvaluationSpec,
+    FeatureSelection,
     ModelSpec,
     RunContext,
     TaskType,
@@ -228,3 +229,28 @@ def test_plugin_descriptor_wires_the_training_adapter() -> None:
     # The fingerprint is the distribution name, not the import name: the
     # env_digest resolves it through importlib.metadata (ADR-19).
     assert PLUGIN.fingerprint_packages == ["scikit-learn"]
+
+
+def test_monotone_constraints_are_refused_on_every_estimator_but_hist_gb() -> None:
+    """The parser's blunt per-adapter probe says sklearn supports constraints;
+    only `hist_gradient_boosting` actually takes `monotonic_cst`, so the
+    adapter refines the answer where the estimator is known (ADR-27)."""
+    from mbt_sklearn.adapter import SklearnTrainingAdapter
+
+    adapter = SklearnTrainingAdapter({})
+
+    def issues(estimator: str) -> list:
+        spec = _spec(estimator=estimator).model_copy(
+            update={
+                "features": FeatureSelection.model_validate(
+                    {"include": ["*"], "monotonic": {"x": "increasing"}}
+                )
+            }
+        )
+        return [i for i in adapter.validate(spec) if i.severity == "error"]
+
+    refused = issues("logistic")
+    assert refused and "cannot enforce monotone constraints" in refused[0].message
+    assert refused[0].field_path == "/features/monotonic"
+    assert "hist_gradient_boosting" in (refused[0].hint or "")
+    assert not issues("hist_gradient_boosting")

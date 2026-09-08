@@ -371,6 +371,83 @@ def test_calibration_on_unsupporting_adapter_is_rejected(
     assert errs and "built-in adapter" in (errs[0].hint or "")
 
 
+def test_monotonic_on_an_unsupporting_adapter_is_rejected(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A constraint the adapter cannot enforce fails at parse rather than being
+    dropped at train time (ADR-27): a constraint the DS believes is protecting
+    them but that silently does not exist is worse than no constraint."""
+    write(
+        demo_project / "models/mono.yml",
+        """
+        models:
+          - name: mono_model
+            task: binary_classification
+            adapter: fake
+            owner: ds@example.com
+            dataset: ref('churn_training')
+            target: churned
+            features: {monotonic: {tenure_days: increasing}}
+            evaluation: {protocol: {split: temporal}, metrics: [pr_auc]}
+            seed: 7
+        """,
+    )
+    parsed = parse(demo_project, fake_registry)
+    errs = [i for i in parsed.report.errors if "cannot enforce monotone constraints" in i.message]
+    assert errs and "xgboost or lightgbm" in (errs[0].hint or "")
+    assert errs[0].field_path == "/features/monotonic"
+
+
+def test_min_frequency_on_an_unsupporting_adapter_is_rejected(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """Rare-level pooling needs the train-fitted level map the shared encoder
+    persists, so it is probed per adapter exactly like monotone constraints."""
+    write(
+        demo_project / "models/pool.yml",
+        """
+        models:
+          - name: pool_model
+            task: binary_classification
+            adapter: fake
+            owner: ds@example.com
+            dataset: ref('churn_training')
+            target: churned
+            features: {categorical: {region: {min_frequency: 0.01}}}
+            evaluation: {protocol: {split: temporal}, metrics: [pr_auc]}
+            seed: 7
+        """,
+    )
+    parsed = parse(demo_project, fake_registry)
+    errs = [i for i in parsed.report.errors if "cannot pool rare categorical" in i.message]
+    assert errs and "pin the level set with 'levels'" in (errs[0].hint or "")
+
+
+def test_declared_categoricals_without_pooling_pass_any_adapter(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """Only min_frequency needs adapter support; the retype and the stateless
+    level policies are applied in core, so they reach every adapter."""
+    write(
+        demo_project / "models/cats.yml",
+        """
+        models:
+          - name: cats_model
+            task: binary_classification
+            adapter: fake
+            owner: ds@example.com
+            dataset: ref('churn_training')
+            target: churned
+            features:
+              categorical: {region: {levels: [north, south], null_as_level: true}}
+            evaluation: {protocol: {split: temporal}, metrics: [pr_auc]}
+            seed: 7
+        """,
+    )
+    parsed = parse(demo_project, fake_registry)
+    assert not [i for i in parsed.report.errors if "cats_model" in (i.resource or "")]
+
+
 def test_backtest_folds_accepted_on_a_path_adapter(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:

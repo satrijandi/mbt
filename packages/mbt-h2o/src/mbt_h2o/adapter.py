@@ -80,6 +80,12 @@ class H2OAutoMLAdapter:
     }
     #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
     supports_calibration: ClassVar[bool] = True
+    #: Declared False rather than left to the getattr default (ADR-27): AutoML
+    #: picks the leader from a family whose members honour monotone constraints
+    #: differently or not at all, and asfactor() derives its own levels, so
+    #: neither declaration could be enforced for the model that actually wins.
+    supports_monotonic_constraints: ClassVar[bool] = False
+    supports_categorical_pooling: ClassVar[bool] = False
     #: AutoML rankings can flip between near-tied leaders across environments;
     #: metric-level variance stays small when runs are models-bounded.
     determinism = DeterminismTier(kind="tolerance", tolerances={"*": 0.02})

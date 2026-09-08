@@ -58,6 +58,43 @@ def test_partial_dependence_renders_as_a_sparkline() -> None:
     assert _partial_dependence_section(empty) == ""
 
 
+def test_treatment_table_spells_out_each_column_in_apply_order() -> None:
+    """A card reader should learn what the model actually consumed without
+    opening the YAML (ADR-27)."""
+    from mbt.contracts import FeatureSelection
+    from mbt.docsgen.generator import _treatment_table
+
+    features = FeatureSelection.model_validate(
+        {
+            "categorical": {
+                "region": {"min_frequency": 0.01, "null_as_level": True},
+                "plan": {"levels": ["basic", "pro"], "max_levels": 4},
+            },
+            "transforms": {
+                "days": {"cap": {"min": 0, "max": 365}, "log": True, "monotonic": "increasing"},
+                "recency": {"percentile": "batch"},
+            },
+            "monotonic": {"tickets": "decreasing"},
+        }
+    ).model_dump(mode="json")
+    html = _treatment_table(features)
+    assert "categorical, pool below 0.01, null is a level" in html
+    # quotes are HTML-escaped, so match the parts around them
+    assert "categorical, levels [" in html and "basic" in html and "max 4 levels" in html
+    assert "floor at 0.0, cap at 365.0, log1p, monotone increasing" in html
+    assert "percentile within batch" in html
+    assert "<td>monotone decreasing</td>" in html
+    # Each column appears once even though monotonic has two spellings.
+    assert html.count("<tr>") == 6  # header + five columns
+
+
+def test_treatment_table_is_omitted_when_nothing_is_declared() -> None:
+    from mbt.contracts import FeatureSelection
+    from mbt.docsgen.generator import _treatment_table
+
+    assert _treatment_table(FeatureSelection().model_dump(mode="json")) == ""
+
+
 def test_metric_table_shows_walk_forward_backtest_beside_single_split() -> None:
     """The card juxtaposes each metric's single-split value with its walk-forward
     backtest mean +/- fold std (R2-7), so an optimistic single test window and an

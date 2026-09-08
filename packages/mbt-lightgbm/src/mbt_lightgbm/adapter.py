@@ -37,6 +37,7 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
+from mbt_adapter_base.training_helpers import monotone_vector
 from mbt_lightgbm.params import LightGBMBinaryParams, LightGBMRegressionParams
 
 if TYPE_CHECKING:
@@ -85,6 +86,10 @@ class LightGBMTrainingAdapter:
     }
     #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
     supports_calibration: ClassVar[bool] = True
+    #: Probed by the parser (ADR-27): native monotone constraints, and rare-level
+    #: pooling via the shared train-fitted level map.
+    supports_monotonic_constraints: ClassVar[bool] = True
+    supports_categorical_pooling: ClassVar[bool] = True
     determinism = DeterminismTier(kind="exact")
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -187,7 +192,7 @@ class LightGBMTrainingAdapter:
         features, categorical = split_feature_columns(
             table, target=spec.target, slices=spec.evaluation.slices, adapter="lightgbm"
         )
-        categories = train_categories(table, categorical)
+        categories = train_categories(table, categorical, spec.features.categorical_policies)
         x = self._features_matrix(table, features, categories)
         y = table.column(spec.target).to_numpy(zero_copy_only=False).astype(np.float64)
         train_set = lgb.Dataset(
@@ -197,6 +202,9 @@ class LightGBMTrainingAdapter:
             categorical_feature=sorted(categories) if categories else "auto",
         )
         booster_params = params.booster_params(seed=ctx.seed)
+        constraints = monotone_vector(spec, features)
+        if constraints is not None:
+            booster_params["monotone_constraints"] = constraints
         valid_sets = None
         callbacks: list[Any] = []
         want_eval = params.early_stopping_rounds is not None or report is not None
