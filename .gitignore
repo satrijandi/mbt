@@ -1,12 +1,11 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
 .venv/
-.python-version.local
+# `uv build --all-packages` output (release.yml). No setuptools artifacts here:
+# every package builds with hatchling, so .eggs/, build/ and *.egg-info/ never
+# appear.
+dist/
 
 # Docs build output (mkdocs)
 site/
@@ -23,18 +22,21 @@ site/
 .coverage.*
 htmlcov/
 
-# mbt project artifacts (demo/e2e runs)
+# mbt project artifacts, from running any in-tree project in place
+# (tests/fixtures/{churn_demo,revenue_demo}, examples/showcase/project).
+# Unanchored on purpose: the scoring configs write `predictions/<name>` and the
+# profiles write `mlflow.db` relative to whichever project dir is running.
+# The first six also appear in the repo-root conftest.py `_KNOWN_LITTER` guard,
+# which fails a test run that drops them at the root; keep the two lists in step.
 target/
 mlruns/
 mlartifacts/
 mlflow.db
 *.duckdb
 *.duckdb.wal
-tests/fixtures/churn_demo/predictions/
-tests/fixtures/revenue_demo/predictions/
-examples/snowflake_wide/predictions/
+predictions/
 
-# JVM adapter leftovers (Spark/H2O e2e runs)
+# JVM adapter leftovers (Spark/H2O e2e runs); also in conftest.py `_KNOWN_LITTER`
 derby.log
 metastore_db/
 spark-warehouse/
@@ -43,12 +45,11 @@ hs_err_pid*
 
 # Local secrets / environment (live-Snowflake creds etc. flow via env vars;
 # a root profiles.yml would be a dev's personal copy - example projects keep
-# their tracked hermetic ones)
+# their tracked hermetic ones, and their tracked .env.example templates)
 .env
 .env.*
 !.env.example
 /profiles.yml
-.python-version
 
 # Claude Code local state (shared config would be .claude/settings.json)
 .claude/settings.local.json
