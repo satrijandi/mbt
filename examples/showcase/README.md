@@ -79,6 +79,10 @@ Three things are worth knowing before you run it:
 
 The seeder uploads the *same parquet* the lake is seeded from rather than generating fresh data in-warehouse, which is what makes the two planes comparable: the live test asserts both materialize the same panel.
 
+The DS view of this plane is a committed notebook, `project/notebooks/ds_inner_loop_snowflake.ipynb`, mirroring the lake one step for step: explore the warehouse tables, build the probe on the `snowflake` target, run the selection funnel (it reproduces the committed include list here too, which is a real cross-plane check), sample without the rows leaving Snowflake, then train and promote.
+Open it with a HOST kernel, not the stack's JupyterLab - `uv run --with jupyterlab jupyter lab --notebook-dir examples/showcase/project` from the repo root, with the same environment `make snowflake` uses.
+The runner image ships no `mbt-snowflake`, so the notebook at http://localhost:8899 cannot reach the warehouse; its first cell says so and checks the environment, including the `AWS_*` pair this plane needs even though it never touches s3a (profiles.yml renders whole, and the shared s3a anchor calls `env_var()` with no default).
+
 **Why 12 tables when the cadence reads 6.** `mbt compile` pins a snapshot for every source referenced by any dataset or scoring node, regardless of `--select`, so all 12 must exist or the compile fails before selection narrows anything.
 Pinning is a metadata call, so the six belonging to the daily and monthly cadences are created **empty** - your sandbox gets the wide cadence's data and nothing else.
 Pass `--all-cadences` to the seeder if you want to point this target at `tag:daily` or `tag:monthly` too; that is also the fallback if your account ever refuses to pin a never-written table (`could not read a snapshot token`).

@@ -11,6 +11,7 @@ test_bump_version.py established); everything writes under tmp_path only.
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -357,17 +358,39 @@ def test_wide_hooks_casts_declared_codes_and_preserves_the_rest() -> None:
     assert wide_hooks.transform_features(untouched, ctx=None) is untouched
 
 
-def test_ds_notebook_is_committed_clean() -> None:
-    """The DS inner-loop notebook ships without outputs (reviewable diffs)
-    and actually drives mbt; the live tier executes it for real."""
-    payload = json.loads((PROJECT / "notebooks" / "ds_inner_loop.ipynb").read_text())
-    assert payload["nbformat"] == 4
-    code_cells = [c for c in payload["cells"] if c["cell_type"] == "code"]
-    assert code_cells, "notebook has no code cells"
-    assert all(c["outputs"] == [] and c["execution_count"] is None for c in code_cells)
-    source = "".join("".join(c["source"]) for c in payload["cells"])
-    assert "mbt build --target dev" in source
-    assert "select_features.py" in source
+def test_ds_notebooks_are_committed_clean() -> None:
+    """Every DS notebook ships without outputs (reviewable diffs) and actually
+    drives mbt; the live tier executes them for real.
+
+    A directory walk rather than a list of filenames, deliberately. This guard
+    was bound to ds_inner_loop.ipynb by name, so when the warehouse-plane
+    notebook was added beside it the guard went on passing over an unguarded
+    file - the same shape as 01c3ec6, where a check that read one workflow
+    stayed green through an identical hole in another. It also refuses to pass
+    vacuously: a rename that stops it matching fails rather than finding
+    nothing and reporting success.
+    """
+    notebooks = sorted((PROJECT / "notebooks").glob("*.ipynb"))
+    assert len(notebooks) >= 2, f"expected the lake and warehouse notebooks, found {notebooks}"
+
+    targets: set[str] = set()
+    for path in notebooks:
+        payload = json.loads(path.read_text())
+        assert payload["nbformat"] == 4, path.name
+        code_cells = [c for c in payload["cells"] if c["cell_type"] == "code"]
+        assert code_cells, f"{path.name} has no code cells"
+        assert all(c["outputs"] == [] and c["execution_count"] is None for c in code_cells), (
+            f"{path.name} carries committed outputs"
+        )
+        source = "".join("".join(c["source"]) for c in payload["cells"])
+        assert "select_features.py" in source, path.name
+        built = re.findall(r"mbt build --target (\w+)", source)
+        assert built, f"{path.name} never drives mbt build"
+        targets.update(built)
+
+    # Both planes are represented, so neither notebook can quietly drift into a
+    # copy of the other.
+    assert {"dev", "snowflake"} <= targets, targets
 
 
 def test_selection_report_shape_matches_what_the_live_test_reads(tmp_path: Path) -> None:
