@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
+import pytest
 import yaml
 from mbt_snowflake.adapter import SnowflakeDataAdapter
 from snowflake_stub_helpers import FakeBuildContext, FakeSourceTable, StubConnection
@@ -379,6 +380,123 @@ def test_seeder_loads_with_parquet_logical_types(monkeypatch) -> None:
         # The other two settings this load depends on.
         assert kwargs["quote_identifiers"] is False, kwargs
         assert kwargs["auto_create_table"] is False, kwargs
+
+
+def test_seeder_trims_padded_env_identifiers(monkeypatch) -> None:
+    """A padded SNOWFLAKE_* identifier used to half-succeed, the worst shape.
+
+    The two ways this script names a table disagree about whitespace:
+    ``create_table_sql`` interpolates the schema straight into DDL, where the SQL
+    tokenizer ignores padding, so every CREATE TABLE succeeds; ``write_pandas``
+    then binds the same location through ``COPY INTO identifier(?)``, where the
+    padding IS part of the identifier. A schema pasted with trailing spaces
+    therefore created twelve tables and THEN failed with ``Schema
+    'DB."SC          "' does not exist``, which reads as a permissions problem
+    unless you notice the quotes. The INFORMATION_SCHEMA pre-flight matched
+    nothing for the same reason, so nothing caught it earlier either.
+
+    Observed against a real account. All three paths are asserted below.
+    """
+    import snowflake.connector
+    from snowflake.connector import pandas_tools
+
+    module = _seed_module()
+    statements: list[str] = []
+    loads: list[dict] = []
+    connect_kwargs: dict = {}
+
+    class FakeCursor:
+        def execute(self, sql, *a, **k):
+            statements.append(sql)
+            return self
+
+        def fetchall(self):
+            return []  # no pre-existing tables
+
+        def close(self):
+            pass
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def close(self):
+            pass
+
+    def fake_connect(**kwargs):
+        connect_kwargs.update(kwargs)
+        return FakeConnection()
+
+    def fake_write_pandas(conn, df, **kwargs):
+        loads.append(kwargs)
+        return True, 1, len(df), None
+
+    monkeypatch.setattr(snowflake.connector, "connect", fake_connect)
+    monkeypatch.setattr(pandas_tools, "write_pandas", fake_write_pandas)
+    for name, value in (
+        ("SNOWFLAKE_ACCOUNT", "  acct  "),
+        ("SNOWFLAKE_USER", "u\t"),
+        ("SNOWFLAKE_WAREHOUSE", "WH  "),
+        ("SNOWFLAKE_DATABASE", "  DB"),
+        ("SNOWFLAKE_SCHEMA", "SC          "),
+        ("SNOWFLAKE_ROLE", " ML_ROLE "),
+        # Significant whitespace in a secret survives: trimming it would turn a
+        # working credential into an auth failure with no visible cause.
+        ("SNOWFLAKE_PASSWORD", "  pw with space  "),
+    ):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("SNOWFLAKE_AUTHENTICATOR", raising=False)
+    monkeypatch.delenv("SNOWFLAKE_PRIVATE_KEY_FILE", raising=False)
+
+    assert module.main([]) == 0
+
+    assert connect_kwargs["account"] == "acct"
+    assert connect_kwargs["user"] == "u"
+    assert connect_kwargs["warehouse"] == "WH"
+    assert connect_kwargs["database"] == "DB"
+    assert connect_kwargs["schema"] == "SC"
+    assert connect_kwargs["role"] == "ML_ROLE"
+    assert connect_kwargs["password"] == "  pw with space  "
+
+    # Path 1: the DDL, which succeeded even when padded and so hid the problem.
+    ddl = [s for s in statements if s.startswith("CREATE OR REPLACE TABLE")]
+    assert len(ddl) == len(module.TABLES)
+    assert all(s.startswith("CREATE OR REPLACE TABLE DB.SC.MBT_SHOWCASE_") for s in ddl), ddl[:1]
+
+    # Path 2: the COPY INTO identifier(?) binding, which did not.
+    assert {k["database"] for k in loads} == {"DB"}
+    assert {k["schema"] for k in loads} == {"SC"}
+
+    # And the pre-flight that should have reported the tables as already there.
+    preflight = next(s for s in statements if "INFORMATION_SCHEMA.TABLES" in s)
+    assert "DB.INFORMATION_SCHEMA.TABLES" in preflight
+    assert "table_schema = 'SC'" in preflight
+
+
+def test_seeder_reads_whitespace_only_required_env_as_missing(monkeypatch) -> None:
+    """Trimming happens BEFORE the required-vars check, not after.
+
+    Otherwise a var holding only spaces is truthy, passes the check, and becomes
+    a connection attempt against an identifier made of whitespace - the same
+    confusing failure the trim exists to prevent, one step later.
+    """
+    module = _seed_module()
+    for name, value in (
+        ("SNOWFLAKE_ACCOUNT", "acct"),
+        ("SNOWFLAKE_USER", "u"),
+        ("SNOWFLAKE_WAREHOUSE", "WH"),
+        ("SNOWFLAKE_DATABASE", "DB"),
+        ("SNOWFLAKE_SCHEMA", "   "),
+        ("SNOWFLAKE_PASSWORD", "pw"),
+    ):
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._connection_config()
+    message = str(excinfo.value)
+    assert "SNOWFLAKE_SCHEMA" in message
+    # Only the offending one is named, so the message stays actionable.
+    assert "SNOWFLAKE_ACCOUNT" not in message
 
 
 def test_snowflake_target_renders_without_credentials(monkeypatch) -> None:

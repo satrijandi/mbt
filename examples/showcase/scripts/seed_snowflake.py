@@ -175,28 +175,63 @@ def create_table_sql(database: str, schema: str, table: str, frame: Any) -> str:
     return f"CREATE OR REPLACE TABLE {database}.{schema}.{table} (\n  {columns}\n)"
 
 
+#: Env vars read VERBATIM, never trimmed: leading or trailing whitespace can be
+#: significant in a secret, and silently stripping it would turn a working
+#: credential into an authentication failure with no way to see why.
+VERBATIM_ENV: frozenset[str] = frozenset({"password", "private_key_file_pwd"})
+
+
+def _env(key: str) -> str | None:
+    """``SNOWFLAKE_<KEY>`` from the environment, whitespace-trimmed.
+
+    Trimming is not cosmetic tidying - a padded identifier reaches Snowflake by
+    two paths from this script and they disagree about whitespace:
+
+    1. ``create_table_sql`` interpolates the schema straight into DDL, where the
+       SQL tokenizer ignores the padding, so every CREATE TABLE SUCCEEDS.
+    2. ``write_pandas`` binds the same location through ``COPY INTO
+       identifier(?)``, where the padding IS part of the identifier.
+
+    So a ``SNOWFLAKE_SCHEMA`` pasted with trailing spaces (column-aligned output
+    and quoted .env values both do it) failed with ``Schema
+    'DB."SANDBOX          "' does not exist or not authorized`` - AFTER six
+    tables had already been created, and naming a schema that looks correct in
+    the message unless you notice the quotes. Observed against a real account.
+
+    Secrets are exempt (:data:`VERBATIM_ENV`).
+    """
+    value = os.environ.get(f"SNOWFLAKE_{key.upper()}")
+    if value is None or key in VERBATIM_ENV:
+        return value
+    return value.strip()
+
+
 def _connection_config() -> dict[str, Any]:
     """Connection kwargs from the same SNOWFLAKE_* env vars profiles.yml reads.
 
     Same keys the live Snowflake suite reads, so one .env drives both.
     """
     required = ("account", "user", "warehouse", "database", "schema")
-    missing = [k for k in required if not os.environ.get(f"SNOWFLAKE_{k.upper()}")]
+    # Checked on the TRIMMED value, so a whitespace-only var reads as unset
+    # rather than as a connection attempt against an identifier of spaces.
+    missing = [k for k in required if not _env(k)]
     if missing:
         names = ", ".join(f"SNOWFLAKE_{k.upper()}" for k in missing)
         raise SystemExit(
             f"missing environment: {names} (copy packages/mbt-snowflake/.env.example "
             "to .env, edit it, then `set -a; source .env; set +a`)"
         )
-    config: dict[str, Any] = {k: os.environ[f"SNOWFLAKE_{k.upper()}"] for k in required}
+    config: dict[str, Any] = {k: _env(k) for k in required}
     for key in ("password", "role", "authenticator"):
-        value = os.environ.get(f"SNOWFLAKE_{key.upper()}")
+        value = _env(key)
         if value:
             config[key] = value
-    if os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE"):
-        config["private_key_file"] = os.environ["SNOWFLAKE_PRIVATE_KEY_FILE"]
-        if os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE_PWD"):
-            config["private_key_file_pwd"] = os.environ["SNOWFLAKE_PRIVATE_KEY_FILE_PWD"]
+    private_key_file = _env("private_key_file")
+    if private_key_file:
+        config["private_key_file"] = private_key_file
+        key_password = _env("private_key_file_pwd")
+        if key_password:
+            config["private_key_file_pwd"] = key_password
     if str(config.get("authenticator", "")).lower() == "externalbrowser":
         # One browser prompt for this script; whether the NEXT process reuses
         # it depends on the account's ALLOW_ID_TOKEN (docs/troubleshooting.md).
@@ -243,8 +278,8 @@ def main(argv: list[str] | None = None) -> int:
         return args.all_cadences or source in WIDE_TABLES
 
     if args.dry_run:
-        database = os.environ.get("SNOWFLAKE_DATABASE", "ANALYTICS")
-        schema = os.environ.get("SNOWFLAKE_SCHEMA", "SANDBOX")
+        database = _env("database") or "ANALYTICS"
+        schema = _env("schema") or "SANDBOX"
         total = 0
         for source, directory in TABLES.items():
             frame = read_table(directory)

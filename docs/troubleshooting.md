@@ -334,6 +334,40 @@ When `ALLOW_ID_TOKEN` is off, nothing is cached and every process re-prompts, no
 **Fix:** install the SSO extra (`uv pip install 'mbt-snowflake[sso]'`, or use the repo's own environment, whose dev dependencies already include it).
 If prompts persist one-per-process, ask a Snowflake admin whether `ALLOW_ID_TOKEN` is enabled for the account; until it is, use key-pair auth (`SNOWFLAKE_PRIVATE_KEY_FILE`, as the `prod` target does) for anything running more than one job.
 
+## Snowflake says a schema "does not exist or not authorized" but you can see it
+
+**Symptom:** a command that names the schema in one breath fails on it in the next.
+The showcase seeder is the clearest case - six `CREATE TABLE`s succeed, then the load dies:
+
+```text
+created ANALYTICS.SANDBOX_ME          .MBT_SHOWCASE_SUBSCRIBERS       empty (other cadence)
+...
+snowflake.connector.errors.ProgrammingError: 002003 (02000): SQL compilation error:
+Schema 'ANALYTICS."SANDBOX_ME          "' does not exist or not authorized.
+```
+
+**Why:** your `SNOWFLAKE_SCHEMA` (or `_DATABASE`) carries leading or trailing whitespace, usually from a value pasted out of column-aligned output or wrapped in quotes in `.env`.
+Note the quotes and the padding inside them in that message - that is the whole bug, and it is easy to read past as a permissions problem.
+
+Whitespace survives because the two ways an identifier reaches Snowflake disagree about it.
+Interpolated straight into SQL (`CREATE OR REPLACE TABLE {db}.{schema}.{table}`, and the adapter's generated queries) the tokenizer ignores padding around the `.`, so those statements succeed against the right schema.
+Bound through `IDENTIFIER(?)` - which is how `write_pandas` addresses its `COPY INTO` target - the padding is part of the identifier, and nothing matches.
+So the run gets far enough to leave objects behind before failing, and the failure names a schema that looks correct.
+
+**Fix:** trim the value and re-source.
+`printf '%q\n' "$SNOWFLAKE_SCHEMA"` makes the padding visible (`SANDBOX_ME\ \ \ \ \ \ \ \ \ \ `); a correct value prints as a bare word.
+
+```bash
+set -a; source .env; set +a
+printf '%q\n' "$SNOWFLAKE_SCHEMA"
+```
+
+Note that `set -a; source .env; set +a` is not itself the culprit - it strips a trailing `# comment` correctly.
+Nothing needs cleaning up in the warehouse: the objects that were created landed in the real schema, and the showcase seeder's `--force` replaces them on the re-run.
+
+`examples/showcase/scripts/seed_snowflake.py` now trims these vars itself (secrets excepted, where whitespace can be significant), so it fails up front naming the empty variable instead of halfway through.
+`profiles.yml` does not - it passes `env('SNOWFLAKE_SCHEMA')` through verbatim - so a padded value still reaches `mbt build --target snowflake`, where the interpolated path means it may appear to work.
+
 ## `mbt monitor` says `evaluated 0 of 1 matured prediction run(s)`
 
 **Symptom (exit 0, with a warning):**
