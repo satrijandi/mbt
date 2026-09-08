@@ -65,7 +65,12 @@ dev = [
     "types-PyYAML>=6.0",
     # 9.7: below it mkdocs-material pins pymdown-extensions~=10.2, which caps
     # out below the PYSEC-2026-3609/3654 fix in 11.0.1.
-    "mkdocs-material>=9.7",
+    # 9.7.7: fixes GHSA-xvg9-69gf-fjrf, a DOM XSS via the `q` parameter in the
+    # optional search-suggestions feature, affecting 7.2.0 through 9.7.6. The
+    # exposure is the built site, not anything mbt executes, but the fix is a
+    # patch release with nothing holding the floor back - so this is a floor
+    # bump rather than an audit acceptance.
+    "mkdocs-material>=9.7.7",
     # Declared explicitly (it would otherwise arrive only transitively through
     # mkdocs-material) so the ceiling below has somewhere to live. MkDocs 2.0
     # removes the plugin system, rewrites theming, and ships with "no migration
