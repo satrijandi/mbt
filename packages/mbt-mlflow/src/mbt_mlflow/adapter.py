@@ -123,12 +123,54 @@ _ARTIFACT_TAGS = (
     "mbt.artifact_size_bytes",
 )
 
+#: The node kinds that produce tracking runs, and the experiment each lands in
+#: when `experiment` is left unset (ADR-26). A model's runs are experiment
+#: records; a scoring node's runs - the batch summary and the ground-truth
+#: monitor's realized metrics - are production records, and one namespace
+#: holding both grows with serving cadence rather than with modelling work.
+#: `dataset` is absent on purpose: materialization opens no tracking run.
+_DEFAULT_EXPERIMENTS: dict[str, str] = {"model": "mbt", "scoring": "mbt_serving"}
+
+
+def _experiment_map(config: dict[str, Any]) -> dict[str, str]:
+    """Resolve the `experiment` config into one experiment name per node kind.
+
+    Three shapes, deliberately (ADR-26):
+
+    * unset - the per-kind defaults above;
+    * one name - every kind logs there, which is both the pre-ADR-26 behavior
+      and the way back to a single experiment;
+    * a mapping keyed by node kind - per-kind names, kinds left out keep
+      their default.
+    """
+    declared = config.get("experiment")
+    if declared is None:
+        return dict(_DEFAULT_EXPERIMENTS)
+    if isinstance(declared, dict):
+        unknown = sorted(set(declared) - set(_DEFAULT_EXPERIMENTS))
+        if unknown:
+            raise ValueError(
+                f"tracking config: experiment has no node kind {unknown[0]!r}; "
+                f"keys are {sorted(_DEFAULT_EXPERIMENTS)}, or give one name for all kinds"
+            )
+        return {
+            kind: str(declared.get(kind, default)) for kind, default in _DEFAULT_EXPERIMENTS.items()
+        }
+    if not isinstance(declared, str):
+        # A YAML list, or an unquoted number/date read as a scalar: naming an
+        # experiment after str() of that is never what was meant, and the
+        # result would only surface as a strangely named experiment much later.
+        raise ValueError(
+            f"tracking config: experiment must be a name or a mapping keyed by "
+            f"{sorted(_DEFAULT_EXPERIMENTS)}, got {type(declared).__name__}"
+        )
+    return dict.fromkeys(_DEFAULT_EXPERIMENTS, declared)
+
 
 class _MlflowBase:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self.uri: str = str(config.get("uri", "sqlite:///mlflow.db"))
-        self.experiment: str = str(config.get("experiment", "mbt"))
         self.use_aliases: bool = bool(config.get("use_aliases", True))
         self._client: MlflowClient | None = None
 
@@ -143,26 +185,47 @@ class _MlflowBase:
 class MlflowTracking(_MlflowBase):
     """TrackingAdapter over the MLflow client API (no fluent globals)."""
 
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        super().__init__(config)
+        #: Experiment name per run-producing node kind (ADR-26).
+        self.experiments: dict[str, str] = _experiment_map(config or {})
+
     def prepare(self) -> None:
         """Run store migrations once, before parallel jobs hit the backend.
 
         Called by the mbt coordinator when present; prevents alembic
         migration races on fresh sqlite databases.
-        """
-        self._experiment_id()
 
-    def _experiment_id(self) -> str:
+        EVERY configured experiment is created here, not lazily by the first
+        job that needs one, because parallel jobs of different kinds would
+        otherwise race to create theirs. The cost is an empty serving
+        experiment on a store that has only ever trained.
+        """
+        for name in sorted(set(self.experiments.values())):
+            self._experiment_id(name)
+
+    def _experiment_id(self, name: str) -> str:
         client = self.client()
-        experiment = client.get_experiment_by_name(self.experiment)
+        experiment = client.get_experiment_by_name(name)
         if experiment is not None:
             return str(experiment.experiment_id)
-        return str(client.create_experiment(self.experiment))
+        return str(client.create_experiment(name))
+
+    def _experiment_for(self, node: ManifestNode) -> str:
+        """The experiment a node's runs belong in (ADR-26)."""
+        name = self.experiments.get(node.resource_type)
+        if name is None:
+            raise ValueError(
+                f"no tracking experiment for node kind {node.resource_type!r} "
+                f"({node.unique_id}); runs exist for {sorted(_DEFAULT_EXPERIMENTS)}"
+            )
+        return name
 
     @_retryable
     def start_run(self, node: ManifestNode, meta: dict[str, str]) -> RunHandle:
         client = self.client()
         tags = {"mlflow.runName": node.name, "mbt.unique_id": node.unique_id, **meta}
-        run = client.create_run(self._experiment_id(), tags=tags)
+        run = client.create_run(self._experiment_id(self._experiment_for(node)), tags=tags)
         return RunHandle(run_id=run.info.run_id)
 
     @_retryable
@@ -194,7 +257,10 @@ class MlflowTracking(_MlflowBase):
         """Tuning trial history as nested runs (FR-TUNE-03)."""
         client = self.client()
         nested = client.create_run(
-            self._experiment_id(),
+            # Trials are training-time by construction (ADR-8: the trial loop
+            # runs inside the training job), so a nested run always belongs
+            # beside its parent in the model experiment.
+            self._experiment_id(self.experiments["model"]),
             tags={
                 "mlflow.parentRunId": run.run_id,
                 "mlflow.runName": f"trial-{index:03d}",

@@ -28,6 +28,24 @@ def _node() -> ManifestNode:
     )
 
 
+def _scoring_node() -> ManifestNode:
+    return ManifestNode(
+        unique_id="scoring.demo.s",
+        resource_type="scoring",
+        name="s",
+        path="scoring/s.yml",
+        config={},
+    )
+
+
+def _experiment_of(uri: str, run_id: str) -> str:
+    """The NAME of the experiment a run landed in."""
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=uri)
+    return str(client.get_experiment(client.get_run(run_id).info.experiment_id).name)
+
+
 def _artifact(tmp_path: Path) -> ArtifactRef:
     path = tmp_path / "model.bin"
     path.write_bytes(b"weights")
@@ -71,6 +89,103 @@ def test_nested_tuning_trials(uri: str) -> None:
     )
     assert len(children) == 2
     assert {r.data.metrics["objective"] for r in children} == {0.39, 0.42}
+
+
+# -- experiment per node kind (ADR-26) ----------------------------------------
+
+
+def test_training_and_serving_runs_separate_by_default(uri: str) -> None:
+    """A model's runs are experiment records; a scoring node's runs (the batch
+    summary, and the ground-truth monitor's realized metrics, which reuse the
+    scoring node) are production records. One namespace holding both grows with
+    serving cadence, so they default apart."""
+    tracking = MlflowTracking({"uri": uri})
+    tracking.prepare()
+
+    train = tracking.start_run(_node(), {})
+    score = tracking.start_run(_scoring_node(), {})
+
+    assert _experiment_of(uri, train.run_id) == "mbt"
+    assert _experiment_of(uri, score.run_id) == "mbt_serving"
+
+
+def test_prepare_creates_every_configured_experiment(uri: str) -> None:
+    """Both experiments exist before any job runs: parallel jobs of different
+    kinds must never race to create theirs."""
+    from mlflow.tracking import MlflowClient
+
+    MlflowTracking({"uri": uri}).prepare()
+
+    client = MlflowClient(tracking_uri=uri)
+    assert client.get_experiment_by_name("mbt") is not None
+    assert client.get_experiment_by_name("mbt_serving") is not None
+
+
+def test_one_experiment_name_still_collapses_every_kind(uri: str) -> None:
+    """The way back to a single experiment, and the pre-ADR-26 behavior."""
+    tracking = MlflowTracking({"uri": uri, "experiment": "churn"})
+    tracking.prepare()
+
+    train = tracking.start_run(_node(), {})
+    score = tracking.start_run(_scoring_node(), {})
+
+    assert _experiment_of(uri, train.run_id) == "churn"
+    assert _experiment_of(uri, score.run_id) == "churn"
+
+
+def test_experiment_mapping_overrides_one_kind_and_defaults_the_rest(uri: str) -> None:
+    tracking = MlflowTracking({"uri": uri, "experiment": {"scoring": "churn_production"}})
+
+    train = tracking.start_run(_node(), {})
+    score = tracking.start_run(_scoring_node(), {})
+
+    assert _experiment_of(uri, train.run_id) == "mbt"  # kind left out keeps its default
+    assert _experiment_of(uri, score.run_id) == "churn_production"
+
+
+def test_tuning_trials_stay_in_the_model_experiment(uri: str) -> None:
+    """Nested trial runs belong beside their parent, not in the serving
+    experiment - even when the model experiment was renamed."""
+    tracking = MlflowTracking({"uri": uri, "experiment": {"model": "churn_training"}})
+    run = tracking.start_run(_node(), {})
+    tracking.log_trial(run, 0, {"max_depth": 3}, 0.39)
+
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=uri)
+    experiment = client.get_experiment_by_name("churn_training")
+    children = client.search_runs(
+        [experiment.experiment_id],
+        filter_string=f"tags.\"mlflow.parentRunId\" = '{run.run_id}'",
+    )
+    assert len(children) == 1
+
+
+def test_an_unknown_node_kind_in_the_mapping_is_rejected(uri: str) -> None:
+    """A typo must fail loudly at construction, not silently log everything to
+    the default experiment and leave the override looking applied."""
+    with pytest.raises(ValueError, match="no node kind 'models'"):
+        MlflowTracking({"uri": uri, "experiment": {"models": "oops"}})
+
+
+def test_a_non_name_non_mapping_experiment_is_rejected(uri: str) -> None:
+    with pytest.raises(ValueError, match="must be a name or a mapping"):
+        MlflowTracking({"uri": uri, "experiment": ["a", "b"]})
+
+
+def test_a_node_kind_that_produces_no_runs_is_an_error(uri: str) -> None:
+    """Datasets materialize without opening a tracking run; if a caller ever
+    starts one anyway, say so rather than filing it under training."""
+    tracking = MlflowTracking({"uri": uri})
+    dataset = ManifestNode(
+        unique_id="dataset.demo.d",
+        resource_type="dataset",
+        name="d",
+        path="datasets/d.yml",
+        config={},
+    )
+    with pytest.raises(ValueError, match="no tracking experiment for node kind 'dataset'"):
+        tracking.start_run(dataset, {})
 
 
 def test_registry_champion_flow_defaults_to_aliases(uri: str, tmp_path: Path) -> None:

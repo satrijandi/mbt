@@ -28,6 +28,9 @@ macro_paths: [macros]
   outputs:
     dev:
       data:     {adapter: local,  config: {root: .}}
+      # training runs land in the `mbt` experiment, scoring and ground-truth
+      # monitor runs in `mbt_serving`; `experiment:` renames or merges them
+      # (see "Where tracking runs land" below)
       tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
       # the registry maps mbt stages to registered-model aliases by default;
       # set use_aliases: false for MLflow servers without alias support (<2.9)
@@ -67,6 +70,42 @@ occurrence of that string disappears from your logs, your `run_results.json`,
 and your model cards - a value of `1` rewrites `0.1234` to `0.***234`. Use
 `env()` for something that *is* a secret and it will be printed. When in
 doubt, `env_var()`: a redacted log is recoverable, a leaked credential is not.
+
+### Where tracking runs land
+
+mbt opens a tracking run in three places: training a model, scoring a batch,
+and evaluating a matured prediction run against ground truth.
+The first is an experiment record; the other two are production records, and
+the monitor run reuses the scoring node, so it follows scoring.
+They default to separate experiments because the production kind grows with
+serving cadence while the experiment kind grows with modelling work (ADR-26):
+
+| node kind | default experiment | holds |
+|---|---|---|
+| `model` | `mbt` | training runs, and their nested tuning trials |
+| `scoring` | `mbt_serving` | one run per scored batch, one per evaluated prediction run |
+
+The `experiment` key in the tracking adapter's config takes either shape:
+
+```yaml
+      # one name for every kind - a single experiment, as before ADR-26
+      tracking: {adapter: mlflow, config: {uri: "...", experiment: churn}}
+
+      # per kind; a kind left out keeps its default
+      tracking:
+        adapter: mlflow
+        config:
+          uri: "..."
+          experiment: {model: churn_training, scoring: churn_production}
+```
+
+An unrecognized kind (`models:` for `model:`) is an error, not a silent
+fallback to the default.
+Experiment names come from `profiles.yml`, which never enters node identity
+(ADR-5), so renaming one cannot mark a node `state:modified`.
+Note that `var()` in `profiles.yml` reads CLI and project vars, not the
+target's own `vars:` block, so build a per-target name from `env()` or write
+it literally.
 
 ## sources.yml
 

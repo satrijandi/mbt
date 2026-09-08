@@ -34,7 +34,7 @@ The notebook ends where the PR begins; `make demo` and `make wide` below are the
 
 After `make demo`, look at:
 
-- **MLflow**: registered `churn_automl` versions, the `production` alias set by the promotion, per-run metrics and `mbt.*` provenance tags, plus one tracking run per monitored prediction run (the realized-performance time series).
+- **MLflow**: registered `churn_automl` versions, the `production` alias set by the promotion, and two experiments (ADR-26) - `mbt` holds the training runs with their metrics and `mbt.*` provenance tags, `mbt_serving` holds one run per scored batch plus one per monitored prediction run (the realized-performance time series).
 - **Lake browser** (SeaweedFS filer UI, no login): the seeded gold tables under `/buckets/mbt-lake/` and the MLflow artifacts under `/buckets/mbt-artifacts/`.
   The raw S3 API port accepts signed requests only (`mbtadmin`/`mbtsecret`), so a bare browser GET there returns `AccessDenied` by design - browse through the filer UI instead.
 - **Grafana** (`admin`/`admin`): the "mbt Model Health" dashboard - gate margins, realized metrics, shift-vs-threshold.

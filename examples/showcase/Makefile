@@ -244,6 +244,7 @@ snowflake:
 	$(HOST_MBT) monitor $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(MONITOR_ANCHOR)
 	@echo "warehouse plane done: versions are registered as churn_wide_automl_snowflake"
 	@echo "predictions staged under: $(SHOWCASE_DIR)/project/target/snowflake_predictions"
+	@echo "MLflow: 2 training runs in the mbt experiment, the score + monitor runs in mbt_serving"
 
 snowflake-drop:
 	uv run --project $(REPO_ROOT) python $(SHOWCASE_DIR)/scripts/seed_snowflake.py --drop

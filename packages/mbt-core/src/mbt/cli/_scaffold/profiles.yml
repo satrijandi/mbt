@@ -5,6 +5,11 @@
 # manifest, model card, and run_results.json. Use env() for the environment
 # values that are not secrets (roots, hosts, schema names) so they stay
 # readable when you are debugging. See docs/spec-reference.md.
+#
+# Tracking runs split by node kind (ADR-26): training lands in the `mbt`
+# experiment, `mbt score` and `mbt monitor` in `mbt_serving`. Set
+# `experiment:` under the tracking config to rename either, or give one name
+# to put them back in a single experiment.
 __PROJECT_NAME__:
   target: dev
   outputs:
