@@ -27,9 +27,42 @@ def data_adapter(profiles: LoadedProfiles, project_dir: Path, registry: AdapterR
     return registry.component("data", ref.adapter, normalized_adapter_config(ref, project_dir))
 
 
-def tracking_adapter(profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry) -> Any:
+def tracking_adapter_config(
+    ref: AdapterRef, project_dir: Path, project_name: str
+) -> dict[str, Any]:
+    """Adapter config with the tracking experiment name composed into it.
+
+    Two names, both the user's: the project (``name:`` in mbt_project.yml) and
+    the experiment (``experiment:`` in the target's tracking config, which the
+    profiles pre-render already lets you write as ``env('EXPERIMENT_NAME')``).
+    They compose to ``<project>_<experiment>``, so one tracking server holds
+    many projects without collision and one project holds many modelling
+    efforts. With no ``experiment:`` the project name stands alone, which is
+    why a fresh project's runs land under its own name rather than a literal
+    ``mbt`` (ADR-28).
+
+    Composing here rather than inside each tracking adapter keeps the rule in
+    one place and applies it to every tracker, not only MLflow.
+    """
+    config = normalized_adapter_config(ref, project_dir)
+    declared = config.get("experiment")
+    if isinstance(declared, str) or declared is None:
+        # An empty string counts as unset: `env('EXPERIMENT_NAME', '')` with
+        # the variable absent must not produce a trailing-underscore name, or
+        # worse an experiment named "".
+        config["experiment"] = f"{project_name}_{declared}" if declared else project_name
+    # Anything else (a mapping, a number) is left untouched so the adapter
+    # raises its own error naming the shape it wanted.
+    return config
+
+
+def tracking_adapter(
+    profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry, project_name: str
+) -> Any:
     ref = profiles.target.tracking
-    return registry.component("tracking", ref.adapter, normalized_adapter_config(ref, project_dir))
+    return registry.component(
+        "tracking", ref.adapter, tracking_adapter_config(ref, project_dir, project_name)
+    )
 
 
 def registry_adapter(profiles: LoadedProfiles, project_dir: Path, registry: AdapterRegistry) -> Any:

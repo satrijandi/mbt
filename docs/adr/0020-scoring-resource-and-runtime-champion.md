@@ -1,6 +1,14 @@
 # ADR-20: Scoring pipelines are a resource kind; champions resolve at run time
 
-**Status:** accepted
+**Status:** accepted, amended by [ADR-28](0028-mlflow-training-only-and-champion-carried-config.md)
+
+Two amendments. Scoring no longer opens a tracking run, so the resolved
+champion version is recorded in run_results and the prediction sidecar but not
+in tracking tags. And the model spec a scoring run applies now comes from the
+champion's own exported inference config rather than from the local manifest -
+which is this ADR's runtime-champion principle carried one step further, since
+the champion already resolved at run time. The hooks-parity check below is
+unchanged and still hard-fails: hooks stay in the checkout.
 
 Batch scoring was a sanctioned v1 direction (the roadmap's `mbt score`), while online serving stays a non-goal: mbt's serving surface terminates like a job, never as a long-running prediction service.
 One `scoring` YAML config declares one batch serving pipeline end to end: which model's champion to load, what data to score, where predictions land, and what to monitor.

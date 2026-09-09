@@ -206,15 +206,21 @@ def test_scoring_without_ground_truth_is_skipped(
     assert node.message == "no ground_truth block declared"
 
 
-def test_monitor_metrics_reach_tracking(
+def test_realized_metrics_land_in_the_ledger_not_the_tracker(
     monitored_project: Path, fake_registry: AdapterRegistry
 ) -> None:
+    """A ground-truth evaluation is a production record (ADR-28): its realized
+    metrics belong beside the prediction run they measure, where `mbt
+    predictions show` reads them, not in an experiment tracker."""
     _build_and_promote(monitored_project, fake_registry)
     _score(monitored_project, fake_registry)
+    tracked = sorted(p.name for p in (monitored_project / "target/fake_tracking").glob("*.json"))
+
     monitor(monitored_project, fake_registry)
-    tracking_dir = monitored_project / "target/fake_tracking"
-    payloads = [json.loads(p.read_text()) for p in tracking_dir.glob("*.json")]
-    monitor_runs = [p for p in payloads if p.get("tags", {}).get("mbt.monitor") == "ground_truth"]
-    assert len(monitor_runs) == 1
-    assert monitor_runs[0]["metrics"]["ground_truth.coverage"] == 1.0
-    assert "pr_auc" in monitor_runs[0]["metrics"]
+
+    marker = next(_prediction_runs(monitored_project)[0].glob("ground_truth.marker.json"))
+    recorded = json.loads(marker.read_text())
+    assert recorded["coverage"] == 1.0
+    assert "pr_auc" in recorded["metrics"]
+    after = sorted(p.name for p in (monitored_project / "target/fake_tracking").glob("*.json"))
+    assert after == tracked  # the training runs, and nothing new

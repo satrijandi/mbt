@@ -1032,13 +1032,17 @@ def test_score_empty_batch_writes_zero_row_run(
     assert info["row_count"] == 0
 
 
-def test_score_prediction_shift_monitor_reaches_tracking(
+def test_score_reports_a_shift_breach_without_opening_a_tracking_run(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:
+    """Scoring is inference, not an experiment (ADR-28): the breach reaches the
+    operator through the exit code and the node result, and the tracker gains
+    nothing beyond the training runs that were already there."""
     write(demo_project / "sources.yml", SOURCES_WITH_BATCH)
     write(demo_project / "scoring/churn_scoring.yml", PREDICTION_SHIFT_YML)
     _write_batch(demo_project)
     _build_and_promote(demo_project, fake_registry)
+    tracked = sorted(p.name for p in (demo_project / "target/fake_tracking").glob("*.json"))
     results = invoke(demo_project, fake_registry, "score")
     # the fake model scores unlabeled input with a constant, so the score
     # distribution deterministically breaches the test-split baseline
@@ -1048,9 +1052,9 @@ def test_score_prediction_shift_monitor_reaches_tracking(
     assert node.monitors and {m.monitor for m in node.monitors} == {"prediction_shift"}
     assert not node.monitors[0].passed
     assert "score distribution" in (node.message or "")
-    tracking_file = demo_project / "target/fake_tracking" / f"{node.tracking_run_id}.json"
-    payload = json.loads(tracking_file.read_text())
-    assert "monitor.prediction_shift" in payload["metrics"]
+    assert node.tracking_run_id is None
+    after = sorted(p.name for p in (demo_project / "target/fake_tracking").glob("*.json"))
+    assert after == tracked  # the training runs, and nothing new
 
 
 # -- main() / module entrypoint ------------------------------------------------------

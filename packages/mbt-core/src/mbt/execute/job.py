@@ -45,9 +45,10 @@ from mbt.events.models import AutoResolved, LogMessage
 from mbt.exceptions import AdapterError, ConfigError, MbtError
 from mbt.execute.handles import TransformedDatasetHandle
 from mbt.quality.hooks import ModelHooks, load_hooks
-from mbt.runtime import normalized_adapter_config
+from mbt.runtime import normalized_adapter_config, tracking_adapter_config
 from mbt.secrets import taint
 from mbt.storage import artifact_store_for
+from mbt.utils import canonical_json
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
 
 #: Fraction of the train window carved as implicit validation (TSD §13.5).
@@ -150,7 +151,7 @@ def run_job(job: TrainingJob) -> JobResult:
 def _tracking_adapter(job: TrainingJob) -> Any:
     assert job.tracking is not None
     rendered = _render_adapter_ref(job.tracking, _job_vars(job))
-    config = normalized_adapter_config(rendered, Path(job.project_dir))
+    config = tracking_adapter_config(rendered, Path(job.project_dir), job.project)
     return get_registry().component("tracking", rendered.adapter, config)
 
 
@@ -328,6 +329,74 @@ def _export_baseline(runtime: _JobRuntime, model: Any) -> Any:
         path = Path(staging) / "baseline.json"
         write_baseline(baseline, path)
         return runtime.store.put_file(path, "baseline.json", format="json")
+
+
+def _export_inference_config(
+    runtime: _JobRuntime,
+    artifact: Any,
+    baseline: Any,
+    metrics: dict[str, float],
+) -> Any:
+    """Export the champion's own inference config next to the artifact (ADR-28).
+
+    What a later scoring run reads the model's spec from, so scoring follows
+    the champion it loaded rather than the working tree. Built unconditionally
+    like the baseline above: a champion registered without one falls back to
+    the local manifest with a warning, and that fallback should be a
+    migration story, not the normal path.
+    """
+    import tempfile
+
+    from mbt.execute.inference_config import build_inference_config
+
+    document = build_inference_config(
+        node=runtime.job.node,
+        project=runtime.job.project,
+        run_id=runtime.job.run_id,
+        feature_columns=runtime.transformed.feature_columns or [],
+        metrics=metrics,
+        artifact=artifact,
+        baseline=baseline,
+        meta=dict(runtime.job.tracking_meta),
+    )
+    with tempfile.TemporaryDirectory(prefix="mbt-inference-config-") as staging:
+        path = Path(staging) / "inference_config.json"
+        path.write_text(canonical_json(document) + "\n")
+        return runtime.store.put_file(path, "inference_config.json", format="json")
+
+
+def _log_run_documents(
+    runtime: _JobRuntime, tracking: Any, run_handle: Any, inference_config: Any
+) -> None:
+    """Attach the readable record of what this run trained (ADR-28).
+
+    ``log(artifacts=...)`` uploads only a ``file://`` ArtifactRef, because a
+    model binary belongs in mbt's artifact store with a pointer in the tracker
+    (ADR-21) - which leaves a run on an ``s3://`` store carrying no documents
+    at all. These two are small, mbt wrote them, and they are what makes the
+    run describe its model: the inference config, and the hooks source whose
+    hash the config records.
+
+    Optional capability, probed like ``prepare`` and ``log_trial``: a tracker
+    without it simply keeps the tags it always had.
+    """
+    if not hasattr(tracking, "log_document"):
+        return
+    import tempfile
+
+    with contextlib.suppress(Exception):  # a tracker hiccup must not fail training
+        local = runtime.store.fetch(inference_config)
+        tracking.log_document(run_handle, local)
+        hooks_path = runtime.job.node.hooks_path
+        if hooks_path is not None:
+            source = Path(runtime.job.project_dir) / hooks_path
+            if source.is_file():
+                # Copied under its declared basename so the run shows
+                # "wide_hooks.py", not whatever the checkout nests it under.
+                with tempfile.TemporaryDirectory(prefix="mbt-hooks-") as staging:
+                    staged = Path(staging) / Path(hooks_path).name
+                    staged.write_bytes(source.read_bytes())
+                    tracking.log_document(run_handle, staged)
 
 
 def _feature_importance(runtime: _JobRuntime, model: Any) -> dict[str, float]:
@@ -954,9 +1023,13 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
         delta_bounds = _champion_delta_bounds(runtime, model, champion_model)
 
-    # 5. export the artifact, plus the monitoring baseline (ADR-21)
+    # 5. export the artifact, the monitoring baseline (ADR-21), and the
+    #    inference config a later scoring run reads its spec from (ADR-28)
     artifact = runtime.adapter.export(model, "native", runtime.store)
     baseline = _export_baseline(runtime, model)
+    inference_config = _export_inference_config(
+        runtime, artifact, baseline, dict(challenger.metrics)
+    )
     importance = _feature_importance(runtime, model)
     partial_dependence = _partial_dependence(runtime, model, importance)
     backtest_folds = spec.evaluation.protocol.backtest_folds
@@ -969,7 +1042,7 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         else ({}, {})
     )
 
-    # 6. tracking: params, metrics, artifacts, tuning history
+    # 6. tracking: params, metrics, artifacts, documents, tuning history
     tracking_run_id: str | None = None
     if tracking is not None and run_handle is not None:
         tracking_run_id = run_handle.run_id
@@ -981,6 +1054,7 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
             metrics=dict(challenger.metrics),
             artifacts=[artifact],
         )
+        _log_run_documents(runtime, tracking, run_handle, inference_config)
         if tuning_result is not None:
             tracking.log(
                 run_handle,
@@ -1005,6 +1079,7 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         tuning=tuning_result,
         artifact=artifact,
         baseline=baseline,
+        inference_config=inference_config,
         tracking_run_id=tracking_run_id,
     )
 
@@ -1028,7 +1103,10 @@ def _run_score(job: TrainingJob) -> JobResult:
             "score mode requires the champion artifact reference", resource=job.node.unique_id
         )
     scoring_spec = ScoringSpec.model_validate(job.node.config)
-    model_spec = ModelSpec.model_validate(job.model_node.config)
+    # The champion's own exported spec wins over the working tree's (ADR-28);
+    # the coordinator falls back to model_node.config, loudly, only for a
+    # champion registered before mbt exported one.
+    model_spec = ModelSpec.model_validate(job.champion_spec or job.model_node.config)
 
     data_ref = _render_adapter_ref(job.data, _job_vars(job))
     data_adapter = registry.component(
@@ -1133,7 +1211,7 @@ def _run_score(job: TrainingJob) -> JobResult:
         PredictionRunInfo(
             run_key=job.run_key,
             uri="",
-            scored_at=job.tracking_meta.get("mbt.anchor", ""),
+            scored_at=job.anchor,
             run_id=job.run_id,
             model_name=model_spec.registration.name if model_spec.registration else model_spec.name,
             model_version=job.model_version or "",
@@ -1147,35 +1225,11 @@ def _run_score(job: TrainingJob) -> JobResult:
         ),
     )
 
-    tracking_run_id: str | None = None
-    if job.tracking is not None:
-        tracking = _tracking_adapter(job)
-        run_handle = tracking.start_run(job.node, dict(job.tracking_meta))
-        tracking_run_id = run_handle.run_id
-        metrics: dict[str, float] = {"predictions.rows": float(persisted.row_count)}
-        if stats is not None:
-            if stats.prediction_shift is not None:
-                metrics["monitor.prediction_shift"] = stats.prediction_shift.value
-            if stats.feature_shift:
-                metrics["monitor.feature_shift.max"] = max(
-                    s.value for s in stats.feature_shift.values()
-                )
-        tracking.log(
-            run_handle,
-            metrics=metrics,
-            tags={
-                "mbt.model_version": job.model_version or "",
-                "mbt.run_key": persisted.run_key,
-            },
-        )
-        tracking.end_run(run_handle, "FINISHED")
-
-    return JobResult(
-        status="success",
-        predictions=persisted,
-        monitor_stats=stats,
-        tracking_run_id=tracking_run_id,
-    )
+    # No tracking run: scoring is inference, not an experiment (ADR-28). The
+    # batch's row count, shift statistics, model version and run key all live
+    # in the prediction sidecar this job just wrote, which is where an
+    # operator asking about a batch already looks.
+    return JobResult(status="success", predictions=persisted, monitor_stats=stats)
 
 
 def _run_evaluate(runtime: _JobRuntime) -> JobResult:

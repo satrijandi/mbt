@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -59,6 +60,7 @@ from mbt.runtime import (
     tracking_adapter as build_tracking_adapter,
 )
 from mbt.secrets import Secret
+from mbt.storage import artifact_store_for
 from mbt.utils import canonical_json
 
 
@@ -161,10 +163,14 @@ class ExecutionContext:
         self._graph = self.manifest.graph()
         self._selectable = self.manifest.selectable_nodes()
         # Warm backends that need one-time setup (e.g. MLflow sqlite
-        # migrations) before parallel jobs hit them concurrently.
-        tracking = self.tracking()
-        if hasattr(tracking, "prepare"):
-            tracking.prepare()
+        # migrations) before parallel jobs hit them concurrently. Only training
+        # opens tracking runs (ADR-28), so a scoring or monitoring invocation
+        # does not touch the tracker at all - and does not create its
+        # experiment on a store that has never trained.
+        if any(node.resource_type == "model" for node in self.manifest.nodes.values()):
+            tracking = self.tracking()
+            if hasattr(tracking, "prepare"):
+                tracking.prepare()
 
     @property
     def merged_vars(self) -> dict[str, Any]:
@@ -178,7 +184,9 @@ class ExecutionContext:
         return {k: v for k, v in self.merged_vars.items() if not isinstance(v, Secret)}
 
     def tracking(self) -> Any:
-        return build_tracking_adapter(self.profiles, self.project_dir, self.registry)
+        return build_tracking_adapter(
+            self.profiles, self.project_dir, self.registry, self.manifest.metadata.project_name
+        )
 
     def registry_adapter(self) -> Any:
         return build_registry_adapter(self.profiles, self.project_dir, self.registry)
@@ -504,6 +512,7 @@ class ModelRunner:
             run_id=ctx.run_id,
             project_dir=str(ctx.project_dir),
             target_name=meta.target,
+            project=meta.project_name,
             node=node,
             dataset=handle.locator(),
             dataset_windows=dict(dataset_node.resolved),
@@ -532,6 +541,12 @@ class ModelRunner:
             required_env=list(ctx.profiles.required_env),
             tracking_meta={
                 "mbt.run_id": ctx.run_id,
+                # One run per model per invocation, named for the invocation
+                # (ADR-28): a re-train tomorrow no longer produces a second
+                # run with today's name. Composed here, beside the experiment
+                # name, so the policy is not restated in every tracker.
+                "mbt.run_name": f"{ctx.run_id}-{node.name}",
+                "mbt.project": meta.project_name,
                 "mbt.config_hash": node.config_hash,
                 "mbt.input_hash": node.input_hash,
                 "mbt.manifest_hash": ctx.manifest.manifest_hash(),
@@ -595,6 +610,15 @@ class ModelRunner:
             metadata["mbt.baseline_format"] = job_result.baseline.format
             metadata["mbt.baseline_content_hash"] = job_result.baseline.content_hash
             metadata["mbt.baseline_size_bytes"] = str(job_result.baseline.size_bytes)
+        if job_result.inference_config is not None:
+            # The spec scoring runs reconstruct this champion from (ADR-28),
+            # pinned the same way the baseline is so the two travel together.
+            metadata["mbt.inference_config_uri"] = job_result.inference_config.uri
+            metadata["mbt.inference_config_format"] = job_result.inference_config.format
+            metadata["mbt.inference_config_content_hash"] = job_result.inference_config.content_hash
+            metadata["mbt.inference_config_size_bytes"] = str(
+                job_result.inference_config.size_bytes
+            )
         # Persist the champion's operating points (R2-5) so a scoring pipeline
         # can default its decision cutoff from the model (decision_threshold:
         # threshold_at_precision_0.9) instead of a hand-copied constant.
@@ -808,6 +832,73 @@ class ScoringRunner:
             size_bytes=int(champion.tags.get("mbt.baseline_size_bytes", "0")),
         )
 
+    def _champion_spec(
+        self, champion: ModelVersion, model_node: ManifestNode, uid: str
+    ) -> dict[str, Any] | None:
+        """The model spec the champion was trained with, read back from it (ADR-28).
+
+        Scoring follows the champion the registry resolved, not the working
+        tree: a promotion is deliberately outside node identity (ADR-5), so
+        the two legitimately diverge between a retrain and a promote. Reading
+        the spec from the champion is what makes the scoring run use the
+        features, treatment and categoricals the model was actually fit on.
+
+        Returns None for a champion registered before mbt exported one, which
+        leaves the caller on the local manifest exactly as before - the same
+        shape ADR-21 gave a champion registered before baselines existed.
+        """
+        uri = champion.tags.get("mbt.inference_config_uri")
+        if not uri:
+            get_bus().emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=uid,
+                    message=(
+                        f"champion v{champion.version} predates inference-config export "
+                        "(no mbt.inference_config_uri tag); scoring falls back to the "
+                        "project's current model spec, which may not be the one it was "
+                        "trained with - retrain and promote to close this"
+                    ),
+                )
+            )
+            return None
+        ref = ArtifactRef(
+            uri=uri,
+            format=champion.tags.get("mbt.inference_config_format", "json"),
+            content_hash=champion.tags.get("mbt.inference_config_content_hash", ""),
+            size_bytes=int(champion.tags.get("mbt.inference_config_size_bytes", "0")),
+        )
+        store = artifact_store_for(
+            resolve_artifact_store_uri(
+                self.ctx.profiles.target.artifact_store, self.ctx.project_dir
+            )
+        )
+        document = json.loads(store.fetch(ref).read_text())
+        spec = document.get("spec")
+        if not isinstance(spec, dict):
+            raise StateError(
+                f"champion v{champion.version} inference config has no model spec",
+                resource=uid,
+                hint=f"the document at {uri} is malformed; retrain and promote",
+            )
+        recorded = str(document.get("identity", {}).get("config_hash", ""))
+        if recorded and recorded != model_node.config_hash:
+            # Expected whenever a spec edit has been merged but not yet
+            # promoted; scoring uses the champion's, and says which.
+            get_bus().emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=uid,
+                    message=(
+                        f"scoring with champion v{champion.version}, whose spec differs from "
+                        f"the project's ({recorded[:12]} vs {model_node.config_hash[:12]}); "
+                        "the champion's spec is authoritative - promote the retrained "
+                        "model to close the gap"
+                    ),
+                )
+            )
+        return spec
+
     def _materialize_input(self, node: ManifestNode, spec: ScoringSpec) -> Any:
         ctx = self.ctx
         sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
@@ -885,20 +976,26 @@ class ScoringRunner:
         spec: ScoringSpec,
         champion: ModelVersion,
         baseline: ArtifactRef | None,
+        champion_spec: dict[str, Any] | None,
         handle: Any,
     ) -> TrainingJob:
         ctx = self.ctx
         meta = ctx.manifest.metadata
+        # No `tracking` ref and no tracking_meta: a scoring job opens no
+        # tracking run (ADR-28), so handing it a tracker would only give it a
+        # backend it must not use.
         return TrainingJob(
             mode="score",
             run_id=ctx.run_id,
             project_dir=str(ctx.project_dir),
             target_name=meta.target,
+            project=meta.project_name,
+            anchor=meta.anchor,
             node=node,
             model_node=model_node,
+            champion_spec=champion_spec,
             dataset=handle.locator(),
             data=ctx.raw_adapter_ref("data"),
-            tracking=ctx.raw_adapter_ref("tracking"),
             artifact=champion.artifact,
             baseline=baseline,
             output=self._resolve_operating_point(spec.output, champion, node.unique_id),
@@ -908,16 +1005,6 @@ class ScoringRunner:
                 ctx.profiles.target.artifact_store, ctx.project_dir
             ),
             required_env=list(ctx.profiles.required_env),
-            tracking_meta={
-                "mbt.run_id": ctx.run_id,
-                "mbt.config_hash": node.config_hash,
-                "mbt.input_hash": node.input_hash,
-                "mbt.manifest_hash": ctx.manifest.manifest_hash(),
-                "mbt.snapshot_id": node.snapshot_id or "",
-                "mbt.git_commit": meta.git.commit or "",
-                "mbt.anchor": meta.anchor,
-                "mbt.model_version": champion.version,
-            },
             vars=ctx.job_safe_vars(),
         )
 
@@ -937,8 +1024,12 @@ class ScoringRunner:
         model_spec = ModelSpec.model_validate(model_node.config)
 
         champion = self._champion(spec, model_spec, uid)
+        # Still the local hooks file, still a hard fail: hooks are arbitrary
+        # Python, so mbt runs the git-tracked one and refuses when it is not
+        # the one the champion was trained with (ADR-20, ADR-28).
         self._check_hooks_parity(champion, model_node, uid)
         baseline = self._baseline_ref(champion)
+        champion_spec = self._champion_spec(champion, model_node, uid)
 
         handle = self._materialize_input(node, spec)
 
@@ -958,7 +1049,7 @@ class ScoringRunner:
                 ),
             )
 
-        job = self._assemble_job(node, model_node, spec, champion, baseline, handle)
+        job = self._assemble_job(node, model_node, spec, champion, baseline, champion_spec, handle)
         job_result = ctx.run_job(job)
         if job_result.status == "error":
             return NodeResult(

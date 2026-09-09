@@ -1,6 +1,13 @@
 # ADR-26: One tracking experiment per node kind
 
-**Status:** accepted
+**Status:** superseded by [ADR-28](0028-mlflow-training-only-and-champion-carried-config.md)
+
+ADR-28 removed the serving-side tracking runs this ADR existed to separate:
+`mbt score` and `mbt monitor` no longer open runs at all, so there is one kind
+of record left and one namespace to hold it. The `experiment` key survives as
+a single name, composed with the project name; the mapping shape below is now
+rejected at construction. Everything here is kept for the reasoning, which is
+what ADR-28 argues against.
 
 ## Context
 

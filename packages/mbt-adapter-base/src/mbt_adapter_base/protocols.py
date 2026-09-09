@@ -309,7 +309,18 @@ class DataAdapter(Protocol):
 
 
 class TrackingAdapter(Protocol):
-    """Experiment tracking (TSD §12.2)."""
+    """Experiment tracking (TSD §12.2).
+
+    Only training opens tracking runs (ADR-28): ``mbt score`` writes to the
+    prediction store and ``mbt monitor`` to the ground-truth ledger, so an
+    implementation never sees a ``scoring`` node.
+
+    Three capabilities are optional and probed with ``hasattr`` rather than
+    declared here, so a tracker missing one still works: ``prepare()`` (warm
+    the backend before parallel jobs), ``log_trial(run, index, params, value)``
+    (tuning history as nested runs), and ``log_document(run, path)`` (upload a
+    local file mbt wrote, such as the inference config).
+    """
 
     def start_run(self, node: ManifestNode, meta: dict[str, str]) -> RunHandle: ...
 

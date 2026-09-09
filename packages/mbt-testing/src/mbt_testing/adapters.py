@@ -190,6 +190,10 @@ class FakeTrackingAdapter:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self.root = Path(config.get("root", "./target/fake_tracking"))
+        #: Core composes this from the project and the user's `experiment:`
+        #: key before constructing the adapter (ADR-28); recorded on every run
+        #: so a test can assert the composition without a real tracker.
+        self.experiment = str(config.get("experiment", "mbt"))
         self._lock = threading.Lock()
 
     def _path(self, run_id: str) -> Path:
@@ -211,10 +215,15 @@ class FakeTrackingAdapter:
                 {
                     "run_id": run_id,
                     "node": node.unique_id,
+                    "experiment": self.experiment,
+                    # Core's composed name (ADR-28), mapped here the way the
+                    # MLflow adapter maps it onto mlflow.runName.
+                    "run_name": meta.get("mbt.run_name") or node.name,
                     "tags": dict(meta),
                     "params": {},
                     "metrics": {},
                     "artifacts": [],
+                    "documents": [],
                     "status": "RUNNING",
                 }
             )
@@ -240,6 +249,10 @@ class FakeTrackingAdapter:
             )
 
         self._update(run.run_id, apply)
+
+    def log_document(self, run: RunHandle, path: Path) -> None:
+        """Record a document by name (ADR-28); the bytes stay where they are."""
+        self._update(run.run_id, lambda p: p.setdefault("documents", []).append(Path(path).name))
 
     def end_run(self, run: RunHandle, status: str) -> None:
         self._update(run.run_id, lambda p: p.__setitem__("status", status))

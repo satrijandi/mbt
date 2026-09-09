@@ -167,7 +167,7 @@ There are four runners, all sharing one node-lifecycle wrapper (`run_with_lifecy
 - **`DatasetRunner`** - materialize (or reuse) the dataset, then run its `checks` and Python data tests.
   Materialization is cache-aware: the key is `sha256(input_hash + resolved windows [+ sample_fraction])`, so a warm `target/datasets/<name>/<key>` with a `_SUCCESS` marker is reused, and a sampled dev build never satisfies a full build's cache probe.
 - **`ModelRunner`** - resolve the champion, assemble the job, run it, call `evaluate_gates`, and register the artifact **only if every gate passes** (transitioning it to `stage_on_pass` and stamping `mbt.gates_passed=true`, plus the config/input/hooks hashes and the baseline reference, into the registry metadata).
-- **`ScoringRunner`** - resolve the champion from the registry **at run time by stage alias** (so a promotion takes effect on the next scheduled run without a spec edit, ADR-5/ADR-20), verify hooks parity against the champion's `mbt.hooks_hash`, materialize the input, run input `checks` (a failure skips scoring entirely), score, then evaluate shift `monitors`.
+- **`ScoringRunner`** - resolve the champion from the registry **at run time by stage alias** (so a promotion takes effect on the next scheduled run without a spec edit, ADR-5/ADR-20), verify hooks parity against the champion's `mbt.hooks_hash`, read the model spec back from the champion's own `mbt.inference_config_uri` (ADR-28), materialize the input, run input `checks` (a failure skips scoring entirely), score, then evaluate shift `monitors`. It opens no tracking run.
 - **`ModelTestRunner`** - `mbt test` on a model re-evaluates the latest registered version against the current champion; it **never trains** (TSD §11.3). No registered version means `skipped`, not a train.
 
 `mbt evaluate` and `mbt test` share `ModelRunner.evaluate_artifact` and the `evaluation_node_result` assembler, so the two commands cannot drift on error handling or the metrics/gates shape.
@@ -200,12 +200,13 @@ A plugin (`AdapterPlugin`) bundles typed component slots, instantiated on demand
 |---|---|---|
 | `training` | Fit / predict / evaluate / export a model; declare a determinism tier and supported tasks | xgboost, lightgbm, h2o, spark |
 | `data` | Build datasets and scoring inputs from sources; open the prediction store | local (DuckDB), snowflake, spark |
-| `tracking` | Log params, metrics, artifacts, and tuning trials | mlflow |
+| `tracking` | Log params, metrics, artifacts, documents, and tuning trials - training only (ADR-28) | mlflow |
 | `registry` | Register versions, resolve champions by stage, transition stages | mlflow |
 | `compute` | Run a `TrainingJob` (subprocess, `spark-submit`, cluster) | local, spark |
 | `tuning` | Search hyperparameters against an objective | optuna |
 
 Two `Supports*` capabilities are optional and probed with `hasattr` rather than declared: batch-scoring data adapters add `build_scoring_input`/`open_predictions` (contract 1.1, ADR-23), and a training adapter that sets `data_access == "path"` receives its splits as Parquet files rather than in-memory Arrow, so JVM/cluster frameworks ingest natively while still seeing exactly what Arrow adapters see (ADR-17).
+Tracking adapters are probed the same way for `prepare()`, `log_trial()`, and `log_document()`.
 
 The compliance suite in `mbt-adapter-base` (`TrainingAdapterCompliance`, `PredictionStoreCompliance`) is the ship bar: subclass it, keep `test_no_core_imports` green, and the adapter is correct by construction.
 
@@ -274,7 +275,8 @@ Start with the decision, not the code:
 | Identity & reproducibility | ADR-4 (two hashes), ADR-5 (profiles excluded), ADR-12 (windows & anchor), ADR-19 (env digest & `--manifest` verification) |
 | Selection, state & datasets | ADR-7 (env not modifying), ADR-11 (snapshot listing), ADR-13 (datasets auto-materialize), ADR-16 (multi-table inputs & key sampling), ADR-22 (population spine & per-table joins) |
 | Gates & tuning | ADR-6 (gate edits retrain), ADR-8 (tuning never sees test), ADR-9 (champion re-evaluated in job), ADR-10 (missing vs unloadable champion), ADR-18 (paired-bootstrap gates) |
-| Scoring & monitoring | ADR-20 (scoring resource & runtime champion), ADR-21 (prediction store & ground-truth ledger), ADR-23 (warehouse batch scoring) |
+| Scoring & monitoring | ADR-20 (scoring resource & runtime champion), ADR-21 (prediction store & ground-truth ledger), ADR-23 (warehouse batch scoring), ADR-28 (champion-carried inference config) |
+| Tracking | ADR-26 (superseded), ADR-28 (training-only tracking, timestamped runs, named experiments) |
 | Task verticals | ADR-24 (regression as a second vertical) |
 
 The pre-implementation sketches under `design-history/` (`PRD.md` and `TSD.md`) are kept as glossaries for the `FR-*`/`NFR-*` requirement IDs and the `TSD §N` anchors still cited throughout the code; the ADRs supersede their design decisions (ADR-15 explicitly supersedes the `TSD.md` sketch).

@@ -9,7 +9,7 @@ from typing import Any
 from core_helpers import TEST_ANCHOR
 
 from mbt.adapters.registry import AdapterRegistry
-from mbt.contracts import ModelSpec, ScoringSpec, TrainingJob
+from mbt.contracts import ManifestNode, ModelSpec, ScoringSpec, TrainingJob
 from mbt.events import EventBus, get_bus, set_bus
 from mbt.execute.handles import TransformedDatasetHandle
 from mbt.execute.job import _JobRuntime
@@ -103,8 +103,9 @@ def make_scoring_job(
     runner = ScoringRunner(ctx)
     champion = runner._champion(spec, model_spec, node.unique_id)
     baseline = runner._baseline_ref(champion)
+    champion_spec = runner._champion_spec(champion, model_node, node.unique_id)
     handle = runner._materialize_input(node, spec)
-    job = runner._assemble_job(node, model_node, spec, champion, baseline, handle)
+    job = runner._assemble_job(node, model_node, spec, champion, baseline, champion_spec, handle)
     if overrides:
         job = job.model_copy(update=overrides)
     return ctx, job
@@ -145,7 +146,24 @@ def make_inline_runtime(
     if job is None:
         job = SimpleNamespace(
             dataset_windows={},
-            node=SimpleNamespace(unique_id="model.demo.unit_model"),
+            # A real node: _run_train exports an inference config from it
+            # (ADR-28), so it needs the spec fields a stub cannot carry.
+            node=ManifestNode(
+                unique_id="model.demo.unit_model",
+                resource_type="model",
+                name="unit_model",
+                path="models/unit_model.yml",
+                config=spec.model_dump(mode="json"),
+                adapter=spec.adapter,
+                task=spec.task.value if hasattr(spec.task, "value") else str(spec.task),
+                seed=spec.seed,
+                config_hash="sha256:unit",
+                input_hash="sha256:unit-input",
+            ),
+            project="demo",
+            run_id="20260909T000000Z-unit",
+            project_dir=".",
+            tracking_meta={},
             tuning_engine=None,
             tuning_cap=None,
             vars={},

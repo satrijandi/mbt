@@ -50,7 +50,8 @@ def test_optuna_tuning_capped_with_nested_trials(demo_copy: Path) -> None:
     # winning params override the spec's static values in the final fit
     assert result["metrics"]["pr_auc"] > 0
 
-    experiment = client.get_experiment_by_name("mbt")
+    # the experiment is the project name when no `experiment:` is set (ADR-28)
+    experiment = client.get_experiment_by_name("churn_demo")
     children = client.search_runs(
         [experiment.experiment_id],
         filter_string=f"tags.\"mlflow.parentRunId\" = '{result['tracking_run_id']}'",

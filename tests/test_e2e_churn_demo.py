@@ -72,6 +72,14 @@ def test_full_build_reproduce_state_promote(demo_copy: Path) -> None:
     assert run.data.tags["mbt.gates_passed"] == "true"
     assert run.data.params["seed"] == "42"
 
+    # ADR-28: the project names the experiment, the invocation names the run,
+    # and the run carries the config a later scoring run reconstructs from.
+    assert run.data.tags["mbt.project"] == "churn_demo"
+    assert client.get_experiment(run.info.experiment_id).name == "churn_demo"
+    assert run.data.tags["mlflow.runName"] == f"{run.data.tags['mbt.run_id']}-churn_classifier"
+    documents = {a.path for a in client.list_artifacts(run.info.run_id)}
+    assert {"inference_config.json", "churn_classifier.py"} <= documents
+
     # ---- 2. exact reproduction via --manifest (G2, FR-RUN-05/11) ----
     run_mbt(["run", "--manifest", "target/manifest.json"], demo_copy, timeout=600)
     rerun = _results(demo_copy)

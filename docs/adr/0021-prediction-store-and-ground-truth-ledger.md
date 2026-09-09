@@ -1,6 +1,15 @@
 # ADR-21: Prediction stores, training-time baselines, and the ground-truth ledger
 
-**Status:** accepted
+**Status:** accepted, amended by [ADR-28](0028-mlflow-training-only-and-champion-carried-config.md)
+
+One clause below no longer holds: realized metrics do NOT log to the tracking
+adapter. ADR-28 makes tracking training-only, so a ground-truth evaluation
+records its metrics, coverage, matched rows and gate outcome in the run's
+`ground_truth` ledger marker alone, where `mbt predictions show <run_key>`
+reads them. The rest of this ADR - the prediction store, the run key, the
+training-time baseline and its registry tags, the marker-based ledger - is
+unchanged, and ADR-28's inference config is pinned on the model version the
+same way `mbt.baseline_uri` is.
 
 Contract 1.1 adds two DataAdapter methods: `build_scoring_input` (materialize one unlabeled batch as a single `score` split) and `open_predictions`, which returns a `PredictionStore` owning writes, run scanning, and the evaluation ledger.
 A bare `write_predictions -> DatasetLocator` was rejected: it leaves "which runs exist" and "which runs were evaluated" without an owner, and `DatasetLocator` carries snapshot semantics that do not fit predictions.

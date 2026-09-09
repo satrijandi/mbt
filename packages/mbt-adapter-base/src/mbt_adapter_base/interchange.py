@@ -204,9 +204,20 @@ class TrainingJob(_InterchangeModel):
     run_id: str
     project_dir: str
     target_name: str
+    #: The mbt project's name; half of the tracking experiment name (ADR-28).
+    project: str = ""
+    #: The manifest-wide anchor (ADR-12). Score mode stamps it on the
+    #: prediction run as ``scored_at``, which is what ``mbt monitor`` measures
+    #: maturity from - so it is job payload, not tracking metadata.
+    anchor: str = ""
     node: ManifestNode
     #: Score mode: the referenced model's manifest node (hooks path, ModelSpec).
     model_node: ManifestNode | None = None
+    #: Score mode: the champion's own exported model spec, read back from the
+    #: artifact it was registered with (ADR-28). Authoritative over
+    #: ``model_node.config``, which is whatever the working tree says today.
+    #: None only for a champion registered before mbt exported one.
+    champion_spec: dict[str, Any] | None = None
     dataset: DatasetLocator
     #: The dataset node's resolved windows (implicit validation carve, TSD §13.5).
     dataset_windows: dict[str, Any] = Field(default_factory=dict)
@@ -266,6 +277,9 @@ class JobResult(_InterchangeModel):
     artifact: ArtifactRef | None = None
     #: Train mode: the monitoring baseline exported next to the artifact (ADR-21).
     baseline: ArtifactRef | None = None
+    #: Train mode: the inference config exported next to the artifact (ADR-28),
+    #: which is what a later scoring run reads the model's spec from.
+    inference_config: ArtifactRef | None = None
     #: Score mode: computed shift statistics and the written prediction run.
     monitor_stats: MonitorStats | None = None
     predictions: PredictionRunInfo | None = None

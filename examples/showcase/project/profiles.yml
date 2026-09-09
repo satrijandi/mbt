@@ -167,6 +167,11 @@ churn_lake:
           # env_var() would redact it out of every log line and out of the
           # middle of unrelated floats in run_results.json (FEEDBACK v3 A-1).
           uri: "{{ env('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
+          # The warehouse plane's training runs get their own experiment,
+          # churn_lake_snowflake (ADR-28 composes <project>_<experiment>), so
+          # the two planes' histories are separately comparable instead of
+          # interleaved. The other targets omit this and land in churn_lake.
+          experiment: snowflake
       registry:
         adapter: mlflow
         config:

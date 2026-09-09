@@ -81,7 +81,11 @@ What happens, in order:
    Python data tests run.
 3. **models** - each model trains in an isolated subprocess job:
    `{{ auto }}` hyperparameters resolve from the dataset profile, metrics
-   compute on the pinned test split, everything logs to MLflow.
+   compute on the pinned test split, and the run logs to MLflow under an
+   experiment named after your project, as `<run_id>-<model>`, carrying the
+   inference config it was trained with (ADR-28). Training is the only thing
+   that logs there: `mbt score` and `mbt monitor` write to the prediction
+   store, read back with `mbt predictions ls`.
 4. **gates** - thresholds and champion comparisons decide; passing models
    register to the MLflow registry in `staging`.
 5. `target/run_results.json` records statuses, timings, metrics, gates,

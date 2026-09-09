@@ -6,10 +6,12 @@
 # values that are not secrets (roots, hosts, schema names) so they stay
 # readable when you are debugging. See docs/spec-reference.md.
 #
-# Tracking runs split by node kind (ADR-26): training lands in the `mbt`
-# experiment, `mbt score` and `mbt monitor` in `mbt_serving`. Set
-# `experiment:` under the tracking config to rename either, or give one name
-# to put them back in a single experiment.
+# Only training logs to the tracker (ADR-28): `mbt score` writes to the
+# prediction store and `mbt monitor` to the ground-truth ledger, both read
+# back with `mbt predictions show`. The experiment is named
+# <project>_<experiment>, or the project name alone when `experiment:` is
+# omitted below; each run is named <run_id>-<model>, so re-training does not
+# produce a second run with the same name.
 __PROJECT_NAME__:
   target: dev
   outputs:

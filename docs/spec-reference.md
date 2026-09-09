@@ -28,10 +28,10 @@ macro_paths: [macros]
   outputs:
     dev:
       data:     {adapter: local,  config: {root: .}}
-      # training runs land in the `mbt` experiment, scoring and ground-truth
-      # monitor runs in `mbt_serving`; `experiment:` renames or merges them
+      # only training logs here; the experiment is <project>_<experiment>,
+      # or the project name alone when `experiment:` is omitted
       # (see "Where tracking runs land" below)
-      tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
+      tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db", experiment: wide_v2}}
       # the registry maps mbt stages to registered-model aliases by default;
       # set use_aliases: false for MLflow servers without alias support (<2.9)
       registry: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db"}}
@@ -73,39 +73,106 @@ doubt, `env_var()`: a redacted log is recoverable, a leaked credential is not.
 
 ### Where tracking runs land
 
-mbt opens a tracking run in three places: training a model, scoring a batch,
-and evaluating a matured prediction run against ground truth.
-The first is an experiment record; the other two are production records, and
-the monitor run reuses the scoring node, so it follows scoring.
-They default to separate experiments because the production kind grows with
-serving cadence while the experiment kind grows with modelling work (ADR-26):
+**Only training opens a tracking run** (ADR-28). `mbt score` writes to the
+prediction store and `mbt monitor` to the ground-truth ledger; neither touches
+the tracker, so a scoring cadence cannot fail on a tracker outage, and a
+tracking server holds modelling work rather than serving volume. Realized
+production metrics are read back with `mbt predictions show <run_key>`.
 
-| node kind | default experiment | holds |
+The experiment name is composed from two names you give:
+
+| where | key | example |
 |---|---|---|
-| `model` | `mbt` | training runs, and their nested tuning trials |
-| `scoring` | `mbt_serving` | one run per scored batch, one per evaluated prediction run |
-
-The `experiment` key in the tracking adapter's config takes either shape:
+| `mbt_project.yml` | `name:` | `churn_lake` |
+| `profiles.yml`, tracking config | `experiment:` | `wide_v2` |
 
 ```yaml
-      # one name for every kind - a single experiment, as before ADR-26
-      tracking: {adapter: mlflow, config: {uri: "...", experiment: churn}}
-
-      # per kind; a kind left out keeps its default
       tracking:
         adapter: mlflow
         config:
           uri: "..."
-          experiment: {model: churn_training, scoring: churn_production}
+          experiment: "{{ env('EXPERIMENT_NAME', 'wide_v2') }}"
 ```
 
-An unrecognized kind (`models:` for `model:`) is an error, not a silent
-fallback to the default.
+That gives an MLflow experiment named `churn_lake_wide_v2`. Omit `experiment:`
+and the project name stands alone (`churn_lake`), so a fresh project's runs
+land under their own name rather than under a literal `mbt`. One tracking
+server can then hold many projects, and one project many modelling efforts,
+without collision.
+
+Each run is named `<run_id>-<model>`, where `run_id` is the invocation id mbt
+already stamps on the artifact store and on `run_results.json`:
+
+```
+experiment "churn_lake_wide_v2"
+├─ 20260909T101500Z-a1b2c3d4-churn_wide_automl
+│   ├─ trial-000                       # tuning trials nest under their parent
+│   └─ trial-001
+├─ 20260909T101500Z-a1b2c3d4-churn_wide_probe
+└─ 20260901T090000Z-9f3e21bc-churn_wide_automl   # last week's training
+```
+
+So re-training a model does not produce a second run with the same name, and a
+run says which model it is and when it ran without being opened.
+
+Every run carries `mbt.project`, `mbt.run_id`, and the identity tags
+(`mbt.config_hash`, `mbt.input_hash`, `mbt.manifest_hash`, `mbt.snapshot_id`,
+`mbt.git_commit`), plus two documents: `inference_config.json` and, when the
+model has one, its `hooks.py` source. Model binaries stay in the artifact
+store with a pointer tag, not in the tracker.
+
 Experiment names come from `profiles.yml`, which never enters node identity
 (ADR-5), so renaming one cannot mark a node `state:modified`.
 Note that `var()` in `profiles.yml` reads CLI and project vars, not the
 target's own `vars:` block, so build a per-target name from `env()` or write
 it literally.
+
+`experiment:` no longer accepts the per-node-kind mapping ADR-26 introduced
+(`{model: ..., scoring: ...}`); it is rejected at construction rather than
+half-applied.
+
+### What the champion carries
+
+A training run exports `inference_config.json` next to the model artifact and
+pins it on the registered version as `mbt.inference_config_uri` (with
+`_format`, `_content_hash`, `_size_bytes`), the same way ADR-21 pins the
+monitoring baseline. `mbt score` reads the model's spec back from it, so a
+scoring run applies the features, transforms and categoricals the champion was
+actually trained with rather than whatever the working tree says today:
+
+```jsonc
+{
+  "schema_version": 1,
+  "project": "churn_lake", "model": "churn_wide_automl",
+  "trained_at": "20260909T101500Z-a1b2c3d4",
+  "spec": { /* the rendered model spec, verbatim */ },
+  "resolved": {
+    "feature_columns": ["...the exact order the model was fit on..."],
+    "target": "churned_90d", "task": "binary_classification",
+    "adapter": "h2o", "seed": 42, "calibration": "isotonic",
+    "categorical": {...}, "transforms": {...}, "monotonic": {...},
+    "operating_points": {"threshold_at_precision_0.35": 0.41}
+  },
+  "hooks": {"path": "models/wide_hooks.py", "hash": "sha256:..."},
+  "identity": {"config_hash": "sha256:...", "manifest_hash": "sha256:...", ...},
+  "artifact": {"uri": "s3://...", "format": "mojo", ...},
+  "baseline_uri": "s3://..."
+}
+```
+
+Two things are deliberately NOT taken from the champion. **`hooks.py`** is
+arbitrary Python, so mbt keeps executing the git-tracked file from the project
+and keeps hard-failing when its hash differs from the champion's
+(`mbt.hooks_hash`); the source above is a record, not a load path. And the
+**scoring node's own spec** - input, filters, window, checks, output, monitors,
+`ground_truth` - is the local manifest's, since it describes this batch rather
+than the model. `mbt score` therefore still needs the project checked out.
+
+A champion registered before mbt exported an inference config has none to
+read, so scoring falls back to the project's current model spec and warns on
+every run until a retrain and promote. A champion whose spec differs from the
+project's also warns, naming both hashes: that is expected between merging a
+spec edit and promoting the model it produced, and the champion's spec wins.
 
 ## sources.yml
 

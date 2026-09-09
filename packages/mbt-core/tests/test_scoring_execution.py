@@ -288,6 +288,7 @@ def test_score_with_manifest_rebuilds_the_input_not_a_stale_cache(
 
 def test_score_full_loop(scoring_project: Path, fake_registry: AdapterRegistry) -> None:
     _build_and_promote(scoring_project, fake_registry)
+    tracked = sorted(p.name for p in (scoring_project / "target/fake_tracking").glob("*.json"))
     results = invoke(scoring_project, fake_registry, "score")
     assert results.exit_code() == 0
     by_id = {r.unique_id: r for r in results.results}
@@ -298,7 +299,7 @@ def test_score_full_loop(scoring_project: Path, fake_registry: AdapterRegistry) 
     assert node.tests and all(t.passed for t in node.tests)
     assert node.monitors and all(m.passed for m in node.monitors)
     assert {m.monitor for m in node.monitors} == {"feature_shift"}
-    assert node.tracking_run_id
+    assert node.tracking_run_id is None  # scoring opens no tracking run (ADR-28)
 
     runs = _prediction_runs(scoring_project)
     assert len(runs) == 1
@@ -314,11 +315,11 @@ def test_score_full_loop(scoring_project: Path, fake_registry: AdapterRegistry) 
     stored = json.loads((scoring_project / "target/run_results.json").read_text())
     assert stored["metadata"]["command"] == "score"
 
-    # tracking run carries the resolved champion + run identity
-    tracking_file = scoring_project / "target/fake_tracking" / f"{node.tracking_run_id}.json"
-    payload = json.loads(tracking_file.read_text())
-    assert payload["tags"]["mbt.model_version"] == "1"
-    assert payload["metrics"]["predictions.rows"] == 120.0
+    # The resolved champion and the batch summary are production records: they
+    # live in the prediction sidecar asserted above, and the tracker gains
+    # nothing from a scoring run beyond the training runs already in it.
+    after = sorted(p.name for p in (scoring_project / "target/fake_tracking").glob("*.json"))
+    assert after == tracked
 
 
 def test_rescore_same_manifest_overwrites_same_run(

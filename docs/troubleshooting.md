@@ -387,6 +387,57 @@ In the ADR-10 spirit this passes loudly instead of blocking scoring.
 
 **Fix:** retrain and promote once; every training job now exports a baseline and registration pins it to the version.
 
+## `WARN champion vN predates inference-config export`
+
+**Symptom (exit 0, scoring proceeds):**
+
+```text
+WARN champion v1 predates inference-config export (no
+mbt.inference_config_uri tag); scoring falls back to the project's
+current model spec, which may not be the one it was trained with -
+retrain and promote to close this
+```
+
+**Why:** since ADR-28 every training run exports an `inference_config.json` beside the model artifact, and registration pins it to the version; `mbt score` reads the model's spec back from there so a scoring run applies the features and treatment the champion was actually trained with.
+A champion registered before that has nothing to read, so scoring falls back to the working tree's spec - which is the pre-ADR-28 behaviour, and is right only as long as nobody has edited the spec since.
+It warns rather than failing for the same reason the missing-baseline case does: an old champion must stay scoreable.
+
+**Fix:** retrain and promote once. Same migration as the monitoring baseline, and both close together.
+
+## `WARN scoring with champion vN, whose spec differs from the project's`
+
+**Symptom (exit 0, scoring proceeds):**
+
+```text
+WARN scoring with champion v1, whose spec differs from the project's
+(sha256:5c108 vs sha256:a2a08); the champion's spec is authoritative -
+promote the retrained model to close the gap
+```
+
+**Why:** a promotion is registry state, deliberately outside node identity (ADR-5), so the working tree and the champion legitimately diverge in the window between merging a spec edit and promoting the model it produced.
+The first hash is the champion's, the second the project's.
+Scoring uses the champion's, because that is the model whose weights are being loaded - applying today's feature treatment to yesterday's model is exactly the skew ADR-28 exists to prevent.
+
+**Fix:** nothing, if you are mid-cycle - this is the expected state between a merge and a promote.
+If it persists, the spec edit never made it through `mbt build` and a promote: run those.
+
+## `tracking config: experiment no longer takes a mapping keyed by node kind`
+
+**Symptom (hard error, exit 1, before any node runs):**
+
+```text
+tracking config: experiment no longer takes a mapping keyed by node kind
+(got ['model', 'scoring']); scoring and monitor runs are not tracked as of
+ADR-28, so give one name here - or omit it and mbt uses the project name
+```
+
+**Why:** ADR-26 let `experiment:` be `{model: ..., scoring: ...}` because scoring and monitor runs went to their own experiment.
+ADR-28 removed those runs entirely, so there is one kind of record and one name.
+mbt refuses to pick one of the two names for you: silently honouring `model:` and dropping `scoring:` would leave the config looking applied.
+
+**Fix:** replace the mapping with the single name you want, or delete the key and let the experiment default to the project name.
+A related error, `tracking config: experiment must be a name, got list`, means the value parsed as a YAML list - usually an unquoted string containing a comma.
+
 ## `data adapter '<name>' does not support batch scoring`
 
 **Symptom (hard error, exit 1, before any job runs):**

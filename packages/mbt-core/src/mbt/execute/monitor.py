@@ -396,36 +396,11 @@ def _evaluate_run(
         )
         return None
 
-    _log_tracking(ctx, node, run, metrics, coverage)
+    # No tracking run: a monitor evaluation is a production record, not an
+    # experiment (ADR-28). The realized metrics, coverage, matched rows,
+    # champion version and gate outcome are all in the ledger marker written
+    # just above, and `mbt predictions show <run_key>` reads them back.
     return metrics, gate_results
-
-
-def _log_tracking(
-    ctx: ExecutionContext,
-    node: ManifestNode,
-    run: PredictionRunInfo,
-    metrics: dict[str, float],
-    coverage: float,
-) -> None:
-    """One tracking run per evaluated prediction run: the realized-metric
-    time series accumulates in the tracking backend (MLflow et al.)."""
-    try:
-        tracking = ctx.tracking()
-        handle = tracking.start_run(
-            node,
-            {
-                "mbt.monitor": GROUND_TRUTH_MARKER,
-                "mbt.run_key": run.run_key,
-                "mbt.model_version": run.model_version,
-                "mbt.scored_at": run.scored_at,
-            },
-        )
-        tracking.log(handle, metrics={**metrics, "ground_truth.coverage": coverage})
-        tracking.end_run(handle, "FINISHED")
-    except Exception as exc:
-        get_bus().emit(
-            LogMessage(level="warn", message=f"could not log monitor metrics to tracking: {exc}")
-        )
 
 
 __all__ = ["GROUND_TRUTH_MARKER", "run_monitor"]

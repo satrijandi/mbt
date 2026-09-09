@@ -166,9 +166,12 @@ def test_unparseable_scored_at_is_skipped_not_fatal(
     assert any("unparseable scored_at" in m and "not-a-timestamp" in m for m in sink.messages())
 
 
-def test_monitor_tracking_failure_warns_but_evaluates(
+def test_monitor_never_touches_the_tracker(
     gt_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A tracker that would raise on any call must not affect `mbt monitor` at
+    all: it no longer opens a run (ADR-28), so a tracking outage cannot even
+    warn, let alone hold up a ground-truth evaluation."""
     _build_and_promote(gt_project, fake_registry)
     assert invoke(gt_project, fake_registry, "score").exit_code() == 0
 
@@ -182,9 +185,8 @@ def test_monitor_tracking_failure_warns_but_evaluates(
     node = _node(results)
     assert node.status == "success"
     assert "evaluated 1 of 1" in (node.message or "")
-    # evaluation still landed in the ledger despite the tracking failure
     assert list(_prediction_runs(gt_project)[0].glob("*.marker.json"))
-    assert any("could not log monitor metrics" in m for m in sink.messages())
+    assert not any("tracking" in m for m in sink.messages())
 
 
 def test_overlapping_monitor_does_not_re_evaluate_a_recorded_run(
