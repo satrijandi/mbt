@@ -23,8 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           python-version: "3.11"
           enable-cache: true
@@ -66,14 +66,14 @@ jobs:
         # Every Python that requires-python (>=3.11) advertises is tested.
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           # tests/test_generate_changelog.py reads real tags and commit spans:
           # the changelog is generated FROM git, so its guards have no other
           # source of truth. The default checkout is a tagless depth-1 clone,
           # which made every one of them fail here while passing locally.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
@@ -109,20 +109,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           fetch-depth: 0   # tags, for the changelog guards - see the test job
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           python-version: "3.11"
           enable-cache: true
       - name: Install workspace at dependency floors
-        # --clear, not a bare `uv venv`: setup-uv creates and activates a .venv
-        # of its own whenever `python-version` is set, so a bare `uv venv` exits
-        # 2 with "A virtual environment already exists" (it did, on every run,
-        # from 2026-08-27 until this line was fixed). Recreating unconditionally
-        # is also the honest thing for this job: it must start from an empty
+        # --clear, not a bare `uv venv`: this job must start from an empty
         # environment, never inherit one somebody else populated.
+        #
+        # It was also load-bearing against setup-uv v5, which created AND
+        # activated a .venv of its own whenever `python-version` was set, so a
+        # bare `uv venv` exited 2 with "A virtual environment already exists"
+        # (it did, on every run, from 2026-08-27 until this line was fixed).
+        # v6 moved that behind `activate-environment` (default false), so the
+        # collision is gone as of the v10 pin - but recreating unconditionally
+        # is the property this job wants regardless of what the action does.
         run: |
           uv venv --clear
           uv run --no-project python scripts/install_floors.py
@@ -162,8 +166,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           python-version: "3.11"
           enable-cache: true
@@ -198,8 +202,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           python-version: "3.11"
           enable-cache: true
@@ -221,7 +225,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           fetch-depth: 0   # full history, or leaks in old commits stay invisible
       - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7   # v2.3.9
@@ -232,8 +236,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           python-version: "3.11"
           enable-cache: true

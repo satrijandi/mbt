@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           # This tier runs the fast suite, and the changelog guards in it read
           # real tags and commit spans. The default depth-1 tagless clone made
@@ -46,7 +46,7 @@ jobs:
           # ci.yml's test and floors jobs; pinned by
           # tests/test_generate_changelog.py, which now scans every workflow.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
         with:
           python-version: "3.11"
           # Explicitly off, not left to setup-uv's default: cached index
