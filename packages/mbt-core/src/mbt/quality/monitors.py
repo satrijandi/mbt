@@ -6,7 +6,7 @@ declared thresholds ("jobs compute, core compares", ADR-3). A breach sets
 node status ``monitor_failed`` (exit code 2).
 """
 
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from mbt.artifacts.run_results import MonitorResult
 from mbt.contracts import MetricSpec, MonitorsSpec, MonitorStats, ShiftStat
@@ -31,64 +31,91 @@ def ks_critical_value(significance: float, n_baseline: int, n_current: int) -> f
     return coefficient * math.sqrt((n_baseline + n_current) / (n_baseline * n_current))
 
 
+def _lower_regularized_gamma(a: float, x: float) -> float:
+    """The regularized lower incomplete gamma ``P(a, x)``.
+
+    Pure stdlib (mbt-core carries no scipy, matching ``_cramers_v``): series for
+    ``x < a + 1``, continued fraction (Lentz) for the upper tail above it -
+    Numerical Recipes ``gser``/``gcf``. ``x`` is always positive here (a
+    bisection midpoint, or half a chi-square statistic on the p-value path), so
+    no zero guard is needed; both branches are well-defined for x > 0.
+    """
+    import math
+
+    if x < a + 1.0:  # series converges fast here
+        term = 1.0 / a
+        total = term
+        n = a
+        for _ in range(500):
+            n += 1.0
+            term *= x / n
+            total += term
+            if abs(term) < abs(total) * 1e-15:
+                break
+        return total * math.exp(-x + a * math.log(x) - math.lgamma(a))
+    # continued fraction for the upper tail (Lentz's method)
+    tiny = 1e-300
+    b = x + 1.0 - a
+    c = 1.0 / tiny
+    d = 1.0 / b
+    h = d
+    for i in range(1, 500):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        d = tiny if abs(d) < tiny else d
+        c = b + an / c
+        c = tiny if abs(c) < tiny else c
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-15:
+            break
+    upper = math.exp(-x + a * math.log(x) - math.lgamma(a)) * h
+    return 1.0 - upper
+
+
 def chi2_critical_value(significance: float, df: int) -> float:
     """Upper-tail chi-square quantile at ``significance`` with ``df`` degrees
     of freedom - the n-aware bar for a categorical ``significance`` monitor
     (F15), sibling to :func:`ks_critical_value` for numeric features.
 
-    Pure stdlib (mbt-core carries no scipy, matching ``_cramers_v``): bisection
-    on the regularized lower incomplete gamma ``P(df/2, x/2)`` computed by
-    series / continued fraction (Numerical Recipes ``gser``/``gcf``), solving
-    ``P = 1 - significance`` to ~1e-10.
+    Bisection on :func:`_lower_regularized_gamma`, solving ``P = 1 -
+    significance`` to ~1e-10.
     """
-    import math
-
-    def _lower_regularized(a: float, x: float) -> float:
-        # x is always a positive bisection midpoint (mid in (0, hi], hi >= df),
-        # so no zero guard is needed; both branches are well-defined for x > 0.
-        if x < a + 1.0:  # series converges fast here
-            term = 1.0 / a
-            total = term
-            n = a
-            for _ in range(500):
-                n += 1.0
-                term *= x / n
-                total += term
-                if abs(term) < abs(total) * 1e-15:
-                    break
-            return total * math.exp(-x + a * math.log(x) - math.lgamma(a))
-        # continued fraction for the upper tail (Lentz's method)
-        tiny = 1e-300
-        b = x + 1.0 - a
-        c = 1.0 / tiny
-        d = 1.0 / b
-        h = d
-        for i in range(1, 500):
-            an = -i * (i - a)
-            b += 2.0
-            d = an * d + b
-            d = tiny if abs(d) < tiny else d
-            c = b + an / c
-            c = tiny if abs(c) < tiny else c
-            d = 1.0 / d
-            delta = d * c
-            h *= delta
-            if abs(delta - 1.0) < 1e-15:
-                break
-        upper = math.exp(-x + a * math.log(x) - math.lgamma(a)) * h
-        return 1.0 - upper
-
     target = 1.0 - significance
     lo, hi = 0.0, float(df)
-    while _lower_regularized(df / 2.0, hi / 2.0) < target:
+    while _lower_regularized_gamma(df / 2.0, hi / 2.0) < target:
         hi *= 2.0
     for _ in range(200):
         mid = (lo + hi) / 2.0
-        if _lower_regularized(df / 2.0, mid / 2.0) < target:
+        if _lower_regularized_gamma(df / 2.0, mid / 2.0) < target:
             lo = mid
         else:
             hi = mid
     return (lo + hi) / 2.0
+
+
+def ks_p_value(value: float, n_baseline: int, n_current: int) -> float:
+    """The two-sample KS p-value for statistic ``value``, exactly inverting
+    :func:`ks_critical_value`.
+
+    ``2 * exp(-2 * D^2 * n1*n2/(n1+n2))`` is the first term of the Kolmogorov
+    series, which is the same approximation ``c(a) = sqrt(-ln(a/2)/2)`` inverts.
+    Using the same one in both directions is what makes "p <= alpha" and
+    "D > critical value at alpha" the same decision, so a family of one behaves
+    identically before and after the correction below.
+    """
+    import math
+
+    effective_n = (n_baseline * n_current) / (n_baseline + n_current)
+    return min(1.0, 2.0 * math.exp(-2.0 * value * value * effective_n))
+
+
+def chi2_p_value(value: float, df: int) -> float:
+    """The upper-tail chi-square p-value for statistic ``value``, the exact
+    inverse of :func:`chi2_critical_value`."""
+    return 1.0 - _lower_regularized_gamma(df / 2.0, value / 2.0)
 
 
 def _uses_ks_critical_value(spec: FeatureShiftSpec | PredictionShiftSpec, stat: ShiftStat) -> bool:
@@ -113,26 +140,118 @@ def _uses_chi2_critical_value(
     )
 
 
-def _fail_bar(spec: FeatureShiftSpec | PredictionShiftSpec, stat: ShiftStat) -> float:
-    """The fail threshold for one stat: the kind-matched n-aware critical value
-    when the monitor sets ``significance`` on a ``ks`` stat (Kolmogorov for
-    numeric, chi-square for categorical), else the fixed ``threshold``."""
+def _p_value(spec: FeatureShiftSpec | PredictionShiftSpec, stat: ShiftStat) -> float | None:
+    """The p-value behind one stat, or None when this stat is on the fixed-
+    threshold path and is therefore not a hypothesis test at all."""
     if _uses_ks_critical_value(spec, stat):
-        assert spec.significance is not None  # narrowed by _uses_ks_critical_value
-        return ks_critical_value(spec.significance, stat.n_baseline, stat.n_current)
+        return ks_p_value(stat.value, stat.n_baseline, stat.n_current)
     if _uses_chi2_critical_value(spec, stat):
-        assert spec.significance is not None and stat.df is not None
-        return chi2_critical_value(spec.significance, stat.df)
+        assert stat.df is not None  # narrowed by _uses_chi2_critical_value
+        return chi2_p_value(stat.value, stat.df)
+    return None
+
+
+def benjamini_hochberg_significance(p_values: list[float], significance: float) -> float:
+    """The per-test alpha that reproduces the Benjamini-Hochberg decision on
+    ``p_values`` at false-discovery rate ``significance``.
+
+    BH rejects the ``k`` smallest p-values for the largest ``k`` with
+    ``p_(k) <= k/m * alpha``. Returning ``k/m * alpha`` as a single per-test bar
+    is equivalent, because ``p_(k+1) > (k+1)/m * alpha`` by construction: every
+    rejected p-value is at or below it and every accepted one is strictly above.
+    With no rejections it returns ``alpha/m``, which every p-value clears for
+    the same reason. That equivalence is what lets the caller keep comparing
+    statistics against a critical value - the units an operator can read - while
+    the decision is BH's.
+
+    A family of one returns ``alpha`` unchanged, so ``prediction_shift`` and a
+    single-feature model behave exactly as before.
+    """
+    family_size = len(p_values)
+    if family_size <= 1:
+        return significance
+    rejected = 0
+    for rank, p_value in enumerate(sorted(p_values), start=1):
+        if p_value <= rank / family_size * significance:
+            rejected = rank
+    return max(rejected, 1) / family_size * significance
+
+
+class _Correction(NamedTuple):
+    """The multiple-comparison correction in force for one monitor's family.
+
+    ``significance`` is the per-test alpha after correction (None on the fixed-
+    threshold path); ``family_size`` is how many hypothesis tests it covers.
+    """
+
+    significance: float | None
+    family_size: int
+
+
+def _feature_shift_correction(
+    spec: FeatureShiftSpec, feature_shift: dict[str, ShiftStat]
+) -> _Correction:
+    """Benjamini-Hochberg across the feature set (D-1).
+
+    Every feature under a ``significance`` monitor is an independent test at
+    that alpha, and every breach is exit 2. On a 40-feature model at
+    ``significance: 0.05`` with no real drift, the expected number of breaches
+    is 2 - so the monitor fires on most clean nightly runs and the operational
+    response converges on ignoring it, which is worse than the fixed threshold
+    it replaced, because a fixed threshold never claimed to be a test.
+
+    BH is the right default for a screening monitor: it holds the false-
+    DISCOVERY rate rather than the family-wise error rate, so it stays
+    sensitive as the feature set grows instead of going numb the way
+    Bonferroni's alpha/m does.
+    """
+    if spec.significance is None:
+        return _Correction(None, 0)
+    p_values = [
+        p_value
+        for p_value in (_p_value(spec, stat) for stat in feature_shift.values())
+        if p_value is not None
+    ]
+    if not p_values:
+        return _Correction(spec.significance, 0)
+    return _Correction(benjamini_hochberg_significance(p_values, spec.significance), len(p_values))
+
+
+def _fail_bar(
+    spec: FeatureShiftSpec | PredictionShiftSpec,
+    stat: ShiftStat,
+    correction: _Correction,
+) -> float:
+    """The fail threshold for one stat: the kind-matched n-aware critical value
+    at the CORRECTED significance when the monitor sets ``significance`` on a
+    ``ks`` stat (Kolmogorov for numeric, chi-square for categorical), else the
+    fixed ``threshold``."""
+    if _uses_ks_critical_value(spec, stat):
+        assert correction.significance is not None  # narrowed by _uses_ks_critical_value
+        return ks_critical_value(correction.significance, stat.n_baseline, stat.n_current)
+    if _uses_chi2_critical_value(spec, stat):
+        assert correction.significance is not None and stat.df is not None
+        return chi2_critical_value(correction.significance, stat.df)
     return spec.threshold
 
 
-def _bar_label(spec: FeatureShiftSpec | PredictionShiftSpec, stat: ShiftStat, bar: float) -> str:
+def _bar_label(
+    spec: FeatureShiftSpec | PredictionShiftSpec,
+    stat: ShiftStat,
+    bar: float,
+    correction: _Correction,
+) -> str:
+    family = (
+        f", Benjamini-Hochberg over {correction.family_size} features"
+        if correction.family_size > 1
+        else ""
+    )
     if _uses_ks_critical_value(spec, stat):
-        return f"the KS critical value {bar:.4f} (significance={spec.significance})"
+        return f"the KS critical value {bar:.4f} (significance={spec.significance}{family})"
     if _uses_chi2_critical_value(spec, stat):
         return (
             f"the chi-square critical value {bar:.4f} "
-            f"(significance={spec.significance}, df={stat.df})"
+            f"(significance={spec.significance}{family}, df={stat.df})"
         )
     return f"{bar:.4f}"
 
@@ -165,6 +284,19 @@ def evaluate_monitors(
     results: list[MonitorResult] = []
     if monitors.feature_shift is not None:
         spec = monitors.feature_shift
+        correction = _feature_shift_correction(spec, stats.feature_shift)
+        if correction.family_size > 1:
+            get_bus().emit(
+                LogMessage(
+                    unique_id=resource,
+                    message=(
+                        f"feature_shift significance: Benjamini-Hochberg over "
+                        f"{correction.family_size} features holds the false-discovery "
+                        f"rate at {spec.significance}; the per-feature bar this run is "
+                        f"alpha={correction.significance:.6g}"
+                    ),
+                )
+            )
         for feature, stat in sorted(stats.feature_shift.items()):
             if (
                 spec.significance is not None
@@ -188,7 +320,7 @@ def evaluate_monitors(
                         ),
                     )
                 )
-            bar = _fail_bar(spec, stat)
+            bar = _fail_bar(spec, stat, correction)
             results.append(
                 _shift_result(
                     "feature_shift",
@@ -198,7 +330,7 @@ def evaluate_monitors(
                     warn_threshold=spec.warn_threshold,
                     breach=(
                         f"{feature}: {stat.method}={stat.value:.4f} exceeds "
-                        f"{_bar_label(spec, stat, bar)} "
+                        f"{_bar_label(spec, stat, bar, correction)} "
                         f"(n={stat.n_current} vs baseline n={stat.n_baseline})"
                     ),
                     warn=f"{feature}: {stat.method}={stat.value:.4f} in the shift warn band",
@@ -221,7 +353,10 @@ def evaluate_monitors(
     if monitors.prediction_shift is not None and stats.prediction_shift is not None:
         shift_spec = monitors.prediction_shift
         stat = stats.prediction_shift
-        bar = _fail_bar(shift_spec, stat)
+        # A family of one: the score distribution is a single hypothesis, so
+        # there is nothing to correct for and the bar is the declared alpha.
+        pred_correction = _Correction(shift_spec.significance, 1)
+        bar = _fail_bar(shift_spec, stat, pred_correction)
         results.append(
             _shift_result(
                 "prediction_shift",
@@ -231,7 +366,8 @@ def evaluate_monitors(
                 warn_threshold=shift_spec.warn_threshold,
                 breach=(
                     f"score distribution {stat.method}={stat.value:.4f} exceeds "
-                    f"{_bar_label(shift_spec, stat, bar)} vs the champion's test-split baseline"
+                    f"{_bar_label(shift_spec, stat, bar, pred_correction)} "
+                    "vs the champion's test-split baseline"
                 ),
                 warn=f"score distribution {stat.method}={stat.value:.4f} in the shift warn band",
                 resource=resource,

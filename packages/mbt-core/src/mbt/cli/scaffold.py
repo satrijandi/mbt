@@ -11,7 +11,49 @@ _TOKEN = "__PROJECT_NAME__"
 #: Stamped into the template's requirements pins so a scaffolded project
 #: reproduces the exact toolchain version that generated it (NFR-01).
 _VERSION_TOKEN = "__MBT_VERSION__"
+#: Replaced by exact `==` pins for the packages below, at the versions installed
+#: in the environment running `mbt init`.
+_PINS_TOKEN = "__PINNED_DEPS__"
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+#: The numerics stack the scaffold pins by version, in install order.
+#:
+#: Pinning the three mbt packages pins NONE of these, and these are the versions
+#: that decide model numerics. requirements.txt's own header states the reason
+#: the file exists - "a floating training environment invalidates the manifest's
+#: env digest, so CI always installs from this file" - and with only the mbt
+#: refs pinned that was false: env_freeze_digest (ADR-19) changed whenever any
+#: of them released, which is the exact condition ADR-19 exists to detect.
+#:
+#: Resolved from the scaffolding environment rather than hardcoded, so the pins
+#: are the versions this mbt was actually tested against and cannot go stale in
+#: the template. A package that is not installed is skipped: the scaffold must
+#: work from a partial install (mbt-core alone, say) rather than pin a version
+#: nobody verified.
+_PINNED_PACKAGES = (
+    "numpy",
+    "scipy",
+    "pandas",
+    "pyarrow",
+    "scikit-learn",
+    "duckdb",
+    "xgboost",
+    "mlflow",
+)
+
+
+def _pinned_requirements() -> str:
+    """`name==version` lines for the numerics stack, one per installed package."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    lines = []
+    for package in _PINNED_PACKAGES:
+        try:
+            lines.append(f"{package}=={version(package)}")
+        except PackageNotFoundError:
+            continue  # not installed here; pin nothing rather than guess
+    return "\n".join(lines)
+
 
 #: Template files renamed on write (dotfiles cannot ship as package data
 #: reliably across build backends).
@@ -57,12 +99,17 @@ def scaffold_project(name: str, parent_dir: Path, *, home: Path | None = None) -
         )
 
     template_root = files("mbt.cli") / "_scaffold"
+    pins = _pinned_requirements()
     for rel, content in sorted(_walk(template_root)):
         parts = rel.split("/")
         parts[-1] = _RENAMES.get(parts[-1], parts[-1])
         target = destination.joinpath(*parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        rendered = content.replace(_TOKEN, name).replace(_VERSION_TOKEN, mbt.__version__)
+        rendered = (
+            content.replace(_TOKEN, name)
+            .replace(_VERSION_TOKEN, mbt.__version__)
+            .replace(_PINS_TOKEN, pins)
+        )
         target.write_text(rendered)
 
     _install_home_profiles(name, destination, home=home)
@@ -70,8 +117,9 @@ def scaffold_project(name: str, parent_dir: Path, *, home: Path | None = None) -
 
 
 def _install_home_profiles(name: str, destination: Path, *, home: Path | None) -> None:
-    """profiles.yml lives in ~/.mbt by default; the project copy is gitignored
-    (TSD §18). Never clobber existing profiles for other projects."""
+    """profiles.yml also lives in ~/.mbt so commands run outside the project
+    find it (TSD §18); the project copy is committed, because CI has no ~/.mbt
+    to read. Never clobber existing profiles for other projects."""
     home_dir = home or Path.home()
     home_profiles = home_dir / ".mbt" / "profiles.yml"
     project_profiles = (destination / "profiles.yml").read_text()

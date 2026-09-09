@@ -9,6 +9,13 @@ datasets:
     filters:
       - "is_active = true"
       - "tenure_days >= 30"
+    # The row identity sampling and splitting hash. Without it the hash preimage
+    # is EVERY column, so adding one to the source re-buckets every row: the dev
+    # target's sample_fraction would draw a different half after any schema
+    # change, and a random split would move rows across the train/test boundary.
+    # Snowflake and Spark require it outright, so declaring it also keeps this
+    # spec portable across backends.
+    sample_key: user_id
     split:
       strategy: temporal
       time_column: snapshot_date

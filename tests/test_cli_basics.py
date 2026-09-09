@@ -115,9 +115,19 @@ def test_init_scaffold_is_complete_and_parses(scaffold: Path, tmp_path: Path) ->
         "README.md",
     ):
         assert (scaffold / expected).is_file(), f"scaffold missing {expected}"
-    # profiles.yml installed to ~/.mbt too (TSD §18) and gitignored locally
+    # profiles.yml installed to ~/.mbt too (TSD §18), and COMMITTED in the
+    # project: CI has no ~/.mbt, so gitignoring it made the reference workflows
+    # fail at `mbt compile` with "no profiles.yml found" (A-1). What keeps it
+    # safe to commit is env_var(), not absence - so assert both halves.
     assert (tmp_path / "home" / ".mbt" / "profiles.yml").is_file()
-    assert "profiles.yml" in (scaffold / ".gitignore").read_text()
+    ignored = [
+        line.strip()
+        for line in (scaffold / ".gitignore").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert "profiles.yml" not in ignored, ".gitignore hides the environment config from CI"
+    profiles = (scaffold / "profiles.yml").read_text()
+    assert "env_var(" in profiles or "env(" in profiles
     # project name substituted everywhere
     assert "__PROJECT_NAME__" not in (scaffold / "mbt_project.yml").read_text()
 
@@ -136,14 +146,63 @@ def test_scaffold_ci_installs_are_pinned(scaffold: Path) -> None:
     for name in ("requirements.in", "requirements.txt"):
         pins = (scaffold / name).read_text()
         assert "__MBT_VERSION__" not in pins, f"{name} kept the version token"
+        assert "__PINNED_DEPS__" not in pins, f"{name} kept the dependency token"
         for package in ("mbt-core", "mbt-xgboost", "mbt-mlflow"):
-            # Pinned to an immutable release tag (reproducible, non-floating) yet
-            # installable from a fresh checkout without a private index.
+            # Pinned to a release tag: reproducible and installable from a fresh
+            # checkout without a private index. (A tag is movable; the header
+            # says so and names the commit-SHA form.)
             ref = (
                 f"{package} @ git+https://github.com/satrijandi/mbt"
                 f"@v{mbt.__version__}#subdirectory=packages/{package}"
             )
             assert ref in pins, f"{name}: {package} not pinned to the release tag"
+
+
+def test_scaffold_pins_the_numerics_stack_it_was_scaffolded_from(scaffold: Path) -> None:
+    """Pinning the three mbt packages pins none of the libraries that decide
+    model numerics (FEEDBACK B-1).
+
+    requirements.txt's header states the reason the file exists - "a floating
+    training environment invalidates the manifest's env digest, so CI always
+    installs from this file" - and with only the mbt refs pinned that was not
+    true of the file itself: env_freeze_digest (ADR-19) moved whenever any of
+    xgboost, mlflow, numpy, scipy or pyarrow released.
+    """
+    from importlib.metadata import version
+
+    for name in ("requirements.in", "requirements.txt"):
+        pins = (scaffold / name).read_text()
+        for package in ("numpy", "scipy", "pyarrow", "xgboost", "mlflow", "scikit-learn"):
+            # The version the scaffolding environment is actually running, so
+            # the pin is a version this mbt was tested against.
+            assert f"{package}=={version(package)}" in pins, f"{name}: {package} floats"
+
+
+def test_docs_enumerate_the_workflows_that_actually_ship() -> None:
+    """The tutorial lists the workflows a user gets by name, and listed six of
+    the seven for as long as `scheduled_retrain_monthly` has existed (FEEDBACK
+    B-1). A list of names in prose drifts silently; this is what stops it.
+    """
+    from e2e_utils import REPO_ROOT
+
+    shipped = {p.stem for p in (SCAFFOLD / ".github" / "workflows").glob("*.yml")}
+    tutorial = (REPO_ROOT / "docs" / "tutorial.md").read_text()
+    for name in shipped:
+        assert f"`{name}`" in tutorial, f"docs/tutorial.md does not mention {name}"
+    words = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    spelled = {str(len(shipped)), words.get(len(shipped), "")}
+    assert any(f"{n} GitHub workflows" in tutorial for n in spelled if n), (
+        f"docs/tutorial.md miscounts the shipped workflows ({len(shipped)})"
+    )
+
+
+def test_scaffold_readme_says_codeowners_needs_branch_protection() -> None:
+    """CODEOWNERS requests reviewers; it does not gate a merge until branch
+    protection requires reviews. Shipping the file without saying so implies a
+    review gate the reference project will not actually have (FEEDBACK C-3)."""
+    readme = (SCAFFOLD / "README.md").read_text()
+    assert "CODEOWNERS` only binds once branch protection requires reviews" in readme
+    assert "signed commits" in readme
 
 
 def test_scaffold_operational_guardrails(scaffold: Path) -> None:
@@ -206,6 +265,62 @@ def test_scaffold_ci_is_hardened(scaffold: Path) -> None:
     ):
         spec = yaml.safe_load((workflows_dir / mutating).read_text())
         assert spec["concurrency"]["cancel-in-progress"] is False, mutating
+
+
+@pytest.mark.e2e
+def test_reference_ci_first_steps_run_on_a_bare_clone(scaffold: Path, tmp_path: Path) -> None:
+    """The scaffold's own CI, reproduced: commit, clone the way actions/checkout
+    does, and run pr_check.yml's first two steps against an empty HOME (A-1).
+
+    This is every scaffolded project's first CI run. It was red from the day the
+    workflows shipped, because `profiles.yml` was gitignored, so the clone had
+    no environment config and no ~/.mbt to fall back on:
+
+        Error: no profiles.yml found
+
+    Six of the seven reference workflows died at that line. Nothing caught it
+    because the one test that walked this loop copied the working directory
+    instead of cloning the repo.
+    """
+    origin = tmp_path / "ci_origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "--quiet", str(origin)], capture_output=True, check=True
+    )
+    for args in (
+        ["init", "--quiet"],
+        ["config", "user.name", "test"],
+        ["config", "user.email", "test@example.com"],
+        ["add", "-A"],
+        ["commit", "--quiet", "-m", "mbt scaffold"],
+        ["push", "--quiet", str(origin), "HEAD:refs/heads/main"],
+    ):
+        subprocess.run(["git", *args], cwd=scaffold, capture_output=True, check=True)
+
+    checkout = tmp_path / "ci_checkout"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--branch", "main", str(origin), str(checkout)],
+        capture_output=True,
+        check=True,
+    )
+    assert (checkout / "profiles.yml").is_file(), "the clone has no environment config"
+
+    # A GitHub runner's HOME has no .mbt; PATH/SYSTEMROOT are all the CLI needs.
+    ci_home = tmp_path / "ci_home"
+    ci_home.mkdir()
+    ci_env = {
+        "HOME": str(ci_home),
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+    }
+    subprocess.run(
+        [sys.executable, str(checkout / "scripts" / "generate_sample_data.py"), "400"],
+        cwd=checkout,
+        capture_output=True,
+        check=True,
+    )
+    run_mbt(["parse"], checkout, env=ci_env)
+    run_mbt(["compile", "--target", "dev", "--deep-snapshot"], checkout, env=ci_env)
+    assert (checkout / "target" / "manifest.json").is_file()
 
 
 def test_init_template_validates_against_published_schemas(scaffold: Path) -> None:
@@ -332,13 +447,28 @@ def test_scaffold_state_branch_loop_end_to_end(scaffold: Path) -> None:
     # plumbing-only contract: the project repo's index and tree stay clean
     assert git(scaffold, "status", "--porcelain").stdout.strip() == ""
 
-    # the PR-check side, in a simulated fresh checkout: same bytes, new
-    # mtimes. Deep snapshots keep the diff empty; the default mtime scheme
-    # would flag every dataset here and retrain the world on every CI run.
+    # the PR-check side, in a real fresh checkout: `git clone` from the origin
+    # this test already pushed to, which is what actions/checkout does. Fresh
+    # mtimes, same bytes - deep snapshots keep the diff empty, where the default
+    # mtime scheme would flag every dataset and retrain the world on every run.
+    #
+    # This used to be `shutil.copytree(..., copy_function=copy)`. It got the
+    # mtimes right and the FILE SET wrong: copytree carries the working
+    # directory, gitignored files included, so the reference pipeline was never
+    # once run against the files a clone actually has. That is how a gitignored
+    # profiles.yml stayed invisible while it broke every scaffolded project's
+    # second CI step (A-1).
     checkout = scaffold.parent / "fresh_checkout"
-    # copy_function=copy: fresh mtimes, same bytes - like actions/checkout
-    # (copytree's default copy2 would preserve mtimes and prove nothing)
-    shutil.copytree(scaffold, checkout, copy_function=shutil.copy)
+    git(scaffold, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+    subprocess.run(
+        ["git", "clone", "--quiet", "--branch", "main", str(origin), str(checkout)],
+        capture_output=True,
+        check=True,
+    )
+    # data/ is gitignored, and rightly so - a clone gets it from the lake, and
+    # CI from generate_sample_data.py. Copy the same bytes in with fresh mtimes,
+    # which is precisely the ADR-11 property this test exists to prove.
+    shutil.copytree(scaffold / "data", checkout / "data", copy_function=shutil.copy)
     fetch = sh(checkout, "fetch_state.sh")
     assert fetch.returncode == 0, fetch.stdout + fetch.stderr
     diff = json.loads(

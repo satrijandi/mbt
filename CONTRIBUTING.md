@@ -92,6 +92,19 @@ Every wheel and sdist is attested with `actions/attest-build-provenance`, so an
 installer can verify where an artifact came from:
 `gh attestation verify mbt_core-0.2.0-py3-none-any.whl --repo satrijandi/mbt`.
 
+Both provenance chains - the SLSA attestation and the `GitInfo` commit recorded
+in every manifest - terminate at a commit SHA, and **commits on `main` are not
+signed today**, so nothing cryptographically attests who authored the code an
+artifact was built from.
+Closing that means turning on `required_signatures` for `main` in branch
+protection, which requires every committer to configure a signing key first;
+until that is set up, the gap is recorded here rather than implied away.
+Every action in every workflow is pinned to a commit digest with a `# vX.Y.Z`
+comment beside it (`tests/test_workflow_supply_chain.py` fails the suite if one
+reverts to a tag or a branch), which closes the other half of the same story:
+a v-tag can be repointed at new code retroactively, and `release/v1` on the
+PyPI publisher was a branch.
+
 ### The changelog
 
 `CHANGELOG.md` is **generated from git**, never edited by hand:

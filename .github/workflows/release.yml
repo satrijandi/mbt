@@ -48,10 +48,10 @@ jobs:
     timeout-minutes: 20
     environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
         with:
           fetch-depth: 0   # generate_changelog.py reads tags and commit history
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: "3.11"
       - name: Changelog matches the tag history
@@ -73,7 +73,7 @@ jobs:
         # in the showcase); the published wheels were the one gap, which is
         # backwards - they are the only artifacts that leave this repo.
         # Verify with: gh attestation verify <file> --repo satrijandi/mbt
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be   # v2.4.0
         with:
           subject-path: |
             dist/*.whl
@@ -82,7 +82,7 @@ jobs:
       # failed (or gated-off) PyPI publish must never block the artifact users
       # actually consume today - the tag's release with wheels attached.
       - name: Create the GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65   # v2.6.2
         with:
           # wheels + sdists only: uv build drops a .gitignore into dist/,
           # which a bare dist/* glob attached to v0.1.0 as a stray
@@ -96,7 +96,7 @@ jobs:
         # is the same one-time act as configuring the PyPI side, so a real
         # publish failure after that fails the run loudly - no silent skips.
         if: vars.PYPI_TRUSTED_PUBLISHING == 'enabled'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33   # v1.14.2
         with:
           # 10 wheels do not upload atomically; if a publish fails partway, a
           # re-run must skip the packages that already landed instead of

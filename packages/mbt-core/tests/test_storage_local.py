@@ -86,3 +86,46 @@ def test_artifact_exists_probes_file_uris_and_reports_unknown_schemes(tmp_path: 
     assert artifact_exists(ref(f"file://{present}")) is True
     assert artifact_exists(ref(f"file://{tmp_path}/gone.bin")) is False
     assert artifact_exists(ref("memory://somewhere/model.bin")) is None
+
+
+def test_fetch_rejects_bytes_that_no_longer_match_their_digest(tmp_path: Path) -> None:
+    """Every artifact records a SHA-256 at write time; fetch is what makes that
+    a control rather than a record of one (FEEDBACK A-3).
+
+    Consumers deserialize straight out of fetch() - joblib for sklearn, which
+    is pickle, which is arbitrary code execution - so the bytes must be proven
+    to be the bytes that were stored before anything loads them.
+    """
+    store = artifact_store_for(f"file://{tmp_path}/store", run_prefix="run1")
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"weights")
+    ref = store.put_file(source, "model.bin", format="bin")
+
+    stored = Path(ref.uri.removeprefix("file://"))
+    stored.write_bytes(b"weights-but-tampered")
+
+    with pytest.raises(MbtError) as excinfo:
+        store.fetch(ref)
+    message = f"{excinfo.value.message} {excinfo.value.hint}"
+    assert "content hash mismatch" in message
+    assert ref.content_hash in message  # names the digest it expected
+    assert hashlib.sha256(b"weights-but-tampered").hexdigest() in message  # and what it got
+
+
+def test_fetch_passes_through_refs_that_carry_no_digest(tmp_path: Path) -> None:
+    """A baseline or inference-config ref reconstructed from an older champion's
+    registry tags legitimately has content_hash="" (see runners._baseline_ref).
+    Refusing to score with such a champion would be worse than the check it
+    skips, so it warns and proceeds."""
+    from exec_unit_helpers import recording_bus
+
+    store = artifact_store_for(f"file://{tmp_path}/store", run_prefix="run1")
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"weights")
+    ref = store.put_file(source, "model.bin", format="bin")
+    hashless = ref.model_copy(update={"content_hash": ""})
+
+    with recording_bus() as sink:
+        assert store.fetch(hashless).read_bytes() == b"weights"
+    warnings = [e for e in sink.events if e.level == "warn"]
+    assert warnings and "no content hash" in warnings[0].message

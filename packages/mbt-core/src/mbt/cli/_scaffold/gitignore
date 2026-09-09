@@ -8,8 +8,12 @@ predictions/
 # fetched prod-state baseline (lives on the mbt-state branch)
 state/
 
-# local environment config (may hold secrets; lives in ~/.mbt by default)
-profiles.yml
+# NOTE: profiles.yml is deliberately NOT ignored. It is environment config as
+# code - the reference workflows have no other way to learn what `dev` and
+# `prod` mean, and a gitignored profiles.yml made every scaffolded project's
+# first CI run die at `mbt compile` with "no profiles.yml found". Secrets never
+# belong in it: env_var('NAME') keeps them out of the file AND redacts them
+# everywhere they could be printed (see SECURITY.md).
 
 # Python
 __pycache__/

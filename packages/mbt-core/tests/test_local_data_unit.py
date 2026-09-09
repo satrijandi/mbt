@@ -379,3 +379,71 @@ def test_duckdb_divides_cores_and_memory_across_parallel_builds(tmp_path: Path) 
     assert shared_threads == max(1, (os.cpu_count() or 1) // 4)
     assert shared_threads <= solo_threads
     assert shared_mem != solo_mem  # the RAM budget is divided, not the 80% default
+
+
+def test_keyless_split_membership_moves_when_a_column_is_added(tmp_path: Path) -> None:
+    """Without `sample_key` the hash preimage is EVERY column, so a schema
+    change re-buckets every row and moves some across the train/test boundary
+    (FEEDBACK D-3). Declaring the key is what makes membership survive schema
+    evolution - and the Snowflake and Spark adapters require it outright, so
+    the keyless path is local-only besides.
+    """
+    _write_rows(tmp_path, 60)
+    adapter = LocalDataAdapter({"root": str(tmp_path)})
+
+    def test_ids(spec: DatasetSpec, run: str) -> set[int]:
+        output_dir = tmp_path / "target" / "datasets" / run
+        adapter.build_dataset(spec, _ctx(adapter, _tables(), output_dir))
+        return set(pq.read_table(output_dir / "test.parquet")["user_id"].to_pylist())
+
+    keyless_before = test_ids(_random_spec(), "keyless_before")
+    keyed_before = test_ids(_random_spec(sample_key="user_id"), "keyed_before")
+
+    # one unrelated column arrives in the source, exactly as schema evolution does
+    rows = pq.read_table(tmp_path / "data" / "rows" / "part-000.parquet")
+    rows = rows.append_column("region", pa.array(["eu"] * rows.num_rows))
+    pq.write_table(rows, tmp_path / "data" / "rows" / "part-000.parquet")
+
+    keyless_after = test_ids(_random_spec(), "keyless_after")
+    keyed_after = test_ids(_random_spec(sample_key="user_id"), "keyed_after")
+
+    assert keyless_before != keyless_after, "the keyless digest is expected to be unstable"
+    assert keyed_before == keyed_after, "a declared sample_key must survive schema evolution"
+
+
+def test_keyless_sampling_and_splitting_warn_that_they_are_unstable(tmp_path: Path) -> None:
+    """The fallback is announced where it happens, naming both consequences:
+    schema-change instability and the fact that the warehouse adapters refuse
+    this path (FEEDBACK D-3)."""
+    _write_rows(tmp_path)
+    adapter = LocalDataAdapter({"root": str(tmp_path)})
+
+    sink = RecordingSink()
+    adapter.build_dataset(
+        _random_spec(),
+        _ctx(
+            adapter,
+            _tables(),
+            tmp_path / "target" / "datasets" / "keyless",
+            sample_fraction=0.5,
+            events=sink,
+        ),
+    )
+    warnings = [e for e in sink.events if getattr(e, "level", "") == "warn"]
+    assert [w for w in warnings if "sampling hashes all" in w.message]
+    assert [w for w in warnings if "the random split hashes all" in w.message]
+    assert all("Snowflake and Spark" in w.message for w in warnings)
+
+    # with a key declared there is nothing to warn about
+    quiet = RecordingSink()
+    adapter.build_dataset(
+        _random_spec(sample_key="user_id"),
+        _ctx(
+            adapter,
+            _tables(),
+            tmp_path / "target" / "datasets" / "keyed",
+            sample_fraction=0.5,
+            events=quiet,
+        ),
+    )
+    assert not [e for e in quiet.events if getattr(e, "level", "") == "warn"]

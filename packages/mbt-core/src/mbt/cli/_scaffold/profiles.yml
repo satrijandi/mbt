@@ -1,5 +1,9 @@
-# Environments for __PROJECT_NAME__. Keep this file OUT of git when it holds
-# secrets; resolve them via env_var('NAME') Jinja calls - never write values here.
+# Environments for __PROJECT_NAME__. This file is COMMITTED: it is environment
+# config as code, and CI has no other way to learn what `dev` and `prod` mean
+# (a gitignored copy makes every workflow after `mbt parse` fail with "no
+# profiles.yml found"). Never write a secret value here - resolve them via
+# env_var('NAME') Jinja calls, which keeps the value out of the file and
+# redacts it everywhere it could be printed.
 #
 # env_var() marks the value SECRET: it is redacted from every log line, event,
 # manifest, model card, and run_results.json. Use env() for the environment

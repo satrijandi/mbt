@@ -26,9 +26,10 @@ cd my_models
 ```
 
 You get a working golden-path project: an example source, dataset, and model
-spec, `profiles.yml` (also installed to `~/.mbt/`), pre-commit config,
-a pinned CI install set (`requirements.txt`), reference CI workflows, and
-CODEOWNERS on `models/`.
+spec, `profiles.yml` (committed, because CI has no `~/.mbt/` - a copy is
+installed there too), pre-commit config, a version-pinned CI install set
+(`requirements.txt`), reference CI workflows with every action pinned to a
+commit digest, and CODEOWNERS on `models/`.
 
 ## 3. Get data
 

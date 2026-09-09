@@ -19,6 +19,9 @@ on:
         required: true
         default: production
 
+permissions:
+  contents: read   # least privilege at workflow scope; jobs opt up individually
+
 # Promotion mutates the registry; serialize and never cancel a run mid-write.
 concurrency:
   group: ${{ github.workflow }}
@@ -30,8 +33,8 @@ jobs:
     timeout-minutes: 10
     environment: production   # require reviewers in repo settings
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065   # v5.6.0
         with:
           python-version: "3.11"
       - name: Install project
@@ -41,6 +44,20 @@ jobs:
         run: mbt promote --from-file promotions.yml
       - name: Promote (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
-        run: >
-          mbt promote --model "${{ inputs.model }}" --to "${{ inputs.to }}"
-          ${{ inputs.version && format('--version {0}', inputs.version) || '' }}
+        # Inputs arrive as env vars, never spliced into the script text. A
+        # `${{ }}` expression is substituted BEFORE bash sees the line, so a
+        # version of `1 --force` used to render `--version 1 --force` - and
+        # --force is the documented override for "gates were not recorded as
+        # passed", on the workflow whose whole purpose is enforcing that gate.
+        # Quoting is not enough either: the quotes are part of the template,
+        # so an input containing one breaks out of them.
+        env:
+          MODEL: ${{ inputs.model }}
+          TO: ${{ inputs.to }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$VERSION" ]; then
+            mbt promote --model "$MODEL" --to "$TO" --version "$VERSION"
+          else
+            mbt promote --model "$MODEL" --to "$TO"
+          fi

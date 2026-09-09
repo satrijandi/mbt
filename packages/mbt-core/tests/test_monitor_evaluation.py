@@ -123,6 +123,124 @@ def test_feature_shift_significance_scales_the_fail_bar_with_batch_size() -> Non
         assert evaluate_monitors(fixed, stats, resource="scoring.p.s")[0].passed
 
 
+def _ks_stat_at_p(target_p: float, n: int) -> ShiftStat:
+    """A numeric KS stat whose two-sample p-value is just under ``target_p``.
+
+    ``ks_critical_value`` is the exact inverse of ``ks_p_value``, so scaling the
+    critical value up a hair puts the statistic marginally past that alpha.
+    """
+    from mbt.quality.monitors import ks_critical_value
+
+    return ShiftStat(
+        method="ks",
+        value=ks_critical_value(target_p, n, n) * 1.0001,
+        n_current=n,
+        n_baseline=n,
+        kind="numeric",
+    )
+
+
+def test_feature_shift_significance_corrects_for_multiple_comparisons() -> None:
+    """40 features at significance 0.05 is 40 hypothesis tests, so ~2 breach on
+    clean data and every breach is exit 2 - a monitor that fires on most clean
+    nightly runs trains its operators to ignore it (FEEDBACK D-1).
+
+    Benjamini-Hochberg over the feature family is what makes `significance`
+    mean what a significance level claims to mean.
+    """
+    monitors = MonitorsSpec(
+        feature_shift=FeatureShiftSpec(method="ks", threshold=0.15, significance=0.05)
+    )
+    # The shape of a clean run: two features land just inside a per-feature 0.05,
+    # which is exactly the ~2 that 40 independent tests produce with no drift.
+    feature_shift = {f"f{i:02d}": _ks_stat_at_p(0.5, 2000) for i in range(38)}
+    feature_shift["noise_a"] = _ks_stat_at_p(0.04, 2000)
+    feature_shift["noise_b"] = _ks_stat_at_p(0.02, 2000)
+
+    with recording_bus() as sink:
+        results = evaluate_monitors(
+            monitors, MonitorStats(feature_shift=feature_shift), resource="scoring.p.s"
+        )
+    assert all(r.passed for r in results), [r.subject for r in results if not r.passed]
+    assert any("Benjamini-Hochberg over 40 features" in m for m in sink.messages())
+
+    # ...and without the correction both would have breached, i.e. the test is
+    # measuring the correction and not an accidentally lenient bar.
+    from mbt.quality.monitors import ks_critical_value
+
+    uncorrected = ks_critical_value(0.05, 2000, 2000)
+    assert feature_shift["noise_a"].value > uncorrected
+    assert feature_shift["noise_b"].value > uncorrected
+
+
+def test_multiple_comparison_correction_still_reports_real_drift() -> None:
+    """The correction must not blind the monitor: one genuinely shifted feature
+    in a 40-feature family still fails, and the breach message says which
+    correction was applied over how many features."""
+    monitors = MonitorsSpec(
+        feature_shift=FeatureShiftSpec(method="ks", threshold=0.15, significance=0.05)
+    )
+    feature_shift = {f"f{i:02d}": _ks_stat_at_p(0.5, 2000) for i in range(39)}
+    feature_shift["tenure_days"] = _ks_stat_at_p(1e-9, 2000)
+
+    results = {
+        r.subject: r
+        for r in evaluate_monitors(
+            monitors, MonitorStats(feature_shift=feature_shift), resource="scoring.p.s"
+        )
+    }
+    assert not results["tenure_days"].passed
+    assert "Benjamini-Hochberg over 40 features" in (results["tenure_days"].message or "")
+    assert all(r.passed for name, r in results.items() if name != "tenure_days")
+
+
+def test_a_family_of_one_is_not_corrected() -> None:
+    """A single feature, and prediction_shift's single score distribution, are
+    families of one: BH returns alpha unchanged, so both keep exactly the bar
+    they had before the correction existed."""
+    from mbt.quality.monitors import benjamini_hochberg_significance, ks_critical_value
+
+    monitors = MonitorsSpec(
+        feature_shift=FeatureShiftSpec(method="ks", threshold=0.15, significance=0.05),
+        prediction_shift=PredictionShiftSpec(method="ks", threshold=0.15, significance=0.05),
+    )
+    stats = MonitorStats(
+        feature_shift={"age": _ks_stat_at_p(0.5, 2000)},
+        prediction_shift=ShiftStat(
+            method="ks", value=0.01, n_current=2000, n_baseline=2000, kind="numeric"
+        ),
+    )
+    bars = {
+        r.monitor: r.threshold for r in evaluate_monitors(monitors, stats, resource="scoring.p.s")
+    }
+    assert bars["feature_shift"] == pytest.approx(ks_critical_value(0.05, 2000, 2000))
+    assert bars["prediction_shift"] == pytest.approx(ks_critical_value(0.05, 2000, 2000))
+    assert benjamini_hochberg_significance([0.9], 0.05) == 0.05
+
+
+def test_benjamini_hochberg_significance_matches_the_hand_computed_step_up() -> None:
+    """The step-up rule directly: the largest k with p_(k) <= k/m * alpha, and
+    alpha/m when nothing is rejected (which every p-value then clears)."""
+    from mbt.quality.monitors import benjamini_hochberg_significance
+
+    alpha = 0.05
+    # m=4, sorted p = .009, .02, .03, .9 against k/m*alpha = .0125, .025,
+    # .0375, .05: the largest k that clears is 3 (.03 <= .0375), so three
+    # features are called and the per-test bar is 3/4 * alpha.
+    assert benjamini_hochberg_significance([0.9, 0.02, 0.03, 0.009], alpha) == pytest.approx(
+        3 / 4 * alpha
+    )
+    # nothing rejected -> alpha/m, and every p-value is above it by construction
+    nothing = [0.2, 0.4, 0.6, 0.8]
+    bar = benjamini_hochberg_significance(nothing, alpha)
+    assert bar == pytest.approx(alpha / 4)
+    assert all(p > bar for p in nothing)
+    # everything rejected -> alpha itself, the uncorrected bar
+    assert benjamini_hochberg_significance([0.001, 0.002, 0.003, 0.004], alpha) == pytest.approx(
+        alpha
+    )
+
+
 def test_feature_shift_significance_is_kind_matched() -> None:
     """F15: significance applies a KIND-MATCHED n-aware bar - the two-sample KS
     critical value for a numeric stat, the chi-square critical value (df from

@@ -253,7 +253,7 @@ class LocalDataAdapter:
             if spec.split.strategy is SplitStrategy.TEMPORAL:
                 written = self._write_temporal_splits(con, spec, ctx, output_dir)
             else:
-                written = self._write_random_splits(con, spec, output_dir)
+                written = self._write_random_splits(con, spec, ctx, output_dir)
             coverage = self._label_join_coverage(con, _dataset_relation(spec), ctx)
         except duckdb.Error as exc:
             raise AdapterError(
@@ -418,13 +418,51 @@ class LocalDataAdapter:
         }
 
     def _digest_columns(
-        self, con: "duckdb.DuckDBPyConnection", sample_keys: list[str], relation: str
+        self,
+        con: "duckdb.DuckDBPyConnection",
+        sample_keys: list[str],
+        relation: str,
+        *,
+        ctx: DataBuildContext,
+        purpose: str,
     ) -> list[str]:
-        """Columns hashed for sampling/splitting: the declared key, else all."""
+        """Columns hashed for sampling/splitting: the declared key, else all.
+
+        ADR-16 frames the all-columns fallback as the slow path. It is also the
+        UNSTABLE one, and that is the more important half: the column list is
+        the hash preimage, so adding one column to a source re-buckets every
+        row. Measured against DuckDB with this module's own digest expression -
+        ten rows, one column added, an 80/20 boundary - three of ten rows
+        changed side; with a sample_key, none did (test_local_data_unit).
+        Metric history in the tracker stops being comparable across any schema
+        evolution, and rows previously held out silently enter training. (Within
+        one run the champion is re-evaluated on the challenger's split per
+        ADR-9, so the promotion decision itself stays fair; it is the
+        longitudinal record that degrades.)
+
+        It is also local-only: Snowflake and Spark raise on a keyless sample or
+        random split rather than inventing a row identity, so a spec that works
+        here fails there. Hence the warning rather than a silent fallback.
+        """
         if sample_keys:
             return sample_keys
         described = con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
-        return [row[0] for row in described]
+        columns = [row[0] for row in described]
+        ctx.events.emit(
+            LogMessage(
+                level="warn",
+                unique_id=ctx.node.unique_id,
+                message=(
+                    f"no 'sample_key' declared: {purpose} hashes all {len(columns)} "
+                    "columns, so adding or removing any column re-buckets every row "
+                    "and moves rows across the train/test boundary. The Snowflake and "
+                    "Spark adapters reject this path outright - declare "
+                    "'sample_key: <id column(s)>' for a split that survives schema "
+                    "evolution and ports across backends"
+                ),
+            )
+        )
+        return columns
 
     def _digest_sql(self, columns: list[str], salt: str = "") -> str:
         """The canonical cross-adapter row hash (F19): the unsigned LOWER 64
@@ -457,7 +495,9 @@ class LocalDataAdapter:
                 hint="set the 'sample_fraction' var in the target's vars",
             )
         if sample_fraction < 1.0:
-            digest = self._digest_sql(self._digest_columns(con, sample_keys, relation))
+            digest = self._digest_sql(
+                self._digest_columns(con, sample_keys, relation, ctx=ctx, purpose="sampling")
+            )
             threshold = int(sample_fraction * SAMPLE_MODULUS)
             where.append(f"({digest} % {SAMPLE_MODULUS}) < {threshold}")
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
@@ -490,6 +530,7 @@ class LocalDataAdapter:
         self,
         con: "duckdb.DuckDBPyConnection",
         spec: DatasetSpec,
+        ctx: DataBuildContext,
         output_dir: Path,
     ) -> dict[str, int]:
         """Random splits as stable hash-bucket ranges, exactly as the warehouse
@@ -503,7 +544,9 @@ class LocalDataAdapter:
         fractions["test"] = float(spec.split.test)
 
         seed = spec.split.seed or 0
-        columns = self._digest_columns(con, spec.sample_key_columns, "mbt_base")
+        columns = self._digest_columns(
+            con, spec.sample_key_columns, "mbt_base", ctx=ctx, purpose="the random split"
+        )
         written: dict[str, int] = {}
 
         if spec.split.stratify_by:

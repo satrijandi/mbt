@@ -459,12 +459,17 @@ def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: Pars
         )
     if not spec.sample_key_columns:
         report.warning(
-            "random split without 'sample_key': rows are split independently, "
-            "so repeated entities can straddle train and test",
+            "random split without 'sample_key': rows are split independently, so "
+            "repeated entities can straddle train and test, AND split membership "
+            "is computed by hashing every column - adding or removing one moves "
+            "rows across the train/test boundary, so metric history stops being "
+            "comparable across any schema change",
             file=rel,
             resource=uid,
             field_path="/split",
-            hint="set 'sample_key' to the entity id to keep an entity's rows together",
+            hint="set 'sample_key' to the entity id: it keeps an entity's rows "
+            "together, keeps the split stable across schema evolution, and is "
+            "required outright by the Snowflake and Spark adapters",
         )
 
 

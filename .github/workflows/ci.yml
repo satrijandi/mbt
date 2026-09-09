@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_call:   # release.yml gates publishing on this exact CI passing (R2-1)
 
+# Least privilege at workflow scope. Seven of the nine jobs below need nothing
+# but a read of the tree, and they are the ones that run `uv sync`, `pip
+# install`, and third-party actions; docs-publish and notify opt up locally.
+permissions:
+  contents: read
+
 # Superseded pushes to the same PR/branch cancel their in-flight runs; main
 # never cancels (a half-cancelled Pages deploy is worse than a queued one).
 concurrency:
@@ -17,8 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: "3.11"
           enable-cache: true
@@ -60,14 +66,14 @@ jobs:
         # Every Python that requires-python (>=3.11) advertises is tested.
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
         with:
           # tests/test_generate_changelog.py reads real tags and commit spans:
           # the changelog is generated FROM git, so its guards have no other
           # source of truth. The default checkout is a tagless depth-1 clone,
           # which made every one of them fail here while passing locally.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
@@ -103,10 +109,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
         with:
           fetch-depth: 0   # tags, for the changelog guards - see the test job
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: "3.11"
           enable-cache: true
@@ -156,12 +162,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: "3.11"
           enable-cache: true
-      - uses: actions/setup-java@v4   # H2O + Spark adapters need a JVM
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3   # v4.9.1 - H2O + Spark adapters need a JVM
         with: {distribution: temurin, java-version: "17"}
       - name: Sync workspace
         run: uv sync
@@ -178,7 +184,7 @@ jobs:
         # Manifests, run results, and logs from the pytest tmp trees; without
         # these a red e2e run can only be debugged by rerunning locally.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
         with:
           name: e2e-diagnostics
           retention-days: 7
@@ -192,8 +198,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: "3.11"
           enable-cache: true
@@ -215,10 +221,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
         with:
           fetch-depth: 0   # full history, or leaks in old commits stay invisible
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7   # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -226,8 +232,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: "3.11"
           enable-cache: true
@@ -235,7 +241,7 @@ jobs:
         run: uv sync
       - name: Build docs site (strict - broken nav/links fail the build)
         run: uv run mkdocs build --strict
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa   # v3.0.1
         with: {path: site/}
 
   docs-publish:
@@ -252,7 +258,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e   # v4.0.5
         id: deployment
 
   notify:

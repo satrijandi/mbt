@@ -97,6 +97,9 @@ Consistent with this project's documentation standards, they are stated plainly 
 | OpenTelemetry metrics and exporter wiring | Spans ship opt-in (`MBT_OTEL`, NFR-06): one run/node trace per command against your configured tracer. mbt still exports no metrics and ships no exporter - you supply the `OTEL_*` destination; the events + run-results + Pushgateway/Prometheus spec remain the metrics path |
 | Per-attribute dataset profiling catalog | Schema checks and class-balance reports ship; full attribute statistics (min/max/missing ratios/distributions) do not |
 | Sensitive-data classification (GDPR data sheets) | Organizational; mbt's contribution is keeping secrets out of manifests and redacting tainted values, not classifying data content |
+| Batch-composition independence of `percentile: batch` | The transform ranks within the batch being scored (ADR-27), so a filtered or unusually small batch changes the feature's meaning and predictions are not independent across rows. A `train`-relative percentile would remove the assumption and is not built |
+| A stable split for a dataset with no row identity | Hash-bucket membership is a function of the columns hashed, so a keyless dataset's split moves when the schema does. `sample_key` fixes it and both warehouse adapters require it; the local adapter warns and falls back to hashing every column |
+| A hash-verified lock for scaffolded projects | The scaffold pins the mbt packages by release tag and the numerics stack by exact version, but their transitive dependencies float and nothing is hash-verified. A real `--generate-hashes` lock needs mbt on PyPI, since a git ref has no wheel hash to record |
 
 ## Stack canvas, answered
 

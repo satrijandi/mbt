@@ -384,13 +384,28 @@ def parse(
     verbose: VerboseOpt = False,
 ) -> None:
     """Validate all configs and build the DAG; nothing executes."""
+    from mbt.config.project import load_project
     from mbt.events import get_bus
     from mbt.events.models import ParseCompleted, ParseStarted
+    from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 
     cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     bus = get_bus()
-    bus.emit(ParseStarted(project=cli.project_dir.name))
+    # The banner names the PROJECT, read from mbt_project.yml, not the directory
+    # it happens to sit in. profiles.yml is keyed by the project name, so when
+    # the two differ - any CI checkout directory, any --project-dir at a
+    # differently named path, any clone into a renamed folder - the banner used
+    # to print one name while the very next error said "profiles.yml has no
+    # entry for project 'other'", in exactly the moment someone is reading the
+    # banner to find out which name to use.
+    try:
+        project_name = load_project(cli.project_dir).name
+    except ConfigError:
+        # An unreadable mbt_project.yml is parse_project's error to raise, one
+        # line below and with the full diagnostic; the banner just steps aside.
+        project_name = cli.project_dir.name
+    bus.emit(ParseStarted(project=project_name))
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     bus.emit(
         ParseCompleted(

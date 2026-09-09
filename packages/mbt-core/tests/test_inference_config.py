@@ -220,6 +220,31 @@ def test_the_run_is_named_for_the_invocation_and_the_model(
     assert payload["experiment"] == "demo"  # no experiment: set, so the project name
 
 
+def _rewrite_champion_config(project: Path, mutate) -> None:
+    """Rewrite the champion's exported inference config, keeping the registry's
+    recorded digest in step.
+
+    The store verifies `mbt.artifact_content_hash` on fetch, so editing an
+    artifact's bytes without updating the tag is corruption, which is exactly
+    what the store is there to refuse. A real re-registration writes both, so
+    the fixture does too - otherwise these tests would be asserting on the
+    integrity check instead of on the spec-divergence behavior they are about.
+    """
+    import hashlib
+
+    path = project / "target/fake_registry/churn_model.json"
+    entries = json.loads(path.read_text())
+    tags = entries[0]["tags"]
+    document = Path(tags["mbt.inference_config_uri"].removeprefix("file://"))
+    payload = json.dumps(mutate(json.loads(document.read_text())))
+    document.write_text(payload)
+    tags["mbt.inference_config_content_hash"] = (
+        "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+    )
+    tags["mbt.inference_config_size_bytes"] = str(len(payload.encode()))
+    path.write_text(json.dumps(entries))
+
+
 def test_scoring_reads_the_model_spec_from_the_champion(
     scoring_project: Path,  # noqa: F811
     fake_registry: AdapterRegistry,
@@ -227,11 +252,12 @@ def test_scoring_reads_the_model_spec_from_the_champion(
     """The champion's spec is authoritative, so a spec edit that has not been
     promoted does not silently change how the deployed model is fed."""
     _build_and_promote(scoring_project, fake_registry)
-    entry = json.loads((scoring_project / "target/fake_registry/churn_model.json").read_text())[0]
-    document = Path(entry["tags"]["mbt.inference_config_uri"].removeprefix("file://"))
-    recorded = json.loads(document.read_text())
-    recorded["spec"]["description"] = "the champion's own copy"
-    document.write_text(json.dumps(recorded))
+
+    def edit(recorded: dict) -> dict:
+        recorded["spec"]["description"] = "the champion's own copy"
+        return recorded
+
+    _rewrite_champion_config(scoring_project, edit)
 
     with recording_bus() as sink:
         results = invoke(scoring_project, fake_registry, "score")
@@ -266,11 +292,12 @@ def test_a_champion_whose_spec_diverges_warns_and_still_wins(
     """Between merging a spec edit and promoting it, the two legitimately
     differ (ADR-5); scoring says so and uses the champion's."""
     _build_and_promote(scoring_project, fake_registry)
-    entry = json.loads((scoring_project / "target/fake_registry/churn_model.json").read_text())[0]
-    document = Path(entry["tags"]["mbt.inference_config_uri"].removeprefix("file://"))
-    recorded = json.loads(document.read_text())
-    recorded["identity"]["config_hash"] = "sha256:something_else"
-    document.write_text(json.dumps(recorded))
+
+    def edit(recorded: dict) -> dict:
+        recorded["identity"]["config_hash"] = "sha256:something_else"
+        return recorded
+
+    _rewrite_champion_config(scoring_project, edit)
 
     with recording_bus() as sink:
         results = invoke(scoring_project, fake_registry, "score")
@@ -286,9 +313,7 @@ def test_a_malformed_inference_config_is_an_error(
     """Not a fallback: a config that exists but carries no spec means the
     document is corrupt, and scoring on a guess is worse than stopping."""
     _build_and_promote(scoring_project, fake_registry)
-    entry = json.loads((scoring_project / "target/fake_registry/churn_model.json").read_text())[0]
-    document = Path(entry["tags"]["mbt.inference_config_uri"].removeprefix("file://"))
-    document.write_text(json.dumps({"schema_version": 1}))
+    _rewrite_champion_config(scoring_project, lambda _: {"schema_version": 1})
 
     results = invoke(scoring_project, fake_registry, "score")
 

@@ -17,6 +17,11 @@ You can expect an acknowledgement within a week.
 mbt's security model in one paragraph: secrets enter specs and profiles only through `env_var()`; rendered values are tainted and every serialization path (events, run results, manifests, CLI errors, `mbt show`, the generated docs site) redacts them; the manifest stores target config unrendered.
 Anything that lets a tainted value reach a stored or displayed surface unredacted is a vulnerability - as is any way for a spec, profile, or hook to execute code outside the documented seams (Python hooks and adapters are code by design; YAML and Jinja specs are not).
 
+The second half of the model is artifact integrity.
+Every stored artifact records a SHA-256, and both artifact stores verify it on `fetch()` before any consumer sees the bytes, because the consumers deserialize immediately - and for the sklearn adapter that is joblib, which is pickle, which is arbitrary code execution.
+A mismatch is a hard error naming both digests; a reference from an older mbt that carries no digest is used with a warning rather than blocking a champion that predates the field.
+Anything that lets an artifact's bytes reach a deserializer without that comparison is a vulnerability.
+
 ## Choosing between `env_var()` and `env()`
 
 `env_var('NAME')` declares the value a secret; `env('NAME')` is the same environment lookup for values that are not.

@@ -16,9 +16,18 @@ REVENUE_ANCHOR = DEMO_ANCHOR
 
 
 def run_mbt(
-    args: list[str], cwd: Path, *, expect_exit: int = 0, timeout: int = 300
+    args: list[str],
+    cwd: Path,
+    *,
+    expect_exit: int = 0,
+    timeout: int = 300,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Invoke the real CLI in a subprocess (non-interactive, FR-CLI-01)."""
+    """Invoke the real CLI in a subprocess (non-interactive, FR-CLI-01).
+
+    ``env`` replaces the whole environment, so a caller can reproduce a CI
+    runner's empty ``HOME`` (no ``~/.mbt/profiles.yml`` to fall back on).
+    """
     proc = subprocess.run(
         [sys.executable, "-m", "mbt.cli.main", *args],
         cwd=cwd,
@@ -26,6 +35,7 @@ def run_mbt(
         text=True,
         timeout=timeout,
         stdin=subprocess.DEVNULL,
+        env=env,
         check=False,
     )
     assert proc.returncode == expect_exit, (

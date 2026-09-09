@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
         with:
           # This tier runs the fast suite, and the changelog guards in it read
           # real tags and commit spans. The default depth-1 tagless clone made
@@ -46,14 +46,14 @@ jobs:
           # ci.yml's test and floors jobs; pinned by
           # tests/test_generate_changelog.py, which now scans every workflow.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86   # v5.4.2
         with:
           python-version: "3.11"
           # Explicitly off, not left to setup-uv's default: cached index
           # metadata is a stale view of "what is newest", which is the one
           # thing this tier measures. A nightly can afford a cold resolve.
           enable-cache: false
-      - uses: actions/setup-java@v4   # H2O + Spark adapters need a JVM
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3   # v4.9.1 - H2O + Spark adapters need a JVM
         with: {distribution: temurin, java-version: "17"}
 
       - name: Re-resolve every dependency to the newest allowed version
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload the resolution that failed
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
         with:
           name: upstream-resolution
           retention-days: 14

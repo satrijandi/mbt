@@ -134,3 +134,54 @@ def test_artifact_exists_head_probes_s3(tmp_path: Path) -> None:
         assert artifact_exists(ref) is None
     finally:
         storage_module._s3_client = original
+
+
+@mock_aws()
+def test_s3_put_uses_the_managed_multipart_transfer(tmp_path: Path) -> None:
+    """put_file must go through upload_file, not put_object (FEEDBACK D-2).
+
+    The method identity IS the property: put_object reads the whole artifact
+    into memory and is a single PUT, which S3 caps at 5 GiB. upload_file
+    streams from disk and switches to multipart above its threshold - the same
+    managed transfer fetch() has always used on the way down.
+    """
+    import boto3
+
+    boto3.client("s3").create_bucket(Bucket="models")
+    store = artifact_store_for("s3://models/mbt", run_prefix="runx")
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"weights")
+
+    calls: list[str] = []
+    real_client = store._client
+
+    class _RecordingClient:
+        def __getattr__(self, name: str):
+            calls.append(name)
+            return getattr(real_client, name)
+
+    store._client = _RecordingClient()  # type: ignore[assignment]
+    ref = store.put_file(source, "model.bin", format="test_bin")
+
+    assert "upload_file" in calls and "put_object" not in calls
+    store._client = real_client  # type: ignore[assignment]
+    assert store.fetch(ref).read_bytes() == b"weights"
+
+
+@mock_aws()
+def test_s3_fetch_rejects_an_object_that_changed_under_its_key(tmp_path: Path) -> None:
+    """A lifecycle rule, a re-upload, or tampering can replace the object while
+    the key still resolves; the recorded digest is what notices (FEEDBACK A-3)."""
+    import boto3
+
+    from mbt.exceptions import MbtError
+
+    boto3.client("s3").create_bucket(Bucket="models")
+    store = artifact_store_for("s3://models/mbt", run_prefix="runx")
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"weights")
+    ref = store.put_file(source, "model.bin", format="test_bin")
+
+    boto3.client("s3").put_object(Bucket="models", Key="mbt/runx/model.bin", Body=b"other")
+    with pytest.raises(MbtError, match="content hash mismatch"):
+        store.fetch(ref)

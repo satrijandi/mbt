@@ -82,7 +82,20 @@ def test_fsyncs_data_before_replace_and_dir_after(
 
 
 @posix_only
-@pytest.mark.parametrize("umask, expected", [(0o022, 0o644), (0o002, 0o664), (0o077, 0o600)])
+@pytest.mark.parametrize(
+    "umask, expected",
+    [
+        (0o022, 0o644),
+        (0o002, 0o644),
+        (0o077, 0o600),
+        # umask 000 is what several common container base images set, and it is
+        # the case that separates "readable by another uid" (the requirement)
+        # from "writable by anyone" (never asked for). The requested mode used
+        # to be 0o666, so manifest.json landed world-writable here - the file
+        # carrying the env_digest ADR-19 verification checks against.
+        (0o000, 0o644),
+    ],
+)
 def test_permissions_follow_the_umask_not_the_temp_file(
     tmp_path: Path, umask: int, expected: int
 ) -> None:
@@ -91,12 +104,17 @@ def test_permissions_follow_the_umask_not_the_temp_file(
     handing artifacts to the next. `tempfile.mkstemp` hardcodes 0600 and
     `os.replace` carries that onto the destination, which made every
     manifest.json/run_results.json private to whoever wrote it.
+
+    Read is the whole requirement: no umask may leave a control file writable
+    by group or other.
     """
     previous = os.umask(umask)
     try:
         target = tmp_path / "run_results.json"
         atomic.atomic_write_text(target, '{"results": []}\n')
-        assert stat.S_IMODE(target.stat().st_mode) == expected
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode == expected
+        assert not mode & (stat.S_IWGRP | stat.S_IWOTH), "control file is group/world writable"
     finally:
         os.umask(previous)
 

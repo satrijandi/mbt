@@ -47,6 +47,8 @@ features:
 
 `cap` freezes the drifting tail at a plateau, `log` compresses what is left, and `monotonic` stops the model learning a squiggle that inverts once the population ages out of the training range.
 If the whole population shifts together rather than the tail growing, `percentile: batch` is the stronger lever: it ranks the value inside each scoring batch, so a uniform shift cancels entirely.
+It buys that with an assumption: every scoring batch must be a representative sample of the population, because the rank is computed within the batch.
+Re-score only your high-tenure customers and their `tenure_days` re-spreads across the whole (0, 1] range, so the model sees a population it never trained on.
 Capping does cost you the signal in the tail; that is the trade, and it is written down in the spec where a reviewer can argue with it.
 
 ## Step 3: Train, with every random choice pinned

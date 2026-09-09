@@ -38,7 +38,9 @@ git init && git add -A && git commit -m "mbt scaffold"
 ```
 
 **You get** a complete working project:
-example source/dataset/model/scoring specs, `profiles.yml` with `dev` and `prod` targets, an empty `promotions.yml`, six GitHub workflows (`pr_check`, `prod_build`, `promote`, `scheduled_retrain`, `scheduled_score`, `scheduled_monitor`), state-publishing scripts, a hash-pinned `requirements.txt`, pre-commit config, and `CODEOWNERS`.
+example source/dataset/model/scoring specs, `profiles.yml` with `dev` and `prod` targets, an empty `promotions.yml`, seven GitHub workflows (`pr_check`, `prod_build`, `promote`, `scheduled_retrain`, `scheduled_retrain_monthly`, `scheduled_score`, `scheduled_monitor`), state-publishing scripts, a `requirements.txt` pinning mbt to its release tag and the numerics stack (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb, xgboost, mlflow) to the exact versions your mbt install is running, pre-commit config, and `CODEOWNERS`.
+That is a version-pinned install set, not a hash-verified lock: the pinned packages' own transitive dependencies still float, and a real `uv pip compile --generate-hashes` lock needs mbt on PyPI, because a git ref carries no wheel hash to record.
+`requirements.in` and the header of `requirements.txt` both spell out how to generate one once it is.
 
 **Your job in this step** is `profiles.yml`, the only file that describes environments:
 
@@ -47,7 +49,8 @@ example source/dataset/model/scoring specs, `profiles.yml` with `dev` and `prod`
   Secrets never enter any artifact; the target config is stored unrendered.
 
 **Verify:** the tree above exists, and `mbt parse` exits 0 once data exists (step 2).
-Note that `profiles.yml` is gitignored by the scaffold; the canonical copy is also installed to `~/.mbt/profiles.yml`.
+Note that `profiles.yml` is committed, and a copy is also installed to `~/.mbt/profiles.yml` so commands run outside the project find it.
+Committing it is what lets CI compile at all - a runner has no `~/.mbt` - and what keeps it safe to commit is `env_var()`, which resolves secrets from the environment instead of storing them, and redacts the resolved value everywhere it could be printed.
 
 ## Step 2 (DS): point at data
 

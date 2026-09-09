@@ -1,8 +1,22 @@
 # Direct toolchain dependencies for this project's CI workflows.
-# Git refs pin mbt to an immutable release tag (reproducible + installable from
-# a fresh checkout). Once mbt is on PyPI, switch to plain version pins and
-# regenerate the fully pinned, hash-verified lock:
+#
+# The mbt packages are pinned to an mbt release tag, which is reproducible and
+# installable from a fresh checkout without a private index. A tag is MOVABLE
+# though, on GitHub included, so the immutable form is the commit SHA - swap
+# @v__MBT_VERSION__ for the SHA you scaffolded from when that matters (and it
+# is also the workaround until the tag exists; see requirements.txt's header).
+#
+# The block below pins the numerics stack at the exact versions the mbt install
+# that scaffolded this project was running. Pinning mbt alone pins none of them,
+# and they are the versions that decide model numerics: a floating training
+# environment changes env_freeze_digest whenever any of them releases, which is
+# the exact condition ADR-19 exists to detect. Renovate keeps them moving on
+# purpose, one reviewed PR at a time.
+#
+# Once mbt is on PyPI, switch the three git refs to plain version pins and
+# regenerate the fully transitive, hash-verified lock:
 #   uv pip compile --generate-hashes requirements.in -o requirements.txt
 mbt-core @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-core
 mbt-xgboost @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-xgboost
 mbt-mlflow @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-mlflow
+__PINNED_DEPS__

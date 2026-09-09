@@ -11,6 +11,68 @@ from typing import Any
 from mbt.contracts import ArtifactRef
 from mbt.exceptions import MbtError, StateError
 
+#: Read size for the streaming hashes below. Big enough that a multi-GB model
+#: is not millions of syscalls, small enough that nothing large is ever resident.
+_HASH_CHUNK = 4 * 1024 * 1024
+
+
+def _sha256_file(path: Path) -> str:
+    """The ``sha256:...`` digest of a file, read in chunks.
+
+    Streaming rather than ``read_bytes()``: Spark model directories, H2O MOJO
+    bundles, and large sklearn pipelines are routinely bigger than a runner's
+    free memory, and every artifact write and every verified read hashes.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_HASH_CHUNK), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _verify_content_hash(ref: ArtifactRef, path: Path) -> None:
+    """Check the fetched bytes against the digest recorded when they were stored.
+
+    Every artifact carries a SHA-256 from ``put_file``, and until this existed
+    nothing ever compared it: every consumer of ``fetch()`` deserialized
+    immediately, and for sklearn that is joblib, which is pickle, which is
+    arbitrary code execution. A digest recorded at write time and never read is
+    not a control - it is a record of one. The cases it catches are bucket
+    tampering, a truncated multi-GB download, and a lifecycle rule that replaced
+    an object under a key that still resolves.
+
+    A ref with no digest is passed through with a warning rather than a failure:
+    baseline and inference-config refs reconstructed from an older champion's
+    registry tags legitimately carry ``""`` (see ``_baseline_ref``), and refusing
+    to score with a champion registered by an older mbt would be a worse outcome
+    than the check it skips.
+    """
+    if not ref.content_hash.startswith("sha256:"):
+        from mbt.events import get_bus
+        from mbt.events.models import LogMessage
+
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                message=(
+                    f"artifact {ref.uri} carries no content hash (stored by an older "
+                    "mbt); its bytes are used without integrity verification"
+                ),
+            )
+        )
+        return
+    actual = _sha256_file(path)
+    if actual != ref.content_hash:
+        raise MbtError(
+            f"artifact content hash mismatch for {ref.uri}",
+            hint=(
+                f"expected {ref.content_hash}, got {actual}. The bytes changed since "
+                "the artifact was stored - suspect object-store tampering, a "
+                "truncated download, or a lifecycle rule that replaced the object. "
+                "Do not load it; re-run the build that produced it."
+            ),
+        )
+
 
 def _s3_client() -> Any:
     """A boto3 S3 client with bounded retry-with-backoff (R2-2).
@@ -47,12 +109,13 @@ class LocalArtifactStore:
         destination = self._root / self._prefix / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(local_path, destination)
-        payload = destination.read_bytes()
+        # Hashed by streaming the copy, not by reading it back into a bytes
+        # object: a 2 GB model used to be read twice and held once.
         return ArtifactRef(
             uri=f"file://{destination.resolve()}",
             format=format,
-            content_hash="sha256:" + hashlib.sha256(payload).hexdigest(),
-            size_bytes=len(payload),
+            content_hash=_sha256_file(destination),
+            size_bytes=destination.stat().st_size,
         )
 
     def fetch(self, ref: ArtifactRef) -> Path:
@@ -67,6 +130,7 @@ class LocalArtifactStore:
                 f"artifact not found: {ref.uri}",
                 hint="the artifact store may have been cleaned; re-run the build",
             )
+        _verify_content_hash(ref, path)
         return path
 
 
@@ -104,14 +168,19 @@ class S3ArtifactStore:
         return self._uri
 
     def put_file(self, local_path: Path, name: str, format: str) -> ArtifactRef:
-        payload = local_path.read_bytes()
         key = "/".join(part for part in (self._base, self._prefix, name) if part)
-        self._client.put_object(Bucket=self._bucket, Key=key, Body=payload)
+        # upload_file, not put_object: the managed transfer streams from disk and
+        # switches to multipart above its threshold. put_object read the whole
+        # artifact into memory and is a single PUT, which S3 caps at 5 GiB - and
+        # the failure lands after the training hours are already spent, which is
+        # the case _s3_client's retry config exists to protect against. fetch()
+        # has always used the managed download_file; this is its other half.
+        self._client.upload_file(str(local_path), self._bucket, key)
         return ArtifactRef(
             uri=f"s3://{self._bucket}/{key}",
             format=format,
-            content_hash="sha256:" + hashlib.sha256(payload).hexdigest(),
-            size_bytes=len(payload),
+            content_hash=_sha256_file(local_path),
+            size_bytes=local_path.stat().st_size,
         )
 
     def fetch(self, ref: ArtifactRef) -> Path:
@@ -131,6 +200,10 @@ class S3ArtifactStore:
                     f"artifact not found: {ref.uri} ({exc})",
                     hint="a lifecycle rule may have removed the object; re-run the build",
                 ) from exc
+            # Verified on download only. The cache is this process's own temp
+            # dir, so a hit re-verifies bytes nobody else could have touched -
+            # and re-hashing a multi-GB model on every fetch is not free.
+            _verify_content_hash(ref, target)
         return target
 
 

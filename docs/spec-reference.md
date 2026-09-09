@@ -604,15 +604,22 @@ Steps apply in the fixed order `cap` -> `log` -> `percentile`, on the same table
 | --- | --- |
 | `cap: 365` | plateau above 365. `cap: {min: 0, max: 365}` clamps both ends. Declared constants only - a fitted `p99` would need persisted state, so it is deliberately not supported (use `hooks.py`). |
 | `log: true` | `log1p`, compressing the tail so a doubling of the raw value moves the feature by a constant. |
-| `percentile: batch` | rank within the split or batch being read, into (0, 1], ties taking the group's average rank. Self-normalizing: a uniform shift cancels, because every batch is ranked against itself. |
+| `percentile: batch` | rank within the split or batch being read, into (0, 1], ties taking the group's average rank. Self-normalizing: a uniform shift cancels, because every batch is ranked against itself. The reciprocal is that the feature's value depends on batch composition - see the caveat below. |
 | `monotonic: increasing` | pin the model's response direction. Equivalent to naming the column in `features.monotonic`. |
 
 Nulls survive every step as nulls, so tree adapters keep using their own missing branch.
 Every step is monotone increasing, so a `monotonic` direction composes with them.
 `log` alongside `percentile` is a parse error: a rank is invariant under any monotone transform, so the `log` would do nothing.
 
-Two things worth knowing before reaching for `percentile: batch`.
+Three things worth knowing before reaching for `percentile: batch`.
+
 It makes PSI on that column near-zero *by construction* - both sides become uniform ranks - so it trades monitorability for stability.
+
+It assumes each scoring batch is a representative sample of the scored population, because the rank is computed within whatever batch is being scored (ADR-27).
+The same entity with the same raw value therefore gets a different feature value depending on who else is in the batch: a re-score of only high-tenure customers after a failed batch re-spreads that slice's `tenure_days` across the full (0, 1] range, so a uniformly high-tenure population presents to the model as if it spanned the whole tenure distribution.
+Predictions are also no longer independent across rows, which is a surprise for anyone reasoning about a batch scorer as a row-wise function.
+Filtered, unusually small, or otherwise non-representative batches change the feature's meaning; a `train`-relative percentile would not, and ADR-27 records why it was not taken.
+
 And capping is not free: it discards whatever signal lived in the tail, which is the trade the lever exists to make.
 
 **`monotonic`** reaches the booster, not the data. xgboost and lightgbm support it natively; sklearn only through `estimator: hist_gradient_boosting`; Spark and H2O not at all.
@@ -693,6 +700,12 @@ scoring:
                                         # (contingency) chi-square statistic
                                         # judged at the chi-square critical
                                         # value. Excludes warn_threshold.
+                                        # The family is the model's monitored
+                                        # FEATURE SET, corrected by Benjamini-
+                                        # Hochberg: 40 features at 0.05 would
+                                        # otherwise breach ~2 per clean run.
+                                        # prediction_shift is a family of one,
+                                        # so it is uncorrected.
         include: ["*"]                  # globs over the model's features
         exclude: []
       prediction_shift:

@@ -1,6 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
+  "description": [
+    "helpers:pinGitHubActionDigests keeps every `uses:` in .github/workflows on an immutable commit SHA.",
+    "A v-tag or a release branch can be repointed at new code retroactively (the tj-actions/changed-files compromise did exactly that), and these workflows hold the credentials that write your registry and your state branch.",
+    "Renovate maintains both halves once pinned: it bumps the SHA and rewrites the `# vX.Y.Z` comment beside it."
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
   "pre-commit": {
     "enabled": true
   }

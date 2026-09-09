@@ -179,11 +179,30 @@ def test_parse_reports_counts(demo_project: Path) -> None:
 def test_parse_emits_parse_started_and_completed(demo_project: Path) -> None:
     """parse brackets its work with ParseStarted/ParseCompleted on the bus
     (rendered to stderr), symmetric with compile's Compile* events - the
-    command was previously silent on the event stream."""
+    command was previously silent on the event stream.
+
+    The banner names the project from mbt_project.yml ('demo'), never the
+    directory, which here is a pytest tmp dir: profiles.yml is keyed by the
+    project name, so a banner showing the directory name sends whoever reads it
+    to look up the wrong key (FEEDBACK E-1).
+    """
     result = invoke(["parse", "--project-dir", str(demo_project)])
     assert result.exit_code == 0, debug(result)
-    assert "Parsing project" in result.stderr
+    assert "Parsing project 'demo'" in result.stderr
+    assert demo_project.name not in result.stderr
     assert "resources in" in result.stderr
+
+
+def test_parse_banner_falls_back_to_the_directory_when_the_project_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """An unreadable mbt_project.yml is parse_project's error to report, with
+    the full diagnostic; the banner steps aside rather than pre-empting it."""
+    (tmp_path / "mbt_project.yml").write_text("name: [not a string\n")
+    result = invoke(["parse", "--project-dir", str(tmp_path)])
+    assert result.exit_code == 1, debug(result)
+    assert f"Parsing project '{tmp_path.name}'" in result.stderr
+    assert "mbt_project.yml" in result.stderr
 
 
 def test_profiles_dir_override_is_honored(demo_project: Path) -> None:

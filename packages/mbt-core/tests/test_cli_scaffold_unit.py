@@ -63,3 +63,27 @@ def test_scaffold_never_clobbers_existing_project_profiles(tmp_path: Path) -> No
     existing.write_text("myproj:\n  target: prod\n")
     scaffold_project("myproj", tmp_path, home=home)
     assert existing.read_text() == "myproj:\n  target: prod\n"
+
+
+def test_scaffold_pins_installed_packages_and_skips_absent_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The numerics pins are resolved from the scaffolding environment, not
+    hardcoded, so they cannot rot in the template (FEEDBACK B-1).
+
+    A package that is not installed is skipped rather than guessed at: `mbt
+    init` has to work from a partial install (mbt-core alone, say), and a pin
+    nobody verified is worse than no pin.
+    """
+    from importlib.metadata import version
+
+    from mbt.cli import scaffold as scaffold_module
+
+    monkeypatch.setattr(scaffold_module, "_PINNED_PACKAGES", ("duckdb", "no-such-package-anywhere"))
+    project = scaffold_project("pin_probe", tmp_path, home=tmp_path / "home")
+
+    for name in ("requirements.in", "requirements.txt"):
+        pins = (project / name).read_text()
+        assert f"duckdb=={version('duckdb')}" in pins
+        assert "no-such-package-anywhere" not in pins
+        assert "__PINNED_DEPS__" not in pins

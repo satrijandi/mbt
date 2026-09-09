@@ -17,17 +17,24 @@ import os
 import uuid
 from pathlib import Path
 
-# Mode requested for the temp file, which the kernel masks with the process
-# umask - so the control file lands with exactly the permissions an ordinary
-# write would give it (0644 under the usual 022).
+# Mode requested for the temp file, which the kernel then masks with the process
+# umask - so under the usual 022 the control file lands at 0644, exactly what an
+# ordinary write would give it.
 #
 # This is deliberately not `tempfile.mkstemp`: mkstemp hardcodes 0600, and
 # `os.replace` carries the temp file's mode onto the destination, so every
 # manifest.json/run_results.json was readable only by the uid that wrote it.
 # Nothing in a control file is secret, and they are routinely written by one
-# uid for another to read - the showcase's runner container writing a workspace
+# uid for another to READ - the showcase's runner container writing a workspace
 # its host user then inspects, or one CI step handing artifacts to the next.
-_CONTROL_FILE_MODE = 0o666
+#
+# Read is the whole requirement, so 0644 and not 0666: group and other write
+# buys nothing the rationale above asks for, and the difference is invisible
+# under a 022 umask but not under `umask 000`, which several common container
+# base images set. There manifest.json would land world-WRITABLE - and it is
+# the file carrying the env_digest and env_freeze_digest that ADR-19
+# verification checks a --manifest run against.
+_CONTROL_FILE_MODE = 0o644
 
 
 def _fsync_dir(directory: Path) -> None:
