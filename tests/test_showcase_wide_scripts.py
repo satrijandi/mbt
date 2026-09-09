@@ -459,3 +459,59 @@ def test_selection_report_shape_matches_what_the_live_test_reads(tmp_path: Path)
     encoded = json.loads(json.dumps(report))
     assert encoded["stages"]["lgbm"]["best_params"]
     assert all(row["importance"] > 0 for row in encoded["selected"])
+
+
+def test_the_probe_declares_every_string_column_in_the_panel(tmp_path: Path) -> None:
+    """`features.categorical` is authoritative once present (ADR-27), so a
+    string column in the joined panel that the probe does not declare is a
+    hard error at train time - not a fallback to inference.
+
+    The declaration replaced `wide_hooks.py` with `region` and `income_band`
+    listed and `plan_tier` and `top_category` missed, and the wide build died
+    on the first live run after that landed:
+
+        string feature(s) not declared in features.categorical:
+        plan_tier, top_category
+
+    Only the opt-in live tier could see it, because the panel's column set
+    exists only once the generator has run. So derive it here instead: run the
+    generator at its smallest useful size, read the string columns straight
+    off the parquet schemas, and hold the shipped spec to them.
+    """
+    import yaml
+
+    generator = _import(
+        REPO_ROOT / "examples" / "showcase" / "scripts" / "generate_wide_data.py",
+        "wide_generate_data",
+    )
+    out = tmp_path / "lake"
+    generator.generate(customers=40, filler_columns=2, out=out)
+
+    # Every table the generator writes, not a hardcoded list: label columns
+    # land in the joined panel too, and a table rename should not silently
+    # narrow what this checks.
+    string_columns: set[str] = set()
+    for parquet in sorted(out.rglob("*.parquet")):
+        frame = pd.read_parquet(parquet)
+        string_columns |= {
+            name
+            for name in frame.columns
+            if frame[name].dtype == object or pd.api.types.is_string_dtype(frame[name])
+        }
+
+    probe = yaml.safe_load((PROJECT / "models" / "churn_wide_probe.yml").read_text())
+    features = probe["models"][0]["features"]
+    declared = set(features["categorical"])
+    excluded = set(features["exclude"])
+    # Per-table source pruning drops the ingest-audit columns before the join.
+    dataset = yaml.safe_load((PROJECT / "datasets" / "wide_churn_training.yml").read_text())
+    for entry in dataset["datasets"][0]["inputs"].get("features") or []:
+        excluded |= set(entry.get("exclude") or [])
+
+    reachable = string_columns - excluded
+    assert reachable, "derived no string columns - the generator's shape moved"
+    missing = sorted(reachable - declared)
+    assert not missing, (
+        f"the probe's features.categorical does not declare {missing}; "
+        "an undeclared string feature is a hard error at train time (ADR-27)"
+    )

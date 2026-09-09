@@ -31,12 +31,18 @@ models:
       # the code, so read as a magnitude it costs real signal; declaring it
       # here makes every adapter's native handling pick it up (LightGBM
       # native categoricals, H2O asfactor, SparkML StringIndexer).
-      # The block is authoritative once present, so region and income_band
-      # must be listed too - a string feature left undeclared is an error,
-      # not a guess. scripts/select_features.py reads THIS list as the
-      # funnel's candidate set and writes the surviving subset into
-      # churn_wide_automl's generated block.
-      categorical: [contract_code, region, income_band]
+      # The block is authoritative once present, so EVERY string feature in
+      # the joined panel must be listed too - an undeclared one is an error,
+      # not a guess. That is four tables' worth: region and income_band and
+      # plan_tier from demographics, top_category from transactions.
+      # Missing two of them is what turned the live tier red the first night
+      # after this declaration replaced wide_hooks.py, so
+      # test_the_probe_declares_every_string_column_in_the_panel derives the
+      # list from the generator and fails in the fast suite instead.
+      # scripts/select_features.py reads THIS list as the funnel's candidate
+      # set and writes the surviving subset into churn_wide_automl's
+      # generated block.
+      categorical: [contract_code, region, income_band, plan_tier, top_category]
 
     hyperparameters:
       n_estimators: 120
