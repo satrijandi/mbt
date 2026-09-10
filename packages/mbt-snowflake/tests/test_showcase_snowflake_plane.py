@@ -217,7 +217,11 @@ def _synthetic_panel() -> tuple[str, pa.Table]:
         con.register("labels", labels)
         for name, frame in frames.items():
             con.register(name, frame)
-        panel = con.execute(
+        # con.sql() returns a RELATION, which has had to_arrow_table since well
+        # before the declared duckdb floor; con.execute() returns the connection,
+        # whose to_arrow_table is newer than the floor. The local adapter's
+        # read_source_distinct uses this same form for the same reason.
+        panel = con.sql(
             "SELECT * FROM spine "
             "JOIN labels USING (CUSTOMER_ID, INFERENCE_DATE) "
             "JOIN demographic_history USING (CUSTOMER_ID, INFERENCE_DATE) "
