@@ -27,7 +27,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
-      - uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d   # v3.37.9
+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63   # v4.38.0
         with:
           languages: python
           # Source only: generated scaffolds are user-project templates and
@@ -37,6 +37,6 @@ jobs:
               - packages
             paths-ignore:
               - packages/mbt-core/src/mbt/cli/_scaffold
-      - uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d   # v3.37.9
+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63   # v4.38.0
         with:
           category: "/language:python"
