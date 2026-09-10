@@ -78,10 +78,16 @@ def _seed_module():
 
 
 def test_source_identifiers_match_the_seeding_script() -> None:
-    """sources.yml and seed_snowflake.py must not drift apart."""
+    """sources.yml and seed_snowflake.py must not drift apart.
+
+    The seeder owns two kinds of relation now (ADR-29): ``TABLES`` are loaded
+    from parquet, ``PANELS`` are dynamic tables joined over them. Both are
+    declared in sources.yml, and both must use the same identifier the seeder
+    creates.
+    """
     module = _seed_module()
     declared = {t["name"]: t["identifier"] for t in _sources()}
-    seeded = {name: module.table_name(name) for name in module.TABLES}
+    seeded = {name: module.table_name(name) for name in (*module.TABLES, *module.PANELS)}
     assert seeded == declared
 
 
@@ -184,24 +190,66 @@ def _synthetic() -> dict[str, tuple[str, pa.Table]]:
     }
 
 
+def _synthetic_panel() -> tuple[str, pa.Table]:
+    """The wide panel as the upstream join produces it, Snowflake-shaped.
+
+    Built by joining `_synthetic()`'s six gold tables exactly the way the
+    panel's dynamic table does: INNER to the labels, each history on its own
+    key, `ETL_LOADED_AT` pruned per table before it can collide. Doing the join
+    here rather than declaring the result keeps this fixture honest about what
+    upstream owes mbt - notably that transaction_history can only match through
+    the crosswalk's SAFE_ID.
+    """
+    synth = _synthetic()
+    spine = synth["monthly_population"][1]
+    labels = synth["monthly_labels"][1]
+    frames = {
+        name: table.drop_columns(["ETL_LOADED_AT"])
+        for name, (_ident, table) in synth.items()
+        if name.endswith("_history")
+    }
+
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        con.register("spine", spine)
+        con.register("labels", labels)
+        for name, frame in frames.items():
+            con.register(name, frame)
+        panel = con.execute(
+            "SELECT * FROM spine "
+            "JOIN labels USING (CUSTOMER_ID, INFERENCE_DATE) "
+            "JOIN demographic_history USING (CUSTOMER_ID, INFERENCE_DATE) "
+            "JOIN login_history USING (CUSTOMER_ID, INFERENCE_DATE) "
+            "JOIN transaction_history USING (SAFE_ID, INFERENCE_DATE)"
+        ).to_arrow_table()
+    finally:
+        con.close()
+    assert panel.num_rows == spine.num_rows, "the synthetic join must not drop or fan rows"
+    return "MBT_SHOWCASE_MONTHLY_PANEL", panel
+
+
 def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> None:
-    """The committed wide spec, unmodified, over Snowflake-shaped tables."""
+    """The committed wide spec, unmodified, over a Snowflake-shaped panel.
+
+    ADR-29 moved the join out of mbt, so what this proves changed with it. It no
+    longer exercises join assembly; it exercises what mbt still owns on this
+    plane and what a stub cannot vouch for by inspection: the temporal split
+    predicate over TIMESTAMP_NTZ, and the panel arriving intact through the
+    Arrow streaming path with its identifier case folded to the spec's
+    lowercase.
+    """
     doc = yaml.safe_load((PROJECT / "datasets" / "wide_churn_training.yml").read_text())
     spec = DatasetSpec.model_validate(doc["datasets"][0])
-    synth = _synthetic()
-
-    refs = [
-        spec.inputs.spine,
-        spec.inputs.label_source,
-        *[entry.source for entry in spec.inputs.feature_entries],
-    ]
-    source_tables = {
-        ref: FakeSourceTable(name=_table_name(ref), identifier=synth[_table_name(ref)][0])
-        for ref in refs
-    }
-    stub = StubConnection(
-        tables={f"{DATABASE}.{SCHEMA}.{ident}": tbl for ident, tbl in synth.values()}
+    assert spec.source is not None and spec.inputs is None, (
+        "the wide spec should read one relation (ADR-29)"
     )
+
+    identifier, panel = _synthetic_panel()
+    ref = spec.source
+    source_tables = {ref: FakeSourceTable(name=_table_name(ref), identifier=identifier)}
+    stub = StubConnection(tables={f"{DATABASE}.{SCHEMA}.{identifier}": panel})
     adapter = SnowflakeDataAdapter({"database": DATABASE, "schema": SCHEMA})
     adapter._connection = stub  # type: ignore[assignment]
 
@@ -215,7 +263,7 @@ def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> 
     )
     ctx = FakeBuildContext(
         node=node,
-        source=source_tables[spec.inputs.spine],
+        source=source_tables[ref],
         source_tables=source_tables,
         # Narrowed to the synthetic months; the committed windows span a year
         # of data this fixture does not generate.
@@ -231,11 +279,11 @@ def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> 
     handle = adapter.build_dataset(spec, ctx)
 
     assert handle.splits() == {"train", "test"}
-    panel = handle.read("train")
-    # The spine's crosswalk and lineage columns survive; each feature history
-    # contributes its payload; the label lands and its join columns are
-    # projected away (no __mbt_lbl* leakage).
-    assert set(panel.column_names) == {
+    train = handle.read("train")
+    # The panel arrives whole: the spine's crosswalk and lineage columns, each
+    # history's payload, and the label - all lowercased from Snowflake's
+    # UPPERCASE identifiers.
+    assert set(train.column_names) == {
         "customer_id",
         "safe_id",
         "inference_date",
@@ -247,18 +295,14 @@ def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> 
         "txn_cnt_30d",
         "is_churn",
     }
-    # ADR-25: all three feature tables carry an identically-named
-    # etl_loaded_at, and none of them reaches the panel - each was pruned
-    # inside its own source subquery, so they never collided in the first
-    # place. A model's features.exclude could not have saved this: the
-    # collision would happen during the join, before any model sees it.
-    assert "etl_loaded_at" not in panel.column_names
-    # Spine-driven row counts: 10 customers x 2 month-starts in the train
-    # window, 10 x 1 in test. transaction_history joined through safe_id
-    # alone, so a broken crosswalk would show up as nulls or dropped rows.
-    assert panel.num_rows == CUSTOMERS * 2
+    # The audit column all three feature tables carry is pruned upstream, in
+    # the panel's own join, so it is not in the relation mbt reads at all.
+    assert "etl_loaded_at" not in train.column_names
+    # The split predicate really ran against TIMESTAMP_NTZ: 10 customers x 2
+    # month-starts in the train window, 10 x 1 in test.
+    assert train.num_rows == CUSTOMERS * 2
     assert handle.read("test").num_rows == CUSTOMERS
-    assert panel.column("txn_cnt_30d").null_count == 0
+    assert train.column("txn_cnt_30d").null_count == 0
 
 
 def test_no_profile_env_var_default_is_a_bare_number() -> None:
@@ -282,13 +326,20 @@ def test_no_profile_env_var_default_is_a_bare_number() -> None:
     )
 
 
-def test_wide_tables_is_exactly_what_the_wide_specs_reference() -> None:
+def test_wide_tables_covers_everything_the_wide_specs_can_reach() -> None:
     """The seeder loads rows only for the wide cadence and creates the rest
-    empty, so WIDE_TABLES must be derived from the specs, not guessed.
+    empty, so what gets loaded must be derived from the specs, not guessed.
 
     Too small and the wide build reads an empty table - which fails as a
     zero-row split, far from the cause. Too large and the user's sandbox
     collects demo data for cadences this plane never runs.
+
+    ADR-29 put one level of indirection in the middle: the specs now reference
+    PANELS, which are dynamic tables that read the loaded tables. So the
+    invariant is no longer "WIDE_TABLES equals what the specs reference" but
+    "everything the specs reference is either a panel or a loaded table, and
+    every table a panel reads is loaded" - the second half being the one that
+    actually breaks, since an empty base table yields an empty panel.
     """
     module = _seed_module()
 
@@ -300,13 +351,32 @@ def test_wide_tables_is_exactly_what_the_wide_specs_reference() -> None:
         referenced |= set(re.findall(r"source\('lake',\s*'([a-z_]+)'\)", spec_file.read_text()))
 
     assert referenced, "no source() references found - did the spec format change?"
-    assert set(module.WIDE_TABLES) == referenced, (
-        f"WIDE_TABLES drifted from the wide specs: "
-        f"missing={referenced - set(module.WIDE_TABLES)} "
-        f"extra={set(module.WIDE_TABLES) - referenced}"
+    panels = set(module.PANELS)
+    loaded = set(module.WIDE_TABLES)
+    assert referenced <= panels | loaded, (
+        f"the wide specs reference relations the seeder neither creates as a "
+        f"panel nor loads: {referenced - panels - loaded}"
     )
-    # And every one of them is a real seedable table.
-    assert set(module.WIDE_TABLES) <= set(module.TABLES)
+    assert loaded <= set(module.TABLES), "WIDE_TABLES names a table the seeder cannot load"
+
+    # Every table a panel reads must hold rows, or the panel is empty.
+    for panel in panels:
+        sql = module.panel_sql(DATABASE, SCHEMA, panel, "ML_WH")
+        read = {name for name in module.TABLES if module.table_name(name) in sql}
+        assert read <= loaded, (
+            f"panel {panel!r} reads {read - loaded}, which the seeder creates empty"
+        )
+
+    # And nothing is loaded that no panel and no spec needs.
+    panel_inputs = {
+        name
+        for panel in panels
+        for name in module.TABLES
+        if module.table_name(name) in module.panel_sql(DATABASE, SCHEMA, panel, "ML_WH")
+    }
+    assert loaded == panel_inputs | (referenced & set(module.TABLES)), (
+        f"WIDE_TABLES drifted: extra={loaded - panel_inputs - referenced}"
+    )
 
 
 def test_seeder_loads_with_parquet_logical_types(monkeypatch) -> None:
@@ -538,10 +608,35 @@ def test_snowflake_target_renders_without_credentials(monkeypatch) -> None:
 
 
 def test_transaction_history_joins_through_safe_id_only() -> None:
-    """The heterogeneous-key claim, asserted against the committed spec."""
-    doc = yaml.safe_load((PROJECT / "datasets" / "wide_churn_training.yml").read_text())
-    spec = DatasetSpec.model_validate(doc["datasets"][0])
-    using = {_table_name(e.source): list(e.using) for e in spec.inputs.feature_entries}
-    assert using["demographic_history"] == ["customer_id", "inference_date"]
-    assert using["login_history"] == ["customer_id", "inference_date"]
-    assert using["transaction_history"] == ["safe_id", "inference_date"]
+    """The heterogeneous-key claim, asserted where the join now lives.
+
+    It used to be read off the dataset spec's per-table `using:` columns. ADR-29
+    moved the join upstream, so the claim moved with it: the panel's dynamic
+    table is where transaction_history matches through safe_id, the key only the
+    population's crosswalk provides. Getting this wrong upstream is why the
+    panel is worth asserting - a wrong key produces an empty or fanned-out panel
+    long before mbt sees it.
+    """
+    module = _seed_module()
+    sql = module.panel_sql(DATABASE, SCHEMA, "monthly_panel", "ML_WH")
+
+    for table, keys in (
+        ("DEMOGRAPHIC_HISTORY", "USING (customer_id, inference_date)"),
+        ("LOGIN_HISTORY", "USING (customer_id, inference_date)"),
+        ("TRANSACTION_HISTORY", "USING (safe_id, inference_date)"),
+    ):
+        segment = sql.split(f"MBT_SHOWCASE_{table}")[1]
+        assert keys in segment.split("JOIN")[0], (table, segment)
+
+    # The label join is INNER and present only on the training panel: a cohort
+    # whose outcome window has not closed is not a training example, and the
+    # serving twin must keep it.
+    assert "MBT_SHOWCASE_MONTHLY_LABELS" in sql
+    assert "LEFT JOIN" not in sql
+    scoring = module.panel_sql(DATABASE, SCHEMA, "monthly_panel_scoring", "ML_WH")
+    assert "MBT_SHOWCASE_MONTHLY_LABELS" not in scoring
+
+    # A dynamic table, not a view: the change token and HASH_AGG must reflect
+    # the panel's own rows, or a re-deploy adding a column is invisible (ADR-29).
+    assert "CREATE OR REPLACE DYNAMIC TABLE" in sql
+    assert "TARGET_LAG" in sql and "WAREHOUSE = ML_WH" in sql

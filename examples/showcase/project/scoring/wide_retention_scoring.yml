@@ -8,28 +8,21 @@ scoring:
     stage: production              # champion resolved from the registry at run time (ADR-20)
 
     input:
-      # The same population spine the training dataset declares, minus the
-      # label: the newest month-start cohort joined to its feature histories
-      # (per-table entity keys, one uniform inference_date join key,
-      # ADR-22 + docs/naming-conventions.md) at scoring time.
-      inputs:
-        spine: source('lake', 'monthly_population')
-        # The SAME per-table pruning as training (ADR-25). Scoring must prune
-        # identically or the champion would meet columns it never saw - and
-        # the three identically-named etl_loaded_at columns would collide in
-        # the scoring batch exactly as they would in the training panel.
-        features:
-          - source: source('lake', 'demographic_history')
-            using: [customer_id, inference_date]
-            exclude: [etl_loaded_at]
-          - source: source('lake', 'login_history')
-            using: [customer_id, inference_date]
-            exclude: [etl_loaded_at]
-          - source: source('lake', 'transaction_history')
-            using: [safe_id, inference_date]
-            exclude: [etl_loaded_at]
+      # The serving twin of the training panel (ADR-29): the same upstream join,
+      # minus the label and its INNER join, so the newest cohort survives.
+      # Scoring used to restate the whole join here, with a comment warning that
+      # it had to prune identically or the champion would meet columns it never
+      # saw. Both sides now name one relation, and the champion's recorded
+      # feature columns are enforced at score time rather than by copy-paste.
+      # The two relations share one join definition upstream, which is the
+      # dbt-side half of the same contract.
+      source: source('lake', 'monthly_panel_scoring')
       time_column: inference_date
-      window: "-31d:now"           # exactly the newest month-start cohort
+      # Exactly the newest month-start cohort, and no newer: ending the window
+      # 28 days back rather than at `now` is also what makes the 14d maturity
+      # below reach the 1mo label horizon (a row is already 28 days old when it
+      # is scored, so 14 more days carries it past its outcome window).
+      window: "-31d:-28d"
       sample_key: customer_id
 
     checks:
@@ -42,10 +35,12 @@ scoring:
       prediction_shift:
         threshold: 0.25
 
-    # Maturity counts from scored_at (the scoring run's anchor, 2026-06-30).
-    # The cohort's outcome window closes one month after its
-    # inference_date (2026-07-01), so 14d models label-arrival lag and
-    # matures inside the pinned monitor anchor (2026-07-14 <= 2026-07-20).
+    # Maturity counts from scored_at (the scoring run's anchor, 2026-06-30),
+    # while the label horizon counts from inference_date - the input window
+    # above is what bridges the two. The cohort's outcome window closes one
+    # month after its inference_date (2026-07-01), so 14d models label-arrival
+    # lag and matures inside the pinned monitor anchor (2026-07-14 <=
+    # 2026-07-20).
     ground_truth:
       label:
         source: source('lake', 'wide_churn_outcomes')

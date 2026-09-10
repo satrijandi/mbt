@@ -1018,9 +1018,15 @@ def test_label_horizon_drives_the_embargo_warnings(
 def test_ground_truth_maturity_shorter_than_the_horizon_warns(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:
-    """A maturity below the label horizon grades predictions against outcomes
-    that have not been observed, so the realized metrics are quietly wrong
-    rather than missing."""
+    """A maturity that does not reach the label horizon grades predictions
+    against outcomes that have not been observed, so the realized metrics are
+    quietly wrong rather than missing.
+
+    The two are anchored to different instants - maturity to ``scored_at``, the
+    horizon to ``inference_date`` - and the scoring window bridges them, so a
+    batch that is already partly matured when it is scored needs proportionally
+    less maturity.
+    """
     (demo_project / "datasets/churn_training.yml").write_text(
         _panel_dataset().replace('test: "-28d:now"\n', 'test: "-28d:now"\n      embargo: "1mo"\n')
     )
@@ -1046,16 +1052,67 @@ def test_ground_truth_maturity_shorter_than_the_horizon_warns(
     parsed = parse_project(demo_project, registry=fake_registry)
     messages = [i.message for i in parsed.report.warnings]
     assert any(
-        "ground_truth.maturity (7d) is shorter than the label horizon (1mo)" in m for m in messages
+        "ground_truth.maturity (7d) does not reach the label horizon (1mo)" in m for m in messages
     )
 
-    (demo_project / "scoring/retention.yml").write_text(
-        (demo_project / "scoring/retention.yml")
-        .read_text()
-        .replace('maturity: "7d"', 'maturity: "1mo"')
+    path = demo_project / "scoring/retention.yml"
+
+    def maturity_warnings() -> list:
+        report = parse_project(demo_project, registry=fake_registry).report
+        return [i for i in report.warnings if "maturity" in i.message]
+
+    # Raising the maturity closes it.
+    path.write_text(path.read_text().replace('maturity: "7d"', 'maturity: "1mo"'))
+    assert not maturity_warnings()
+
+    # So does ending the input window earlier: a batch whose freshest row is
+    # already 28 days old when it is scored needs 28 days less maturity. That is
+    # the showcase's own configuration, and a check that could not see the
+    # window would fire on it falsely.
+    write(
+        path,
+        """
+        scoring:
+          - name: retention
+            owner: ds@example.com
+            model: ref('churn_model')
+            input:
+              source: source('lakehouse', 'subscribers')
+              time_column: snapshot_date
+              window: "-31d:-28d"
+            ground_truth:
+              label:
+                source: source('lakehouse', 'subscribers')
+                column: churned
+              join_key: user_id
+              maturity: "7d"
+              metrics: [pr_auc]
+            output: {path: predictions/a, columns: [user_id]}
+        """,
     )
-    parsed = parse_project(demo_project, registry=fake_registry)
-    assert not [i for i in parsed.report.warnings if "maturity" in i.message]
+    assert not maturity_warnings()
+
+
+def test_newest_row_age_reads_the_window_end_bound() -> None:
+    """The bridge between `ground_truth.maturity` and `label.horizon`.
+
+    Maturity counts from ``scored_at`` and the horizon from ``inference_date``,
+    so the scoring window is what relates them: it says how old the freshest
+    scored row can be. Everything that is not a relative end bound counts as
+    zero, which is the conservative direction - it can only make the maturity
+    check stricter, never let an under-matured batch through.
+    """
+    from mbt.parsing.project_parser import _newest_row_age_days
+
+    assert _newest_row_age_days(None) == 0.0
+    assert _newest_row_age_days("-31d:now") == 0.0
+    assert _newest_row_age_days("-31d:-28d") == 28.0
+    assert _newest_row_age_days("-2mo:-1mo") == 30.0
+    # An absolute bound is anchor-relative and unknowable at parse time.
+    assert _newest_row_age_days("2026-05-01:2026-06-01") == 0.0
+    # A malformed window is reported by its own validator in the same pass;
+    # this must not raise on the way past it.
+    assert _newest_row_age_days("not-a-window") == 0.0
 
 
 def test_horizon_and_time_offset_must_agree(

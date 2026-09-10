@@ -487,11 +487,17 @@ def test_the_probe_declares_every_string_column_in_the_panel(tmp_path: Path) -> 
     out = tmp_path / "lake"
     generator.generate(customers=40, filler_columns=2, out=out)
 
-    # Every table the generator writes, not a hardcoded list: label columns
-    # land in the joined panel too, and a table rename should not silently
-    # narrow what this checks.
+    # Read the PANEL, not every table the generator writes: since ADR-29 the
+    # panel is literally the relation the model trains on, so its schema is the
+    # question rather than a proxy for it. (It is also where the upstream join
+    # already pruned the ingest-audit columns, which this test used to have to
+    # subtract by re-reading the dataset spec's per-table `exclude:` lists.)
+    dataset = yaml.safe_load((PROJECT / "datasets" / "wide_churn_training.yml").read_text())
+    relation = dataset["datasets"][0]["source"].split("'")[-2]
+    parquets = sorted((out / relation).glob("*.parquet"))
+    assert parquets, f"the generator wrote no {relation!r} - has the panel moved?"
     string_columns: set[str] = set()
-    for parquet in sorted(out.rglob("*.parquet")):
+    for parquet in parquets:
         frame = pd.read_parquet(parquet)
         string_columns |= {
             name
@@ -503,10 +509,6 @@ def test_the_probe_declares_every_string_column_in_the_panel(tmp_path: Path) -> 
     features = probe["models"][0]["features"]
     declared = set(features["categorical"])
     excluded = set(features["exclude"])
-    # Per-table source pruning drops the ingest-audit columns before the join.
-    dataset = yaml.safe_load((PROJECT / "datasets" / "wide_churn_training.yml").read_text())
-    for entry in dataset["datasets"][0]["inputs"].get("features") or []:
-        excluded |= set(entry.get("exclude") or [])
 
     reachable = string_columns - excluded
     assert reachable, "derived no string columns - the generator's shape moved"

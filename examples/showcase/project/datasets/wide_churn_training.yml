@@ -1,58 +1,43 @@
-# The wide multi-table shape (ADR-22) under the project naming convention
-# (docs/naming-conventions.md): every table shares ONE join key,
-# inference_date (the prediction date), so the population spine defines
-# the examples and carries the customer_id-to-safe_id entity crosswalk;
-# three feature histories join by DIFFERENT entity keys (transactions
-# only match through safe_id). Feature rows are aligned by their producer
-# to the inference_date they serve - the balances they describe are as of
-# the previous day, recorded in the spine's informational as_of_date
-# column (a lineage column, never a join key or feature).
+# The wide cadence reads ONE relation (ADR-29). The join that builds it -
+# population + matured labels + three feature histories, on their own entity
+# keys and the one uniform inference_date - lives upstream, where relational
+# work belongs: a step in scripts/generate_wide_data.py on the lake and Spark
+# planes, a Snowflake DYNAMIC TABLE on the warehouse plane, and a dbt model in
+# a real deployment. mbt never sees it.
 #
-# monthly_labels follows the gold-layer label contract: each row is keyed
-# by the cohort's OWN inference_date, and rows appear only once the
-# outcome window has closed (one calendar month later), so the newest
-# cohort has no label rows yet at the build anchor and the plain inner
-# join below cannot leak immature outcomes. A raw upstream feed keyed by
-# observation date would instead declare `time_offset: "1mo"` here to shift
-# the join off the spine's date (ADR-22); this project models the matured
-# gold-layer shape, so it does not need one.
+# What moved upstream with the join:
+#   - the label join, INNER, so the newest cohort (whose outcome window has not
+#     closed) is absent from the panel and cannot leak an immature outcome;
+#   - the per-table pruning of etl_loaded_at, which all three feature tables
+#     carry under the same name and which would collide in the panel;
+#   - the entity crosswalk (customer_id to safe_id) that let transaction
+#     history join at all.
+# What stayed here: the split, the window, the sampling, the checks, and the
+# statement of what the training set IS.
 datasets:
   - name: wide_churn_training
-    description: Monthly churn panel joined from population + labels + three feature histories.
-    inputs:
-      population: source('lake', 'monthly_population')
-      label:
-        source: source('lake', 'monthly_labels')
-        using: [customer_id, inference_date]
-      # Each feature table carries its own `etl_loaded_at` ingest audit
-      # column, under the SAME name on all three - which is what gold tables
-      # actually look like. A per-table `exclude:` prunes it inside the source
-      # query (ADR-25), so it is never scanned, transferred, or materialized.
-      # This is source-side reduction, distinct from the models'
-      # `features.exclude`, which drops columns AFTER materialization: three
-      # identically-named columns would collide in the panel long before a
-      # model could ignore them.
-      #
-      # Drop-list rather than a `columns:` keep-list here because the tables'
-      # width is a knob (`--filler-columns`), so an enumerated keep-list would
-      # go stale every time the stress shape changed.
-      features:
-        - source: source('lake', 'demographic_history')
-          using: [customer_id, inference_date]
-          exclude: [etl_loaded_at]
-        - source: source('lake', 'login_history')
-          using: [customer_id, inference_date]
-          exclude: [etl_loaded_at]
-        - source: source('lake', 'transaction_history')
-          using: [safe_id, inference_date]
-          exclude: [etl_loaded_at]
-    label:
-      column: is_churn
-      definition: "churned during the month after inference_date"
+    description: Monthly churn panel, joined upstream from population + labels + three feature histories.
+    source: source('lake', 'monthly_panel')
+    # No `columns:` panel contract here on purpose. The contract is the right
+    # default for a real panel (see monthly_churn_training.yml, which declares
+    # one), but this table's width is a deliberate stress knob
+    # (`--filler-columns`, hundreds in the stress shape), so an enumerated list
+    # would go stale every time the shape changed. The models' committed
+    # `features.include` lists carry the review burden instead.
+    #
     # Panel sampling: hashing customer_id keeps or drops every snapshot of a
     # customer together, so `--vars '{sample_fraction: 0.25}'` on the dev
     # inner loop trains on a coherent quarter of the population.
     sample_key: customer_id
+    label:
+      column: is_churn
+      definition: "churned during the month after inference_date"
+      # Declarative (ADR-29): the outcome is observed one calendar month after
+      # the prediction date. It joins nothing - the upstream label table is
+      # already keyed by the cohort's own inference_date and only appears once
+      # that window closes - but declaring it is what lets mbt check that the
+      # embargo below and the scoring pipeline's ground_truth.maturity agree.
+      horizon: "1mo"
     split:
       strategy: temporal
       time_column: inference_date
@@ -60,9 +45,21 @@ datasets:
       # The 2026-06-01 cohort stays out on purpose: it is the scoring batch.
       train: "2025-07-01:2026-04-01"
       test: "2026-04-01:2026-06-01"
+      # At least the label horizon: a training row's outcome is observed a
+      # month later, so without this the last training cohort's outcome falls
+      # inside the test window.
+      embargo: "1mo"
     checks:
       - class_balance_report
       - no_future_columns
       - not_null:
           columns: [is_churn, inference_date, as_of_date, customer_id, safe_id]
+      # The upstream join can no longer be measured from here, so the two
+      # things it used to guarantee are asserted on the result instead: one row
+      # per customer per cohort (a non-unique feature table would have fanned
+      # the population out), and a volume floor that turns a silently collapsed
+      # join into a loud failure.
+      - unique:
+          columns: [customer_id, inference_date]
+      - row_count: {min: 1000}
     tags: [churn, wide]

@@ -6,9 +6,29 @@ datasets:
   - name: monthly_churn_training
     description: Active subscribers per month-start snapshot, labeled with 30-day churn.
     source: source('lake', 'monthly_subscribers')
+    # The panel contract (ADR-29): the exact column set this dataset expects
+    # from its relation. An undeclared column fails the build, so a column
+    # arriving upstream cannot enter the training set until this list asks for
+    # it - which is what keeps "we added a feature" a reviewed diff even when
+    # the relation is built somewhere else entirely. It asserts and never
+    # selects; the models' `features.include` chooses among these.
+    columns:
+      - user_id
+      - inference_date
+      - is_active
+      - tenure_days
+      - monthly_usage
+      - support_tickets
+      - plan_type
+      - weekly_logins
+      - signup_channel
+      - churned_30d
     label:
       column: churned_30d
       definition: "cancelled within 30 days of the month-start snapshot"
+      # Declarative: the outcome is observed 30 days after the snapshot. It
+      # joins nothing, but it is what makes the embargo below checkable.
+      horizon: "30d"
     filters:
       - "is_active = true"
       - "tenure_days >= 30"
@@ -20,6 +40,10 @@ datasets:
       # starts (2025-07-01 .. 2026-04-01), evaluate on the two freshest.
       train: "-365d:-62d"
       test: "-62d:now"
+      # At least the label horizon: a training row's outcome lands 30 days
+      # later, so without this the last training month's outcome falls inside
+      # the test window.
+      embargo: "30d"
     checks:
       # label_leakage_scan is auto-appended to every labeled dataset; this
       # data carries no teaching leak (no account_status column), so no

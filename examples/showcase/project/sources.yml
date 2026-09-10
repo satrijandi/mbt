@@ -91,6 +91,24 @@ sources:
         path: transaction_history/*.parquet
         identifier: MBT_SHOWCASE_TRANSACTION_HISTORY
         description: Monthly transaction features keyed by (safe_id, inference_date); rows describe balances as of the previous day.
+      # The panel the wide cadence actually reads (ADR-29): the five gold
+      # tables above, joined upstream into one relation. On the lake and Spark
+      # planes that join is a step in scripts/generate_wide_data.py; on the
+      # Snowflake plane it is a DYNAMIC TABLE, which is what a dbt deployment
+      # would own. mbt declares one relation and never sees the join.
+      - name: monthly_panel
+        path: monthly_panel/*.parquet
+        identifier: MBT_SHOWCASE_MONTHLY_PANEL
+        description: >-
+          The monthly training panel: population joined to matured labels (INNER, so a
+          cohort whose outcome window has not closed drops out) and to the three feature
+          histories on their own entity keys. One row per customer per inference_date.
+      - name: monthly_panel_scoring
+        path: monthly_panel_scoring/*.parquet
+        identifier: MBT_SHOWCASE_MONTHLY_PANEL_SCORING
+        description: >-
+          The serving twin of monthly_panel: identical features, no label and no label
+          join, so the newest cohort survives. Built from the same join definition.
       - name: wide_churn_outcomes
         path: wide_churn_outcomes/*.parquet
         identifier: MBT_SHOWCASE_WIDE_CHURN_OUTCOMES

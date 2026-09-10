@@ -435,6 +435,25 @@ def _duration_days(duration: str) -> float:
     return abs(value) * _NOMINAL_DAYS[unit]
 
 
+def _newest_row_age_days(window: str | None) -> float:
+    """How old the freshest row in a scoring batch is, at minimum, when scored.
+
+    Read off the window's END bound: ``"-31d:-28d"`` cannot contain anything
+    newer than 28 days, while an end of ``now`` (or no window at all) admits a
+    row scored on its own inference date. An absolute end is anchor-relative
+    and unknowable here, so it counts as zero - the conservative direction.
+    """
+    if window is None:
+        return 0.0
+    try:
+        end = parse_window(window).end
+    except ConfigError:
+        return 0.0  # reported by _validate_scoring_windows in the same pass
+    if end.kind != "duration" or end.delta is None:
+        return 0.0
+    return max(0.0, -(end.delta.total_seconds() / 86400.0) - end.months * _NOMINAL_DAYS["mo"])
+
+
 def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
     """Warn on split configurations that invite leakage (FR-RES-09).
 
@@ -1201,14 +1220,19 @@ def _check_maturity_vs_horizon(
     dataset_by_name: dict[str, ParsedResource],
     report: ParseReport,
 ) -> None:
-    """`ground_truth.maturity` must not be shorter than the label horizon.
+    """`ground_truth.maturity` must reach the label horizon (ADR-29).
 
-    A prediction run is evaluated once ``scored_at + maturity`` has passed. If
-    that is shorter than the window in which the outcome is actually observed,
-    the monitor grades predictions against labels that have not happened yet,
-    and the realized metrics are quietly wrong rather than missing. The three
-    places a project states this one number (``label.horizon``,
-    ``split.embargo``, ``ground_truth.maturity``) now have to agree (ADR-29).
+    A prediction run is evaluated once ``scored_at + maturity`` has passed; the
+    outcome of a scored row is observed at ``inference_date + horizon``. Those
+    are anchored to different instants, and the scoring window is what bridges
+    them: a batch selected with ``window: "-31d:-28d"`` holds rows that are
+    already at least 28 days old when they are scored, so it needs 28 days less
+    maturity than one whose window ends at ``now``.
+
+    So the bar is ``maturity + (minimum age of the newest scored row) >=
+    horizon``, and the newest row's age comes from the window's END bound. Below
+    it, the monitor grades predictions against outcomes that have not been
+    observed, and the realized metrics are quietly wrong rather than missing.
     """
     if spec.ground_truth is None:
         return
@@ -1226,7 +1250,8 @@ def _check_maturity_vs_horizon(
     if horizon is None:
         return
     try:
-        too_short = _duration_days(spec.ground_truth.maturity) < _duration_days(horizon)
+        reach = _duration_days(spec.ground_truth.maturity) + _newest_row_age_days(spec.input.window)
+        too_short = reach < _duration_days(horizon)
     except ValueError:
         # A malformed maturity is already reported by _validate_scoring_windows,
         # and parsing collects every error in one pass rather than stopping, so
@@ -1235,14 +1260,15 @@ def _check_maturity_vs_horizon(
         return
     if too_short:
         report.warning(
-            f"ground_truth.maturity ({spec.ground_truth.maturity}) is shorter "
-            f"than the label horizon ({horizon}) declared by dataset "
+            f"ground_truth.maturity ({spec.ground_truth.maturity}) does not "
+            f"reach the label horizon ({horizon}) declared by dataset "
             f"{ds_spec.name!r}: predictions would be evaluated against outcomes "
             "that have not been observed yet",
             file=scoring.path,
             resource=scoring.unique_id,
             field_path="/ground_truth/maturity",
-            hint=f"set ground_truth.maturity to at least {horizon}",
+            hint="raise ground_truth.maturity, or end the input window earlier "
+            "than 'now' so the batch is already partly matured when it is scored",
         )
 
 

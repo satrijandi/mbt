@@ -110,6 +110,53 @@ WIDE_TABLES: frozenset[str] = frozenset(
 )
 
 
+#: The panels mbt actually reads on this plane (ADR-29): one relation per
+#: dataset, built upstream by a DYNAMIC TABLE over the six tables above. That
+#: is the warehouse-native stand-in for the dbt model a real deployment owns,
+#: and it is why it must be a dynamic table rather than a view: a dynamic table
+#: has its own rows, so both the change token and --deep-snapshot's HASH_AGG
+#: reflect what the panel actually contains.
+#:
+#: `_scoring` is the serving twin: the same joins, minus the label and its
+#: INNER join, so the newest cohort survives. They share one definition here
+#: for the reason ADR-29 gives - two relations that must stay in lockstep
+#: should not be written twice.
+PANEL_FEATURE_JOINS = """
+  JOIN (SELECT * EXCLUDE (etl_loaded_at) FROM {demographic_history}) AS demo
+       USING (customer_id, inference_date)
+  JOIN (SELECT * EXCLUDE (etl_loaded_at) FROM {login_history}) AS login
+       USING (customer_id, inference_date)
+  JOIN (SELECT * EXCLUDE (etl_loaded_at) FROM {transaction_history}) AS txn
+       USING (safe_id, inference_date)
+"""
+
+#: Panel name -> the label join that distinguishes it (empty for serving).
+PANELS: dict[str, str] = {
+    "monthly_panel": "JOIN {monthly_labels} AS lbl USING (customer_id, inference_date)",
+    "monthly_panel_scoring": "",
+}
+
+#: How stale the panel may be before Snowflake refreshes it. mbt's
+#: `freshness: {max_lag: ...}` dataset check guards the same property from the
+#: consumer side, so a lag that stops being honored fails a build rather than
+#: silently training on old data.
+PANEL_TARGET_LAG = "1 hour"
+
+
+def panel_sql(database: str, schema: str, panel: str, warehouse: str) -> str:
+    """The DDL for one panel dynamic table."""
+    refs = {source: f"{database}.{schema}.{table_name(source)}" for source in TABLES}
+    joins = PANEL_FEATURE_JOINS.format(**refs)
+    label_join = PANELS[panel].format(**refs)
+    return (
+        f"CREATE OR REPLACE DYNAMIC TABLE {database}.{schema}.{table_name(panel)}\n"
+        f"  TARGET_LAG = '{PANEL_TARGET_LAG}'\n"
+        f"  WAREHOUSE = {warehouse}\n"
+        f"AS SELECT * FROM {refs['monthly_population']} AS pop\n"
+        f"  {label_join}{joins}"
+    )
+
+
 def table_name(source: str) -> str:
     return f"{PREFIX}{source.upper()}"
 
@@ -300,6 +347,11 @@ def main(argv: list[str] | None = None) -> int:
         sample = "monthly_population"
         print(f"\nDDL for {table_name(sample)} (the rest follow the same mapping):\n")
         print(create_table_sql(database, schema, table_name(sample), read_table(TABLES[sample])))
+        warehouse = _env("warehouse") or "ML_WH"
+        print("\nThe panels mbt reads (ADR-29) - one relation per dataset:\n")
+        for panel in PANELS:
+            print(panel_sql(database, schema, panel, warehouse))
+            print()
         return 0
 
     config = _connection_config()
@@ -373,11 +425,24 @@ def main(argv: list[str] | None = None) -> int:
             if not success:
                 raise SystemExit(f"failed loading {database}.{schema}.{name}")
             print(f"loaded {database}.{schema}.{name:40s} {rows:>8,} rows")
+
+        # The panels come last: a dynamic table refuses to be created over
+        # tables that do not exist yet, and its first refresh reads them.
+        warehouse = str(config.get("warehouse") or "")
+        if not warehouse:
+            raise SystemExit("SNOWFLAKE_WAREHOUSE is required to create the panel dynamic tables")
+        for panel in PANELS:
+            panel_cursor = connection.cursor()
+            try:
+                panel_cursor.execute(panel_sql(database, schema, panel, warehouse))
+            finally:
+                panel_cursor.close()
+            print(f"created {database}.{schema}.{table_name(panel):40s}    dynamic table")
     finally:
         connection.close()
 
     print(
-        f"\n{len(TABLES)} tables ready in {database}.{schema}.\n"
+        f"\n{len(TABLES)} tables and {len(PANELS)} panels ready in {database}.{schema}.\n"
         "Next: uv run mbt build --project-dir examples/showcase/project "
         "--target snowflake --select tag:wide"
     )

@@ -246,6 +246,7 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
     _write("transaction_history", txn_parts)
     assert newest_cohort is not None and newest_outcome is not None
     _write("wide_churn_outcomes", {"customer_id": newest_cohort, "is_churn": newest_outcome})
+    _write_panels(out)
 
     total = sum(len(p["customer_id"]) for p in demo_parts)
     rate = np.concatenate(labels["is_churn"]).mean()
@@ -255,6 +256,72 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
     width = len(demo_parts[0]) + len(login_parts[0]) + len(txn_parts[0]) - 4 - 3
     print(f"population rows: {total}, churn rate: {rate:.1%}, joined feature columns: ~{width}")
     print(f"newest cohort (scoring batch {MONTHS[-1]:%Y-%m-%d}): {newest_cohort.size} customers")
+
+
+#: The gold-layer join, expressed once. `mbt_panel` is the training relation
+#: (labelled, inner-joined so an immature cohort drops out) and
+#: `mbt_panel_scoring` is the serving one (the same features, no label). They
+#: share this one definition for the reason ADR-29 spells out: two relations
+#: that must stay in lockstep should not be written twice.
+_PANEL_FEATURE_JOINS = """
+  JOIN (SELECT * EXCLUDE (etl_loaded_at)
+        FROM read_parquet('{root}/demographic_history/*.parquet')) AS demo
+       USING (customer_id, inference_date)
+  JOIN (SELECT * EXCLUDE (etl_loaded_at)
+        FROM read_parquet('{root}/login_history/*.parquet')) AS login
+       USING (customer_id, inference_date)
+  JOIN (SELECT * EXCLUDE (etl_loaded_at)
+        FROM read_parquet('{root}/transaction_history/*.parquet')) AS txn
+       USING (safe_id, inference_date)
+"""
+
+
+def _write_panels(out: Path) -> None:
+    """Join the five gold tables into the two panels mbt actually reads.
+
+    This stands in for the dbt model a real deployment would own (ADR-29): mbt
+    declares one relation per dataset and the join lives upstream. Doing it here
+    with DuckDB rather than in mbt is the whole point - it is the same SQL a dbt
+    model would hold, and the Snowflake plane materializes it as a dynamic table.
+
+    The label join is INNER: a cohort whose outcome window has not closed is not
+    a training example, so the newest cohort drops out of the training panel and
+    survives in the scoring one. `etl_loaded_at` is pruned per table here, where
+    it is a join concern - all three feature tables carry it under the same name
+    and it would collide in the panel otherwise.
+    """
+    import duckdb
+
+    root = out.as_posix()
+    joins = _PANEL_FEATURE_JOINS.format(root=root)
+    con = duckdb.connect()
+    try:
+        for name, label_join in (
+            (
+                "monthly_panel",
+                f"JOIN read_parquet('{root}/monthly_labels/*.parquet') AS lbl "
+                "USING (customer_id, inference_date)",
+            ),
+            ("monthly_panel_scoring", ""),
+        ):
+            dest = out / name
+            dest.mkdir(parents=True, exist_ok=True)
+            con.execute(
+                f"COPY (SELECT * FROM read_parquet('{root}/monthly_population/*.parquet') AS pop "
+                f"{label_join}{joins}) "
+                f"TO '{(dest / 'part-000.parquet').as_posix()}' (FORMAT PARQUET)"
+            )
+        rows = con.execute(
+            f"SELECT count(*) FROM read_parquet('{root}/monthly_panel/*.parquet')"
+        ).fetchone()
+        columns = con.execute(
+            f"SELECT count(*) FROM (DESCRIBE SELECT * "
+            f"FROM read_parquet('{root}/monthly_panel/*.parquet'))"
+        ).fetchone()
+    finally:
+        con.close()
+    assert rows is not None and columns is not None
+    print(f"joined panel: {rows[0]} rows x {columns[0]} columns (monthly_panel)")
 
 
 def main() -> None:

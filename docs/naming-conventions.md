@@ -34,10 +34,10 @@ Feature tables and the label all join on `inference_date`; `split.time_column` i
 ## Rules that keep the convention leakage-safe in mbt
 
 - **Label tables are keyed by `inference_date`** (the cohort's own prediction date) and rows appear only once the outcome window has closed - the gold-layer label contract.
-  A raw upstream feed keyed by observation date is joined with `time_offset` instead (ADR-22); encode the offset in exactly one place.
+  A raw upstream feed keyed by observation date is realigned in the panel's own join; encode the offset in exactly one place, and state it in the dataset's `label.horizon` so mbt can check the embargo and the ground-truth maturity against it (ADR-29).
 - **Keys, lineage, and audit columns never become features.** mbt auto-drops only `split.time_column` (`inference_date`) at train time; everything else the spine carries - the entity ids, `as_of_date`, `loaded_at_time` - must be listed in `features.exclude`, or a trainer will rightly refuse the raw timestamp.
 - **Audit columns never become features.** Everything in a joined table lands in the training panel, so `loaded_at_time` belongs in the model's `features.exclude` list (the DS ignored-columns contract, honored by the showcase's selection funnel); mbt's `no_future_columns` check backstops any timestamp that leaks past its split window.
-- **Joined gold tables need disjoint non-key column names.** mbt's multi-table joins merge key columns and pass everything else through, so two feature tables both carrying `loaded_at_time` would collide in the panel; keep shared-name audit columns out of tables that get joined together (the showcase carries `loaded_at_time` on the spine only).
+- **Joined gold tables need disjoint non-key column names.** The join merges key columns and passes everything else through, so two feature tables both carrying `loaded_at_time` would collide in the panel; keep shared-name audit columns out of tables that get joined together, or prune them in the join (the showcase's panel drops each feature table's `etl_loaded_at` inside its own subquery and carries `loaded_at_time` from the spine only). Since ADR-29 that join lives upstream, so this is a rule for whoever builds the panel - a dbt model, or the showcase's generator.
 - **The orchestrator hands mbt its logical date.** A scheduled DAG passes `execution_date` as `mbt build/score --anchor`; every window (`train:`, `test:`, scoring `window:`) resolves against that anchor, which is what makes backfills and reruns reproducible.
 
 ## Adoption status
