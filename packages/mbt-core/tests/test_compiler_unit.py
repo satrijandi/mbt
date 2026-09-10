@@ -226,39 +226,3 @@ def test_snapshot_pinning_failure_is_a_compilation_error(
         compile_with_vars(demo_project, fake_registry)
     assert "lakehouse.subscribers" in excinfo.value.message
     assert "disk on fire" in excinfo.value.message
-
-
-def test_scoring_inputs_snapshot_combines_spine_and_features(
-    demo_project: Path, fake_registry: AdapterRegistry
-) -> None:
-    write(
-        demo_project / "sources.yml",
-        """
-        sources:
-          - name: lakehouse
-            tables:
-              - name: subscribers
-                path: data/subscribers/*.parquet
-              - name: extra_features
-                path: data/subscribers/*.parquet
-        """,
-    )
-    write(
-        demo_project / "scoring/inputs_form.yml",
-        """
-        scoring:
-          - name: sc_inputs
-            owner: ds@example.com
-            model: ref('churn_model')
-            input:
-              inputs:
-                spine: source('lakehouse', 'subscribers')
-                features: ["source('lakehouse', 'extra_features')"]
-                join_key: user_id
-            output: {path: predictions/scores, columns: [user_id]}
-        """,
-    )
-    manifest = compile_with_vars(demo_project, fake_registry)
-    node = manifest.nodes["scoring.demo.sc_inputs"]
-    assert node.snapshot_id and node.snapshot_id.startswith("sha256:")
-    assert node.snapshot_id != manifest.nodes[DS].snapshot_id  # combined, not single

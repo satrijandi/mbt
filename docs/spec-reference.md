@@ -225,12 +225,11 @@ datasets:
       - schema: {columns: {churned_90d: int64}}
       - not_null: {columns: [churned_90d]}
       # each listed value must be distinct within every split (nulls ignored):
-      # catches a multi-table join that fanned the population spine out on a
-      # non-unique feature/label key
-      - unique: {columns: [user_id]}
-      # with source:, unique runs PRE-JOIN against the raw table, treating the
-      # columns as one composite key - the 1:1 join-cardinality contract that
-      # stops the fan-out before it happens and blames the offending table
+      # catches an upstream join that fanned the panel out on a non-unique key
+      - unique: {columns: [user_id, inference_date]}
+      # with source:, unique runs against a RAW table instead of the panel,
+      # treating the columns as one composite key - so you can assert the key
+      # uniqueness your panel depends on, on the table that owes it
       - unique: {source: lakehouse.txn_features, columns: [safe_id, snapshot_date]}
       # a column's non-null values must all lie in the allowed set (nulls
       # ignored): catches a categorical that drifted to an unexpected level
@@ -240,13 +239,9 @@ datasets:
       # in the referenced RAW source's field (parent pulled as DISTINCT via the
       # data adapter - size the referenced table like a dimension)
       - relationships: {column: plan_id, to: lakehouse.plans, field: id}
-      # population-spine datasets record how many spine rows survived the
-      # inner label join (before filters/sampling/windows); this floor turns a
-      # quiet partial drop - labels off the offset grid - into a loud failure
-      - label_join_coverage: {min_fraction: 0.95}
       # the materialized dataset's total row count (all splits) must stay within
-      # bounds: a volume floor/ceiling that turns a silent 90%-drop (labels off
-      # the join's offset grid) into a loud build failure
+      # bounds: a volume floor/ceiling that turns a silently collapsed upstream
+      # join into a loud build failure instead of a quietly smaller model
       - row_count: {min: 1000}
       # the newest row must be within max_lag of the anchor ("now"): an
       # upstream-is-stale guard, so a scheduled retrain fails loudly instead of
@@ -322,9 +317,9 @@ numbers and shift by real calendar months (`-3mo` is a true quarter, not
 `90d`), clamping the day (`Jan 31 - 1mo -> Feb 28`).
 
 **Embargo (temporal only):** `embargo: <duration>` drops that much off the END
-of the resolved train window, so training rows whose label horizon (the
-`label.time_offset`) reaches into the evaluation window cannot leak - set it to
-at least the label horizon. It is applied in the compiler, so every data adapter
+of the resolved train window, so training rows whose label horizon (declared
+as `label.horizon`) reaches into the evaluation window cannot leak - set it to
+at least that horizon. It is applied in the compiler, so every data adapter
 gets the embargoed window; an embargo that consumes the whole train window is a
 compile error.
 
@@ -352,92 +347,6 @@ everywhere but can differ for raw TIMESTAMP columns (session formats), so
 prefer id/date sampling keys.
 Hash-bucket fractions are approximate (each row lands independently); a
 temporal split, the default, is window-based and unaffected by all of this.
-
-### Multi-table datasets and sampling keys
-
-```yaml
-datasets:
-  - name: churn_training_set
-    inputs:
-      label: source('snowflake', 'churn_labels')      # the spine: defines examples
-      features:
-        - source('snowflake', 'customer_features')
-        - source('snowflake', 'usage_features')
-      join_key: [customer_id, snapshot_date]
-      join: left                                       # default; or inner
-    label:
-      column: churned_90d
-    sample_key: [customer_id]                          # stable row identity
-    split: {strategy: temporal, time_column: snapshot_date,
-            train: "-180d:-28d", test: "-28d:now"}
-```
-
-- Feature tables LEFT JOIN onto the label table by `join_key`; examples with
-  missing features arrive with NULLs (tree adapters handle them natively).
-  Column names must be unique across tables apart from the join key(s).
-- Every referenced table is a DAG edge; the dataset's pinned snapshot
-  combines all of them, so any input changing marks it `state:modified`.
-- `sample_key` (defaults to the join key) drives deterministic sampling and
-  seeded random splits: rows are kept when
-  `hash(key) % 1e6 < sample_fraction * 1e6`, pushed down into the source
-  query. Same fraction -> same rows; smaller fractions are subsets of
-  larger ones. Strongly recommended on wide tables.
-
-### Population spines, per-table join keys, and label offsets (ADR-22)
-
-When the examples are defined by a population/cohort table rather than the
-label table - and feature tables join by different keys - declare a
-`population` spine:
-
-```yaml
-datasets:
-  - name: wide_churn_training
-    inputs:
-      population: source('lake', 'monthly_population')  # spine: defines examples
-      label:
-        source: source('lake', 'monthly_labels')
-        using: [customer_id, snapshot_date]
-        time_offset: "1mo"      # label.snapshot_date = spine's + 1 calendar month
-      features:
-        - source: source('lake', 'demographic_history')
-          using: [customer_id, snapshot_date]
-          columns: [age_band, tenure_months]   # keep-list: scan ONLY these (ADR-25)
-        - source: source('lake', 'transaction_history')
-          using: [safe_id, snapshot_date]   # key introduced by the population
-          exclude: [etl_loaded_at]          # drop-list: prune bookkeeping at the source
-    sample_key: [customer_id]   # panel sampling: keeps whole customers
-    label:
-      column: is_churn
-    split:
-      strategy: temporal
-      time_column: snapshot_date
-      train: "2025-07-01:2026-04-01"    # explicit ISO date ranges work too
-      test: "2026-04-01:2026-06-02"
-```
-
-- Feature entries are bare `source()` strings (joined by `join_key`) or
-  `{source, using}` mappings with their own USING-style columns, applied in
-  declaration order - so a column introduced by an earlier join (the
-  population's `safe_id`) is usable by a later one. The field is named
-  `using`, not `on`: bare `on` is a YAML 1.1 boolean.
-- Each mapping entry may carry a per-table column projection (ADR-25):
-  `columns` keeps ONLY the named payload columns (join columns are always
-  kept), `exclude` drops the named columns; at most one per entry, and a
-  join column cannot be excluded. The projection is pushed into the source
-  query itself (a subquery on Snowflake/DuckDB, a select/drop on Spark), so
-  pruned columns of a wide gold table are never scanned or transferred -
-  source-side workload reduction, distinct from the model's
-  `features.include/exclude`, which selects after materialization.
-- The label join is always **inner** when a population is present: an
-  example without an observed outcome is not a training example, so
-  population rows whose labels have not matured yet drop out.
-- `time_offset` (`1mo`, `-28d`, `2w`, `12h`; `mo` is a calendar month)
-  shifts the spine's `split.time_column` when matching the label's
-  same-named column, declaring the outcome's observation delay instead of
-  pre-aligning dates upstream. The label's join columns are projected away;
-  the spine's prediction date is the one true `time_column`.
-- Scoring inputs mirror this shape with `spine:` (the same population
-  table, no label) and the same per-table `using` support.
 
 ### Warehouse sources (Snowflake)
 
@@ -700,10 +609,10 @@ scoring:
     stage: production                   # which champion alias to load (default)
 
     input:                              # unlabeled, unsplit by design
-      source: source('lakehouse', 'scoring_batch')
-      # or multi-table, like dataset inputs but with a spine instead of a label:
-      # inputs: {spine: source(...), features: [source(...)], join_key: user_id}
-      # feature entries may carry their own columns: {source: ..., using: [...]}
+      # ONE relation, the serving twin of the training panel: identical
+      # features, no label. Build both from one upstream definition - they are
+      # two objects that have to stay in lockstep (ADR-29).
+      source: source('lakehouse', 'ml_churn_panel_scoring')
       filters: ["is_active = true"]     # SQL WHERE fragments, ANDed
       time_column: snapshot_date        # optional
       window: "-7d:now"                 # optional; resolved against the anchor

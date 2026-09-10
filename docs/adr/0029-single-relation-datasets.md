@@ -54,7 +54,12 @@ mbt is, and it is where those teams already work.
    gates, the seed and the feature list, even though the join that produced the
    column lives in another repo.
 
-3. **`sample_key` is required.**
+3. **`sample_key` is required**, and validated non-empty - a required field
+   that can still be `[]` would leave the all-columns fallback reachable, which
+   is the whole failure it exists to end. That in turn makes the keyless guards
+   in the Snowflake and Spark adapters unreachable for datasets, so they are
+   gone; a scoring input's `sample_key` stays optional, and that is where the
+   runtime guard still bites.
    With `inputs.join_key` gone there is no fallback but the all-columns digest,
    and `_digest_columns` documents what that costs: adding one column to a
    source re-buckets every row, and a measured ten-row case moved three of them
@@ -100,13 +105,17 @@ Recording them here rather than letting them vanish quietly:
   mbt cannot see that ratio once the join is upstream.
   Re-home it as a dbt test on the panel model; mbt's `row_count: {min: N}`
   floor remains the catastrophic-drop backstop.
-- **Pre-join `unique: {source: <table>, columns: [...]}`**, the 1:1
-  join-cardinality contract that blamed the offending table before a fan-out
-  could happen.
-  Re-home it as dbt's own `unique` / `unique_combination_of_columns` tests on
-  each feature table's key.
-  The post-materialization `unique: {columns: [...]}` form stays and still
-  catches a fan-out that reached the panel.
+- **`unique: {source: <table>, columns: [...]}`** was framed as the 1:1
+  join-cardinality contract - it blamed the offending table before mbt's own
+  join could fan the spine out. That framing is gone with the join, but the
+  check is not: it asserts that a raw table's key is unique, which is still
+  worth asserting from the consumer side even when someone else does the
+  joining, and it costs nothing to keep (`SourceAccess` stays for
+  `relationships` regardless). It is now "assert the key uniqueness your panel
+  depends on, against the table that owes it", and dbt's own `unique` tests are
+  the better place for it when you control that repo.
+  The post-materialization `unique: {columns: [...]}` form is unchanged and
+  still catches a fan-out that reached the panel.
 - **`label.time_offset`** as executable join semantics, replaced by the
   declarative `label.horizon` above.
 
@@ -184,11 +193,13 @@ change the meaning of every project's existing spec.
   validator, the `sample_key_columns` fallback chain, and the join builders in
   three adapters. `DataBuildContext.source_tables` keeps its dict shape with one
   entry; `SourceAccess` stays, because `relationships` still reads a raw source.
-- **Config hashes flip once.** `DatasetSpec` and `LabelSpec` gained fields, and
-  `config_hash` is a full rendered dump, so every dataset is `state:modified`
-  for one cycle even where nothing was declared. The ADR-7 caveat, exactly as
-  ADR-16 and ADR-22 recorded it for their own rollouts. Golden manifests
-  regenerate.
+- **Config hashes flip twice, not once.** `config_hash` is a full rendered dump,
+  so both halves of this change move it: adding `columns` and `label.horizon`,
+  and then REMOVING `inputs` (a dropped key changes the dump exactly as an added
+  one does). Landing them in separate commits means two `state:modified` cycles
+  rather than one, which is the price of keeping each step independently
+  revertible. The ADR-7 caveat, exactly as ADR-16 and ADR-22 recorded it for
+  their own rollouts. Golden manifests regenerate for both.
 - **Snowflake input hashes flip once**, independently, because `snapshot_id`
   now includes a column fingerprint. This moves `input_hash` rather than
   `config_hash`, so it marks Snowflake-backed nodes modified on the first

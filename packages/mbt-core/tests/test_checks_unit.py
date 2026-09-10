@@ -14,6 +14,7 @@ def _spec(checks: list) -> DatasetSpec:
         {
             "name": "unit_ds",
             "source": "source('a', 'b')",
+            "sample_key": "user_id",
             "label": {"column": "y"},
             "split": {
                 "strategy": "temporal",
@@ -298,50 +299,6 @@ class _CoverageHandle(InMemoryDatasetHandle):
     @property
     def label_join_coverage(self) -> dict | None:
         return self._coverage
-
-
-def test_label_join_coverage_enforces_the_floor() -> None:
-    spec = _spec(
-        [
-            {"label_join_coverage": {"min_fraction": 0.95}},
-            {"label_leakage_scan": {"enabled": False}},
-        ]
-    )
-    low = _CoverageHandle({"spine_rows": 520, "matched_rows": 480})
-    results = {r.name: r for r in run_checks(spec, low, {}, resource="d")}
-    assert not results["label_join_coverage"].passed
-    assert "matched 480 of 520 spine rows (92.3%)" in results["label_join_coverage"].message
-
-    lenient = _spec(
-        [
-            {"label_join_coverage": {"min_fraction": 0.9}},
-            {"label_leakage_scan": {"enabled": False}},
-        ]
-    )
-    results = {r.name: r for r in run_checks(lenient, low, {}, resource="d")}
-    assert results["label_join_coverage"].passed
-    assert "92.3%" in results["label_join_coverage"].message  # reports even on pass
-
-
-def test_label_join_coverage_degenerate_inputs_fail_clearly() -> None:
-    checks = [
-        {"label_join_coverage": {"min_fraction": 0.9}},
-        {"label_leakage_scan": {"enabled": False}},
-    ]
-    none = _CoverageHandle(None)
-    results = {r.name: r for r in run_checks(_spec(checks), none, {}, resource="d")}
-    assert not results["label_join_coverage"].passed
-    assert "no label-join coverage recorded" in results["label_join_coverage"].message
-
-    empty = _CoverageHandle({"spine_rows": 0, "matched_rows": 0})
-    results = {r.name: r for r in run_checks(_spec(checks), empty, {}, resource="d")}
-    assert not results["label_join_coverage"].passed
-    assert "0 rows" in results["label_join_coverage"].message
-
-    bad = _spec([{"label_join_coverage": {}}, {"label_leakage_scan": {"enabled": False}}])
-    results = {r.name: r for r in run_checks(bad, _CoverageHandle(None), {}, resource="d")}
-    assert not results["label_join_coverage"].passed
-    assert "requires min_fraction in (0, 1]" in results["label_join_coverage"].message
 
 
 def test_run_checks_emits_check_evaluated_per_check() -> None:

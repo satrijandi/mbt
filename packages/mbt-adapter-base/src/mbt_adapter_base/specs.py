@@ -9,7 +9,7 @@ parser layer turns those rejections into did-you-mean suggestions.
 """
 
 import re
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -163,243 +163,19 @@ class SplitSpec(_SpecModel):
 CheckSpec = str | dict[str, dict[str, Any]]
 
 
-class FeatureEntry(NamedTuple):
-    """One normalized feature-table join: source, join columns, projection.
-
-    ``columns``/``exclude`` mirror :class:`FeatureInput`; at most one is set.
-    """
-
-    source: str
-    using: list[str]
-    columns: list[str] | None = None  # keep-list; join columns always kept
-    exclude: list[str] | None = None  # drop-list
-
-    @property
-    def keep_columns(self) -> list[str] | None:
-        """The full projected column list for a keep-list entry (join columns
-        first, then payload, deduplicated), or None when unprojected."""
-        if self.columns is None:
-            return None
-        return list(dict.fromkeys([*self.using, *self.columns]))
-
-
-def _normalize_columns(value: str | list[str] | None) -> list[str] | None:
-    if value is None:
-        return None
-    return [value] if isinstance(value, str) else list(value)
-
-
-def _validate_projection(where: str, entry: FeatureEntry) -> None:
-    """A drop-list must not remove the entry's own join columns (the join
-    needs them); a keep-list may name them redundantly (deduplicated)."""
-    if entry.exclude is None:
-        return
-    clash = sorted(set(entry.exclude) & set(entry.using))
-    if clash:
-        raise ValueError(
-            f"{where} excludes its own join column(s) {clash}: a join column cannot be dropped"
-        )
-
-
-class FeatureInput(_SpecModel):
-    """One feature table with its own USING-style join columns (ADR-22) and
-    an optional per-table column projection (ADR-25).
-
-    ``columns`` keeps ONLY the named payload columns (join columns are always
-    kept); ``exclude`` drops the named columns and keeps the rest. At most one
-    of the two may be set. The projection is pushed into the warehouse/lake
-    query itself, so pruned columns of a huge gold table are never scanned
-    into a training set or scoring batch - this is source-side workload
-    reduction, distinct from the model's ``features.include/exclude`` which
-    selects AFTER materialization.
-
-    The join field is named ``using`` (not ``on``) deliberately: bare ``on``
-    is a YAML 1.1 boolean, so PyYAML would hand pydantic a ``True`` key.
-    """
-
-    source: str  # source() ref
-    using: str | list[str] | None = None  # join columns; default: the dataset join_key
-    columns: str | list[str] | None = None  # keep-list of payload columns
-    exclude: str | list[str] | None = None  # drop-list of columns
-
-    @property
-    def using_columns(self) -> list[str] | None:
-        if self.using is None:
-            return None
-        return [self.using] if isinstance(self.using, str) else list(self.using)
-
-    @property
-    def columns_list(self) -> list[str] | None:
-        return _normalize_columns(self.columns)
-
-    @property
-    def exclude_list(self) -> list[str] | None:
-        return _normalize_columns(self.exclude)
-
-    @model_validator(mode="after")
-    def _shape(self) -> "FeatureInput":
-        if self.using_columns is not None and (
-            not self.using_columns or any(not c for c in self.using_columns)
-        ):
-            raise ValueError("'using' must name at least one non-empty column")
-        if self.columns is not None and self.exclude is not None:
-            raise ValueError(
-                "'columns' (keep-list) and 'exclude' (drop-list) are mutually "
-                "exclusive on a feature table - set at most one"
-            )
-        for field_name, values in (("columns", self.columns_list), ("exclude", self.exclude_list)):
-            if values is not None and (not values or any(not c for c in values)):
-                raise ValueError(f"'{field_name}' must name at least one non-empty column")
-        return self
-
-
-class LabelInput(_SpecModel):
-    """The label table joined onto a population spine (ADR-22).
-
-    ``time_offset`` shifts the spine's ``split.time_column`` when matching
-    the label's same-named column (``label.ts = spine.ts + offset``), so an
-    outcome observed one month after the prediction snapshot is declared as
-    ``time_offset: "1mo"`` instead of pre-aligned upstream. The join-column
-    field is ``using`` for the same YAML 1.1 reason as ``FeatureInput``.
-    """
-
-    source: str  # source() ref
-    using: str | list[str] | None = None  # join columns; default: the dataset join_key
-    time_offset: str | None = None  # e.g. "1mo"; calendar-aware (ADR-22)
-
-    @property
-    def using_columns(self) -> list[str] | None:
-        if self.using is None:
-            return None
-        return [self.using] if isinstance(self.using, str) else list(self.using)
-
-    @model_validator(mode="after")
-    def _shape(self) -> "LabelInput":
-        if self.using_columns is not None and (
-            not self.using_columns or any(not c for c in self.using_columns)
-        ):
-            raise ValueError("'using' must name at least one non-empty column")
-        if self.time_offset is not None:
-            try:
-                parse_time_offset(self.time_offset)
-            except ValueError as exc:
-                raise ValueError(str(exc)) from None
-        return self
-
-
-class DatasetInputs(_SpecModel):
-    """Multi-table dataset construction (ADR-16, ADR-22).
-
-    Without ``population``, the label table is the spine - it defines which
-    examples exist - and feature tables join onto it. With ``population``,
-    the population table is the spine and the label joins like a feature
-    table (always ``inner``: an example without an observed outcome is not
-    a training example), optionally shifted by ``time_offset``.
-
-    Feature tables join in declaration order onto the accumulated relation
-    (``left`` by default, so missing features arrive as NULLs; tree
-    adapters handle those natively), each by its own ``on`` columns or the
-    dataset-level ``join_key``. Column names must be unique across tables
-    apart from each table's join columns.
-    """
-
-    features: list[str | FeatureInput]  # source() refs, or {source, on} mappings
-    label: str | LabelInput  # source() ref; mapping form requires 'population'
-    population: str | None = None  # source() ref to the spine table (ADR-22)
-    join_key: str | list[str] | None = None  # default join columns
-    join: Literal["left", "inner"] = "left"  # feature joins; the label join is inner
-
-    @property
-    def join_columns(self) -> list[str]:
-        if self.join_key is None:
-            return []
-        return [self.join_key] if isinstance(self.join_key, str) else list(self.join_key)
-
-    @property
-    def label_source(self) -> str:
-        return self.label if isinstance(self.label, str) else self.label.source
-
-    @property
-    def label_join_columns(self) -> list[str]:
-        """The label's effective join columns (its ``using``, else ``join_key``)."""
-        if isinstance(self.label, LabelInput) and self.label.using_columns is not None:
-            return self.label.using_columns
-        return self.join_columns
-
-    @property
-    def label_time_offset(self) -> str | None:
-        return self.label.time_offset if isinstance(self.label, LabelInput) else None
-
-    @property
-    def spine(self) -> str:
-        """The table that defines which examples exist."""
-        return self.population if self.population is not None else self.label_source
-
-    @property
-    def feature_entries(self) -> list[FeatureEntry]:
-        """Normalized feature-table joins in declaration order."""
-        entries: list[FeatureEntry] = []
-        for feature in self.features:
-            if isinstance(feature, str):
-                entries.append(FeatureEntry(feature, self.join_columns))
-            else:
-                entries.append(
-                    FeatureEntry(
-                        feature.source,
-                        feature.using_columns or self.join_columns,
-                        feature.columns_list,
-                        feature.exclude_list,
-                    )
-                )
-        return entries
-
-    @property
-    def feature_sources(self) -> list[str]:
-        return [entry.source for entry in self.feature_entries]
-
-    @model_validator(mode="after")
-    def _shape(self) -> "DatasetInputs":
-        if not self.features:
-            raise ValueError("inputs.features must list at least one feature table")
-        if self.join_key is not None and (
-            not self.join_columns or any(not c for c in self.join_columns)
-        ):
-            raise ValueError("inputs.join_key must name at least one non-empty column")
-        for i, entry in enumerate(self.feature_entries):
-            if not entry.using:
-                raise ValueError(
-                    f"inputs.features[{i}] ({entry.source}) has no join columns: "
-                    "give it 'using' or set a dataset-level 'join_key'"
-                )
-            _validate_projection(f"inputs.features[{i}] ({entry.source})", entry)
-        if self.population is None:
-            if isinstance(self.label, LabelInput):
-                raise ValueError(
-                    "the label mapping form ('using'/'time_offset') requires "
-                    "a 'population' spine; without one the label table is the "
-                    "spine and joins nothing"
-                )
-        elif not self.label_join_columns:
-            raise ValueError(
-                "with a 'population' spine the label needs join columns: "
-                "give label 'using' or set a dataset-level 'join_key'"
-            )
-        return self
-
-
 class DatasetSpec(_SpecModel):
     """Declarative training-set construction (TSD §5.5, FR-RES-02).
 
-    Data comes from exactly one of:
-
-    - ``source``: a single table holding features and the label, or
-    - ``inputs``: feature table(s) joined onto a label table by a join key.
+    ``source`` names ONE relation holding the features and the label: a table,
+    a view, or a warehouse dynamic table. Whatever assembles it - joining a
+    population to its labels and feature histories - is upstream and mbt does
+    not model it (ADR-29). What mbt owns is everything below: which rows, which
+    split, which checks, and the statement of what the training set is.
     """
 
     name: str = Field(pattern=NAME_PATTERN)
     description: str = ""
-    source: str | None = None  # "source('lakehouse', 'gold_subscribers')"
-    inputs: DatasetInputs | None = None  # multi-table form
+    source: str  # "source('lakehouse', 'ml_churn_panel')"
     #: The panel contract (ADR-29): the exact column set this dataset expects
     #: from its relation. An undeclared column fails the build, and so does a
     #: declared column that is absent.
@@ -415,10 +191,13 @@ class DatasetSpec(_SpecModel):
     filters: list[str] = Field(default_factory=list)  # SQL WHERE fragments, ANDed
     split: SplitSpec
     #: Stable row-identity column(s) used for deterministic hash sampling and
-    #: seeded random splits. Strongly recommended for wide tables: sampling
-    #: hashes only these columns instead of every column, and warehouse
-    #: adapters push the predicate down into the source query.
-    sample_key: str | list[str] | None = None
+    #: seeded random splits, pushed down into the source query. Required: with
+    #: no declared identity the digest hashes every column, so the column list
+    #: becomes the hash preimage and one column arriving upstream re-buckets
+    #: every row (ADR-29). Use the ENTITY id on a panel whose rows repeat per
+    #: entity - hashing it keeps all of an entity's rows on one side of the
+    #: split, which is what makes a sampled dev run comparable to a full one.
+    sample_key: str | list[str]
     checks: list[CheckSpec] = Field(default_factory=list)
     tests: list[str] = Field(default_factory=list)  # names of Python data tests that apply
     snapshot: str | None = None  # explicit pin; normally pinned at compile
@@ -426,35 +205,13 @@ class DatasetSpec(_SpecModel):
 
     @property
     def sample_key_columns(self) -> list[str]:
-        """Sampling identity: explicit sample_key, else join_key, else the
-        label's join columns, else []."""
-        if self.sample_key is not None:
-            return [self.sample_key] if isinstance(self.sample_key, str) else list(self.sample_key)
-        if self.inputs is not None:
-            return self.inputs.join_columns or self.inputs.label_join_columns
-        return []
+        """The sampling identity, always as a list."""
+        return [self.sample_key] if isinstance(self.sample_key, str) else list(self.sample_key)
 
     @model_validator(mode="after")
-    def _source_xor_inputs(self) -> "DatasetSpec":
-        if (self.source is None) == (self.inputs is None):
-            raise ValueError(
-                "a dataset needs exactly one of 'source' (single table) or "
-                "'inputs' (feature tables + label table with a join key)"
-            )
-        offset = self.inputs.label_time_offset if self.inputs is not None else None
-        if offset is not None:
-            assert self.inputs is not None
-            if self.split.time_column is None:
-                raise ValueError(
-                    "label time_offset shifts the split's 'time_column'; "
-                    "this dataset's split declares none"
-                )
-            if self.split.time_column not in self.inputs.label_join_columns:
-                raise ValueError(
-                    f"label time_offset shifts the split time_column "
-                    f"{self.split.time_column!r}, so it must be one of the "
-                    f"label's join columns {self.inputs.label_join_columns!r}"
-                )
+    def _panel_contract(self) -> "DatasetSpec":
+        if not self.sample_key_columns or not all(self.sample_key_columns):
+            raise ValueError("'sample_key' must name at least one non-empty column")
         if self.columns is not None:
             if not self.columns:
                 raise ValueError(
@@ -761,7 +518,8 @@ class GateSpec(_SpecModel):
     bootstrap_resamples: int = 1000
     #: Metric source (R2-7): ``test`` gates the single held-out test window;
     #: ``backtest`` gates the walk-forward mean (needs ``protocol.backtest_folds``).
-    #: NOT named ``on`` - that is a YAML 1.1 boolean (see FeatureInput.using).
+    #: NOT named ``on`` - that is a YAML 1.1 boolean, so PyYAML would hand
+    #: pydantic a ``True`` key.
     source: Literal["test", "backtest"] = "test"
 
     @model_validator(mode="after")
@@ -1008,80 +766,22 @@ class ExposureSpec(_SpecModel):
     description: str = ""
 
 
-class ScoringInputs(_SpecModel):
-    """Multi-table scoring input: a spine table plus feature tables.
-
-    The spine defines which rows are scored - for a population-spine
-    dataset (ADR-22) it is the same population table, minus the label.
-    Feature tables join onto the accumulated relation in declaration order,
-    each by its own ``on`` columns or the shared ``join_key``, exactly like
-    ``DatasetInputs`` feature tables. There is no label anywhere - scoring
-    inputs are unlabeled by design.
-    """
-
-    spine: str  # source() ref that defines which rows are scored
-    features: list[str | FeatureInput]  # source() refs, or {source, on} mappings
-    join_key: str | list[str] | None = None  # default join columns
-    join: Literal["left", "inner"] = "left"
-
-    @property
-    def join_columns(self) -> list[str]:
-        if self.join_key is None:
-            return []
-        return [self.join_key] if isinstance(self.join_key, str) else list(self.join_key)
-
-    @property
-    def feature_entries(self) -> list[FeatureEntry]:
-        """Normalized feature-table joins in declaration order."""
-        entries: list[FeatureEntry] = []
-        for feature in self.features:
-            if isinstance(feature, str):
-                entries.append(FeatureEntry(feature, self.join_columns))
-            else:
-                entries.append(
-                    FeatureEntry(
-                        feature.source,
-                        feature.using_columns or self.join_columns,
-                        feature.columns_list,
-                        feature.exclude_list,
-                    )
-                )
-        return entries
-
-    @property
-    def feature_sources(self) -> list[str]:
-        return [entry.source for entry in self.feature_entries]
-
-    @model_validator(mode="after")
-    def _shape(self) -> "ScoringInputs":
-        if not self.features:
-            raise ValueError("inputs.features must list at least one feature table")
-        if self.join_key is not None and (
-            not self.join_columns or any(not c for c in self.join_columns)
-        ):
-            raise ValueError("inputs.join_key must name at least one non-empty column")
-        for i, entry in enumerate(self.feature_entries):
-            if not entry.using:
-                raise ValueError(
-                    f"inputs.features[{i}] ({entry.source}) has no join columns: "
-                    "give it 'on' or set an inputs-level 'join_key'"
-                )
-            _validate_projection(f"inputs.features[{i}] ({entry.source})", entry)
-        return self
-
-
 class ScoringInputSpec(_SpecModel):
     """The unlabeled, unsplit batch a scoring pipeline reads (ADR-20).
 
-    Data comes from exactly one of ``source`` (single table) or ``inputs``
-    (spine + feature tables). The optional ``window`` is a window expression
-    over ``time_column``, resolved against the manifest anchor like dataset
-    split windows (ADR-12), so re-scoring is snapshot-driven, never
-    clock-driven.
+    ``source`` names ONE relation, the serving twin of the training panel:
+    identical features, no label (ADR-29). The two are separate upstream
+    objects that must stay in lockstep, which is why the champion's recorded
+    feature columns are enforced here at score time.
+
+    The optional ``window`` is a window expression over ``time_column``,
+    resolved against the manifest anchor like dataset split windows (ADR-12),
+    so re-scoring is snapshot-driven, never clock-driven. Its END bound also
+    says how old the freshest scored row can be, which is what relates
+    ``ground_truth.maturity`` to the dataset's ``label.horizon``.
     """
 
-    source: str | None = None  # "source('lakehouse', 'scoring_batch')"
-    inputs: ScoringInputs | None = None
+    source: str  # "source('lakehouse', 'ml_churn_panel_scoring')"
     filters: list[str] = Field(default_factory=list)  # SQL WHERE fragments, ANDed
     time_column: str | None = None
     window: str | None = None  # window expression, e.g. "-7d:now"
@@ -1089,19 +789,12 @@ class ScoringInputSpec(_SpecModel):
 
     @property
     def sample_key_columns(self) -> list[str]:
-        if self.sample_key is not None:
-            return [self.sample_key] if isinstance(self.sample_key, str) else list(self.sample_key)
-        if self.inputs is not None:
-            return self.inputs.join_columns
-        return []
+        if self.sample_key is None:
+            return []
+        return [self.sample_key] if isinstance(self.sample_key, str) else list(self.sample_key)
 
     @model_validator(mode="after")
     def _shape(self) -> "ScoringInputSpec":
-        if (self.source is None) == (self.inputs is None):
-            raise ValueError(
-                "a scoring input needs exactly one of 'source' (single table) or "
-                "'inputs' (spine + feature tables with a join key)"
-            )
         if self.window is not None and self.time_column is None:
             raise ValueError("'window' requires 'time_column'")
         return self

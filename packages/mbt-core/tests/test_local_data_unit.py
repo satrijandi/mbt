@@ -257,6 +257,7 @@ def test_empty_temporal_split_is_an_error(tmp_path: Path) -> None:
         {
             "name": "churn_temporal",
             "source": ROWS_UID,
+            "sample_key": "user_id",
             "label": {"column": "churned"},
             "split": {
                 "strategy": "temporal",
@@ -412,24 +413,25 @@ def test_declared_sample_key_survives_schema_evolution(tmp_path: Path) -> None:
     assert before == after, "a declared sample_key must survive schema evolution"
 
 
-def test_keyless_sampling_and_splitting_is_an_actionable_error(tmp_path: Path) -> None:
+def test_keyless_scoring_sampling_is_an_actionable_error(tmp_path: Path) -> None:
     """The keyless digest is refused, not warned about (ADR-29).
 
-    It used to warn here and raise on Snowflake and Spark, which meant a spec
-    could pass on the dev plane and fail on the prod one. The parser now
-    requires ``sample_key``; this is the runtime backstop for a spec built
-    in-process, and it is what makes all three planes agree.
+    A dataset cannot reach it at all now - `sample_key` is required on the spec
+    - so a scoring input, whose key stays optional, is what still exercises the
+    guard. It used to warn here and raise on Snowflake and Spark, which meant a
+    spec could pass on the dev plane and fail on the prod one.
     """
     _write_rows(tmp_path)
     adapter = LocalDataAdapter({"root": str(tmp_path)})
+    spec = ScoringInputSpec.model_validate({"source": ROWS_UID})
 
     with pytest.raises(AdapterError, match="no 'sample_key' declared") as excinfo:
-        adapter.build_dataset(
-            _random_spec(sample_key=None),
+        adapter.build_scoring_input(
+            spec,
             _ctx(
                 adapter,
                 _tables(),
-                tmp_path / "target" / "datasets" / "keyless",
+                tmp_path / "target" / "scoring" / "keyless",
                 sample_fraction=0.5,
             ),
         )
@@ -437,14 +439,45 @@ def test_keyless_sampling_and_splitting_is_an_actionable_error(tmp_path: Path) -
 
     # with a key declared the same build runs, and says nothing about it
     quiet = RecordingSink()
-    adapter.build_dataset(
-        _random_spec(sample_key="user_id"),
+    adapter.build_scoring_input(
+        ScoringInputSpec.model_validate({"source": ROWS_UID, "sample_key": "user_id"}),
         _ctx(
             adapter,
             _tables(),
-            tmp_path / "target" / "datasets" / "keyed",
+            tmp_path / "target" / "scoring" / "keyed",
             sample_fraction=0.5,
             events=quiet,
         ),
     )
     assert not [e for e in quiet.events if getattr(e, "level", "") == "warn"]
+
+
+def test_source_level_reads_back_raw_tables(tmp_path: Path) -> None:
+    """The two raw-source reads behind `unique: {source: ...}` and
+    `relationships` (F2/F21).
+
+    These look at a table mbt does NOT otherwise read - a dimension, or an
+    upstream feature table whose key uniqueness the panel depends on - so they
+    survive the join moving upstream (ADR-29): asserting a property of a table
+    you consume is not the same as assembling it.
+    """
+    rows = pa.table(
+        {
+            "user_id": [1, 1, 2, 3, None],
+            "plan": ["basic", "basic", "pro", None, "pro"],
+        }
+    )
+    out = tmp_path / "data" / "dim"
+    out.mkdir(parents=True)
+    pq.write_table(rows, out / "part-000.parquet")
+    adapter = LocalDataAdapter({"root": str(tmp_path)})
+    table = SourceTable(name="dim", path="data/dim/*.parquet")
+
+    # user_id 1 appears twice; the null key is ignored, as in dbt
+    assert adapter.count_source_duplicates(table, ["user_id"]) == 1
+    # the composite key is unique even though user_id alone is not
+    assert adapter.count_source_duplicates(table, ["user_id", "plan"]) == 1
+
+    distinct = adapter.read_source_distinct(table, "plan")
+    assert distinct.column_names == ["value"]
+    assert sorted(distinct.column("value").to_pylist()) == ["basic", "pro"]

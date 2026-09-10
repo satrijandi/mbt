@@ -28,6 +28,7 @@ def _spec(checks) -> DatasetSpec:
         {
             "name": "d",
             "source": "source('a', 'b')",
+            "sample_key": "user_id",
             "label": {"column": "churned"},
             "split": {"time_column": "snapshot_date", "train": "-30d:-7d", "test": "-7d:now"},
             "checks": checks,

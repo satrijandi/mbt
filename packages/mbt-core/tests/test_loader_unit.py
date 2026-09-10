@@ -119,6 +119,7 @@ def test_nested_unknown_field_gets_did_you_mean_and_salvages() -> None:
     raw = {
         "name": "ds",
         "source": "source('a', 'b')",
+        "sample_key": "user_id",
         "label": {"column": "churned"},
         "split": {**VALID_SPLIT, "strategi": "temporal"},
     }
@@ -143,6 +144,7 @@ def test_unknown_field_without_suggestion_lists_valid_fields() -> None:
     raw = {
         "name": "ds",
         "source": "source('a', 'b')",
+        "sample_key": "user_id",
         "label": {"column": "churned"},
         "split": VALID_SPLIT,
         "zzzqqqxyz": 1,
@@ -154,10 +156,18 @@ def test_unknown_field_without_suggestion_lists_valid_fields() -> None:
 
 
 def test_salvage_failure_returns_none() -> None:
-    """Stripping the unknown field exposes a model-validator error: no spec."""
+    """Stripping the unknown field exposes a model-validator error: no spec.
+
+    The panel contract omits the label column, which `_panel_contract` rejects
+    - a failure that only surfaces AFTER the unknown field is stripped, which
+    is the path being pinned. The unknown field is still the reported error.
+    """
     report = ParseReport()
-    raw = {  # neither 'source' nor 'inputs': XOR validator fails after salvage
+    raw = {
         "name": "ds",
+        "source": "source('lakehouse', 'subscribers')",
+        "sample_key": "user_id",
+        "columns": ["user_id"],  # missing the label column
         "label": {"column": "churned"},
         "split": VALID_SPLIT,
         "bogus_field": 1,
@@ -185,11 +195,11 @@ def test_fields_at_defends_against_non_models() -> None:
 
 
 def test_unwrap_model_digs_through_annotations() -> None:
-    from mbt.contracts import DatasetInputs
+    from mbt.contracts import SplitSpec
 
-    assert _unwrap_model(DatasetInputs) is DatasetInputs
-    assert _unwrap_model(DatasetInputs | None) is DatasetInputs
-    assert _unwrap_model(list[DatasetInputs]) is DatasetInputs
+    assert _unwrap_model(SplitSpec) is SplitSpec
+    assert _unwrap_model(SplitSpec | None) is SplitSpec
+    assert _unwrap_model(list[SplitSpec]) is SplitSpec
     assert _unwrap_model(str) is None
     assert _unwrap_model(list[str]) is None
 

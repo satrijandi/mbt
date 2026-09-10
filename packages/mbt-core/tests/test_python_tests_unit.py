@@ -16,6 +16,7 @@ def _dataset_spec() -> DatasetSpec:
         {
             "name": "unit_ds",
             "source": "source('a', 'b')",
+            "sample_key": "user_id",
             "label": {"column": "y"},
             "split": {
                 "strategy": "temporal",

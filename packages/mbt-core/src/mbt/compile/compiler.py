@@ -416,11 +416,7 @@ def _scoring_snapshot(spec: ScoringSpec, snapshots: dict[str, str | None]) -> st
     identity (ADR-20) - labels maturing later must never mark a scoring
     node modified. In the resolved spec, source() calls already rendered
     to source unique_ids."""
-    if spec.input.source is not None:
-        uids = [spec.input.source]
-    else:
-        assert spec.input.inputs is not None  # source XOR inputs, validated
-        uids = [spec.input.inputs.spine, *spec.input.inputs.feature_sources]
+    uids = [spec.input.source]
     return combine_snapshots({uid: snapshots[uid] for uid in uids if uid in snapshots})
 
 

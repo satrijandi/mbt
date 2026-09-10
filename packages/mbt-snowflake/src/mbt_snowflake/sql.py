@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime
 
-from mbt_adapter_base import DatasetSpec, FeatureEntry, ScoringInputSpec, parse_time_offset
+from mbt_adapter_base import DatasetSpec, ScoringInputSpec
 from mbt_adapter_base.materialization import SAMPLE_MODULUS
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -84,84 +84,14 @@ def sampling_predicate(key_columns: list[str], fraction: float) -> str:
     return f"{key_hash_expr(key_columns)} < {threshold}"
 
 
-#: time_offset units -> SQL interval keywords (calendar month included).
-_INTERVAL_UNITS = {"mo": "MONTH", "d": "DAY", "w": "WEEK", "h": "HOUR"}
-
-
-def _interval_sql(count: int, unit: str) -> str:
-    """``(1, "mo")`` -> ``+ INTERVAL '1 MONTH'`` (sign as the operator).
-
-    The quoted-interval spelling is shared by Snowflake and DuckDB, so the
-    emulation tests run the generated SQL verbatim.
-    """
-    operator = "-" if count < 0 else "+"
-    return f"{operator} INTERVAL '{abs(count)} {_INTERVAL_UNITS[unit]}'"
-
-
-def _feature_relation(table_ref: str, entry: FeatureEntry) -> str:
-    """The joinable relation for one feature table: the bare table, or a
-    projecting subquery when the entry declares ``columns``/``exclude``
-    (ADR-25). The projection runs INSIDE the warehouse query, so pruned
-    columns of a wide gold table are never scanned into the panel."""
-    keep = entry.keep_columns
-    if keep is not None:
-        cols = ", ".join(validate_column(c) for c in keep)
-        return f"(SELECT {cols} FROM {table_ref})"
-    if entry.exclude is not None:
-        cols = ", ".join(validate_column(c) for c in entry.exclude)
-        return f"(SELECT * EXCLUDE ({cols}) FROM {table_ref})"
-    return table_ref
-
-
-def _spine_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> str:
-    """The spine + feature USING joins, before any label join (shared by
-    ``base_relation`` and the label-join coverage counts, F21)."""
-    assert spec.inputs is not None
-    join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
-    sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
-    for i, entry in enumerate(spec.inputs.feature_entries):
-        using = ", ".join(validate_column(c) for c in entry.using)
-        relation = _feature_relation(table_refs[entry.source], entry)
-        sql += f" {join_kind} {relation} AS mbt_f{i} USING ({using})"
-    return sql
-
-
 def base_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> tuple[str, list[str]]:
     """FROM clause plus columns to project away afterwards.
 
-    Single table, or spine + feature USING joins in declaration order; a
-    population-spine label joins last through a rename-project subquery
-    (ADR-22): its join columns are renamed, matched with ON so the
-    time_offset can shift the spine's time column, and excluded from the
-    output by the caller.
+    One relation, whatever built it (ADR-29). The second element is the
+    project-away list, kept because ``split_queries`` still takes it and the
+    scoring path shares the shape; nothing populates it today.
     """
-    if spec.inputs is None:
-        assert spec.source is not None
-        return table_refs[spec.source], []
-    sql = _spine_relation(spec, table_refs)
-    if spec.inputs.population is None:
-        return sql, []
-    renames = {
-        validate_column(c): f"__mbt_lbl{i}" for i, c in enumerate(spec.inputs.label_join_columns)
-    }
-    rename_sql = ", ".join(f"{c} AS {alias}" for c, alias in renames.items())
-    offset = spec.inputs.label_time_offset
-    conditions = []
-    for column, alias in renames.items():
-        if offset is not None and column == spec.split.time_column:
-            count, unit = parse_time_offset(offset)
-            conditions.append(
-                f"CAST({alias} AS TIMESTAMP) = "
-                f"CAST({column} AS TIMESTAMP) {_interval_sql(count, unit)}"
-            )
-        else:
-            conditions.append(f"{alias} = {column}")
-    sql += (
-        f" JOIN (SELECT * RENAME ({rename_sql}) FROM "
-        f"{table_refs[spec.inputs.label_source]}) AS mbt_label "
-        f"ON {' AND '.join(conditions)}"
-    )
-    return sql, list(renames.values())
+    return table_refs[spec.source], []
 
 
 def _iso_to_ntz(iso: str) -> str:
@@ -198,13 +128,9 @@ def split_queries(
     # Proportions are approximate (each row lands in a split independently);
     # exact-fraction ranking is not worth a full-table window sort in the
     # warehouse. Deterministic and leak-free is what matters here.
-    keys = spec.sample_key_columns
-    if not keys:
-        raise SnowflakeSQLError(
-            "a random split on Snowflake needs 'sample_key' (or inputs.join_key) "
-            "as the stable row identity to hash"
-        )
-    bucket = key_hash_expr(keys, salt=str(spec.split.seed or 0))
+    # sample_key is required and validated non-empty on the spec (ADR-29), so
+    # there is no keyless path left to reject here.
+    bucket = key_hash_expr(spec.sample_key_columns, salt=str(spec.split.seed or 0))
     fractions: dict[str, float] = {"train": float(spec.split.train)}
     if spec.split.validation is not None:
         fractions["validation"] = float(spec.split.validation)
@@ -223,32 +149,11 @@ def split_queries(
     return queries
 
 
-def coverage_queries(spec: DatasetSpec, table_refs: Mapping[str, str]) -> tuple[str, str] | None:
-    """``(spine_count_sql, matched_count_sql)`` for the label-join coverage
-    statistic (F21), or None when the dataset has no population-spine label
-    join. Counted before filters/sampling/windows so the ratio isolates the
-    inner label join's silent drop (labels off the offset grid)."""
-    if spec.inputs is None or spec.inputs.population is None:
-        return None
-    matched, _ = base_relation(spec, table_refs)
-    spine = _spine_relation(spec, table_refs)
-    return (f"SELECT COUNT(*) FROM {spine}", f"SELECT COUNT(*) FROM {matched}")
-
-
 def scoring_relation(spec: ScoringInputSpec, table_refs: Mapping[str, str]) -> str:
-    """FROM clause for an unlabeled scoring batch (ADR-20): a single source, or a
-    spine + feature USING joins in declaration order. Never a label join - a
-    scoring input has no label by design (contrast ``base_relation``)."""
-    if spec.inputs is None:
-        assert spec.source is not None
-        return table_refs[spec.source]
-    join_kind = "LEFT JOIN" if spec.inputs.join == "left" else "JOIN"
-    sql = f"{table_refs[spec.inputs.spine]} AS mbt_spine"
-    for i, entry in enumerate(spec.inputs.feature_entries):
-        using = ", ".join(validate_column(c) for c in entry.using)
-        relation = _feature_relation(table_refs[entry.source], entry)
-        sql += f" {join_kind} {relation} AS mbt_f{i} USING ({using})"
-    return sql
+    """FROM clause for an unlabeled scoring batch (ADR-20): one relation, the
+    serving twin of the training panel. Never a label join - a scoring input
+    has no label by design (ADR-29)."""
+    return table_refs[spec.source]
 
 
 def scoring_query(

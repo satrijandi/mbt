@@ -45,7 +45,6 @@ from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
 from mbt_snowflake.sql import (
     SnowflakeSQLError,
     base_relation,
-    coverage_queries,
     qualify_table,
     sampling_predicate,
     scoring_query,
@@ -301,14 +300,7 @@ class SnowflakeDataAdapter:
                 f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}"
             )
         if ctx.sample_fraction < 1.0:
-            keys = spec.sample_key_columns
-            if not keys:
-                raise SnowflakeAdapterError(
-                    "sampling on Snowflake needs a stable row identity",
-                    hint="declare sample_key: [<id columns>] on the dataset "
-                    "(or use the multi-table inputs form, whose join_key is used)",
-                )
-            where.append(sampling_predicate(keys, ctx.sample_fraction))
+            where.append(sampling_predicate(spec.sample_key_columns, ctx.sample_fraction))
 
         try:
             relation, exclude = base_relation(spec, table_refs)
@@ -332,23 +324,6 @@ class SnowflakeDataAdapter:
             + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
         )
 
-        coverage: dict[str, int] | None = None
-        pair = coverage_queries(spec, table_refs)
-        if pair is not None:
-            # Label-join coverage (F21): spine rows vs rows surviving the inner
-            # label join, counted in-warehouse before filters/sampling/windows.
-            coverage = {
-                "spine_rows": int(self._fetch_one(pair[0]) or 0),
-                "matched_rows": int(self._fetch_one(pair[1]) or 0),
-            }
-            if coverage["spine_rows"] > 0:
-                fraction = coverage["matched_rows"] / coverage["spine_rows"]
-                ctx.events.emit(
-                    f"dataset {ctx.node.unique_id}: label join matched "
-                    f"{coverage['matched_rows']} of {coverage['spine_rows']} "
-                    f"spine rows ({fraction:.1%})"
-                )
-
         write_materialization_metadata(
             output_dir,
             snapshot_id=ctx.node.snapshot_id,
@@ -358,7 +333,6 @@ class SnowflakeDataAdapter:
             windows=ctx.resolved_windows,
             sample_fraction=ctx.sample_fraction,
             row_counts=written,
-            label_join_coverage=coverage,
         )
         return MaterializedDatasetHandle(output_dir, adapter=self.name)
 

@@ -816,7 +816,6 @@ They were added so paths that used to run silently now report progress; an opera
 | `evaluate: 2 node(s) selected on target 'dev'` / `evaluate finished [success]: 2 ok, 0 failed, 0 skipped in 1.2s` | `mbt evaluate` run brackets, matching the other commands |
 | `check schema: PASS` / `test test_row_count: PASS` | each built-in check and Python data test (the `FAIL` variant is a symptom - see its entry above) |
 | `materialized 1000 rows: test=200, train=800` | a dataset build's per-split row counts (local, snowflake, and spark data adapters; the warehouse adapters prefix the node id) |
-| `label join matched 480 of 520 spine rows (92.3%)` | a population-spine build's outcome coverage (F21): how many spine rows survived the inner label join, counted before filters/sampling/windows. Expected to be below 100% when the newest cohort's outcomes have not matured yet; enforce a floor with the `label_join_coverage` check |
 | `scoring input materialized 340 rows to score` | a scoring-input build (an empty batch warns `scoring input materialized 0 rows; nothing to score` instead) |
 | `tuning complete: 10 trial(s), 2 pruned, best pr_auc=0.8300` | a tuning search summary; per-trial `tuning trial 0: pr_auc=0.8300` lines are debug-level, shown only under `--verbose` or `--log-format json` |
 | `feature_shift warn: tenure: psi=0.1800 in the shift warn band [0.15, 0.25]` | a shift in a monitor's optional `warn_threshold` band - elevated but below the fail bar, so the run stays green (exit 0); tune the thresholds or investigate the feature |

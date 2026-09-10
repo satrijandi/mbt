@@ -48,6 +48,7 @@ def dataset_specs(draw) -> DatasetSpec:
     return DatasetSpec(
         name=draw(_name),
         source="source('lakehouse', 'subscribers')",
+        sample_key=draw(_name),
         label={"column": draw(_name)},
         filters=draw(st.lists(st.sampled_from(["a = 1", "b > 2"]), max_size=2)),
         split={

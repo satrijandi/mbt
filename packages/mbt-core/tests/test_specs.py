@@ -176,6 +176,7 @@ def test_split_default_is_temporal() -> None:
         {
             "name": "d",
             "source": "source('a', 'b')",
+            "sample_key": "user_id",
             "label": {"column": "y"},
             "split": {"time_column": "ts", "train": "-180d:-28d", "test": "-28d:now"},
         }

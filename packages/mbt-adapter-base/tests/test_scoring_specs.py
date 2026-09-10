@@ -28,71 +28,9 @@ def test_minimal_spec_parses_with_defaults() -> None:
     assert spec.passthrough_columns == ["user_id"]
 
 
-def test_input_requires_source_xor_inputs() -> None:
-    with pytest.raises(ValidationError, match="exactly one of 'source'"):
-        ScoringInputSpec.model_validate({})
-    with pytest.raises(ValidationError, match="exactly one of 'source'"):
-        ScoringInputSpec.model_validate(
-            {
-                "source": "source('a', 'b')",
-                "inputs": {
-                    "spine": "source('a', 'c')",
-                    "features": ["source('a', 'd')"],
-                    "join_key": "id",
-                },
-            }
-        )
-
-
 def test_window_requires_time_column() -> None:
     with pytest.raises(ValidationError, match="'window' requires 'time_column'"):
         ScoringInputSpec.model_validate({"source": "source('a', 'b')", "window": "-7d:now"})
-
-
-def test_multi_table_inputs_need_features_and_join_key() -> None:
-    with pytest.raises(ValidationError, match="at least one feature table"):
-        ScoringInputSpec.model_validate(
-            {"inputs": {"spine": "source('a', 'c')", "features": [], "join_key": "id"}}
-        )
-
-
-def test_feature_entries_need_join_columns_from_somewhere() -> None:
-    with pytest.raises(ValidationError, match="has no join columns"):
-        ScoringInputSpec.model_validate(
-            {"inputs": {"spine": "source('a', 'c')", "features": ["source('a', 'd')"]}}
-        )
-
-
-def test_scoring_feature_entries_carry_per_table_projections() -> None:
-    """ADR-25 applies to scoring inputs identically: entries normalize the
-    keep/drop lists, and dropping a join column is rejected."""
-    spec = ScoringInputSpec.model_validate(
-        {
-            "inputs": {
-                "spine": "source('a', 'c')",
-                "features": [
-                    {"source": "source('a', 'd')", "columns": "x"},
-                    {"source": "source('a', 'e')", "exclude": ["loaded_at"]},
-                ],
-                "join_key": "id",
-            }
-        }
-    )
-    assert spec.inputs is not None
-    keep, drop = spec.inputs.feature_entries
-    assert keep.keep_columns == ["id", "x"]
-    assert drop.exclude == ["loaded_at"]
-
-    with pytest.raises(ValidationError, match="join column cannot be dropped"):
-        ScoringInputSpec.model_validate(
-            {
-                "inputs": {
-                    "spine": "source('a', 'c')",
-                    "features": [{"source": "source('a', 'd')", "exclude": ["id"]}],
-                    "join_key": "id",
-                }
-            }
-        )
 
 
 def test_ground_truth_gate_metric_must_be_declared() -> None:

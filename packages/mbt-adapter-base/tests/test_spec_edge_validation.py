@@ -6,13 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from mbt_adapter_base.specs import (
-    DatasetInputs,
     EvaluationProtocol,
     EvaluationSpec,
     GateSpec,
     GroundTruthSpec,
     ModelSpec,
-    ScoringInputs,
     ScoringInputSpec,
     SearchDimension,
     SourceTable,
@@ -53,16 +51,6 @@ def test_temporal_split_rejects_seed() -> None:
 def test_random_split_fraction_must_be_in_unit_interval() -> None:
     with pytest.raises(ValidationError, match=r"must be in \(0, 1\)"):
         SplitSpec(strategy=SplitStrategy.RANDOM, train="1.5", test="0.2", seed=7)
-
-
-def test_dataset_inputs_need_at_least_one_feature_table() -> None:
-    with pytest.raises(ValidationError, match="at least one feature table"):
-        DatasetInputs(features=[], label="source('a', 'labels')", join_key="user_id")
-
-
-def test_dataset_inputs_need_nonempty_join_key() -> None:
-    with pytest.raises(ValidationError, match="non-empty column"):
-        DatasetInputs(features=["source('a', 'f')"], label="source('a', 'labels')", join_key="")
 
 
 def test_evaluation_metrics_must_be_nonempty() -> None:
@@ -132,11 +120,6 @@ def test_tuning_objective_metric_must_be_declared() -> None:
     )
     with pytest.raises(ValidationError, match=r"must appear in evaluation\.metrics"):
         _model_spec(tuning=tuning)
-
-
-def test_scoring_inputs_need_nonempty_join_key() -> None:
-    with pytest.raises(ValidationError, match="non-empty column"):
-        ScoringInputs(spine="source('a', 's')", features=["source('a', 'f')"], join_key="")
 
 
 def test_scoring_input_sample_key_columns() -> None:
@@ -349,3 +332,14 @@ def test_panel_columns_rejects_empty_and_repeated() -> None:
                 columns=["customer_id", "inference_date", "is_churn", "age_band", "age_band"]
             )
         )
+
+
+def test_sample_key_must_name_a_column() -> None:
+    """`sample_key` is required (ADR-29), and a required field that can still be
+    empty is a trap: the adapters would then fall back to hashing every column,
+    which is the exact failure requiring it was meant to end."""
+    from mbt_adapter_base.specs import DatasetSpec
+
+    for empty in ([], "", [""]):
+        with pytest.raises(ValidationError, match="at least one non-empty column"):
+            DatasetSpec.model_validate(_panel_payload(sample_key=empty))

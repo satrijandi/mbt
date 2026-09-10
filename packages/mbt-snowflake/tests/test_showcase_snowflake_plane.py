@@ -242,9 +242,7 @@ def test_showcase_wide_dataset_builds_on_the_snowflake_plane(tmp_path: Path) -> 
     """
     doc = yaml.safe_load((PROJECT / "datasets" / "wide_churn_training.yml").read_text())
     spec = DatasetSpec.model_validate(doc["datasets"][0])
-    assert spec.source is not None and spec.inputs is None, (
-        "the wide spec should read one relation (ADR-29)"
-    )
+    assert spec.source, "the wide spec should read one relation (ADR-29)"
 
     identifier, panel = _synthetic_panel()
     ref = spec.source

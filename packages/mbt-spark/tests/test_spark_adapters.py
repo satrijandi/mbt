@@ -36,14 +36,14 @@ WINDOWS = {
     "train": ("2026-01-02T00:00:00Z", "2026-06-03T00:00:00Z"),
     "test": ("2026-06-03T00:00:00Z", "2026-07-01T00:00:00Z"),
 }
-LABEL_UID = "source.p.lake.labels"
-USAGE_UID = "source.p.lake.usage"
+PANEL_UID = "source.p.lake.panel"
 
 
 # -- fixtures -----------------------------------------------------------------------
 
 
 def _write_tables(root: Path, n: int = 400) -> None:
+    """The training panel, as whatever built it upstream hands it over (ADR-29)."""
     dates = [ANCHOR - timedelta(days=(i * 179) % 180 + 1) for i in range(n)]
     signal = [((i * 37) % 100) / 100.0 for i in range(n)]
     pq.write_table(
@@ -51,21 +51,12 @@ def _write_tables(root: Path, n: int = 400) -> None:
             {
                 "customer_id": list(range(n)),
                 "snapshot_date": dates,
+                "monthly_usage": signal,
+                "support_tickets": [i % 7 for i in range(n)],
                 "churned_90d": [1 if s > 0.55 else 0 for s in signal],
             }
         ),
-        _mk(root / "labels") / "part-000.parquet",
-    )
-    pq.write_table(
-        pa.table(
-            {
-                "customer_id": list(range(n)),
-                "snapshot_date": dates,
-                "monthly_usage": signal,
-                "support_tickets": [i % 7 for i in range(n)],
-            }
-        ),
-        _mk(root / "usage") / "part-000.parquet",
+        _mk(root / "panel") / "part-000.parquet",
     )
 
 
@@ -115,11 +106,7 @@ class FakeBuildContext:
 def _spec(**overrides: Any) -> DatasetSpec:
     base: dict[str, Any] = {
         "name": "churn_spark",
-        "inputs": {
-            "label": LABEL_UID,
-            "features": [USAGE_UID],
-            "join_key": ["customer_id", "snapshot_date"],
-        },
+        "source": PANEL_UID,
         "label": {"column": "churned_90d"},
         "sample_key": ["customer_id"],
         "split": {
@@ -142,8 +129,7 @@ def source_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _sources(root: Path) -> dict[str, Any]:
     return {
-        LABEL_UID: FakeSourceTable("labels", str(root / "labels" / "*.parquet")),
-        USAGE_UID: FakeSourceTable("usage", str(root / "usage" / "*.parquet")),
+        PANEL_UID: FakeSourceTable("panel", str(root / "panel" / "*.parquet")),
     }
 
 
@@ -160,7 +146,7 @@ def _ctx(
         config={},
         snapshot_id=pinned,
     )
-    return FakeBuildContext(node, sources, LABEL_UID, out, sample_fraction)
+    return FakeBuildContext(node, sources, PANEL_UID, out, sample_fraction)
 
 
 # -- data plane -----------------------------------------------------------------------
@@ -236,17 +222,12 @@ def test_build_dataset_joins_windows_and_reproducible_sampling(
 # -- batch scoring (contract 1.1, R2-17) ----------------------------------------------
 
 SCORE_WINDOW = {"score": ("2026-06-03T00:00:00Z", "2026-07-01T00:00:00Z")}
-POP_UID = "source.p.lake.population"
-SFEAT_UID = "source.p.lake.sfeatures"
+SCORING_UID = "source.p.lake.scoring_panel"
 
 
 def _scoring_sources(root: Path, n: int = 200) -> dict[str, Any]:
-    """A population spine (who to score) + a feature table, no label anywhere."""
+    """The serving twin of the training panel: same features, no label."""
     dates = [ANCHOR - timedelta(days=(i * 179) % 180 + 1) for i in range(n)]
-    pq.write_table(
-        pa.table({"customer_id": list(range(n)), "snapshot_date": dates}),
-        _mk(root / "population") / "part-000.parquet",
-    )
     pq.write_table(
         pa.table(
             {
@@ -255,11 +236,10 @@ def _scoring_sources(root: Path, n: int = 200) -> dict[str, Any]:
                 "monthly_usage": [((i * 37) % 100) / 100.0 for i in range(n)],
             }
         ),
-        _mk(root / "sfeatures") / "part-000.parquet",
+        _mk(root / "scoring_panel") / "part-000.parquet",
     )
     return {
-        POP_UID: FakeSourceTable("population", str(root / "population" / "*.parquet")),
-        SFEAT_UID: FakeSourceTable("sfeatures", str(root / "sfeatures" / "*.parquet")),
+        SCORING_UID: FakeSourceTable("scoring_panel", str(root / "scoring_panel" / "*.parquet")),
     }
 
 
@@ -275,27 +255,26 @@ def _scoring_ctx(
         snapshot_id=None,  # scoring inputs are not snapshot-verified (R2-10)
     )
     return FakeBuildContext(
-        node, sources, POP_UID, out, sample_fraction, resolved_windows=SCORE_WINDOW
+        node, sources, SCORING_UID, out, sample_fraction, resolved_windows=SCORE_WINDOW
     )
 
 
 def _scoring_spec() -> ScoringInputSpec:
     return ScoringInputSpec.model_validate(
         {
-            "inputs": {
-                "spine": POP_UID,
-                "features": [SFEAT_UID],
-                "join_key": ["customer_id", "snapshot_date"],
-            },
+            "source": SCORING_UID,
             "time_column": "snapshot_date",
             "window": "-28d:now",
+            # No join_key to fall back on any more (ADR-29), so a scoring input
+            # that samples has to name its row identity.
+            "sample_key": ["customer_id"],
         }
     )
 
 
-def test_build_scoring_input_joins_windows_and_samples(tmp_path: Path) -> None:
-    """R2-17: a Spark team can now materialize a batch for `mbt score` - spine +
-    feature joins, the score window, and reproducible key sampling, unlabeled.
+def test_build_scoring_input_windows_and_samples(tmp_path: Path) -> None:
+    """R2-17: a Spark team can materialize a batch for `mbt score` - the serving
+    relation, the score window, and reproducible key sampling, unlabeled.
     Before this, Spark hard-failed at `mbt score` (no build_scoring_input)."""
     adapter = SparkDataAdapter({"master": "local[2]"})
     sources = _scoring_sources(_mk(tmp_path / "src"))
@@ -375,119 +354,9 @@ def test_spark_now_advertises_batch_scoring_capability() -> None:
     assert hasattr(adapter, "open_predictions")
 
 
-def test_population_spine_with_label_offset_on_spark(tmp_path: Path) -> None:
-    """ADR-22 on the Spark plane: population spine, per-table using columns,
-    and the calendar-month label offset via an expression join."""
-    months = [datetime(2026, m, 1) for m in range(1, 8)]
-    root = _mk(tmp_path / "src")
-    population_rows = [(cid, f"sf-{cid}", when) for when in months[:-1] for cid in range(40)]
-    pq.write_table(
-        pa.table(
-            {
-                "customer_id": [r[0] for r in population_rows],
-                "safe_id": [r[1] for r in population_rows],
-                "snapshot_date": [r[2] for r in population_rows],
-            }
-        ),
-        _mk(root / "population") / "part-000.parquet",
-    )
-    label_rows = [
-        (cid, months[i + 1], (cid + i) % 2) for i in range(len(months) - 1) for cid in range(40)
-    ]
-    pq.write_table(
-        pa.table(
-            {
-                "customer_id": [r[0] for r in label_rows],
-                "snapshot_date": [r[1] for r in label_rows],
-                "churned": [r[2] for r in label_rows],
-            }
-        ),
-        _mk(root / "monthly_labels") / "part-000.parquet",
-    )
-    pq.write_table(
-        pa.table(
-            {
-                "safe_id": [r[1] for r in population_rows],
-                "snapshot_date": [r[2] for r in population_rows],
-                "txn_total": [float(r[0] % 300) for r in population_rows],
-            }
-        ),
-        _mk(root / "txn") / "part-000.parquet",
-    )
-    pop_uid = "source.p.lake.population"
-    lbl_uid = "source.p.lake.monthly_labels"
-    txn_uid = "source.p.lake.txn"
-    sources = {
-        pop_uid: FakeSourceTable("population", str(root / "population" / "*.parquet")),
-        lbl_uid: FakeSourceTable("monthly_labels", str(root / "monthly_labels" / "*.parquet")),
-        txn_uid: FakeSourceTable("txn", str(root / "txn" / "*.parquet")),
-    }
-    spec = DatasetSpec.model_validate(
-        {
-            "name": "wide_spark",
-            "inputs": {
-                "population": pop_uid,
-                "label": {
-                    "source": lbl_uid,
-                    "using": ["customer_id", "snapshot_date"],
-                    "time_offset": "1mo",
-                },
-                "features": [{"source": txn_uid, "using": ["safe_id", "snapshot_date"]}],
-            },
-            "sample_key": ["customer_id"],
-            "label": {"column": "churned"},
-            "split": {
-                "strategy": "temporal",
-                "time_column": "snapshot_date",
-                "train": "2026-01-01:2026-05-01",
-                "test": "2026-05-01:2026-07-01",
-            },
-        }
-    )
-    adapter = SparkDataAdapter({"master": "local[2]"})
-    pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
-    node = ManifestNode(
-        unique_id="dataset.p.wide_spark",
-        resource_type="dataset",
-        name="wide_spark",
-        path="datasets/wide_spark.yml",
-        config={},
-        snapshot_id=pinned,
-    )
-    ctx = FakeBuildContext(node, sources, pop_uid, tmp_path / "mat")
-    ctx.resolved_windows = {
-        "train": ("2026-01-01T00:00:00Z", "2026-05-01T00:00:00Z"),
-        "test": ("2026-05-01T00:00:00Z", "2026-07-01T00:00:00Z"),
-    }
-    handle = adapter.build_dataset(spec, ctx)
-    month_index = {when: i for i, when in enumerate(months)}
-    for split in ("train", "test"):
-        table = handle.read(split)
-        # spine + feature + label columns, label join columns projected away
-        assert set(table.column_names) == {
-            "customer_id",
-            "safe_id",
-            "snapshot_date",
-            "txn_total",
-            "churned",
-        }
-        assert table.num_rows > 0
-        for row in table.to_pylist():
-            expected = (row["customer_id"] + month_index[row["snapshot_date"]]) % 2
-            assert row["churned"] == expected
-    # F21: label-join coverage recorded (every spine month here has labels)
-    assert handle.label_join_coverage == {"spine_rows": 240, "matched_rows": 240}
-    # F2/F21: the pre-join source-check methods work on the Spark plane
-    pop_table = sources[pop_uid]
-    assert adapter.count_source_duplicates(pop_table, ["customer_id", "snapshot_date"]) == 0
-    values = adapter.read_source_distinct(pop_table, "safe_id")
-    assert values.column_names == ["value"]
-    assert len(values) == 40
-
-
 def test_snapshot_changes_when_source_files_change(source_root: Path) -> None:
     adapter = SparkDataAdapter({})
-    table = _sources(source_root)[LABEL_UID]
+    table = _sources(source_root)[PANEL_UID]
     before = adapter.snapshot_id(table)
     _write_tables(source_root, n=410)
     assert adapter.snapshot_id(table) != before
@@ -504,19 +373,19 @@ def test_deep_snapshot_is_mtime_independent(source_root: Path) -> None:
     import os
 
     adapter = SparkDataAdapter({})
-    table = _sources(source_root)[LABEL_UID]
-    (label_file,) = (source_root / "labels").glob("*.parquet")
+    table = _sources(source_root)[PANEL_UID]
+    (panel_file,) = (source_root / "panel").glob("*.parquet")
 
     shallow_before = adapter.snapshot_id(table)
     deep_before = adapter.snapshot_id(table, deep=True)
 
-    stat = label_file.stat()
-    os.utime(label_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    stat = panel_file.stat()
+    os.utime(panel_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
 
     assert adapter.snapshot_id(table) != shallow_before  # mtime scheme moved
     assert adapter.snapshot_id(table, deep=True) == deep_before  # content did not
 
-    label_file.write_bytes(label_file.read_bytes() + b"\x00")  # real content change
+    panel_file.write_bytes(panel_file.read_bytes() + b"\x00")  # real content change
     assert adapter.snapshot_id(table, deep=True) != deep_before
     _write_tables(source_root, n=400)  # restore pristine bytes for other tests
 

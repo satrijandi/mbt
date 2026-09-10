@@ -705,61 +705,6 @@ def _check_relationships(
         con.close()
 
 
-def _check_label_join_coverage(
-    spec: Any,
-    handle: _CheckableHandle,
-    windows: dict[str, Any],
-    params: dict[str, Any],
-    resource: str,
-    sources: "SourceAccess | None" = None,
-) -> TestResult:
-    """The label join must retain at least ``min_fraction`` of the spine (F21).
-
-    The temporal label join is exact equality on ``time_column + offset``, so
-    labels drifting off the offset grid silently drop spine rows through the
-    inner join; the build records ``{spine_rows, matched_rows}`` (measured
-    before filters/sampling/windows, so the ratio isolates the join drop) and
-    this check turns a quiet partial drop into a loud failure.
-    """
-    min_fraction = params.get("min_fraction")
-    if not isinstance(min_fraction, int | float) or not 0.0 < float(min_fraction) <= 1.0:
-        return TestResult(
-            name="label_join_coverage",
-            passed=False,
-            message=(
-                "label_join_coverage requires min_fraction in (0, 1], e.g. "
-                "label_join_coverage: {min_fraction: 0.95}"
-            ),
-        )
-    coverage = getattr(handle, "label_join_coverage", None)
-    if coverage is None:
-        return TestResult(
-            name="label_join_coverage",
-            passed=False,
-            message=(
-                "no label-join coverage recorded: only population-spine datasets "
-                "measure it (and older materializations lack it - rebuild)"
-            ),
-        )
-    spine = int(coverage["spine_rows"])
-    matched = int(coverage["matched_rows"])
-    if spine == 0:
-        return TestResult(
-            name="label_join_coverage",
-            passed=False,
-            message="the population spine had 0 rows before the label join",
-        )
-    fraction = matched / spine
-    return TestResult(
-        name="label_join_coverage",
-        passed=fraction >= float(min_fraction),
-        message=(
-            f"label join matched {matched} of {spine} spine rows "
-            f"({fraction:.1%}); floor {float(min_fraction):.0%}"
-        ),
-    )
-
-
 _CHECKS = {
     "schema": _check_schema,
     "not_null": _check_not_null,
@@ -768,7 +713,6 @@ _CHECKS = {
     "relationships": _check_relationships,
     "row_count": _check_row_count,
     "freshness": _check_freshness,
-    "label_join_coverage": _check_label_join_coverage,
     "panel_columns": _check_panel_columns,
     "no_future_columns": _check_no_future_columns,
     "label_leakage_scan": _check_label_leakage_scan,

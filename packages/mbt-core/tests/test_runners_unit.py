@@ -1,14 +1,11 @@
 """Unit tests for node runners and the execution context (mbt/execute/runners.py)."""
 
 import json
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
-from core_helpers import TEST_ANCHOR, write
+from core_helpers import write
 from exec_unit_helpers import (
     DATASET_UID,
     MODEL_UID,
@@ -19,7 +16,7 @@ from exec_unit_helpers import (
 from mbt_testing.adapters import FakeTrackingAdapter
 from test_execution import MODEL, invoke
 from test_job_unit import SOURCES_WITH_BATCH
-from test_scoring_execution import SCORING_YML, _build_and_promote, _write_batch
+from test_scoring_execution import SCORING_YML, _write_batch
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.artifacts.run_results import GateResult
@@ -173,7 +170,7 @@ def test_dataset_spine_missing_from_manifest_is_an_error(
     node.config["source"] = "source.demo.lakehouse.elsewhere"
     result = DatasetRunner(ctx).run(DATASET_UID)
     assert result.status == "error"
-    assert "spine source" in (result.message or "")
+    assert "source" in (result.message or "")
 
 
 def test_dataset_declared_tests_bind_and_filter(
@@ -335,42 +332,6 @@ def test_scoring_champion_without_artifact_is_an_error(
     assert "loadable artifact" in (node.message or "")
 
 
-def test_multi_table_scoring_input_joins_spine_and_features(
-    demo_project: Path, fake_registry: AdapterRegistry
-) -> None:
-    write(demo_project / "sources.yml", MULTI_SOURCES_YML)
-    write(demo_project / "scoring/churn_scoring.yml", MULTI_SCORING_YML)
-    n = 40
-    base = TEST_ANCHOR.replace(tzinfo=None)
-    spread = [(i * 131) % 400 for i in range(n)]
-    spine = pa.table(
-        {
-            "user_id": list(range(n)),
-            "snapshot_date": [base - timedelta(days=1 + i % 5) for i in range(n)],
-            "is_active": [True] * n,
-        }
-    )
-    features = pa.table(
-        {
-            "user_id": list(range(n)),
-            "tenure_days": [30 + (idx * 7) % 900 for idx in spread],
-            "monthly_usage": [round((idx * 13.7) % 500, 2) for idx in spread],
-            "plan_type": [("basic", "pro", "enterprise")[idx % 3] for idx in spread],
-        }
-    )
-    for name, table in (("scoring_spine", spine), ("scoring_features", features)):
-        out = demo_project / "data" / name
-        out.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, out / "part-000.parquet")
-
-    _build_and_promote(demo_project, fake_registry)
-    results = invoke(demo_project, fake_registry, "score")
-    assert results.exit_code() == 0
-    node = results.results[0]
-    assert node.status == "success"
-    assert node.metrics["rows_scored"] == float(n)
-
-
 def test_scoring_input_sources_missing_from_manifest(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:
@@ -524,3 +485,27 @@ def test_cancel_active_jobs_terminates_handles_concurrently() -> None:
     )
     ExecutionContext.cancel_active_jobs(ctx)
     assert sorted(passed) == ["h1", "h2"]  # both ran at the same time
+
+
+def test_materialization_key_partitions_by_sample_fraction() -> None:
+    """A sampled build holds different rows, so it must not satisfy a full
+    build's cache probe (or vice versa) - sampling is pushed into the source
+    query, not applied afterwards. Fraction 1.0 contributes nothing, which is
+    what keeps every existing full-build key stable."""
+    from mbt.contracts import ManifestNode
+    from mbt.execute.runners import materialization_key
+
+    node = ManifestNode(
+        unique_id="dataset.demo.churn_training",
+        resource_type="dataset",
+        name="churn_training",
+        path="datasets/churn_training.yml",
+        config={},
+        input_hash="sha256:abc",
+        resolved={"windows": {"train": ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]}},
+    )
+    full = materialization_key(node)
+    assert materialization_key(node, 1.0) == full
+    half = materialization_key(node, 0.5)
+    assert half != full
+    assert materialization_key(node, 0.25) not in {full, half}

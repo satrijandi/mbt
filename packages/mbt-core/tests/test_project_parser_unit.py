@@ -142,21 +142,26 @@ def test_dataset_error_branches(demo_project: Path, fake_registry: AdapterRegist
           - name: ds_var_missing
             description: "{{ var('missing_var_zzz') }}"
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
           - name: ds_invalid
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
           - name: churn_training
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
           - name: ds_badwin
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "bogus", test: "-7d:now"}
           - name: ds_badcheck
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
             checks: [not_nul]
@@ -210,6 +215,7 @@ def test_hidden_resource_dir_is_still_honored(
         datasets:
           - name: tucked_away
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
         """,
@@ -225,6 +231,7 @@ def test_unknown_data_test_binding(demo_project: Path, fake_registry: AdapterReg
         datasets:
           - name: tested_ds
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
             tests: [ghost_test]
@@ -475,52 +482,6 @@ def test_backtest_folds_accepted_on_a_path_adapter(
     assert not [i for i in parsed.report.errors if "backtest" in i.message]
 
 
-def test_temporal_split_with_label_offset_warns_without_embargo() -> None:
-    """A population-spine dataset with a label time_offset but no split.embargo
-    invites boundary leakage (R2-7); the parser warns and names the horizon."""
-    from mbt.contracts import DatasetSpec
-    from mbt.parsing.errors import ParseReport
-    from mbt.parsing.project_parser import _validate_split_protocol
-
-    def _ds(embargo: str | None = None) -> DatasetSpec:
-        split: dict = {
-            "strategy": "temporal",
-            "time_column": "snapshot_date",
-            "train": "-180d:-28d",
-            "test": "-28d:now",
-        }
-        if embargo is not None:
-            split["embargo"] = embargo
-        return DatasetSpec.model_validate(
-            {
-                "name": "wide_churn",
-                "inputs": {
-                    "population": "source('lake', 'pop')",
-                    "label": {
-                        "source": "source('lake', 'lbl')",
-                        "using": ["id", "snapshot_date"],
-                        "time_offset": "1mo",
-                    },
-                    "features": [
-                        {"source": "source('lake', 'f')", "using": ["id", "snapshot_date"]}
-                    ],
-                },
-                "sample_key": "id",
-                "label": {"column": "y"},
-                "split": split,
-            }
-        )
-
-    report = ParseReport()
-    _validate_split_protocol(_ds(), "d.yml", "dataset.p.d", report)
-    warns = [w for w in report.warnings if "embargo" in w.message]
-    assert warns and "1mo" in (warns[0].hint or "")
-
-    clean = ParseReport()
-    _validate_split_protocol(_ds(embargo="1mo"), "d.yml", "dataset.p.d", clean)
-    assert not [w for w in clean.warnings if "embargo" in w.message]
-
-
 def test_tuning_engine_errors(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     register_unit_plugins(fake_registry)
     write(
@@ -661,24 +622,28 @@ def test_scoring_capture_validation_and_maturity_branches(
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             output: {path: predictions/b, columns: [user_id]}
           - name: sc_dup
             owner: ds@example.com
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             output: {path: predictions/c, columns: [user_id]}
           - name: sc_dup
             owner: ds@example.com
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             output: {path: predictions/d, columns: [user_id]}
           - name: sc_bad_maturity
             owner: ds@example.com
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             ground_truth:
               label:
                 source: source('lakehouse', 'subscribers')
@@ -723,6 +688,7 @@ def test_scoring_link_error_branches(demo_project: Path, fake_registry: AdapterR
             model: churn_model
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             output: {path: predictions/a, columns: [user_id]}
           - name: sc_extra_ref
             owner: ds@example.com
@@ -730,12 +696,14 @@ def test_scoring_link_error_branches(demo_project: Path, fake_registry: AdapterR
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             output: {path: predictions/b, columns: [user_id]}
           - name: sc_no_schema
             owner: ds@example.com
             model: ref('reggy_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             ground_truth:
               label:
                 source: source('lakehouse', 'subscribers')
@@ -749,6 +717,7 @@ def test_scoring_link_error_branches(demo_project: Path, fake_registry: AdapterR
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             ground_truth:
               label:
                 source: source('lakehouse', 'subscribers')
@@ -774,7 +743,9 @@ def test_scoring_link_error_branches(demo_project: Path, fake_registry: AdapterR
     assert parsed.scoring["scoring.demo.sc_no_schema"].metric_specs == []
 
 
-def test_scoring_inputs_form_parses(demo_project: Path, fake_registry: AdapterRegistry) -> None:
+def test_scoring_input_source_becomes_a_dag_edge(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
     write(
         demo_project / "sources.yml",
         """
@@ -795,18 +766,13 @@ def test_scoring_inputs_form_parses(demo_project: Path, fake_registry: AdapterRe
             owner: ds@example.com
             model: ref('churn_model')
             input:
-              inputs:
-                spine: source('lakehouse', 'subscribers')
-                features:
-                  - source: source('lakehouse', 'extra_features')
-                    using: [user_id]
+              source: source('lakehouse', 'extra_features')
             output: {path: predictions/a, columns: [user_id]}
         """,
     )
     parsed = parse_project(demo_project, registry=fake_registry)
     resource = parsed.scoring["scoring.demo.sc_inputs"]
     assert "source.demo.lakehouse.extra_features" in resource.depends_on
-    assert "source.demo.lakehouse.subscribers" in resource.depends_on
 
 
 # -- cross-resource linking ----------------------------------------------------------
@@ -819,11 +785,13 @@ def test_dataset_and_model_link_errors(demo_project: Path, fake_registry: Adapte
         datasets:
           - name: ds_unknown_source
             source: source('nowhere', 'tbl')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
           - name: ds_with_ref
             description: "{{ ref('churn_training') }}"
             source: source('lakehouse', 'subscribers')
+            sample_key: user_id
             label: {column: churned}
             split: {strategy: temporal, time_column: t, train: "-30d:-7d", test: "-7d:now"}
         """,
@@ -1039,6 +1007,7 @@ def test_ground_truth_maturity_shorter_than_the_horizon_warns(
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             ground_truth:
               label:
                 source: source('lakehouse', 'subscribers')
@@ -1078,6 +1047,7 @@ def test_ground_truth_maturity_shorter_than_the_horizon_warns(
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
               time_column: snapshot_date
               window: "-31d:-28d"
             ground_truth:
@@ -1115,54 +1085,6 @@ def test_newest_row_age_reads_the_window_end_bound() -> None:
     assert _newest_row_age_days("not-a-window") == 0.0
 
 
-def test_horizon_and_time_offset_must_agree(
-    demo_project: Path, fake_registry: AdapterRegistry
-) -> None:
-    """Two spellings of one number cannot disagree."""
-    write(
-        demo_project / "sources.yml",
-        """
-        sources:
-          - name: lakehouse
-            tables:
-              - name: subscribers
-                path: data/subscribers/*.parquet
-              - name: labels
-                path: data/subscribers/*.parquet
-        """,
-    )
-    write(
-        demo_project / "datasets/churn_training.yml",
-        """
-        datasets:
-          - name: churn_training
-            inputs:
-              population: source('lakehouse', 'subscribers')
-              label:
-                source: source('lakehouse', 'labels')
-                using: [user_id, snapshot_date]
-                time_offset: "1mo"
-              features:
-                - source: source('lakehouse', 'subscribers')
-                  using: [user_id, snapshot_date]
-            sample_key: user_id
-            label:
-              column: churned
-              horizon: "2mo"
-            split:
-              strategy: temporal
-              time_column: snapshot_date
-              train: "-180d:-28d"
-              test: "-28d:now"
-              embargo: "2mo"
-        """,
-    )
-    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
-    assert any(
-        "two spellings of one number and disagree" in i.message for i in parsed.report.errors
-    )
-
-
 def test_sample_key_is_required(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     """Without a declared row identity, sampling and random splits hash EVERY
     column, so a column arriving upstream moves rows across the train/test
@@ -1172,8 +1094,10 @@ def test_sample_key_is_required(demo_project: Path, fake_registry: AdapterRegist
     path.write_text(re.sub(r"^ *sample_key:.*\n", "", path.read_text(), flags=re.M))
     parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
     errors = [i for i in parsed.report.errors if "sample_key" in i.message]
-    assert errors and "stable row identity" in errors[0].message
-    assert "entity id column(s)" in (errors[0].hint or "")
+    assert errors and "required field 'sample_key' is missing" in errors[0].message
+    # "it is missing" is not enough to act on, so the hint carries the reason.
+    assert "stable row identity" in (errors[0].hint or "")
+    assert "re-buckets every row" in (errors[0].hint or "")
 
 
 def test_maturity_horizon_check_survives_a_broken_project(
@@ -1198,6 +1122,7 @@ def test_maturity_horizon_check_survives_a_broken_project(
             model: ref('churn_model')
             input:
               source: source('lakehouse', 'subscribers')
+              sample_key: user_id
             ground_truth:
               label:
                 source: source('lakehouse', 'subscribers')
@@ -1219,3 +1144,17 @@ def test_maturity_horizon_check_survives_a_broken_project(
     model.write_text(model.read_text().replace("ref('churn_training')", "ref('no_such_dataset')"))
     parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
     assert any("unknown dataset" in i.message for i in parsed.report.errors)
+
+
+def test_dataset_source_must_be_a_source_call(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A bare table name is not a source reference: mbt needs the DAG edge, and
+    a name that resolves to nothing at compile is worse than a parse error."""
+    path = demo_project / "datasets/churn_training.yml"
+    path.write_text(
+        path.read_text().replace("source('lakehouse', 'subscribers')", "lakehouse.subscribers")
+    )
+    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
+    errors = [i for i in parsed.report.errors if "expected a source() reference" in i.message]
+    assert errors and errors[0].field_path.endswith("/source")

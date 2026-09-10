@@ -170,11 +170,11 @@ table, nulls ignored - the pre-join `unique: {source: ...}` contract; push it
 down, only a scalar returns) and `read_source_distinct(source, column) ->
 pa.Table` (DISTINCT non-null values as a single ``value`` column - the parent
 side of `relationships`). An adapter lacking them fails those checks with an
-actionable message rather than silently passing. Population-spine
-`build_dataset` implementations should also record `label_join_coverage`
-(spine vs matched counts, before filters/sampling/windows) via
-`write_materialization_metadata`, which the `label_join_coverage` check
-enforces - the three built-in data adapters show the pattern.
+actionable message rather than silently passing. Note that these read a table
+the dataset does not otherwise touch: since ADR-29 a dataset reads exactly one
+relation, so `build_dataset` never joins, but a project may still assert the
+key uniqueness or referential integrity its panel depends on against the raw
+tables upstream - the three built-in data adapters show the pattern.
 
 ## 5. Contract versioning
 

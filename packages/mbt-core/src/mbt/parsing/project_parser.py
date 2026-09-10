@@ -457,48 +457,17 @@ def _newest_row_age_days(window: str | None) -> float:
 def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
     """Warn on split configurations that invite leakage (FR-RES-09).
 
-    Warnings, not errors, with one exception: a random split over truly
-    exchangeable rows is legitimate, and these flag the configurations that
-    usually are not. The missing ``sample_key`` below is the exception, because
-    it is not a judgement call - see the error's own reasoning.
+    Warnings, not errors: a random split over truly exchangeable rows is
+    legitimate, and these flag the configurations that usually are not.
     """
-    if not spec.sample_key_columns:
-        # Without a declared row identity, sampling and random splits hash
-        # EVERY column, so the column list is the hash preimage: adding one
-        # column upstream re-buckets every row and moves rows across the
-        # train/test boundary (a measured ten-row case moved three). Under
-        # ADR-29 the relation is a single evolving panel, which makes that the
-        # normal case rather than an edge one. Snowflake and Spark already
-        # refused the keyless path outright; local only warned, so a spec could
-        # pass on the dev plane and fail on the prod plane.
-        report.error(
-            "a dataset needs 'sample_key': the stable row identity used for "
-            "deterministic sampling and seeded random splits",
-            file=rel,
-            resource=uid,
-            field_path="/sample_key",
-            hint="set it to the entity id column(s), e.g. sample_key: [customer_id] "
-            "- without one, sampling hashes every column, so adding a column "
-            "upstream moves rows across the train/test boundary",
-        )
     # Temporal split + a label horizon but no embargo (R2-7): rows near the
     # train boundary have their labels observed inside the evaluation window and
     # leak. The embargo mechanism exists; guide the user to actually set it.
-    # `time_offset` executes the alignment, `label.horizon` only declares it
-    # (ADR-29); either one names the label horizon, and the guidance is the
-    # same. Without the horizon arm, moving the alignment upstream would
-    # silently switch this warning off on exactly the shape ADR-29 recommends.
-    label_offset = spec.inputs.label_time_offset if spec.inputs is not None else None
-    horizon = spec.label.horizon or label_offset
-    if label_offset is not None and spec.label.horizon not in (None, label_offset):
-        report.error(
-            f"label.horizon ({spec.label.horizon}) and inputs.label.time_offset "
-            f"({label_offset}) are two spellings of one number and disagree",
-            file=rel,
-            resource=uid,
-            field_path="/label/horizon",
-            hint="declare the outcome window once",
-        )
+    # The alignment itself happens upstream (ADR-29), so `label.horizon` is the
+    # only place the project states the outcome window - which is exactly why
+    # it exists: without it, moving the alignment out of mbt would have
+    # silently switched this warning off.
+    horizon = spec.label.horizon
     if (
         spec.split.strategy is SplitStrategy.TEMPORAL
         and horizon is not None
@@ -1080,21 +1049,7 @@ def _check_dataset_source_syntax(dataset: ParsedResource, report: ParseReport) -
     """Dataset table references must be source() calls, not bare names."""
     spec = dataset.spec
     assert isinstance(spec, DatasetSpec)
-    entries: list[tuple[str, str]] = []
-    if spec.source is not None:
-        entries.append(("/source", spec.source))
-    if spec.inputs is not None:
-        if isinstance(spec.inputs.label, str):
-            entries.append(("/inputs/label", spec.inputs.label))
-        else:
-            entries.append(("/inputs/label/source", spec.inputs.label.source))
-        if spec.inputs.population is not None:
-            entries.append(("/inputs/population", spec.inputs.population))
-        for i, value in enumerate(spec.inputs.features):
-            if isinstance(value, str):
-                entries.append((f"/inputs/features/{i}", value))
-            else:
-                entries.append((f"/inputs/features/{i}/source", value.source))
+    entries: list[tuple[str, str]] = [("/source", spec.source)]
     for field_path, value in entries:
         if not _SOURCE_RE.match(value):
             report.error(
@@ -1244,9 +1199,7 @@ def _check_maturity_vs_horizon(
         return
     ds_spec = dataset_res.spec
     assert isinstance(ds_spec, DatasetSpec)
-    horizon = ds_spec.label.horizon or (
-        ds_spec.inputs.label_time_offset if ds_spec.inputs is not None else None
-    )
+    horizon = ds_spec.label.horizon
     if horizon is None:
         return
     try:
@@ -1365,16 +1318,7 @@ def _check_scoring_source_syntax(sc: ParsedResource, report: ParseReport) -> Non
     """Scoring table references must be source() calls, not bare names."""
     spec = sc.spec
     assert isinstance(spec, ScoringSpec)
-    entries: list[tuple[str, str]] = []
-    if spec.input.source is not None:
-        entries.append(("/input/source", spec.input.source))
-    if spec.input.inputs is not None:
-        entries.append(("/input/inputs/spine", spec.input.inputs.spine))
-        for i, value in enumerate(spec.input.inputs.features):
-            if isinstance(value, str):
-                entries.append((f"/input/inputs/features/{i}", value))
-            else:
-                entries.append((f"/input/inputs/features/{i}/source", value.source))
+    entries: list[tuple[str, str]] = [("/input/source", spec.input.source)]
     if spec.ground_truth is not None:
         entries.append(("/ground_truth/label/source", spec.ground_truth.label.source))
     for field_path, value in entries:

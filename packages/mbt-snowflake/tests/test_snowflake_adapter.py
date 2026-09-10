@@ -26,7 +26,6 @@ from mbt_snowflake.sql import (
     qualify_table,
     sampling_predicate,
     scoring_query,
-    scoring_relation,
     split_queries,
 )
 from snowflake_stub_helpers import (
@@ -58,39 +57,32 @@ WINDOWS = {
 
 
 def _make_tables(n: int = 200) -> dict[str, pa.Table]:
+    """The training panel, as whatever built it upstream hands it over (ADR-29).
+
+    Labels and features arrive already joined - that is the point of the
+    single-relation shape - so this fixture is one wide table rather than the
+    two mbt used to join itself.
+    """
     dates = [ANCHOR - timedelta(days=(i * 179) % 180 + 1) for i in range(n)]
-    labels = pa.table(
-        {
-            "CUSTOMER_ID": list(range(n)),
-            "SNAPSHOT_DATE": dates,
-            "CHURNED_90D": [1 if (i * 31) % 100 < 25 else 0 for i in range(n)],
-        }
-    )
-    usage = pa.table(
+    panel = pa.table(
         {
             "CUSTOMER_ID": list(range(n)),
             "SNAPSHOT_DATE": dates,
             "MONTHLY_USAGE": [float(i % 300) for i in range(n)],
+            "CHURNED_90D": [1 if (i * 31) % 100 < 25 else 0 for i in range(n)],
         }
     )
-    return {
-        "ANALYTICS.GOLD.CHURN_LABELS": labels,
-        "ANALYTICS.GOLD.USAGE_FEATURES": usage,
-    }
+    return {"ANALYTICS.GOLD.CHURN_PANEL": panel}
 
 
-LABEL_UID = "source.p.snowflake.churn_labels"
-USAGE_UID = "source.p.snowflake.usage_features"
+PANEL_UID = "source.p.snowflake.churn_panel"
+SCORING_UID = "source.p.snowflake.churn_panel_scoring"
 
 
 def _spec(**overrides: Any) -> DatasetSpec:
     base: dict[str, Any] = {
         "name": "churn_training_set",
-        "inputs": {
-            "label": LABEL_UID,
-            "features": [USAGE_UID],
-            "join_key": ["customer_id", "snapshot_date"],
-        },
+        "source": PANEL_UID,
         "label": {"column": "churned_90d"},
         "sample_key": ["customer_id"],
         "split": {
@@ -112,8 +104,7 @@ def _adapter(stub: StubConnection) -> SnowflakeDataAdapter:
 
 def _sources() -> dict[str, FakeSourceTable]:
     return {
-        LABEL_UID: FakeSourceTable(name="churn_labels", identifier="CHURN_LABELS"),
-        USAGE_UID: FakeSourceTable(name="usage_features", identifier="USAGE_FEATURES"),
+        PANEL_UID: FakeSourceTable(name="churn_panel", identifier="CHURN_PANEL"),
     }
 
 
@@ -140,7 +131,7 @@ def _ctx(
     )
     return FakeBuildContext(
         node=node,
-        source=sources[LABEL_UID],
+        source=sources[PANEL_UID],
         source_tables=sources,
         resolved_windows=WINDOWS,
         sample_fraction=sample_fraction,
@@ -172,28 +163,16 @@ def test_sampling_predicate_shape_and_injection_guard() -> None:
 def test_temporal_split_queries_push_everything_down() -> None:
     spec = _spec(filters=["is_active = true"])
     queries = split_queries(
-        spec, "ANALYTICS.GOLD.CHURN_LABELS AS mbt_label", ["(is_active = true)"], WINDOWS
+        spec, "ANALYTICS.GOLD.CHURN_PANEL AS mbt_label", ["(is_active = true)"], WINDOWS
     )
     assert set(queries) == {"train", "test"}
     assert "TO_TIMESTAMP_NTZ('2026-06-03 00:00:00')" in queries["train"]
     assert "(is_active = true)" in queries["test"]
 
 
-def test_random_split_requires_a_key() -> None:
-    spec = _spec(
-        sample_key=None,
-        inputs=None,
-        source=LABEL_UID,
-        split={"strategy": "random", "train": "0.8", "test": "0.2", "seed": 7},
-    )
-    with pytest.raises(SnowflakeSQLError, match="sample_key"):
-        split_queries(spec, "T", [], {})
-
-
 def test_random_split_buckets_cover_fractions() -> None:
     spec = _spec(
-        inputs=None,
-        source=LABEL_UID,
+        source=PANEL_UID,
         sample_key=["customer_id"],
         split={"strategy": "random", "train": "0.7", "test": "0.3", "seed": 7},
     )
@@ -228,7 +207,9 @@ def test_build_dataset_joins_streams_and_normalizes_case(tmp_path: Path) -> None
     # The metadata-only `LIMIT 0` schema probes (ADR-29) are not split queries.
     selects = [q for q in stub.executed if q.startswith("SELECT *") and not q.endswith(" LIMIT 0")]
     assert len(selects) == 2
-    assert all("LEFT JOIN" in q and "USING (customer_id, snapshot_date)" in q for q in selects)
+    # One relation per split query (ADR-29): mbt reads the panel, it does not
+    # assemble it, so a join appearing here would mean the retraction leaked.
+    assert not any("JOIN" in q for q in selects)
     # the successful build reports its per-split row counts on the bus
     row_logs = [str(m) for m in ctx.events.messages if "materialized" in str(m)]
     assert len(row_logs) == 1
@@ -272,12 +253,11 @@ def test_hash_buckets_match_the_cross_adapter_reference() -> None:
     reference says - so split membership is identical across backends."""
     stub = StubConnection(tables=_make_tables())
     spec = _spec(
-        inputs=None,
-        source=LABEL_UID,
+        source=PANEL_UID,
         sample_key=["customer_id"],
         split={"strategy": "random", "train": "0.7", "test": "0.3", "seed": 7},
     )
-    queries = split_queries(spec, "ANALYTICS.GOLD.CHURN_LABELS", [], {})
+    queries = split_queries(spec, "ANALYTICS.GOLD.CHURN_PANEL", [], {})
     membership: dict[int, str] = {}
     for split, sql in queries.items():
         for cid in stub.run_in_duckdb(sql).column("CUSTOMER_ID").to_pylist():
@@ -288,125 +268,11 @@ def test_hash_buckets_match_the_cross_adapter_reference() -> None:
     # sampling uses the same digest, unsalted
     predicate = sampling_predicate(["customer_id"], 0.5)
     sampled = (
-        stub.run_in_duckdb(f"SELECT * FROM ANALYTICS.GOLD.CHURN_LABELS WHERE {predicate}")
+        stub.run_in_duckdb(f"SELECT * FROM ANALYTICS.GOLD.CHURN_PANEL WHERE {predicate}")
         .column("CUSTOMER_ID")
         .to_pylist()
     )
     assert set(sampled) == {i for i in range(200) if _reference_bucket(str(i)) < 500_000}
-
-
-def test_population_spine_with_label_offset_joins_in_duckdb(tmp_path: Path) -> None:
-    """ADR-22 through the generated SQL: population spine, per-table using
-    columns, and the calendar-month label offset, executed in DuckDB."""
-    months = [datetime(2026, m, 1) for m in range(1, 8)]
-    population_rows = [(cid, f"sf-{cid}", when) for when in months[:-1] for cid in range(40)]
-    population = pa.table(
-        {
-            "CUSTOMER_ID": [r[0] for r in population_rows],
-            "SAFE_ID": [r[1] for r in population_rows],
-            "SNAPSHOT_DATE": [r[2] for r in population_rows],
-        }
-    )
-    # outcome for snapshot m lives at m+1, value encodes the SPINE month index
-    label_rows = [
-        (cid, months[i + 1], (cid + i) % 2) for i in range(len(months) - 1) for cid in range(40)
-    ]
-    labels = pa.table(
-        {
-            "CUSTOMER_ID": [r[0] for r in label_rows],
-            "SNAPSHOT_DATE": [r[1] for r in label_rows],
-            "CHURNED": [r[2] for r in label_rows],
-        }
-    )
-    txn = pa.table(
-        {
-            "SAFE_ID": [r[1] for r in population_rows],
-            "SNAPSHOT_DATE": [r[2] for r in population_rows],
-            "TXN_TOTAL": [float(r[0] % 300) for r in population_rows],
-        }
-    )
-    stub = StubConnection(
-        tables={
-            "ANALYTICS.GOLD.POPULATION": population,
-            "ANALYTICS.GOLD.MONTHLY_LABELS": labels,
-            "ANALYTICS.GOLD.TXN_FEATURES": txn,
-        }
-    )
-    adapter = _adapter(stub)
-    pop_uid = "source.p.snowflake.population"
-    lbl_uid = "source.p.snowflake.monthly_labels"
-    txn_uid = "source.p.snowflake.txn_features"
-    spec = DatasetSpec.model_validate(
-        {
-            "name": "wide_churn",
-            "inputs": {
-                "population": pop_uid,
-                "label": {
-                    "source": lbl_uid,
-                    "using": ["customer_id", "snapshot_date"],
-                    "time_offset": "1mo",
-                },
-                "features": [{"source": txn_uid, "using": ["safe_id", "snapshot_date"]}],
-            },
-            "sample_key": ["customer_id"],
-            "label": {"column": "churned"},
-            "split": {
-                "strategy": "temporal",
-                "time_column": "snapshot_date",
-                "train": "2026-01-01:2026-05-01",
-                "test": "2026-05-01:2026-07-01",
-            },
-        }
-    )
-    sources = {
-        pop_uid: FakeSourceTable(name="population", identifier="POPULATION"),
-        lbl_uid: FakeSourceTable(name="monthly_labels", identifier="MONTHLY_LABELS"),
-        txn_uid: FakeSourceTable(name="txn_features", identifier="TXN_FEATURES"),
-    }
-    pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
-    node = ManifestNode(
-        unique_id="dataset.p.wide_churn",
-        resource_type="dataset",
-        name=spec.name,
-        path="datasets/wide_churn.yml",
-        config={},
-        snapshot_id=pinned,
-    )
-    ctx = FakeBuildContext(
-        node=node,
-        source=sources[pop_uid],
-        source_tables=sources,
-        resolved_windows={
-            "train": ("2026-01-01T00:00:00Z", "2026-05-01T00:00:00Z"),
-            "test": ("2026-05-01T00:00:00Z", "2026-07-01T00:00:00Z"),
-        },
-        sample_fraction=1.0,
-        deep_snapshot=False,
-        output_dir=tmp_path / "mat",
-    )
-    handle = adapter.build_dataset(spec, ctx)
-    month_index = {when: i for i, when in enumerate(months)}
-    for split in ("train", "test"):
-        table = handle.read(split)
-        # spine + feature + label columns, label join columns projected away
-        assert set(table.column_names) == {
-            "customer_id",
-            "safe_id",
-            "snapshot_date",
-            "txn_total",
-            "churned",
-        }
-        for row in table.to_pylist():
-            expected = (row["customer_id"] + month_index[row["snapshot_date"]]) % 2
-            assert row["churned"] == expected
-    # the offset join went into the warehouse query, not client-side
-    joined = [q for q in stub.executed if "INTERVAL '1 MONTH'" in q]
-    assert joined and all("SELECT * RENAME" in q for q in joined)
-    # F21: the build recorded label-join coverage, counted in-warehouse (every
-    # spine month here has matured labels, so coverage is complete)
-    assert handle.label_join_coverage == {"spine_rows": 240, "matched_rows": 240}
-    coverage_logs = [m for m in ctx.events.messages if "label join matched" in str(m)]
-    assert len(coverage_logs) == 1 and "100.0%" in str(coverage_logs[0])
 
 
 def test_source_level_checks_push_down_to_the_warehouse() -> None:
@@ -449,12 +315,15 @@ def test_source_level_checks_push_down_to_the_warehouse() -> None:
     assert empty.column_names == ["value"] and empty.num_rows == 0
 
 
-def test_sampling_without_a_key_is_an_actionable_error(tmp_path: Path) -> None:
-    stub = StubConnection(tables=_make_tables())
-    adapter = _adapter(stub)
-    spec = _spec(inputs=None, source=LABEL_UID, sample_key=None)
+def test_sampling_a_scoring_batch_without_a_key_is_an_actionable_error(tmp_path: Path) -> None:
+    """Datasets cannot reach this - `sample_key` is required on them (ADR-29) -
+    but a scoring input's is optional, and sampling one still needs a stable
+    row identity rather than an invented one."""
+    adapter = _adapter(StubConnection(tables=_make_tables()))
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID})
+    ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), sample_fraction=0.5)
     with pytest.raises(SnowflakeAdapterError, match="sample_key"):
-        adapter.build_dataset(spec, _ctx(tmp_path, spec, adapter, sample_fraction=0.5))
+        adapter.build_scoring_input(spec, ctx)
 
 
 def test_snapshot_pin_mismatch_fails_loudly(tmp_path: Path) -> None:
@@ -462,7 +331,7 @@ def test_snapshot_pin_mismatch_fails_loudly(tmp_path: Path) -> None:
     adapter = _adapter(stub)
     spec = _spec()
     ctx = _ctx(tmp_path, spec, adapter)
-    stub.tokens["CHURN_LABELS"] = "the-table-changed"  # simulate new DML commit
+    stub.tokens["CHURN_PANEL"] = "the-table-changed"  # simulate new DML commit
     with pytest.raises(SnowflakeAdapterError, match="changed under the pinned manifest"):
         adapter.build_dataset(spec, ctx)
 
@@ -470,10 +339,10 @@ def test_snapshot_pin_mismatch_fails_loudly(tmp_path: Path) -> None:
 def test_snapshot_ids_change_with_tokens_and_deep_uses_hash_agg(tmp_path: Path) -> None:
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
-    table = _sources()[LABEL_UID]
+    table = _sources()[PANEL_UID]
     first = adapter.snapshot_id(table)
     assert first.startswith("sha256:")
-    stub.tokens["CHURN_LABELS"] = "new-commit-token"
+    stub.tokens["CHURN_PANEL"] = "new-commit-token"
     assert adapter.snapshot_id(table) != first
     adapter.snapshot_id(table, deep=True)
     assert any("HASH_AGG" in q for q in stub.executed)
@@ -492,18 +361,18 @@ def test_snapshot_id_moves_when_only_the_column_set_changes() -> None:
     tables = _make_tables()
     stub = StubConnection(tables=tables)
     adapter = _adapter(stub)
-    table = _sources()[LABEL_UID]
+    table = _sources()[PANEL_UID]
     before = adapter.snapshot_id(table)
 
     # Same rows, same scripted commit token, one more column.
-    ref = next(iter(k for k in tables if "CHURN_LABELS" in k))
+    ref = next(iter(k for k in tables if "CHURN_PANEL" in k))
     widened = tables[ref].append_column(
         "TXN_VOLUME_90D", pa.array([1.0] * tables[ref].num_rows, type=pa.float64())
     )
     wider = StubConnection(tables={**tables, ref: widened})
     after = _adapter(wider).snapshot_id(table)
 
-    assert wider.snapshot_token("CHURN_LABELS") == stub.snapshot_token("CHURN_LABELS")
+    assert wider.snapshot_token("CHURN_PANEL") == stub.snapshot_token("CHURN_PANEL")
     assert after != before
 
     # The probe is metadata-only: it must never scan rows.
@@ -512,7 +381,7 @@ def test_snapshot_id_moves_when_only_the_column_set_changes() -> None:
 
 def test_snapshot_fingerprint_is_stable_for_an_unchanged_relation() -> None:
     tables = _make_tables()
-    table = _sources()[LABEL_UID]
+    table = _sources()[PANEL_UID]
     first = _adapter(StubConnection(tables=tables)).snapshot_id(table)
     second = _adapter(StubConnection(tables=tables)).snapshot_id(table)
     assert first == second
@@ -580,13 +449,13 @@ def test_fetch_one_retries_a_transient_operational_error(monkeypatch: pytest.Mon
 
     monkeypatch.setattr("mbt_adapter_base.retry.time.sleep", lambda _s: None)
     stub = StubConnection(tables=_make_tables())
-    baseline = _adapter(StubConnection(tables=_make_tables())).snapshot_id(_sources()[LABEL_UID])
+    baseline = _adapter(StubConnection(tables=_make_tables())).snapshot_id(_sources()[PANEL_UID])
 
     adapter = _adapter(stub)
     _fail_first_executes(stub, [OperationalError("warehouse resuming")])
     # snapshot_id -> _fetch_one -> _execute_cursor: the first execute blips, the
     # retry re-runs it and the pin comes back identical (not a hard failure).
-    assert adapter.snapshot_id(_sources()[LABEL_UID]) == baseline
+    assert adapter.snapshot_id(_sources()[PANEL_UID]) == baseline
 
 
 def test_stream_query_wraps_a_non_transient_error_after_no_retry(
@@ -613,7 +482,7 @@ def test_fetch_one_gives_up_after_exhausting_retries(monkeypatch: pytest.MonkeyP
     _fail_first_executes(stub, [OperationalError("still down")] * 10)
     adapter = _adapter(stub)
     with pytest.raises(OperationalError):
-        adapter.snapshot_id(_sources()[LABEL_UID])
+        adapter.snapshot_id(_sources()[PANEL_UID])
 
 
 def test_plugin_import_hygiene() -> None:
@@ -652,60 +521,16 @@ def test_key_hash_requires_a_non_empty_key() -> None:
 
 
 def test_base_relation_single_source_is_the_table_ref() -> None:
-    spec = _spec(inputs=None, source=LABEL_UID, sample_key=["customer_id"])
-    assert base_relation(spec, {LABEL_UID: "ANALYTICS.GOLD.CHURN_LABELS"}) == (
-        "ANALYTICS.GOLD.CHURN_LABELS",
+    spec = _spec(sample_key=["customer_id"])
+    assert base_relation(spec, {PANEL_UID: "ANALYTICS.GOLD.CHURN_PANEL"}) == (
+        "ANALYTICS.GOLD.CHURN_PANEL",
         [],
     )
 
 
-def test_feature_entry_projection_pushes_down_both_flavors() -> None:
-    """ADR-25: per-table pruning becomes a projecting subquery, not a
-    post-materialization filter, so pruned columns are never scanned.
-
-    Both flavors are unit-tested here rather than left to whichever example
-    happens to use them - the keep-list branch previously had no coverage of
-    its own and went dark the moment its only example was removed.
-    """
-    refs = {LABEL_UID: "ANALYTICS.GOLD.CHURN_LABELS", USAGE_UID: "ANALYTICS.GOLD.USAGE_FEATURES"}
-
-    keep = _spec(
-        inputs={
-            "population": LABEL_UID,
-            "label": {"source": LABEL_UID, "using": ["customer_id"]},
-            "features": [
-                {"source": USAGE_UID, "using": ["customer_id"], "columns": ["monthly_usage"]}
-            ],
-            "join_key": ["customer_id"],
-        }
-    )
-    relation, _ = base_relation(keep, refs)
-    # The join key rides along automatically - a keep-list that dropped it
-    # would produce a subquery the USING clause could not join on.
-    assert "(SELECT customer_id, monthly_usage FROM ANALYTICS.GOLD.USAGE_FEATURES)" in relation
-
-    drop = _spec(
-        inputs={
-            "population": LABEL_UID,
-            "label": {"source": LABEL_UID, "using": ["customer_id"]},
-            "features": [
-                {"source": USAGE_UID, "using": ["customer_id"], "exclude": ["etl_loaded_at"]}
-            ],
-            "join_key": ["customer_id"],
-        }
-    )
-    relation, _ = base_relation(drop, refs)
-    assert "(SELECT * EXCLUDE (etl_loaded_at) FROM ANALYTICS.GOLD.USAGE_FEATURES)" in relation
-
-    # No projection declared: the bare table, no wrapping subquery.
-    relation, _ = base_relation(_spec(), refs)
-    assert "(SELECT" not in relation
-
-
 def test_random_split_carves_a_validation_bucket() -> None:
     spec = _spec(
-        inputs=None,
-        source=LABEL_UID,
+        source=PANEL_UID,
         sample_key=["customer_id"],
         split={
             "strategy": "random",
@@ -943,10 +768,10 @@ def test_invalid_source_identifier_wraps_the_sql_error() -> None:
 
 
 def test_missing_snapshot_token_is_actionable() -> None:
-    stub = StubConnection(tables=_make_tables(), tokens={"CHURN_LABELS": None})  # type: ignore[dict-item]
+    stub = StubConnection(tables=_make_tables(), tokens={"CHURN_PANEL": None})  # type: ignore[dict-item]
     adapter = _adapter(stub)
     with pytest.raises(SnowflakeAdapterError, match="could not read a snapshot token"):
-        adapter.snapshot_id(_sources()[LABEL_UID])
+        adapter.snapshot_id(_sources()[PANEL_UID])
 
 
 def test_verify_snapshot_skipped_without_a_pin(tmp_path: Path) -> None:
@@ -979,15 +804,23 @@ def test_sample_fraction_out_of_range_is_actionable(tmp_path: Path) -> None:
 
 
 def test_build_dataset_wraps_split_sql_errors(tmp_path: Path) -> None:
+    """A SQL-generation failure surfaces as a SnowflakeAdapterError, not raw.
+
+    The generator refuses identifiers it cannot emit unquoted, and that refusal
+    has to reach the user as an adapter error naming the dataset rather than as
+    a bare SnowflakeSQLError from three frames down.
+    """
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
     spec = _spec(
-        inputs=None,
-        source=LABEL_UID,
-        sample_key=None,
-        split={"strategy": "random", "train": "0.8", "test": "0.2", "seed": 7},
+        split={
+            "strategy": "temporal",
+            "time_column": "snapshot date",  # a space: not an unquoted identifier
+            "train": "-180d:-28d",
+            "test": "-28d:now",
+        }
     )
-    with pytest.raises(SnowflakeAdapterError, match="random split on Snowflake needs"):
+    with pytest.raises(SnowflakeAdapterError, match="invalid column identifier"):
         adapter.build_dataset(spec, _ctx(tmp_path, spec, adapter))
 
 
@@ -1062,7 +895,7 @@ SCORE_WINDOW = ("2026-06-03T00:00:00Z", "2026-07-01T00:00:00Z")
 
 
 def _scoring_sources() -> dict[str, FakeSourceTable]:
-    return {USAGE_UID: FakeSourceTable(name="usage_features", identifier="USAGE_FEATURES")}
+    return {SCORING_UID: FakeSourceTable(name="churn_panel", identifier="CHURN_PANEL")}
 
 
 def _scoring_ctx(
@@ -1098,38 +931,19 @@ def _scoring_ctx(
     )
 
 
-def test_scoring_relation_single_source_and_label_free_joins() -> None:
-    single = ScoringInputSpec.model_validate({"source": USAGE_UID})
-    assert scoring_relation(single, {USAGE_UID: "DB.S.USAGE"}) == "DB.S.USAGE"
-
-    joined = ScoringInputSpec.model_validate(
-        {
-            "inputs": {
-                "spine": LABEL_UID,
-                "features": [USAGE_UID],
-                "join_key": ["customer_id", "snapshot_date"],
-            }
-        }
-    )
-    sql = scoring_relation(joined, {LABEL_UID: "DB.S.SPINE", USAGE_UID: "DB.S.FEAT"})
-    assert "DB.S.SPINE AS mbt_spine" in sql
-    assert "LEFT JOIN DB.S.FEAT AS mbt_f0 USING (customer_id, snapshot_date)" in sql
-    assert "mbt_label" not in sql  # a scoring relation never joins a label
-
-
 def test_scoring_query_applies_window_only_with_time_column() -> None:
-    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
-    windowed = scoring_query(spec, {USAGE_UID: "T"}, ["(is_active)"], SCORE_WINDOW)
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID, "time_column": "snapshot_date"})
+    windowed = scoring_query(spec, {SCORING_UID: "T"}, ["(is_active)"], SCORE_WINDOW)
     assert "TO_TIMESTAMP_NTZ('2026-06-03 00:00:00')" in windowed
     assert "(is_active)" in windowed
-    assert scoring_query(spec, {USAGE_UID: "T"}, [], None) == "SELECT * FROM T"
+    assert scoring_query(spec, {SCORING_UID: "T"}, [], None) == "SELECT * FROM T"
 
 
 def test_build_scoring_input_streams_windowed_single_source(tmp_path: Path) -> None:
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
     sources = _scoring_sources()
-    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID, "time_column": "snapshot_date"})
     ctx = _scoring_ctx(tmp_path, adapter, sources)
     handle = adapter.build_scoring_input(spec, ctx)
 
@@ -1147,33 +961,11 @@ def test_build_scoring_input_streams_windowed_single_source(tmp_path: Path) -> N
     assert again.read("score").num_rows == score.num_rows
 
 
-def test_build_scoring_input_joins_spine_and_features(tmp_path: Path) -> None:
-    stub = StubConnection(tables=_make_tables())
-    adapter = _adapter(stub)
-    sources = _sources()  # spine + feature tables
-    spec = ScoringInputSpec.model_validate(
-        {
-            "inputs": {
-                "spine": LABEL_UID,
-                "features": [USAGE_UID],
-                "join_key": ["customer_id", "snapshot_date"],
-            },
-            "time_column": "snapshot_date",
-        }
-    )
-    score = adapter.build_scoring_input(spec, _scoring_ctx(tmp_path, adapter, sources)).read(
-        "score"
-    )
-    assert {"customer_id", "snapshot_date", "monthly_usage"} <= set(score.column_names)
-    selects = [q for q in stub.executed if q.startswith("SELECT *")]
-    assert "USING (customer_id, snapshot_date)" in selects[0]
-
-
 def test_build_scoring_input_without_time_column_scores_full_batch(tmp_path: Path) -> None:
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
     sources = _scoring_sources()
-    spec = ScoringInputSpec.model_validate({"source": USAGE_UID})  # no time_column
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID})  # no time_column
     handle = adapter.build_scoring_input(
         spec, _scoring_ctx(tmp_path, adapter, sources, window=None)
     )
@@ -1187,7 +979,7 @@ def test_build_scoring_input_pushes_down_sampling(tmp_path: Path) -> None:
     adapter = _adapter(stub)
     sources = _scoring_sources()
     spec = ScoringInputSpec.model_validate(
-        {"source": USAGE_UID, "time_column": "snapshot_date", "sample_key": ["customer_id"]}
+        {"source": SCORING_UID, "time_column": "snapshot_date", "sample_key": ["customer_id"]}
     )
     handle = adapter.build_scoring_input(
         spec, _scoring_ctx(tmp_path, adapter, sources, sample_fraction=0.5)
@@ -1199,7 +991,7 @@ def test_build_scoring_input_pushes_down_sampling(tmp_path: Path) -> None:
 
 def test_build_scoring_input_rejects_bad_sample_fraction(tmp_path: Path) -> None:
     adapter = SnowflakeDataAdapter({"database": "ANALYTICS", "schema": "GOLD"})
-    spec = ScoringInputSpec.model_validate({"source": USAGE_UID})
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID})
     ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), sample_fraction=1.5, window=None)
     with pytest.raises(SnowflakeAdapterError, match=r"sample_fraction must be in \(0, 1\]"):
         adapter.build_scoring_input(spec, ctx)
@@ -1207,7 +999,7 @@ def test_build_scoring_input_rejects_bad_sample_fraction(tmp_path: Path) -> None
 
 def test_build_scoring_input_sampling_needs_a_key(tmp_path: Path) -> None:
     adapter = SnowflakeDataAdapter({"database": "ANALYTICS", "schema": "GOLD"})
-    spec = ScoringInputSpec.model_validate({"source": USAGE_UID})  # no sample_key
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID})  # no sample_key
     ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), sample_fraction=0.5, window=None)
     with pytest.raises(SnowflakeAdapterError, match="stable row identity"):
         adapter.build_scoring_input(spec, ctx)
@@ -1215,7 +1007,7 @@ def test_build_scoring_input_sampling_needs_a_key(tmp_path: Path) -> None:
 
 def test_build_scoring_input_wraps_invalid_identifiers(tmp_path: Path) -> None:
     adapter = SnowflakeDataAdapter({"database": "ANALYTICS", "schema": "GOLD"})
-    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "bad; DROP"})
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID, "time_column": "bad; DROP"})
     ctx = _scoring_ctx(
         tmp_path, adapter, _scoring_sources()
     )  # window present -> validates time_col
@@ -1226,7 +1018,7 @@ def test_build_scoring_input_wraps_invalid_identifiers(tmp_path: Path) -> None:
 def test_build_scoring_input_zero_rows_warns_not_errors(tmp_path: Path) -> None:
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
-    spec = ScoringInputSpec.model_validate({"source": USAGE_UID, "time_column": "snapshot_date"})
+    spec = ScoringInputSpec.model_validate({"source": SCORING_UID, "time_column": "snapshot_date"})
     events = CapturingSink()
     future = ("2030-01-01T00:00:00Z", "2030-02-01T00:00:00Z")  # matches no rows
     ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), window=future, events=events)

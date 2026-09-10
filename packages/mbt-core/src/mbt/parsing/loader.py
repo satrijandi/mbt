@@ -117,6 +117,23 @@ def _unwrap_model(annotation: Any) -> type[BaseModel] | None:
     return None
 
 
+#: Why a required field is required, for the fields where "it is missing" is
+#: not enough to act on. Keyed by field name, so it applies wherever the field
+#: appears.
+REQUIRED_FIELD_HINTS = {
+    "sample_key": (
+        "set it to the entity id column(s), e.g. sample_key: [customer_id] - it is "
+        "the stable row identity for deterministic sampling and seeded random "
+        "splits. Without one the digest hashes every column, so a column arriving "
+        "upstream re-buckets every row and moves rows across the train/test boundary"
+    ),
+    "source": (
+        "a dataset reads exactly one relation, e.g. "
+        "source: source('warehouse', 'ml_churn_panel') - whatever joins it is upstream"
+    ),
+}
+
+
 def validate_resource(
     model_cls: type[M],
     raw: dict[str, Any],
@@ -155,7 +172,9 @@ def validate_resource(
             else:
                 only_extra = False
                 if error["type"] == "missing":
-                    message = f"required field {str(loc[-1])!r} is missing"
+                    field = str(loc[-1])
+                    message = f"required field {field!r} is missing"
+                    hint = REQUIRED_FIELD_HINTS.get(field)
             report.error(
                 message,
                 file=rel,

@@ -29,10 +29,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from mbt_adapter_base import (
     DatasetLocator,
     DatasetSpec,
-    FeatureEntry,
     ScoringInputSpec,
     ScoringOutputSpec,
-    parse_time_offset,
 )
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
@@ -56,27 +54,6 @@ class SparkAdapterError(RuntimeError):
         if hint:
             message = f"{message}\n  hint: {hint}"
         super().__init__(message)
-
-
-def _project_feature_frame(frame: "DataFrame", entry: FeatureEntry) -> "DataFrame":
-    """Apply a per-table column projection (ADR-25) before the join.
-
-    Keep-lists select join columns + payload; a missing keep column fails in
-    Spark's analyzer. Drop-lists must be checked here because ``.drop``
-    silently ignores unknown columns - a typo'd exclude would otherwise
-    "succeed" while pruning nothing.
-    """
-    keep = entry.keep_columns
-    if keep is not None:
-        return frame.select(*keep)
-    if entry.exclude is not None:
-        missing = sorted(set(entry.exclude) - set(frame.columns))
-        if missing:
-            raise SparkAdapterError(
-                f"feature table {entry.source!r} has no column(s) {missing} to exclude"
-            )
-        return frame.drop(*entry.exclude)
-    return frame
 
 
 #: Which of a source table's two addresses this adapter reads it by.
@@ -123,16 +100,6 @@ def resolve_source_address(
 
 def _quote(column: str) -> str:
     return "`" + column.replace("`", "``") + "`"
-
-
-#: time_offset units -> SQL interval keywords (calendar month included).
-_INTERVAL_UNITS = {"mo": "MONTH", "d": "DAY", "w": "WEEK", "h": "HOUR"}
-
-
-def _interval_sql(count: int, unit: str) -> str:
-    """``(1, "mo")`` -> ``+ INTERVAL 1 MONTH`` (sign as the operator)."""
-    operator = "-" if count < 0 else "+"
-    return f"{operator} INTERVAL {abs(count)} {_INTERVAL_UNITS[unit]}"
 
 
 def key_hash_sql(key_columns: list[str], salt: str = "") -> str:
@@ -319,15 +286,8 @@ class SparkDataAdapter:
         if not 0.0 < ctx.sample_fraction <= 1.0:
             raise SparkAdapterError(f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}")
         if ctx.sample_fraction < 1.0:
-            keys = spec.sample_key_columns
-            if not keys:
-                raise SparkAdapterError(
-                    "sampling on Spark needs a stable row identity",
-                    hint="declare sample_key: [<id columns>] on the dataset "
-                    "(or use the multi-table inputs form)",
-                )
             threshold = int(ctx.sample_fraction * SAMPLE_MODULUS)
-            base = base.filter(f"{key_hash_sql(keys)} < {threshold}")
+            base = base.filter(f"{key_hash_sql(spec.sample_key_columns)} < {threshold}")
 
         written = self._write_splits(base, spec, ctx, output_dir)
         for split, count in written.items():
@@ -342,22 +302,6 @@ class SparkDataAdapter:
             f"dataset {ctx.node.unique_id}: materialized {sum(written.values())} rows: "
             + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
         )
-        coverage: dict[str, int] | None = None
-        if spec.inputs is not None and spec.inputs.population is not None:
-            # Label-join coverage (F21): spine rows vs rows surviving the inner
-            # label join, counted before filters/sampling/windows.
-            tables = {uid: self._read(table) for uid, table in ctx.source_tables.items()}
-            coverage = {
-                "spine_rows": self._spine_frame(spec, tables).count(),
-                "matched_rows": self._base_frame(spec, ctx).count(),
-            }
-            if coverage["spine_rows"] > 0:
-                fraction = coverage["matched_rows"] / coverage["spine_rows"]
-                ctx.events.emit(
-                    f"dataset {ctx.node.unique_id}: label join matched "
-                    f"{coverage['matched_rows']} of {coverage['spine_rows']} "
-                    f"spine rows ({fraction:.1%})"
-                )
         write_materialization_metadata(
             output_dir,
             snapshot_id=ctx.node.snapshot_id,
@@ -367,53 +311,13 @@ class SparkDataAdapter:
             windows=ctx.resolved_windows,
             sample_fraction=ctx.sample_fraction,
             row_counts=written,
-            label_join_coverage=coverage,
         )
         _ = spark  # session kept alive for the adapter's lifetime
         return MaterializedDatasetHandle(output_dir, adapter=self.name)
 
-    def _spine_frame(self, spec: DatasetSpec, tables: dict[str, "DataFrame"]) -> "DataFrame":
-        """The spine + feature joins, before any label join (shared by
-        ``_base_frame`` and the label-join coverage counts, F21)."""
-        assert spec.inputs is not None
-        frame = tables[spec.inputs.spine]
-        how = "left" if spec.inputs.join == "left" else "inner"
-        for entry in spec.inputs.feature_entries:
-            projected = _project_feature_frame(tables[entry.source], entry)
-            frame = frame.join(projected, on=entry.using, how=how)
-        return frame
-
     def _base_frame(self, spec: DatasetSpec, ctx: DataBuildContext) -> "DataFrame":
-        tables = {uid: self._read(table) for uid, table in ctx.source_tables.items()}
-        if spec.inputs is None:
-            assert spec.source is not None
-            return tables[spec.source]
-        frame = self._spine_frame(spec, tables)
-        if spec.inputs.population is None:
-            return frame
-        # The label joins the population spine last (always inner - an example
-        # without an observed outcome is not a training example, ADR-22): its
-        # join columns are renamed, matched with an expression join so the
-        # time_offset can shift the spine's time column, then dropped.
-        from pyspark.sql import functions as F
-
-        label = tables[spec.inputs.label_source]
-        renames = {c: f"__mbt_lbl{i}" for i, c in enumerate(spec.inputs.label_join_columns)}
-        for column, alias in renames.items():
-            label = label.withColumnRenamed(column, alias)
-        offset = spec.inputs.label_time_offset
-        conditions = []
-        for column, alias in renames.items():
-            if offset is not None and column == spec.split.time_column:
-                count, unit = parse_time_offset(offset)
-                conditions.append(
-                    f"CAST({_quote(alias)} AS TIMESTAMP) = "
-                    f"CAST({_quote(column)} AS TIMESTAMP) {_interval_sql(count, unit)}"
-                )
-            else:
-                conditions.append(f"{_quote(alias)} = {_quote(column)}")
-        frame = frame.join(label, on=F.expr(" AND ".join(conditions)), how="inner")
-        return frame.drop(*renames.values())
+        """The dataset's one relation, whatever built it (ADR-29)."""
+        return self._read(ctx.source_tables[spec.source])
 
     # -- source-level checks (F2/F21) ----------------------------------------------------
 
@@ -459,12 +363,8 @@ class SparkDataAdapter:
                 written[split] = self._write_one(frame, output_dir / f"{split}.parquet")
             return written
 
-        keys = spec.sample_key_columns
-        if not keys:
-            raise SparkAdapterError(
-                "a random split on Spark needs 'sample_key' (or inputs.join_key)"
-            )
-        bucket = key_hash_sql(keys, salt=str(spec.split.seed or 0))
+        # sample_key is required and validated non-empty on the spec (ADR-29).
+        bucket = key_hash_sql(spec.sample_key_columns, salt=str(spec.split.seed or 0))
         fractions: dict[str, float] = {"train": float(spec.split.train)}
         if spec.split.validation is not None:
             fractions["validation"] = float(spec.split.validation)
@@ -528,18 +428,9 @@ class SparkDataAdapter:
     # -- batch scoring (contract 1.1, ADR-20/21) -------------------------------------
 
     def _scoring_frame(self, spec: ScoringInputSpec, ctx: DataBuildContext) -> "DataFrame":
-        """Spine + feature joins for a scoring batch - the training relation
-        (``_base_frame``) minus the label (scoring inputs are unlabeled)."""
-        tables = {uid: self._read(table) for uid, table in ctx.source_tables.items()}
-        if spec.inputs is None:
-            assert spec.source is not None
-            return tables[spec.source]
-        frame = tables[spec.inputs.spine]
-        how = "left" if spec.inputs.join == "left" else "inner"
-        for entry in spec.inputs.feature_entries:
-            projected = _project_feature_frame(tables[entry.source], entry)
-            frame = frame.join(projected, on=entry.using, how=how)
-        return frame
+        """The scoring batch's one relation: the serving twin of the training
+        panel, unlabeled by design (ADR-20/29)."""
+        return self._read(ctx.source_tables[spec.source])
 
     def build_scoring_input(
         self, spec: ScoringInputSpec, ctx: DataBuildContext

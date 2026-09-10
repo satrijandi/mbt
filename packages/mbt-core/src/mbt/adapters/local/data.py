@@ -18,7 +18,6 @@ back to hashing every column - correct, but slow on wide tables.
 import glob as globlib
 import hashlib
 import os
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,16 +46,6 @@ from mbt_adapter_base.materialization import (
     write_materialization_metadata,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore
-from mbt_adapter_base.specs import FeatureEntry, parse_time_offset
-
-#: time_offset units -> SQL interval keywords (calendar month included).
-_INTERVAL_UNITS = {"mo": "MONTH", "d": "DAY", "w": "WEEK", "h": "HOUR"}
-
-
-def _interval_sql(count: int, unit: str) -> str:
-    """``(1, "mo")`` -> ``+ INTERVAL 1 MONTH`` (sign as the operator)."""
-    operator = "-" if count < 0 else "+"
-    return f"{operator} INTERVAL {abs(count)} {_INTERVAL_UNITS[unit]}"
 
 
 def _uri_to_path(uri: str) -> Path:
@@ -78,73 +67,6 @@ class LocalDatasetHandle(MaterializedDatasetHandle):
 
     def __init__(self, directory: Path) -> None:
         super().__init__(directory, adapter="local")
-
-
-@dataclass(frozen=True)
-class _LabelJoin:
-    """The label table joined onto a population spine (ADR-22)."""
-
-    uid: str
-    using: list[str]
-    time_offset: tuple[int, str] | None  # parsed (count, unit)
-    time_column: str | None  # the join column the offset shifts
-
-
-@dataclass(frozen=True)
-class _RelationSpec:
-    """The FROM-clause shape shared by datasets and scoring inputs."""
-
-    spine: str  # uid of the single source, or of the spine table
-    features: list[FeatureEntry]  # normalized feature joins, declaration order
-    join: str  # "left" | "inner"
-    label: _LabelJoin | None = None  # only for population-spine datasets
-
-
-def _feature_relation(table_relation: str, entry: FeatureEntry) -> str:
-    """The joinable relation for one feature table: the raw parquet scan, or
-    a projecting subquery when the entry declares ``columns``/``exclude``
-    (ADR-25) - pruning happens inside DuckDB's scan, mirroring the
-    warehouse adapters."""
-    keep = entry.keep_columns
-    if keep is not None:
-        cols = ", ".join(_quote(c) for c in keep)
-        return f"(SELECT {cols} FROM {table_relation})"
-    if entry.exclude is not None:
-        cols = ", ".join(_quote(c) for c in entry.exclude)
-        return f"(SELECT * EXCLUDE ({cols}) FROM {table_relation})"
-    return table_relation
-
-
-def _dataset_relation(spec: DatasetSpec) -> _RelationSpec:
-    if spec.inputs is None:
-        assert spec.source is not None
-        return _RelationSpec(spine=spec.source, features=[], join="left")
-    label: _LabelJoin | None = None
-    if spec.inputs.population is not None:
-        offset = spec.inputs.label_time_offset
-        label = _LabelJoin(
-            uid=spec.inputs.label_source,
-            using=spec.inputs.label_join_columns,
-            time_offset=parse_time_offset(offset) if offset is not None else None,
-            time_column=spec.split.time_column,
-        )
-    return _RelationSpec(
-        spine=spec.inputs.spine,
-        features=spec.inputs.feature_entries,
-        join=spec.inputs.join,
-        label=label,
-    )
-
-
-def _scoring_relation(spec: ScoringInputSpec) -> _RelationSpec:
-    if spec.inputs is None:
-        assert spec.source is not None
-        return _RelationSpec(spine=spec.source, features=[], join="left")
-    return _RelationSpec(
-        spine=spec.inputs.spine,
-        features=spec.inputs.feature_entries,
-        join=spec.inputs.join,
-    )
 
 
 def _connect_duckdb(output_dir: Path, parallelism: int = 1) -> "duckdb.DuckDBPyConnection":
@@ -247,21 +169,18 @@ class LocalDataAdapter:
 
         con = _connect_duckdb(output_dir, ctx.build_parallelism)
         try:
-            self._create_base_view(
-                con, _dataset_relation(spec), ctx, spec.filters, spec.sample_key_columns
-            )
+            self._create_base_view(con, spec.source, ctx, spec.filters, spec.sample_key_columns)
             if spec.split.strategy is SplitStrategy.TEMPORAL:
                 written = self._write_temporal_splits(con, spec, ctx, output_dir)
             else:
                 written = self._write_random_splits(con, spec, ctx, output_dir)
-            coverage = self._label_join_coverage(con, _dataset_relation(spec), ctx)
         except duckdb.Error as exc:
             raise AdapterError(
                 f"dataset build failed in DuckDB: {exc}",
                 resource=ctx.node.unique_id,
                 hint=(
-                    "check the dataset's filters, join keys, and split configuration; "
-                    "column names must be unique across joined tables"
+                    "check the dataset's filters and split configuration against "
+                    "the relation's columns"
                 ),
             ) from exc
         finally:
@@ -284,17 +203,6 @@ class LocalDataAdapter:
                 ),
             )
         )
-        if coverage is not None and coverage["spine_rows"] > 0:
-            fraction = coverage["matched_rows"] / coverage["spine_rows"]
-            ctx.events.emit(
-                LogMessage(
-                    unique_id=ctx.node.unique_id,
-                    message=(
-                        f"label join matched {coverage['matched_rows']} of "
-                        f"{coverage['spine_rows']} spine rows ({fraction:.1%})"
-                    ),
-                )
-            )
 
         write_materialization_metadata(
             output_dir,
@@ -305,7 +213,6 @@ class LocalDataAdapter:
             windows=ctx.resolved_windows,
             sample_fraction=ctx.sample_fraction,
             row_counts=written,
-            label_join_coverage=coverage,
         )
         return LocalDatasetHandle(output_dir)
 
@@ -319,44 +226,6 @@ class LocalDataAdapter:
                 resource=ctx.node.unique_id,
             )
         return self._source_relation(table)
-
-    def _base_relation(self, rel: _RelationSpec, ctx: DataBuildContext) -> tuple[str, list[str]]:
-        """FROM clause plus columns to project away afterwards.
-
-        The single source, or spine + feature USING joins in declaration
-        order; a population-spine label joins last via a rename-project
-        subquery (its join columns cannot merge through USING when the
-        time offset shifts them, so they are renamed, matched with ON, and
-        excluded from the output - ADR-22).
-        """
-        if not rel.features and rel.label is None:
-            return self._table_relation(ctx, rel.spine), []
-        join_kind = "LEFT JOIN" if rel.join == "left" else "JOIN"
-        sql = f"{self._table_relation(ctx, rel.spine)} AS mbt_spine"
-        for i, entry in enumerate(rel.features):
-            using = ", ".join(_quote(c) for c in entry.using)
-            relation = _feature_relation(self._table_relation(ctx, entry.source), entry)
-            sql += f" {join_kind} {relation} AS mbt_f{i} USING ({using})"
-        if rel.label is None:
-            return sql, []
-        renames = {c: f"__mbt_lbl{i}" for i, c in enumerate(rel.label.using)}
-        rename_sql = ", ".join(f"{_quote(c)} AS {alias}" for c, alias in renames.items())
-        conditions = []
-        for column, alias in renames.items():
-            if rel.label.time_offset is not None and column == rel.label.time_column:
-                count, unit = rel.label.time_offset
-                interval = _interval_sql(count, unit)
-                conditions.append(
-                    f"CAST({alias} AS TIMESTAMP) = CAST({_quote(column)} AS TIMESTAMP) {interval}"
-                )
-            else:
-                conditions.append(f"{alias} = {_quote(column)}")
-        sql += (
-            f" JOIN (SELECT * RENAME ({rename_sql}) FROM "
-            f"{self._table_relation(ctx, rel.label.uid)}) AS mbt_label "
-            f"ON {' AND '.join(conditions)}"
-        )
-        return sql, list(renames.values())
 
     # -- source-level checks (F2/F21) ------------------------------------------
 
@@ -392,30 +261,6 @@ class LocalDataAdapter:
             ).to_arrow_table()
         finally:
             con.close()
-
-    def _label_join_coverage(
-        self, con: "duckdb.DuckDBPyConnection", rel: _RelationSpec, ctx: DataBuildContext
-    ) -> dict[str, int] | None:
-        """Spine rows vs rows surviving the inner label join (F21).
-
-        The temporal label join is exact equality on ``time_column + offset``,
-        so labels drifting off the offset grid silently drop spine rows; this
-        measures that drop. Counted before filters/sampling/windows (they
-        remove rows for the user's own reasons) so the ratio isolates the join.
-        Only population-spine datasets have a label join to measure.
-        """
-        if rel.label is None:
-            return None
-        import dataclasses
-
-        matched_sql, _ = self._base_relation(rel, ctx)
-        spine_sql, _ = self._base_relation(dataclasses.replace(rel, label=None), ctx)
-        spine = con.execute(f"SELECT count(*) FROM {spine_sql}").fetchone()
-        matched = con.execute(f"SELECT count(*) FROM {matched_sql}").fetchone()
-        return {
-            "spine_rows": int(spine[0]) if spine else 0,
-            "matched_rows": int(matched[0]) if matched else 0,
-        }
 
     def _digest_columns(
         self,
@@ -475,12 +320,12 @@ class LocalDataAdapter:
     def _create_base_view(
         self,
         con: "duckdb.DuckDBPyConnection",
-        rel: _RelationSpec,
+        source_uid: str,
         ctx: DataBuildContext,
         filters: list[str],
         sample_keys: list[str],
     ) -> None:
-        relation, exclude = self._base_relation(rel, ctx)
+        relation = self._table_relation(ctx, source_uid)
         where: list[str] = [f"({f})" for f in filters]
         sample_fraction = ctx.sample_fraction
         if not 0.0 < sample_fraction <= 1.0:
@@ -495,8 +340,7 @@ class LocalDataAdapter:
             threshold = int(sample_fraction * SAMPLE_MODULUS)
             where.append(f"({digest} % {SAMPLE_MODULUS}) < {threshold}")
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-        select = f"* EXCLUDE ({', '.join(exclude)})" if exclude else "*"
-        con.execute(f"CREATE TEMP VIEW mbt_base AS SELECT {select} FROM {relation}{where_sql}")
+        con.execute(f"CREATE TEMP VIEW mbt_base AS SELECT * FROM {relation}{where_sql}")
 
     def _write_temporal_splits(
         self,
@@ -613,9 +457,7 @@ class LocalDataAdapter:
 
         con = _connect_duckdb(output_dir, ctx.build_parallelism)
         try:
-            self._create_base_view(
-                con, _scoring_relation(spec), ctx, spec.filters, spec.sample_key_columns
-            )
+            self._create_base_view(con, spec.source, ctx, spec.filters, spec.sample_key_columns)
             where = ""
             if spec.time_column is not None and "score" in ctx.resolved_windows:
                 start, end = ctx.resolved_windows["score"]

@@ -389,12 +389,9 @@ class DatasetRunner:
                 f"dataset {node.name!r} has no source in the manifest",
                 resource=node.unique_id,
             )
-        # The spine: population or label table for multi-table inputs (ADR-22),
-        # else the single source.
-        spine_uid = spec.inputs.spine if spec.inputs is not None else spec.source
-        if spine_uid not in source_tables:
+        if spec.source not in source_tables:
             raise ConfigError(
-                f"dataset {node.name!r} spine source {spine_uid!r} missing from the manifest",
+                f"dataset {node.name!r} source {spec.source!r} missing from the manifest",
                 resource=node.unique_id,
                 hint="recompile: the manifest and spec disagree",
             )
@@ -404,7 +401,7 @@ class DatasetRunner:
         }
         build_ctx = BuildContext(
             node=node,
-            source=source_tables[spine_uid],
+            source=source_tables[spec.source],
             source_tables=source_tables,
             resolved_windows=windows,
             sample_fraction=sample_fraction,
@@ -927,13 +924,7 @@ class ScoringRunner:
         # would serve a STALE batch (F4). build_scoring_input wipes and rebuilds
         # this one cheap batch every call; datasets, which are immutable by
         # snapshot, still cache in DatasetRunner._materialize.
-        if spec.input.source is not None:
-            spine_uid = spec.input.source
-            input_uids = [spine_uid]
-        else:
-            assert spec.input.inputs is not None
-            spine_uid = spec.input.inputs.spine
-            input_uids = [spine_uid, *spec.input.inputs.feature_sources]
+        input_uids = [spec.input.source]
         source_tables = {
             uid: ctx.manifest.sources[uid].config
             for uid in input_uids
@@ -952,7 +943,7 @@ class ScoringRunner:
         }
         build_ctx = BuildContext(
             node=node,
-            source=source_tables[spine_uid],
+            source=source_tables[spec.input.source],
             source_tables=source_tables,
             resolved_windows=windows,
             sample_fraction=sample_fraction,

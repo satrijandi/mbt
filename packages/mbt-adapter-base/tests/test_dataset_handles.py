@@ -130,3 +130,27 @@ def test_profile_skips_empty_splits_and_caches(tmp_path: Path) -> None:
     assert profile.time_range == ("2026-01-01", "2026-01-04")
     assert profile.label_balance == {"0": 0.5, "1": 0.5}
     assert handle.profile() is profile
+
+
+def test_combine_snapshots_folds_many_into_one_stable_token() -> None:
+    """The adapter contract's snapshot combiner.
+
+    A dataset reads one relation since ADR-29, so in-tree every caller passes a
+    single entry - but this stays part of the contract adapters build against,
+    and it has to keep three properties: absent snapshots do not contribute, one
+    snapshot passes through unchanged (so a single-source id stays readable),
+    and many fold into one token that is order-independent and sensitive to
+    every part.
+    """
+    from mbt_adapter_base.materialization import combine_snapshots
+
+    assert combine_snapshots({}) is None
+    assert combine_snapshots({"a": None, "b": ""}) is None  # type: ignore[dict-item]
+    assert combine_snapshots({"a": "sha256:one"}) == "sha256:one"
+    assert combine_snapshots({"a": "sha256:one", "b": None}) == "sha256:one"  # type: ignore[dict-item]
+
+    both = combine_snapshots({"a": "sha256:one", "b": "sha256:two"})
+    assert both is not None and both.startswith("sha256:")
+    assert combine_snapshots({"b": "sha256:two", "a": "sha256:one"}) == both  # order-free
+    assert combine_snapshots({"a": "sha256:one", "b": "sha256:three"}) != both
+    assert combine_snapshots({"a": "sha256:two", "b": "sha256:one"}) != both  # uid-bound

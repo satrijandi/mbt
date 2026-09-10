@@ -118,7 +118,6 @@
           "is_active = true",
           "tenure_days >= 30"
         ],
-        "inputs": null,
         "label": {
           "column": "churned_90d",
           "definition": "cancelled within 90 days of snapshot_date",
@@ -143,13 +142,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:2b1c0f5e5c1fd6c9f097d7872a0ef5bea9ef58af75c5b202dc7b0ddf5b242ad1",
+      "config_hash": "sha256:f4f377215b3329cb16cf891538b02728cab14391f9ca1aa41e9e3f103ccc515e",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:98d2f287dafd08c99a7ab47677d5fa91a20d57a1cdce101703329a3beee137a3",
+      "input_hash": "sha256:2ff6af7dca77a95761f2c1275d1b6cb30a97cf7dc291308da04f6932db955298",
       "name": "churn_training_set",
       "path": "datasets/churn_training_set.yml",
       "resolved": {
@@ -182,7 +181,6 @@
           "is_active = true",
           "plan_type != 'enterprise'"
         ],
-        "inputs": null,
         "label": {
           "column": "upgraded_90d",
           "definition": "upgraded their plan within 90 days of snapshot_date",
@@ -207,13 +205,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:6d5fa711f71b985f8f8de80145998d0104f62db0bffb32ceff79b8c87f4617f2",
+      "config_hash": "sha256:968b797c91aa8d91b8fbc62d98b5e2faae0473ef91f720187b13085ab2dd7cda",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:57120016241c03fc76b249aaa15410bdd95db5e90805c4022d8a8f19ff12adfa",
+      "input_hash": "sha256:7392d3b0f5a04fbc75c166b5ec28e035df884c1d2279dafb3ef7ef5f99530528",
       "name": "upsell_training_set",
       "path": "datasets/upsell_training_set.yml",
       "resolved": {
@@ -332,7 +330,7 @@
       ],
       "hooks_hash": "sha256:b69c77c89439a1112e3432f4e582a64be217e42fa4afa8c5f173495bf55954e4",
       "hooks_path": "models/churn_classifier.py",
-      "input_hash": "sha256:a125a8c9e8b8cbae45f56075fc2905b6e77026c6d11b8634a52078eb3086ab64",
+      "input_hash": "sha256:ee9090a4a559ca6dd939173b9cdfef0194375c1edd602dc2455fbde7ea16410c",
       "name": "churn_classifier",
       "path": "models/churn_classifier.yml",
       "resolved": {},
@@ -415,7 +413,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:347f922b21a67156fdf6527c6f9ab535e8eac79a984a6d26c1816073f1124d17",
+      "input_hash": "sha256:e1d36876b9c28e42242eebe6ceb12f0352c8c7c19afa729ba4087eaa19c65409",
       "name": "churn_classifier_deep",
       "path": "models/churn_classifier_deep.yml",
       "resolved": {},
@@ -501,7 +499,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:c61313bbb5ca4e5fbb92f6086c39931c645a4df4a95a4bc9f1d8544880ca5918",
+      "input_hash": "sha256:f514aedf12617bcd2341a4089e8c1e634121f04188b54f50d7302c177ddb3abc",
       "name": "upsell_classifier",
       "path": "models/upsell_classifier.yml",
       "resolved": {},
@@ -549,7 +547,6 @@
             "is_active = true",
             "tenure_days >= 30"
           ],
-          "inputs": null,
           "sample_key": null,
           "source": "source.churn_demo.lakehouse.scoring_batch",
           "time_column": "snapshot_date",
@@ -591,7 +588,7 @@
           "daily"
         ]
       },
-      "config_hash": "sha256:5c0d82aede083fb65374bb23d3b9f01018b1fd4d5bf1b61ca799de8fb16ba17d",
+      "config_hash": "sha256:4713afd8c9f73abb55ca5caa92fdb6875325061d099b63650e82f535069ebde8",
       "depends_on": [
         "model.churn_demo.churn_classifier",
         "source.churn_demo.lakehouse.churn_outcomes",
@@ -599,7 +596,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:acaedaf24a45e4036754263fa134f4cf5d17064b93233860a7097f11b266aaf3",
+      "input_hash": "sha256:8dad9860f29789f96e6d43eb3e1467b692d5044efedea61c56743c72ce4ab5a6",
       "name": "retention_scoring",
       "path": "scoring/retention_scoring.yml",
       "resolved": {
