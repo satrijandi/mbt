@@ -224,8 +224,9 @@ def test_build_dataset_joins_streams_and_normalizes_case(tmp_path: Path) -> None
     # temporal windows actually applied
     assert profile.n_rows["train"] > profile.n_rows["test"] > 0
 
-    # the SELECTs pushed the join down (single query per split, no client join)
-    selects = [q for q in stub.executed if q.startswith("SELECT *")]
+    # the SELECTs pushed the join down (single query per split, no client join).
+    # The metadata-only `LIMIT 0` schema probes (ADR-29) are not split queries.
+    selects = [q for q in stub.executed if q.startswith("SELECT *") and not q.endswith(" LIMIT 0")]
     assert len(selects) == 2
     assert all("LEFT JOIN" in q and "USING (customer_id, snapshot_date)" in q for q in selects)
     # the successful build reports its per-split row counts on the bus
@@ -476,6 +477,45 @@ def test_snapshot_ids_change_with_tokens_and_deep_uses_hash_agg(tmp_path: Path) 
     assert adapter.snapshot_id(table) != first
     adapter.snapshot_id(table, deep=True)
     assert any("HASH_AGG" in q for q in stub.executed)
+
+
+def test_snapshot_id_moves_when_only_the_column_set_changes() -> None:
+    """A shape change must move the id even when the change token does not.
+
+    This is the view case ADR-29 is written for: ``SYSTEM$LAST_CHANGE_COMMIT_TIME``
+    reports the DML of the objects a relation reads, so re-deploying a view to
+    select one more column from an already-loaded table leaves the token exactly
+    where it was. With a single-relation dataset the spec does not move either,
+    so without the column fingerprint the addition would be invisible to both
+    of mbt's hashes and a pinned manifest would re-verify clean.
+    """
+    tables = _make_tables()
+    stub = StubConnection(tables=tables)
+    adapter = _adapter(stub)
+    table = _sources()[LABEL_UID]
+    before = adapter.snapshot_id(table)
+
+    # Same rows, same scripted commit token, one more column.
+    ref = next(iter(k for k in tables if "CHURN_LABELS" in k))
+    widened = tables[ref].append_column(
+        "TXN_VOLUME_90D", pa.array([1.0] * tables[ref].num_rows, type=pa.float64())
+    )
+    wider = StubConnection(tables={**tables, ref: widened})
+    after = _adapter(wider).snapshot_id(table)
+
+    assert wider.snapshot_token("CHURN_LABELS") == stub.snapshot_token("CHURN_LABELS")
+    assert after != before
+
+    # The probe is metadata-only: it must never scan rows.
+    assert any(q.endswith("LIMIT 0") for q in wider.executed)
+
+
+def test_snapshot_fingerprint_is_stable_for_an_unchanged_relation() -> None:
+    tables = _make_tables()
+    table = _sources()[LABEL_UID]
+    first = _adapter(StubConnection(tables=tables)).snapshot_id(table)
+    second = _adapter(StubConnection(tables=tables)).snapshot_id(table)
+    assert first == second
 
 
 def test_from_locator_round_trip_without_connection(tmp_path: Path) -> None:

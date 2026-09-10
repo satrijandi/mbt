@@ -465,6 +465,90 @@ Scoring uses the champion's, because that is the model whose weights are being l
 **Fix:** nothing, if you are mid-cycle - this is the expected state between a merge and a promote.
 If it persists, the spec edit never made it through `mbt build` and a promote: run those.
 
+## `scoring input is missing feature(s) the champion was trained on`
+
+**Symptom (hard error, exit 1, before any row is scored):**
+
+```text
+scoring input is missing feature(s) the champion was trained on: tenure_days
+hint: the champion was fit on 12 feature(s); add the column(s) upstream, or
+retrain and promote against the current input schema
+```
+
+**Why:** every training run records the exact column set it fit on in
+`inference_config.json` (ADR-28), and since ADR-29 `mbt score` reads that list
+back and treats it as authoritative rather than re-running the model's
+`features.include`/`exclude` globs over whatever the batch happens to hold.
+The globs cannot catch this on their own: `include: ["*"]` matches a batch that
+is missing a column just as happily as one that is not.
+Before this check the failure surfaced further downstream as a bare
+`KeyError: 'tenure_days'` from whichever adapter indexed the column first, with
+no resource name and no hint.
+
+This is the common failure mode when the training panel and the scoring panel
+are two separate upstream models: one gained a column, or one lost one, and they
+stopped agreeing.
+
+**Fix:** add the column back to the scoring relation, or, if the model genuinely
+should no longer use it, retrain and promote so the champion's recorded column
+set matches what serving actually produces.
+
+## `WARN scoring input has N column(s) the champion was not trained on`
+
+**Symptom (exit 0, scoring proceeds):**
+
+```text
+WARN scoring input has 1 column(s) the champion was not trained on
+(txn_volume_90d); ignoring them for split 'score'. Retrain and promote to
+take them as features
+```
+
+**Why:** the mirror image of the error above, and deliberately not an error.
+A panel whose upstream shipped the next feature before the retrain landed is the
+normal state of an evolving training set, not a fault: the extra column is
+dropped so the champion sees exactly the columns it was fit on.
+It matters because the adapters used to disagree about this.
+The arrow adapters (XGBoost, LightGBM, scikit-learn) index the feature list
+persisted with the model and ignored the extra column; Spark and H2O re-derive
+features from the staged table and would have fed it in as a phantom feature.
+Pinning the column set before the table is staged makes all five behave the same.
+
+**Fix:** nothing, if you are mid-cycle. Retrain and promote when you want the
+model to actually use the new column.
+
+## `could not read a snapshot token for <relation>`
+
+**Symptom (hard error, exit 1, at compile):**
+
+```text
+could not read a snapshot token for ANALYTICS.GOLD.ML_CHURN_PANEL
+hint: the relation is readable but returned no change token; for a view this
+usually means change tracking is off on a table it reads (ALTER TABLE ... SET
+CHANGE_TRACKING = TRUE), or compile with --deep-snapshot to fingerprint
+contents instead
+```
+
+**Why:** `mbt compile` pins each Snowflake relation with
+`SYSTEM$LAST_CHANGE_COMMIT_TIME`, which reports the last DML of the objects the
+relation reads.
+The relation itself is fine here (mbt probes it with a metadata-only
+`SELECT * ... LIMIT 0` first, so a missing relation or a permissions problem
+fails on that instead, naming it).
+What is missing is the change token.
+
+**Fix:** enable change tracking on the base tables, or compile with
+`--deep-snapshot`, which fingerprints contents with `HASH_AGG(*)` and does not
+need the token.
+Note that a deep baseline and a default one are different token schemes, so
+pick one per pipeline (ADR-11).
+
+Related: since ADR-29 the snapshot id also folds in a metadata-only column
+fingerprint, so re-deploying a view or dynamic table with an extra column marks
+its dataset `state:modified` even though no DML happened and the change token
+did not move.
+That is intended, and it is what makes a single-relation panel safe: without it
+the shape change would be invisible to both of mbt's hashes.
+
 ## `tracking config: experiment no longer takes a mapping keyed by node kind`
 
 **Symptom (hard error, exit 1, before any node runs):**

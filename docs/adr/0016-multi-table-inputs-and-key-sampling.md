@@ -1,6 +1,15 @@
 # ADR-16: Multi-table dataset inputs, key-based sampling, warehouse adapters
 
-**Status:** accepted
+**Status:** superseded by [ADR-29](0029-single-relation-datasets.md)
+
+ADR-29 retracted the `inputs` form this ADR introduced: a dataset now reads one
+relation and the join lives upstream in dbt.
+What survives is everything this ADR decided *around* the join, and it is all
+still load-bearing: key-based deterministic sampling (§2, now with `sample_key`
+required rather than defaulted from `join_key`), the shared
+`MaterializedDatasetHandle` parquet-per-split format (§3), and Snowflake
+snapshotting via `SYSTEM$LAST_CHANGE_COMMIT_TIME` / `HASH_AGG(*)` (§4, since
+extended with a column fingerprint). Read §2-§4 as current; read §1 as history.
 
 ## Context
 

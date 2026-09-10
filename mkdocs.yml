@@ -63,6 +63,7 @@ nav:
       - adr/0026-tracking-experiment-per-node-kind.md
       - adr/0027-declarative-feature-treatment.md
       - adr/0028-mlflow-training-only-and-champion-carried-config.md
+      - adr/0029-single-relation-datasets.md
 
 markdown_extensions:
   - admonition

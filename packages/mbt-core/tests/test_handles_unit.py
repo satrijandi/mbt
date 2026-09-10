@@ -164,3 +164,77 @@ def test_slice_columns_are_not_treatable_features() -> None:
     handle = TransformedDatasetHandle(base, treated, None, _hook_ctx_factory(treated), None)
     with pytest.raises(ConfigError, match="does not consume: region"):
         handle.read("train")
+
+
+def test_pinned_features_missing_column_is_actionable() -> None:
+    """A batch that lost a trained feature can only produce garbage.
+
+    Before the pin (ADR-29) this surfaced as a raw pyarrow KeyError out of
+    whichever adapter indexed the column first, with no resource and no hint.
+    """
+    spec = minimal_model_spec()
+    base = _LocatableHandle({"score": pa.table({"a": [1.0, 2.0]})}, label_column="y")
+    handle = TransformedDatasetHandle(
+        base,
+        spec,
+        None,
+        _hook_ctx_factory(spec),
+        None,
+        require_target=False,
+        pinned_features=["a", "b"],
+    )
+    with pytest.raises(ConfigError, match="missing feature") as excinfo:
+        handle.read("score")
+    assert "b" in str(excinfo.value)
+
+
+def test_pinned_features_drop_extra_columns_with_one_warning() -> None:
+    """A panel whose upstream shipped the next feature before the retrain landed
+    is the normal state, not an error: the column is dropped, once, loudly."""
+    spec = minimal_model_spec()
+    table = pa.table({"a": [1.0, 2.0], "b": [3.0, 4.0], "txn_volume_90d": [5.0, 6.0]})
+    base = _LocatableHandle({"score": table, "extra": table}, label_column="y")
+    handle = TransformedDatasetHandle(
+        base,
+        spec,
+        None,
+        _hook_ctx_factory(spec),
+        None,
+        require_target=False,
+        pinned_features=["a", "b"],
+    )
+    bus = get_bus()
+    before = len(getattr(bus, "messages", []))
+    assert handle.read("score").column_names == ["a", "b"]
+    assert handle.feature_columns == ["a", "b"]
+    handle.read("extra")  # a second split must not re-warn
+    warnings = [m for m in getattr(bus, "messages", [])[before:] if "was not trained on" in str(m)]
+    assert len(warnings) <= 1
+
+
+def test_pinned_features_project_to_the_champion_order() -> None:
+    """Spark's VectorAssembler and H2O's column list are positional, so the
+    order the champion recorded is the order the staged table must carry."""
+    spec = minimal_model_spec()
+    base = _LocatableHandle({"score": pa.table({"a": [1.0], "b": [3.0]})}, label_column="y")
+    handle = TransformedDatasetHandle(
+        base,
+        spec,
+        None,
+        _hook_ctx_factory(spec),
+        None,
+        require_target=False,
+        pinned_features=["b", "a"],
+    )
+    assert handle.read("score").column_names == ["b", "a"]
+
+
+def test_no_pin_leaves_glob_selection_untouched() -> None:
+    """A champion registered before mbt exported an inference config."""
+    spec = minimal_model_spec()
+    table = pa.table({"a": [1.0], "b": [3.0], "surprise": [9.0]})
+    base = _LocatableHandle({"score": table}, label_column="y")
+    handle = TransformedDatasetHandle(
+        base, spec, None, _hook_ctx_factory(spec), None, require_target=False
+    )
+    assert handle.read("score").column_names == ["a", "b", "surprise"]

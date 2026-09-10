@@ -33,6 +33,18 @@ class StubCursor:
         self._table = self._connection.run_in_duckdb(sql)
         return self
 
+    @property
+    def description(self) -> list[tuple[Any, ...]] | None:
+        """Result metadata, as the connector exposes it (name, type_code, ...).
+
+        The adapter's schema fingerprint reads this off ``SELECT * ... LIMIT 0``
+        (ADR-29), which lands on the DuckDB path, so the emulation answers with
+        the real result schema rather than a scripted one.
+        """
+        if self._table is None:
+            return None
+        return [(field.name, str(field.type)) for field in self._table.schema]
+
     def fetchone(self) -> tuple[Any, ...] | None:
         # Snapshot queries answer with the scripted token; anything else (the
         # coverage/source-check COUNTs) answers from the real DuckDB result.

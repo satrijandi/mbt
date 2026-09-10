@@ -1,6 +1,17 @@
 # ADR-22: Population spines, per-table join keys, and label time offsets
 
-**Status:** accepted
+**Status:** superseded by [ADR-29](0029-single-relation-datasets.md)
+
+ADR-29 moved the join to dbt, so the population spine, per-table `using:`
+columns and the calendar `time_offset` described below no longer exist in the
+spec.
+Two things this ADR decided outlive its mechanism. §5's boundary ("anything
+beyond same-named keys plus an outcome offset belongs in the upstream gold
+layer") is the argument ADR-29 acted on. And §3's insistence that the outcome
+window be *stated* rather than pre-aligned upstream survives as
+`label.horizon`, which declares the same number without executing it.
+The `label_join_coverage` check and the pre-join `unique: {source: ...}` form
+were retired with the join; ADR-29 records where they re-home.
 
 ## Context
 

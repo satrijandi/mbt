@@ -218,6 +218,12 @@ class TrainingJob(_InterchangeModel):
     #: ``model_node.config``, which is whatever the working tree says today.
     #: None only for a champion registered before mbt exported one.
     champion_spec: dict[str, Any] | None = None
+    #: Score mode: the exact feature columns, in order, the champion was fit on
+    #: (ADR-28's ``resolved.feature_columns``). The manifest cannot answer this
+    #: at all, because ``features.include: ["*"]`` does not say what it matched.
+    #: Authoritative over re-evaluating the globs against whatever the batch
+    #: happens to hold (ADR-29). None alongside a None ``champion_spec``.
+    champion_feature_columns: list[str] | None = None
     dataset: DatasetLocator
     #: The dataset node's resolved windows (implicit validation carve, TSD §13.5).
     dataset_windows: dict[str, Any] = Field(default_factory=dict)

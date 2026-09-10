@@ -9,7 +9,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pyarrow as pa
 
@@ -753,6 +753,19 @@ def scoring_run_key(node: ManifestNode, model_version: str) -> str:
     return digest.hexdigest()[:16]
 
 
+class _ChampionConfig(NamedTuple):
+    """What `mbt score` reads back off the champion's inference config (ADR-28).
+
+    ``spec`` is authoritative over the working tree's model node, and
+    ``feature_columns`` over re-running the include/exclude globs against
+    whatever the batch holds (ADR-29). Both are None for a champion registered
+    before mbt exported an inference config.
+    """
+
+    spec: dict[str, Any] | None
+    feature_columns: list[str] | None
+
+
 class ScoringRunner:
     """Coordinator side of a scoring run (ADR-20): jobs compute, core compares.
 
@@ -832,10 +845,10 @@ class ScoringRunner:
             size_bytes=int(champion.tags.get("mbt.baseline_size_bytes", "0")),
         )
 
-    def _champion_spec(
+    def _champion_config(
         self, champion: ModelVersion, model_node: ManifestNode, uid: str
-    ) -> dict[str, Any] | None:
-        """The model spec the champion was trained with, read back from it (ADR-28).
+    ) -> "_ChampionConfig":
+        """The spec and feature columns the champion was trained with (ADR-28).
 
         Scoring follows the champion the registry resolved, not the working
         tree: a promotion is deliberately outside node identity (ADR-5), so
@@ -843,9 +856,10 @@ class ScoringRunner:
         the spec from the champion is what makes the scoring run use the
         features, treatment and categoricals the model was actually fit on.
 
-        Returns None for a champion registered before mbt exported one, which
-        leaves the caller on the local manifest exactly as before - the same
-        shape ADR-21 gave a champion registered before baselines existed.
+        Both fields are None for a champion registered before mbt exported an
+        inference config, which leaves the caller on the local manifest exactly
+        as before - the same shape ADR-21 gave a champion registered before
+        baselines existed.
         """
         uri = champion.tags.get("mbt.inference_config_uri")
         if not uri:
@@ -861,7 +875,7 @@ class ScoringRunner:
                     ),
                 )
             )
-            return None
+            return _ChampionConfig(None, None)
         ref = ArtifactRef(
             uri=uri,
             format=champion.tags.get("mbt.inference_config_format", "json"),
@@ -897,7 +911,9 @@ class ScoringRunner:
                     ),
                 )
             )
-        return spec
+        resolved = document.get("resolved")
+        columns = resolved.get("feature_columns") if isinstance(resolved, dict) else None
+        return _ChampionConfig(spec, list(columns) if isinstance(columns, list) else None)
 
     def _materialize_input(self, node: ManifestNode, spec: ScoringSpec) -> Any:
         ctx = self.ctx
@@ -976,7 +992,7 @@ class ScoringRunner:
         spec: ScoringSpec,
         champion: ModelVersion,
         baseline: ArtifactRef | None,
-        champion_spec: dict[str, Any] | None,
+        champion_config: "_ChampionConfig",
         handle: Any,
     ) -> TrainingJob:
         ctx = self.ctx
@@ -993,7 +1009,8 @@ class ScoringRunner:
             anchor=meta.anchor,
             node=node,
             model_node=model_node,
-            champion_spec=champion_spec,
+            champion_spec=champion_config.spec,
+            champion_feature_columns=champion_config.feature_columns,
             dataset=handle.locator(),
             data=ctx.raw_adapter_ref("data"),
             artifact=champion.artifact,
@@ -1029,7 +1046,7 @@ class ScoringRunner:
         # the one the champion was trained with (ADR-20, ADR-28).
         self._check_hooks_parity(champion, model_node, uid)
         baseline = self._baseline_ref(champion)
-        champion_spec = self._champion_spec(champion, model_node, uid)
+        champion_config = self._champion_config(champion, model_node, uid)
 
         handle = self._materialize_input(node, spec)
 
@@ -1049,7 +1066,9 @@ class ScoringRunner:
                 ),
             )
 
-        job = self._assemble_job(node, model_node, spec, champion, baseline, champion_spec, handle)
+        job = self._assemble_job(
+            node, model_node, spec, champion, baseline, champion_config, handle
+        )
         job_result = ctx.run_job(job)
         if job_result.status == "error":
             return NodeResult(

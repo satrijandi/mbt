@@ -1,6 +1,14 @@
 # ADR-25: Per-table column projection on multi-table inputs
 
-**Status:** accepted
+**Status:** superseded by [ADR-29](0029-single-relation-datasets.md)
+
+ADR-29 retired per-table projection along with the joins it rode on.
+Its rationale was source-side workload reduction, and under a single relation
+the panel's author already prunes upstream, so there is nothing left to push
+down. The consequence this ADR anticipated - "a keep-list also future-proofs a
+panel against upstream tables gaining columns" - is exactly what ADR-29's
+dataset-level `columns:` contract now does, at the panel level and as an
+assertion rather than a projection.
 
 ## Context
 

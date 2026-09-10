@@ -5,7 +5,8 @@ Built entirely on official Snowflake surfaces:
 - `snowflake.connector.connect()`_ for sessions (password, key-pair, or
   ``authenticator`` flows - config keys pass through to the connector);
 - ``SYSTEM$LAST_CHANGE_COMMIT_TIME`` for cheap snapshot pinning at compile
-  time, ``HASH_AGG(*)`` for ``--deep-snapshot`` content fingerprints;
+  time, ``HASH_AGG(*)`` for ``--deep-snapshot`` content fingerprints, both
+  combined with a metadata-only column fingerprint (ADR-29);
 - ``MD5_NUMBER_LOWER64`` for deterministic push-down sampling and random
   splits (stable across runs and releases, unlike ``SAMPLE ... REPEATABLE``
   which is only defined for block sampling over fixed physical layout);
@@ -217,13 +218,40 @@ class SnowflakeDataAdapter:
         except SnowflakeSQLError as exc:
             raise SnowflakeAdapterError(str(exc)) from exc
 
+    def _schema_fingerprint(self, ref: str) -> str:
+        """The relation's columns and types, in ordinal order.
+
+        ``LIMIT 0`` scans no data - the driver fills ``cursor.description`` from
+        result metadata - and behaves identically on a table, a view and a
+        dynamic table, which is what makes this safe to run unconditionally.
+
+        It exists because ``SYSTEM$LAST_CHANGE_COMMIT_TIME`` is DDL-blind: it
+        reports the DML of the objects a relation reads, so re-deploying a view
+        to select one more column from an already-loaded table leaves the token
+        unchanged. With a single-relation dataset (ADR-29) the spec does not
+        move either, so without this the shape change would be invisible to
+        both of mbt's hashes and a pinned manifest would re-verify clean.
+        """
+        cursor = self._execute_cursor(f"SELECT * FROM {ref} LIMIT 0")
+        try:
+            description = cursor.description or []
+        finally:
+            cursor.close()
+        return ",".join(f"{column[0]}:{column[1]}" for column in description)
+
     def snapshot_id(self, source: SourceTableLike, deep: bool = False) -> str:
-        """Cheap by default: the table's last DML commit token. Deep: an
-        order-independent aggregate hash over every row (scans the table)."""
+        """Cheap by default: the relation's last DML commit token. Deep: an
+        order-independent aggregate hash over every row (scans the relation).
+
+        Both are combined with a metadata-only column fingerprint, so a shape
+        change moves the id even where the data half does not (ADR-29)."""
         import hashlib
 
         ref = self._table_ref(source)
         safe_ref = ref.replace("'", "''")
+        # Before the token, so an unreadable relation fails on the plain SELECT
+        # that names it rather than on a null token from the SYSTEM$ call.
+        fingerprint = self._schema_fingerprint(ref)
         if deep:
             token = self._fetch_one(f"SELECT HASH_AGG(*) FROM {ref}")
         else:
@@ -231,9 +259,14 @@ class SnowflakeDataAdapter:
         if token is None:
             raise SnowflakeAdapterError(
                 f"could not read a snapshot token for {ref}",
-                hint="check the table exists and the role can access it",
+                hint=(
+                    "the relation is readable but returned no change token; for a "
+                    "view this usually means change tracking is off on a table it "
+                    "reads (ALTER TABLE ... SET CHANGE_TRACKING = TRUE), or "
+                    "compile with --deep-snapshot to fingerprint contents instead"
+                ),
             )
-        digest = hashlib.sha256(f"{ref}|{token}".encode()).hexdigest()
+        digest = hashlib.sha256(f"{ref}|{fingerprint}|{token}".encode()).hexdigest()
         return f"sha256:{digest}"
 
     def _verify_snapshot(self, ctx: DataBuildContext) -> None:

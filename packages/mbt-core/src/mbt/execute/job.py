@@ -834,6 +834,22 @@ def _backtest_folds(
     if spec.evaluation.protocol.split is SplitStrategy.TEMPORAL:
         time_column = getattr(runtime.base_handle, "time_column", None)
         if time_column is None or time_column not in base_train.column_names:
+            # SplitSpec makes time_column mandatory for a temporal split and the
+            # parser forces the protocol to match it, so the only way here is a
+            # transform_features hook that dropped the column. Skipping the
+            # backtest silently would report "no folds" as if none were asked
+            # for (F6's neighbour).
+            get_bus().emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=runtime.job.node.unique_id,
+                    message=(
+                        f"walk-forward backtest skipped: split time column "
+                        f"{time_column!r} is not in the train split after hooks. "
+                        "transform_features must preserve the split time column"
+                    ),
+                )
+            )
             return []
         ordered = base_train.take(
             pc.sort_indices(base_train, sort_keys=[(time_column, "ascending")])
@@ -1129,7 +1145,13 @@ def _run_score(job: TrainingJob) -> JobResult:
 
     time_column = getattr(base_handle, "time_column", None)
     transformed = TransformedDatasetHandle(
-        base_handle, model_spec, hooks, hook_ctx, time_column, require_target=False
+        base_handle,
+        model_spec,
+        hooks,
+        hook_ctx,
+        time_column,
+        require_target=False,
+        pinned_features=job.champion_feature_columns,
     )
     handle: Any = transformed
     if getattr(adapter, "data_access", "arrow") == "path":

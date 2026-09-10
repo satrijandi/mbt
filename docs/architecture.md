@@ -273,7 +273,7 @@ Start with the decision, not the code:
 | Adapter boundary & interchange | ADR-1 (Arrow), ADR-2 (local adapters in core), ADR-14 (import hygiene), ADR-15 (contract refinements), ADR-17 (JVM adapters, path data access) |
 | Coordinator / job split | ADR-3 |
 | Identity & reproducibility | ADR-4 (two hashes), ADR-5 (profiles excluded), ADR-12 (windows & anchor), ADR-19 (env digest & `--manifest` verification) |
-| Selection, state & datasets | ADR-7 (env not modifying), ADR-11 (snapshot listing), ADR-13 (datasets auto-materialize), ADR-16 (multi-table inputs & key sampling), ADR-22 (population spine & per-table joins) |
+| Selection, state & datasets | ADR-7 (env not modifying), ADR-11 (snapshot listing), ADR-13 (datasets auto-materialize), ADR-16 (key sampling & warehouse snapshots), ADR-29 (one relation per dataset; ADR-16 §1/ADR-22/ADR-25 superseded) |
 | Gates & tuning | ADR-6 (gate edits retrain), ADR-8 (tuning never sees test), ADR-9 (champion re-evaluated in job), ADR-10 (missing vs unloadable champion), ADR-18 (paired-bootstrap gates) |
 | Scoring & monitoring | ADR-20 (scoring resource & runtime champion), ADR-21 (prediction store & ground-truth ledger), ADR-23 (warehouse batch scoring), ADR-28 (champion-carried inference config) |
 | Tracking | ADR-26 (superseded), ADR-28 (training-only tracking, timestamped runs, named experiments) |

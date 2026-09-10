@@ -103,9 +103,9 @@ def make_scoring_job(
     runner = ScoringRunner(ctx)
     champion = runner._champion(spec, model_spec, node.unique_id)
     baseline = runner._baseline_ref(champion)
-    champion_spec = runner._champion_spec(champion, model_node, node.unique_id)
+    champion_config = runner._champion_config(champion, model_node, node.unique_id)
     handle = runner._materialize_input(node, spec)
-    job = runner._assemble_job(node, model_node, spec, champion, baseline, champion_spec, handle)
+    job = runner._assemble_job(node, model_node, spec, champion, baseline, champion_config, handle)
     if overrides:
         job = job.model_copy(update=overrides)
     return ctx, job

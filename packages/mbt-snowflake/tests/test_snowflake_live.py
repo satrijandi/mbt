@@ -133,6 +133,8 @@ class LiveWarehouse:
     features_table: str
     rows: list[dict[str, Any]]
     created_tables: list[str] = field(default_factory=list)
+    created_views: list[str] = field(default_factory=list)
+    created_dynamic_tables: list[str] = field(default_factory=list)
 
     def qualified(self, table: str) -> str:
         return f"{self.database}.{self.schema}.{table}"
@@ -150,6 +152,22 @@ class LiveWarehouse:
     def create_table(self, table: str, columns: str) -> str:
         self.execute(f"CREATE TABLE {self.qualified(table)} ({columns})")
         self.created_tables.append(table)
+        return table
+
+    def create_view(self, table: str, query: str) -> str:
+        self.execute(f"CREATE OR REPLACE VIEW {self.qualified(table)} AS {query}")
+        if table not in self.created_views:
+            self.created_views.append(table)
+        return table
+
+    def create_dynamic_table(self, table: str, query: str) -> str:
+        self.execute(
+            f"CREATE OR REPLACE DYNAMIC TABLE {self.qualified(table)} "
+            f"TARGET_LAG = '1 hour' WAREHOUSE = {os.environ['SNOWFLAKE_WAREHOUSE']} "
+            f"AS {query}"
+        )
+        if table not in self.created_dynamic_tables:
+            self.created_dynamic_tables.append(table)
         return table
 
 
@@ -205,6 +223,12 @@ def live() -> Iterator[LiveWarehouse]:
         )
         yield warehouse
     finally:
+        for table in warehouse.created_views:
+            with contextlib.suppress(Exception):
+                warehouse.execute(f"DROP VIEW IF EXISTS {warehouse.qualified(table)}")
+        for table in warehouse.created_dynamic_tables:
+            with contextlib.suppress(Exception):
+                warehouse.execute(f"DROP DYNAMIC TABLE IF EXISTS {warehouse.qualified(table)}")
         for table in warehouse.created_tables:
             with contextlib.suppress(Exception):
                 warehouse.execute(f"DROP TABLE IF EXISTS {warehouse.qualified(table)}")
@@ -729,3 +753,56 @@ def test_wide_cadence_multi_table_join_live(
     assert test.num_rows == expected_test
     assert train.num_rows == len(all_rows) - expected_test
     assert handle.snapshot_id == ctx.node.snapshot_id
+
+
+def test_snapshot_id_pins_views_and_dynamic_tables(live: LiveWarehouse) -> None:
+    """The single-relation panel (ADR-29) must be pinnable on a real account.
+
+    This is the test the package did not have: before ADR-29 the word "view"
+    appeared nowhere in mbt-snowflake and the live suite only ever created
+    tables, so the behaviour of ``SYSTEM$LAST_CHANGE_COMMIT_TIME`` on a view
+    was assumed rather than known.
+
+    What it settles, in order:
+
+    1. ``snapshot_id`` succeeds on a plain view and on a dynamic table at all.
+    2. Re-deploying the view to select one more column from an ALREADY-LOADED
+       table moves the snapshot id. The change token alone is DDL-blind here
+       (no DML happened), and with a single-relation dataset the spec does not
+       move either, so before the column fingerprint this addition was
+       invisible to both of mbt's hashes.
+    3. ``--deep-snapshot`` works on both relation kinds.
+    """
+    adapter = SnowflakeDataAdapter(live.config)
+    labels, features = live.labels_table, live.features_table
+
+    narrow = (
+        f"SELECT l.customer_id, l.snapshot_date, l.churned_90d, f.monthly_usage "
+        f"FROM {live.qualified(labels)} l "
+        f"JOIN {live.qualified(features)} f USING (customer_id, snapshot_date)"
+    )
+    view = live.create_view(f"{live.prefix}_PANEL_VIEW", narrow)
+    source = SourceTable(name="panel", identifier=view)
+
+    before = adapter.snapshot_id(source)
+    assert before.startswith("sha256:")
+    assert adapter.snapshot_id(source) == before, "an untouched view must pin stably"
+
+    # Same rows, same DML, one more column: a dbt re-deploy adding feature N+1.
+    live.create_view(
+        f"{live.prefix}_PANEL_VIEW",
+        narrow.replace("f.monthly_usage", "f.monthly_usage, f.tenure_days"),
+    )
+    after = adapter.snapshot_id(source)
+    assert after != before, (
+        "re-deploying a view with an extra column must move the snapshot id; "
+        "SYSTEM$LAST_CHANGE_COMMIT_TIME alone is DDL-blind (ADR-29)"
+    )
+
+    deep = adapter.snapshot_id(source, deep=True)
+    assert deep.startswith("sha256:") and deep != after
+
+    dynamic = live.create_dynamic_table(f"{live.prefix}_PANEL_DT", narrow)
+    dt_source = SourceTable(name="panel_dt", identifier=dynamic)
+    assert adapter.snapshot_id(dt_source).startswith("sha256:")
+    assert adapter.snapshot_id(dt_source, deep=True).startswith("sha256:")

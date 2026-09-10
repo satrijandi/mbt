@@ -26,6 +26,8 @@ from mbt.contracts import (
     HookContext,
     ModelSpec,
 )
+from mbt.events import get_bus
+from mbt.events.models import LogMessage
 from mbt.exceptions import ConfigError
 from mbt.execute.feature_treatment import apply_treatment
 from mbt.quality.hooks import ModelHooks
@@ -71,6 +73,7 @@ class TransformedDatasetHandle:
         time_column: str | None,
         *,
         require_target: bool = True,
+        pinned_features: list[str] | None = None,
     ) -> None:
         self._base = base
         self._spec = spec
@@ -79,6 +82,14 @@ class TransformedDatasetHandle:
         self._time_column = time_column
         #: False for scoring inputs: unlabeled by design (ADR-20).
         self._require_target = require_target
+        #: The champion's recorded feature columns (ADR-28's
+        #: ``resolved.feature_columns``), when scoring against one. Set, it is
+        #: authoritative over the globs: the champion was fit on exactly these,
+        #: in exactly this order. ``None`` at train time and for a champion
+        #: registered before mbt exported an inference config, which restores
+        #: the glob-only behaviour exactly.
+        self._pinned_features = pinned_features
+        self._pin_warned = False
         self._cache: dict[str, pa.Table] = {}
         self.feature_columns: list[str] | None = None
 
@@ -103,6 +114,8 @@ class TransformedDatasetHandle:
             ctx: HookContext = self._hook_ctx_factory(split)
             table = self._hooks.transform_features(table, ctx)
         features = select_feature_columns(table.column_names, self._spec, self._time_column)
+        if self._pinned_features is not None:
+            features = self._apply_pin(features, table.column_names, split)
         if self.feature_columns is None:
             self.feature_columns = features
         keep = list(features)
@@ -128,6 +141,48 @@ class TransformedDatasetHandle:
         )
         self._cache[split] = table
         return table
+
+    def _apply_pin(self, features: list[str], columns: list[str], split: str) -> list[str]:
+        """Project onto the champion's recorded feature columns (ADR-28/ADR-29).
+
+        Missing is fatal and extra is not, deliberately. A batch that lost a
+        trained feature can only produce garbage, and used to surface as a raw
+        ``KeyError`` out of whichever adapter indexed it first. A batch that
+        gained a column is the normal state of a panel whose upstream shipped
+        the next feature before the retrain landed, so it is dropped with one
+        warning. Ordering matters for the positional consumers (Spark's
+        ``VectorAssembler``, H2O's column list); the arrow adapters index by
+        name and do not care.
+        """
+        pinned = list(self._pinned_features or [])
+        missing = [c for c in pinned if c not in columns]
+        if missing:
+            raise ConfigError(
+                f"scoring input is missing feature(s) the champion was trained on: "
+                f"{', '.join(missing)}",
+                resource=self._spec.name,
+                hint=(
+                    f"the champion was fit on {len(pinned)} feature(s); add the "
+                    "column(s) upstream, or retrain and promote against the "
+                    "current input schema"
+                ),
+            )
+        extra = [c for c in features if c not in pinned]
+        if extra and not self._pin_warned:
+            self._pin_warned = True
+            shown = ", ".join(extra[:5]) + (", ..." if len(extra) > 5 else "")
+            get_bus().emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=self._spec.name,
+                    message=(
+                        f"scoring input has {len(extra)} column(s) the champion was "
+                        f"not trained on ({shown}); ignoring them for split {split!r}. "
+                        "Retrain and promote to take them as features"
+                    ),
+                )
+            )
+        return pinned
 
     def profile(self) -> DatasetProfile:
         return self._base.profile()
