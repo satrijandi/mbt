@@ -14,16 +14,24 @@ That one idea is what makes everything else possible: review, reproducibility, a
 ## Step 1: Say what the training data is
 
 You declare the training set, you do not code it.
-For churn it looks like this: one **population table** lists who we are predicting for each month (every customer active on the 1st - that date is `inference_date`, the day the prediction is FOR).
-Three **feature tables** hold what we know about those customers - demographics, login activity, transactions - and they join to the population on `inference_date` plus an id (`customer_id`, or `safe_id` for transactions).
-One **label table** says who actually churned.
-Two things about it matter a lot:
 
-- The label for the June 1st cohort only exists once June is over, so the label table only contains rows for cohorts whose outcome window has CLOSED.
-  That means you physically cannot train on an outcome nobody knows yet - the join just finds nothing.
-  This is the main defense against label leakage, the classic mistake where information from the future sneaks into training.
-- You also declare exact date ranges: train on cohorts from July 2025 through March 2026, test on April and May 2026.
+The data arrives as **one table**: a panel with one row per customer per month, holding the features and the label side by side.
+Building it is a SQL job - a dbt model, usually - that joins a **population table** (who we are predicting for each month, every customer active on the 1st; that date is `inference_date`, the day the prediction is FOR) to **feature tables** (demographics, login activity, transactions) and to a **label table** (who actually churned).
+That join is deliberately not mbt's job.
+SQL engines are better at joining than mbt would be, your data engineers already own that layer, and keeping mbt out of it means there is exactly one place where "what the training set is" gets decided.
+
+What you declare in mbt is what to do with that panel, and one thing about the panel itself:
+
+- **The columns you expect.** `columns:` lists them, and a column arriving in the panel that is not on your list fails the build.
+  That sounds annoying and is the point: when the panel is built in another repo, this list is the only place a reviewer sees the training set change.
+  Adding `feature_42` becomes a one-line diff in your PR, next to the gates and the seed, instead of something that silently happened upstream last Tuesday.
+- **The outcome window.** `label.horizon: "1mo"` says the outcome is observed a month after the prediction date.
+  It does not join anything - the panel already handled that - but declaring it lets mbt check that your embargo and your monitoring maturity agree with it.
+  The label for the June 1st cohort only exists once June is over, so a well-built panel simply has no row for a cohort whose outcome window is still open.
+  You physically cannot train on an outcome nobody knows yet.
+- **Exact date ranges**: train on cohorts from July 2025 through March 2026, test on April and May 2026.
   Splitting by TIME (not randomly) matters because your model will be used on future customers - testing it on a later period is the honest rehearsal of that.
+- **A `sample_key`**, the entity id. It is required, and the reason is subtle: without it mbt has to identify rows by hashing every column, so the day the panel gains a column, rows move across the train/test boundary and your metric history stops being comparable to itself.
 
 ## Step 2: Pick features with a repeatable recipe, not vibes
 
@@ -54,7 +62,7 @@ Capping does cost you the signal in the tail; that is the trade, and it is writt
 ## Step 3: Train, with every random choice pinned
 
 You run one command: `mbt build`.
-It joins the tables, applies the split, applies your declared feature treatment (`categorical: [contract_code]` tells mbt a numeric code is a category, so no adapter reads it as a magnitude), runs your `hooks.py` if you have one, and trains - for churn, an H2O AutoML that tries a few models and keeps the best.
+It reads the panel, applies the split, applies your declared feature treatment (`categorical: [contract_code]` tells mbt a numeric code is a category, so no adapter reads it as a magnitude), runs your `hooks.py` if you have one, and trains - for churn, an H2O AutoML that tries a few models and keeps the best.
 The spec has `seed: 42`, and every random decision in the whole pipeline (sampling, splits, the search, validation carves) is derived from that one seed.
 Combined with pinned data snapshots, this means anyone can rerun your exact experiment and get the same numbers.
 "It worked on my machine" stops being a sentence anyone says.

@@ -2,10 +2,26 @@
 datasets:
   - name: churn_training_set
     description: Subscribers active at snapshot time, labeled with 90-day churn.
+    # ONE relation. Whatever assembles it - a dbt model joining a population to
+    # its labels and feature histories, a warehouse dynamic table, a nightly
+    # export - is upstream, and mbt does not model it (ADR-29).
     source: source('lakehouse', 'subscribers')
+    # Uncomment to declare the panel contract: the exact column set this dataset
+    # expects. An undeclared column then fails the build, which is what keeps
+    # "we added a feature" a reviewed diff HERE even when the relation is built
+    # somewhere else. Strongly recommended once the relation has another owner.
+    # columns: [user_id, snapshot_date, churned_90d, plan, tenure_days, is_active]
     label:
       column: churned_90d
       definition: "cancelled within 90 days of snapshot_date"
+      # `horizon: "90d"` would declare when the outcome is observed, relative to
+      # snapshot_date. It joins nothing, but it lets mbt check that split.embargo
+      # and a scoring pipeline's ground_truth.maturity agree with it - and it
+      # warns until you set an embargo at least that long, which is the point:
+      # without one, the newest training rows have outcomes observed inside the
+      # test window. It is left off here because the sample generator makes only
+      # 200 days of data, and a correct 90d embargo would leave the train window
+      # too thin for the quickstart to train on. Declare BOTH on a real project.
     filters:
       - "is_active = true"
       - "tenure_days >= 30"

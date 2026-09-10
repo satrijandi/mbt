@@ -8,10 +8,10 @@ This page is the convention mbt projects follow; the [showcase](showcase.md)'s b
 
 | Name | Kind | Meaning |
 |---|---|---|
-| `customer_id`, `safe_id`, `user_id`, ... | entity id | Stable entity identifiers, always suffixed `_id`. A population/spine table may carry several and act as the crosswalk between them (ADR-22). |
+| `customer_id`, `safe_id`, `user_id`, ... | entity id | Stable entity identifiers, always suffixed `_id`. A population/spine table may carry several and act as the crosswalk between them, which the panel's join needs. |
 | `execution_date` | date | The orchestrator's logical date - what Airflow calls the logical (execution) date of the run. Not a wall-clock time: a backfill run for January 1st has `execution_date` January 1st whenever it actually executes. |
 | `target_date` | date | The date a batch job is producing output FOR. Equal to `execution_date` in normal operation; the distinct name exists so job code reads unambiguously. |
-| `inference_date` | date | The prediction as-of date: the date a scored row's prediction refers to. Usually `target_date`. Inference "time" is `inference_date` at 00:00 local (UTC+7). This is the join key between the population spine and the label table, and the `split.time_column` of training datasets. |
+| `inference_date` | date | The prediction as-of date: the date a scored row's prediction refers to. Usually `target_date`. Inference "time" is `inference_date` at 00:00 local (UTC+7). This is the join key the panel is built on - population to labels to every feature history - and the `split.time_column` of training datasets. |
 | `as_of_date` | date | The data-state date: the date a row's balances/aggregates describe. Usually `execution_date - 1 day`, because a batch pipeline running on the logical date can only have complete data through the end of the previous day. A lineage column, never a join key: joins use `inference_date`. |
 | `loaded_at_time` | timestamp | Lakehouse audit column: when the row landed in the lake. An ingest-layer concern, never a feature. |
 
@@ -29,7 +29,7 @@ loaded_at_time ~ shortly after 00:00 on execution_date (ingest audit, not a feat
 
 Every joinable gold table shares ONE join key: `inference_date`.
 The feature producer aligns each row to the `inference_date` it serves (the balances it describes are as of the previous day - that is metadata, recorded once in the spine's informational `as_of_date` column, not a second join key for every consumer to reason about).
-Feature tables and the label all join on `inference_date`; `split.time_column` is `inference_date`; the population spine carries the entity crosswalk (`customer_id` to `safe_id`) plus the `as_of_date` and `loaded_at_time` lineage/audit columns.
+Feature tables and the label all join on `inference_date`; `split.time_column` is `inference_date`; the population spine carries the entity crosswalk (`customer_id` to `safe_id`) plus the `as_of_date` and `loaded_at_time` lineage/audit columns. Since ADR-29 that join happens upstream and mbt reads its result, so these are rules for whoever builds the panel - but they are unchanged, because the panel's shape is what mbt's `split.time_column` and `sample_key` still point at.
 
 ## Rules that keep the convention leakage-safe in mbt
 

@@ -5,7 +5,7 @@
 | Resource | File | Purpose |
 |---|---|---|
 | **source** | `sources.yml` | External inputs: parquet paths (warehouse tables, feature views in v1) |
-| **dataset** | `datasets/*.yml` | Declarative training-set construction: source + label + filters + split policy + checks |
+| **dataset** | `datasets/*.yml` | Declarative training-set definition over ONE relation: source + panel contract + label + filters + split policy + checks. Whatever joins that relation is upstream (ADR-29) |
 | **model** | `models/*.yml` | Task, adapter, features, hyperparameters, tuning, gates, registration |
 | **scoring** | `scoring/*.yml` | Batch scoring (serving) pipeline: champion + input + prediction sink + shift monitors + delayed ground-truth evaluation |
 | **metric** | `metrics.yml` | Reusable metric definitions (`kind: builtin` or `kind: hook`) |
@@ -14,6 +14,47 @@
 
 Every resource gets a stable unique id: `<type>.<project>.<name>`
 (sources are the one exception: `source.<project>.<group>.<table>`).
+
+## What a dataset reads
+
+A dataset names exactly one relation: a table, a view, or a warehouse dynamic
+table.
+Whatever assembles it - joining a population to its labels and feature
+histories - is upstream, and mbt does not model it (ADR-29).
+mbt owns which rows (`filters`, `split` windows, `sample_fraction`), the split
+policy, the checks, and the declaration of what the training set is.
+
+```yaml
+datasets:
+  - name: churn_training_set
+    source: source('warehouse', 'ml_churn_panel')
+    columns: [customer_id, inference_date, is_churn, age_band, tenure_months]
+    sample_key: [customer_id]
+    label: {column: is_churn, horizon: "1mo"}
+    split: {strategy: temporal, time_column: inference_date,
+            train: "2025-07-01:2026-04-01", test: "2026-04-01:2026-06-01",
+            embargo: "1mo"}
+```
+
+Three of those are load-bearing in a way that is not obvious:
+
+- **`columns:`** is the panel contract. An undeclared column fails the build,
+  so a feature arriving in the upstream relation cannot enter the training set
+  until the spec asks for it. Without it, "we added a feature" and "the nightly
+  refresh ran" look identical from inside mbt, and neither shows up in a PR.
+- **`sample_key`** is required. It is the stable row identity for sampling and
+  seeded random splits; with none, the digest hashes every column, so one added
+  column re-buckets every row and moves some across the train/test boundary.
+- **`label.horizon`** declares when the outcome is observed. It executes
+  nothing, but it is what lets mbt check `split.embargo` and a scoring
+  pipeline's `ground_truth.maturity` against one number instead of three
+  hand-kept ones.
+
+The scoring side mirrors this: one relation, the serving twin of the panel with
+the same features and no label. They are two upstream objects that must stay in
+lockstep, so build both from one shared definition - mbt catches divergence
+(the panel contract at build time, the champion's recorded feature columns at
+score time) but cannot prevent it.
 
 ## The DAG and selection
 
