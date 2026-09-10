@@ -63,6 +63,7 @@ def _random_spec(**overrides: object) -> DatasetSpec:
         "name": "churn_random",
         "source": ROWS_UID,
         "label": {"column": "churned"},
+        "sample_key": "user_id",
         "split": {
             "strategy": "random",
             "train": "0.6",
@@ -381,12 +382,16 @@ def test_duckdb_divides_cores_and_memory_across_parallel_builds(tmp_path: Path) 
     assert shared_mem != solo_mem  # the RAM budget is divided, not the 80% default
 
 
-def test_keyless_split_membership_moves_when_a_column_is_added(tmp_path: Path) -> None:
-    """Without `sample_key` the hash preimage is EVERY column, so a schema
-    change re-buckets every row and moves some across the train/test boundary
-    (FEEDBACK D-3). Declaring the key is what makes membership survive schema
-    evolution - and the Snowflake and Spark adapters require it outright, so
-    the keyless path is local-only besides.
+def test_declared_sample_key_survives_schema_evolution(tmp_path: Path) -> None:
+    """Split membership must be a pure function of the declared key.
+
+    This is the positive half of the finding that made ``sample_key`` mandatory
+    (FEEDBACK D-3, ADR-29): with no key the hash preimage is EVERY column, so
+    one unrelated column arriving upstream re-buckets every row and moves some
+    across the train/test boundary - measured here at three of ten. That half
+    is unreachable by construction now (see the test below), so what is left to
+    pin is that a declared key does not have the problem: the panel gains a
+    column and not one row changes side.
     """
     _write_rows(tmp_path, 60)
     adapter = LocalDataAdapter({"root": str(tmp_path)})
@@ -396,45 +401,41 @@ def test_keyless_split_membership_moves_when_a_column_is_added(tmp_path: Path) -
         adapter.build_dataset(spec, _ctx(adapter, _tables(), output_dir))
         return set(pq.read_table(output_dir / "test.parquet")["user_id"].to_pylist())
 
-    keyless_before = test_ids(_random_spec(), "keyless_before")
-    keyed_before = test_ids(_random_spec(sample_key="user_id"), "keyed_before")
+    before = test_ids(_random_spec(sample_key="user_id"), "keyed_before")
 
     # one unrelated column arrives in the source, exactly as schema evolution does
     rows = pq.read_table(tmp_path / "data" / "rows" / "part-000.parquet")
     rows = rows.append_column("region", pa.array(["eu"] * rows.num_rows))
     pq.write_table(rows, tmp_path / "data" / "rows" / "part-000.parquet")
 
-    keyless_after = test_ids(_random_spec(), "keyless_after")
-    keyed_after = test_ids(_random_spec(sample_key="user_id"), "keyed_after")
-
-    assert keyless_before != keyless_after, "the keyless digest is expected to be unstable"
-    assert keyed_before == keyed_after, "a declared sample_key must survive schema evolution"
+    after = test_ids(_random_spec(sample_key="user_id"), "keyed_after")
+    assert before == after, "a declared sample_key must survive schema evolution"
 
 
-def test_keyless_sampling_and_splitting_warn_that_they_are_unstable(tmp_path: Path) -> None:
-    """The fallback is announced where it happens, naming both consequences:
-    schema-change instability and the fact that the warehouse adapters refuse
-    this path (FEEDBACK D-3)."""
+def test_keyless_sampling_and_splitting_is_an_actionable_error(tmp_path: Path) -> None:
+    """The keyless digest is refused, not warned about (ADR-29).
+
+    It used to warn here and raise on Snowflake and Spark, which meant a spec
+    could pass on the dev plane and fail on the prod one. The parser now
+    requires ``sample_key``; this is the runtime backstop for a spec built
+    in-process, and it is what makes all three planes agree.
+    """
     _write_rows(tmp_path)
     adapter = LocalDataAdapter({"root": str(tmp_path)})
 
-    sink = RecordingSink()
-    adapter.build_dataset(
-        _random_spec(),
-        _ctx(
-            adapter,
-            _tables(),
-            tmp_path / "target" / "datasets" / "keyless",
-            sample_fraction=0.5,
-            events=sink,
-        ),
-    )
-    warnings = [e for e in sink.events if getattr(e, "level", "") == "warn"]
-    assert [w for w in warnings if "sampling hashes all" in w.message]
-    assert [w for w in warnings if "the random split hashes all" in w.message]
-    assert all("Snowflake and Spark" in w.message for w in warnings)
+    with pytest.raises(AdapterError, match="no 'sample_key' declared") as excinfo:
+        adapter.build_dataset(
+            _random_spec(sample_key=None),
+            _ctx(
+                adapter,
+                _tables(),
+                tmp_path / "target" / "datasets" / "keyless",
+                sample_fraction=0.5,
+            ),
+        )
+    assert "hash every column" in str(excinfo.value)
 
-    # with a key declared there is nothing to warn about
+    # with a key declared the same build runs, and says nothing about it
     quiet = RecordingSink()
     adapter.build_dataset(
         _random_spec(sample_key="user_id"),

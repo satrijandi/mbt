@@ -82,6 +82,7 @@ def joined_project(demo_project: Path) -> Path:
               join_key: [customer_id, snapshot_date]
             label:
               column: churned
+            sample_key: customer_id
             split:
               strategy: temporal
               time_column: snapshot_date
@@ -246,6 +247,7 @@ def test_bare_table_name_is_a_parse_error(
               join_key: customer_id
             label:
               column: churned
+            sample_key: customer_id
             split:
               strategy: temporal
               time_column: snapshot_date

@@ -516,6 +516,55 @@ Pinning the column set before the table is staged makes all five behave the same
 **Fix:** nothing, if you are mid-cycle. Retrain and promote when you want the
 model to actually use the new column.
 
+## `check panel_columns: FAIL` with `undeclared column(s)`
+
+**Symptom (exit 2, the dataset build fails its checks):**
+
+```text
+check panel_columns: FAIL - undeclared column(s): txn_volume_90d - add them to
+'columns:' to take them, or drop them upstream
+```
+
+**Why:** the dataset declares a `columns:` panel contract and its relation now
+has a column the contract does not name (ADR-29).
+This is working as designed, and it is the point of the contract: when the join
+that builds the panel lives upstream in dbt, a new feature column arriving there
+is otherwise indistinguishable from a routine data refresh, so nothing in the
+mbt repo would move and nobody would review the change to the training set.
+
+**Fix:** add the column to `columns:` if the panel should have it - that one-line
+diff is the reviewable record - or drop it upstream if it should not.
+The mirror case, `declared column(s) absent from the relation`, means the
+upstream model stopped producing a column the contract promises.
+
+## `a dataset needs 'sample_key'`
+
+**Symptom (hard error, exit 1, at parse):**
+
+```text
+datasets/churn_training_set.yml [dataset.demo.churn_training_set] at
+/sample_key: a dataset needs 'sample_key': the stable row identity used for
+deterministic sampling and seeded random splits
+hint: set it to the entity id column(s), e.g. sample_key: [customer_id] -
+without one, sampling hashes every column, so adding a column upstream moves
+rows across the train/test boundary
+```
+
+**Why:** with no declared row identity, `sample_fraction` and seeded random
+splits hash every column of the relation, which makes the column list the hash
+preimage.
+One unrelated column arriving upstream then re-buckets every row: measured
+against DuckDB at three of ten rows changing side across an 80/20 boundary.
+Rows previously held out silently enter training and metric history stops being
+comparable across any schema change.
+The Snowflake and Spark adapters have always refused this outright, so before
+ADR-29 a spec could pass on the laptop and fail in the warehouse.
+
+**Fix:** add `sample_key: [<entity id>]`. Use the entity id rather than a
+row id when rows repeat per entity (a monthly panel): hashing the entity keeps
+all of its rows on one side of the split, which is what makes a sampled dev run
+comparable to a full one.
+
 ## `could not read a snapshot token for <relation>`
 
 **Symptom (hard error, exit 1, at compile):**

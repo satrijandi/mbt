@@ -388,3 +388,68 @@ def test_parser_validates_against_shared_check_names() -> None:
 
     assert project_parser._BUILTIN_CHECKS is BUILTIN_CHECK_NAMES
     assert project_parser._SCORING_CHECKS is SCORING_CHECK_NAMES
+
+
+def _panel_spec(columns: list[str] | None, checks: list | None = None) -> DatasetSpec:
+    return DatasetSpec.model_validate(
+        {
+            "name": "unit_panel",
+            "source": "source('a', 'b')",
+            "columns": columns,
+            "sample_key": ["x"],
+            "label": {"column": "y"},
+            "split": {
+                "strategy": "temporal",
+                "time_column": "t",
+                "train": "-30d:-7d",
+                "test": "-7d:now",
+            },
+            "checks": checks or [],
+        }
+    )
+
+
+def _panel_handle(extra: dict | None = None) -> InMemoryDatasetHandle:
+    columns = {"x": [1.0, 1.0], "t": [1, 2], "y": [0, 1]}
+    columns.update(extra or {})
+    return InMemoryDatasetHandle({"train": pa.table(columns)}, label_column="y")
+
+
+def test_panel_columns_is_auto_appended_and_closed_on_both_sides() -> None:
+    """`columns:` IS the assertion, so it does not also need listing under
+    `checks:` - and unlike `schema`, it fails on a column nobody named.
+
+    That closure is the whole point once the join lives upstream: a relation
+    gaining a column is otherwise indistinguishable from a routine data
+    refresh, so nothing in the mbt repo would move and no reviewer would see
+    the training set change (ADR-29).
+    """
+    spec = _panel_spec(["x", "t", "y"])
+    results = {r.name: r for r in run_checks(spec, _panel_handle(), {}, resource="dataset.unit")}
+    assert results["panel_columns"].passed
+
+    # a column arrives upstream that the contract does not name
+    widened = _panel_handle({"txn_volume_90d": [5.0, 6.0]})
+    result = {r.name: r for r in run_checks(spec, widened, {}, resource="dataset.unit")}
+    assert not result["panel_columns"].passed
+    assert "undeclared column(s): txn_volume_90d" in result["panel_columns"].message
+
+    # and a declared column that the relation stopped producing
+    spec = _panel_spec(["x", "t", "y", "age_band"])
+    result = {r.name: r for r in run_checks(spec, _panel_handle(), {}, resource="dataset.unit")}
+    assert not result["panel_columns"].passed
+    assert "absent from the relation: age_band" in result["panel_columns"].message
+
+
+def test_panel_columns_without_a_contract_says_so() -> None:
+    """Declaring the check but not `columns:` has nothing to check against."""
+    spec = _panel_spec(None, checks=["panel_columns"])
+    results = {r.name: r for r in run_checks(spec, _panel_handle(), {}, resource="dataset.unit")}
+    assert not results["panel_columns"].passed
+    assert "needs a 'columns:' list" in results["panel_columns"].message
+
+
+def test_panel_columns_is_not_double_appended_when_declared() -> None:
+    spec = _panel_spec(["x", "t", "y"], checks=["panel_columns"])
+    names = [r.name for r in run_checks(spec, _panel_handle(), {}, resource="dataset.unit")]
+    assert names.count("panel_columns") == 1

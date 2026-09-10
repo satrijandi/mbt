@@ -426,9 +426,9 @@ class LocalDataAdapter:
         ctx: DataBuildContext,
         purpose: str,
     ) -> list[str]:
-        """Columns hashed for sampling/splitting: the declared key, else all.
+        """Columns hashed for sampling/splitting: the declared key. No fallback.
 
-        ADR-16 frames the all-columns fallback as the slow path. It is also the
+        ADR-16 framed the all-columns fallback as the slow path. It was also the
         UNSTABLE one, and that is the more important half: the column list is
         the hash preimage, so adding one column to a source re-buckets every
         row. Measured against DuckDB with this module's own digest expression -
@@ -440,29 +440,23 @@ class LocalDataAdapter:
         ADR-9, so the promotion decision itself stays fair; it is the
         longitudinal record that degrades.)
 
-        It is also local-only: Snowflake and Spark raise on a keyless sample or
-        random split rather than inventing a row identity, so a spec that works
-        here fails there. Hence the warning rather than a silent fallback.
+        It was also local-only: Snowflake and Spark have always raised on a
+        keyless sample or random split rather than inventing a row identity, so
+        a spec that worked here failed there. The parser now requires
+        ``sample_key`` outright (ADR-29) and this is the runtime backstop, so
+        all three planes agree. ``ctx`` stays in the signature for the resource
+        name in the error.
         """
         if sample_keys:
             return sample_keys
-        described = con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
-        columns = [row[0] for row in described]
-        ctx.events.emit(
-            LogMessage(
-                level="warn",
-                unique_id=ctx.node.unique_id,
-                message=(
-                    f"no 'sample_key' declared: {purpose} hashes all {len(columns)} "
-                    "columns, so adding or removing any column re-buckets every row "
-                    "and moves rows across the train/test boundary. The Snowflake and "
-                    "Spark adapters reject this path outright - declare "
-                    "'sample_key: <id column(s)>' for a split that survives schema "
-                    "evolution and ports across backends"
-                ),
-            )
+        raise AdapterError(
+            f"no 'sample_key' declared, so {purpose} would hash every column - "
+            "adding or removing any column then re-buckets every row and moves "
+            "rows across the train/test boundary",
+            resource=ctx.node.unique_id,
+            hint="declare 'sample_key: <id column(s)>' on the dataset for a "
+            "split that survives schema evolution and ports across backends",
         )
-        return columns
 
     def _digest_sql(self, columns: list[str], salt: str = "") -> str:
         """The canonical cross-adapter row hash (F19): the unsigned LOWER 64

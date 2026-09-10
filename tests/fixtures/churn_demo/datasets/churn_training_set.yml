@@ -8,6 +8,7 @@ datasets:
     filters:
       - "is_active = true"
       - "tenure_days >= 30"
+    sample_key: user_id
     split:
       strategy: temporal
       time_column: snapshot_date

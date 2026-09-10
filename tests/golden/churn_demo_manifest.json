@@ -112,6 +112,7 @@
             }
           }
         ],
+        "columns": null,
         "description": "Active subscribers labeled with 90-day churn.",
         "filters": [
           "is_active = true",
@@ -120,10 +121,11 @@
         "inputs": null,
         "label": {
           "column": "churned_90d",
-          "definition": "cancelled within 90 days of snapshot_date"
+          "definition": "cancelled within 90 days of snapshot_date",
+          "horizon": null
         },
         "name": "churn_training_set",
-        "sample_key": null,
+        "sample_key": "user_id",
         "snapshot": null,
         "source": "source.churn_demo.lakehouse.subscribers",
         "split": {
@@ -141,13 +143,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:a6e993c1bf9e9eb3c40e89451121b613091353cb369f71dc24da51da6959cf2a",
+      "config_hash": "sha256:2b1c0f5e5c1fd6c9f097d7872a0ef5bea9ef58af75c5b202dc7b0ddf5b242ad1",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:1bf0b2b8ecba4afd821d68220388b49404b2bd21d444a695b57db8b21b73d887",
+      "input_hash": "sha256:98d2f287dafd08c99a7ab47677d5fa91a20d57a1cdce101703329a3beee137a3",
       "name": "churn_training_set",
       "path": "datasets/churn_training_set.yml",
       "resolved": {
@@ -174,6 +176,7 @@
         "checks": [
           "class_balance_report"
         ],
+        "columns": null,
         "description": "Non-enterprise subscribers labeled with 90-day plan upgrades.",
         "filters": [
           "is_active = true",
@@ -182,10 +185,11 @@
         "inputs": null,
         "label": {
           "column": "upgraded_90d",
-          "definition": "upgraded their plan within 90 days of snapshot_date"
+          "definition": "upgraded their plan within 90 days of snapshot_date",
+          "horizon": null
         },
         "name": "upsell_training_set",
-        "sample_key": null,
+        "sample_key": "user_id",
         "snapshot": null,
         "source": "source.churn_demo.lakehouse.subscribers",
         "split": {
@@ -203,13 +207,13 @@
         ],
         "tests": []
       },
-      "config_hash": "sha256:6ea3e25feb46383bab3202cf9d93d88d5755f314c00693ec4c08364af33e2fcd",
+      "config_hash": "sha256:6d5fa711f71b985f8f8de80145998d0104f62db0bffb32ceff79b8c87f4617f2",
       "depends_on": [
         "source.churn_demo.lakehouse.subscribers"
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:9080fcd9a83450624b1bfcf1797d7896acf49fbb406a172dea1c8bc65205e68c",
+      "input_hash": "sha256:57120016241c03fc76b249aaa15410bdd95db5e90805c4022d8a8f19ff12adfa",
       "name": "upsell_training_set",
       "path": "datasets/upsell_training_set.yml",
       "resolved": {
@@ -328,7 +332,7 @@
       ],
       "hooks_hash": "sha256:b69c77c89439a1112e3432f4e582a64be217e42fa4afa8c5f173495bf55954e4",
       "hooks_path": "models/churn_classifier.py",
-      "input_hash": "sha256:b57854260eb928f9291411910bee2a7f3c165c1a9533ec9cfb4d2f7f675259d0",
+      "input_hash": "sha256:a125a8c9e8b8cbae45f56075fc2905b6e77026c6d11b8634a52078eb3086ab64",
       "name": "churn_classifier",
       "path": "models/churn_classifier.yml",
       "resolved": {},
@@ -411,7 +415,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:db7cb7da71e2766f702198a0d72d1267a0780ed9ae3a9461a92b4b424c5766b1",
+      "input_hash": "sha256:347f922b21a67156fdf6527c6f9ab535e8eac79a984a6d26c1816073f1124d17",
       "name": "churn_classifier_deep",
       "path": "models/churn_classifier_deep.yml",
       "resolved": {},
@@ -497,7 +501,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:90bf18f5b8eb827b410c8ff11782a8bc56484ac9dd786b9ae989615bf291c515",
+      "input_hash": "sha256:c61313bbb5ca4e5fbb92f6086c39931c645a4df4a95a4bc9f1d8544880ca5918",
       "name": "upsell_classifier",
       "path": "models/upsell_classifier.yml",
       "resolved": {},
@@ -595,7 +599,7 @@
       ],
       "hooks_hash": null,
       "hooks_path": null,
-      "input_hash": "sha256:1e3b0001377287d1e5c443cbceff779311190c55db315e67568f433a9931b6bd",
+      "input_hash": "sha256:acaedaf24a45e4036754263fa134f4cf5d17064b93233860a7097f11b266aaf3",
       "name": "retention_scoring",
       "path": "scoring/retention_scoring.yml",
       "resolved": {

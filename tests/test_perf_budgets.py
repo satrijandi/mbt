@@ -104,6 +104,7 @@ def _build_project(project: Path, n_models: int) -> Path:
             f"datasets:\n  - name: ds_{d}\n"
             "    source: source('lake', 'events')\n"
             "    label: {column: label}\n"
+            "    sample_key: entity_id\n"
             "    split:\n      strategy: temporal\n      time_column: ts\n"
             '      train: "-150d:-28d"\n      test: "-28d:now"\n',
         )

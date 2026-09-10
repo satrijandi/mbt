@@ -82,6 +82,23 @@ class LabelSpec(_SpecModel):
 
     column: str
     definition: str = ""
+    #: DECLARATIVE ONLY: this joins nothing and shifts nothing. It states how
+    #: long after the prediction date the outcome is observed, so mbt can check
+    #: that ``split.embargo`` and ``ground_truth.maturity`` agree with it and
+    #: put the number on the model card (ADR-29).
+    #:
+    #: ADR-22 argued that pre-aligning label dates upstream "hides the outcome
+    #: window, the exact thing a training-set definition should state". ADR-29
+    #: moved the join to the gold layer, so the alignment is upstream now; this
+    #: field keeps the statement without the mechanism. Bare duration ("1mo",
+    #: "-28d", "2w", "12h"), same grammar as ``time_offset``.
+    horizon: str | None = None
+
+    @model_validator(mode="after")
+    def _valid_horizon(self) -> "LabelSpec":
+        if self.horizon is not None:
+            parse_time_offset(self.horizon)
+        return self
 
 
 class SplitSpec(_SpecModel):
@@ -383,6 +400,17 @@ class DatasetSpec(_SpecModel):
     description: str = ""
     source: str | None = None  # "source('lakehouse', 'gold_subscribers')"
     inputs: DatasetInputs | None = None  # multi-table form
+    #: The panel contract (ADR-29): the exact column set this dataset expects
+    #: from its relation. An undeclared column fails the build, and so does a
+    #: declared column that is absent.
+    #:
+    #: It asserts; it never selects. When the join lives upstream in dbt, this
+    #: list is the reviewed record of what the training set IS - without it, a
+    #: feature arriving upstream is indistinguishable from a routine data
+    #: refresh, and adding one would not be a diff anywhere a reviewer looks.
+    #: Distinct from the model's ``features.include``, which selects what one
+    #: model uses out of the panel this declares.
+    columns: list[str] | None = None
     label: LabelSpec
     filters: list[str] = Field(default_factory=list)  # SQL WHERE fragments, ANDed
     split: SplitSpec
@@ -426,6 +454,31 @@ class DatasetSpec(_SpecModel):
                     f"label time_offset shifts the split time_column "
                     f"{self.split.time_column!r}, so it must be one of the "
                     f"label's join columns {self.inputs.label_join_columns!r}"
+                )
+        if self.columns is not None:
+            if not self.columns:
+                raise ValueError(
+                    "'columns' declares the panel's expected column set, so an "
+                    "empty list asserts an empty panel; omit it instead"
+                )
+            duplicates = sorted({c for c in self.columns if self.columns.count(c) > 1})
+            if duplicates:
+                raise ValueError(f"'columns' repeats: {', '.join(duplicates)}")
+            if self.label.column not in self.columns:
+                raise ValueError(
+                    f"'columns' must include the label column "
+                    f"{self.label.column!r}; it is part of the panel"
+                )
+            if self.split.time_column is not None and self.split.time_column not in self.columns:
+                raise ValueError(
+                    f"'columns' must include the split time column "
+                    f"{self.split.time_column!r}; the split reads it"
+                )
+            missing_keys = [c for c in self.sample_key_columns if c not in self.columns]
+            if missing_keys:
+                raise ValueError(
+                    f"'columns' must include the sample_key column(s) "
+                    f"{', '.join(missing_keys)}; sampling hashes them"
                 )
         return self
 

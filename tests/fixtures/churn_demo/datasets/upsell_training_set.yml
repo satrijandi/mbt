@@ -8,6 +8,7 @@ datasets:
     filters:
       - "is_active = true"
       - "plan_type != 'enterprise'"
+    sample_key: user_id
     split:
       strategy: temporal
       time_column: snapshot_date

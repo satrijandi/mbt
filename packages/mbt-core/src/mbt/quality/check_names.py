@@ -22,6 +22,7 @@ BUILTIN_CHECK_NAMES = frozenset(
         "row_count",
         "freshness",
         "label_join_coverage",
+        "panel_columns",
         "no_future_columns",
         "label_leakage_scan",
         "class_balance_report",

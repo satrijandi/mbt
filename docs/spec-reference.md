@@ -199,9 +199,13 @@ Data comes from exactly one of ``source`` (a single table) or ``inputs``
 datasets:
   - name: churn_training_set
     source: source('lakehouse', 'subscribers')
+    columns:                        # the panel contract (ADR-29), optional
+      [user_id, snapshot_date, churned_90d, plan, tenure_days, is_active]
+    sample_key: [user_id]           # REQUIRED: the stable row identity
     label:
       column: churned_90d
       definition: "cancelled within 90d of snapshot_date"   # for model cards
+      horizon: "90d"                # declarative: when the outcome is observed
     filters: ["is_active = true", "tenure_days >= 30"]      # SQL, ANDed
     split:
       strategy: temporal            # default; random needs explicit seed
@@ -262,6 +266,43 @@ datasets:
     snapshot: "sha256:..."          # explicit pin (optional; normally compile pins)
     tags: [churn]
 ```
+
+**The panel contract (`columns:`)** declares the exact column set the dataset
+expects from its relation.
+An undeclared column fails the build, and so does a declared column that is
+absent.
+It asserts; it never selects.
+
+It matters most when the relation is built upstream (a dbt model, a Snowflake
+dynamic table): without it, a feature arriving in that relation is
+indistinguishable from a routine data refresh, so nothing in the mbt repo moves
+and no reviewer sees the training set change.
+With it, adding `feature_N+1` is a one-line diff sitting next to the gates and
+the seed, which is where the decision belongs.
+
+It is distinct from the model's `features.include`: `columns:` says what the
+panel IS, `features.include` says what one model uses out of it.
+Declaring it is optional, but the columns mbt itself reads (the label, the split
+time column, the sample key) must be in the list when you do.
+The check runs automatically whenever `columns:` is set; you do not also list
+`panel_columns` under `checks:`.
+
+**`sample_key` is required.**
+It names the stable row identity used for deterministic hash sampling and
+seeded random splits.
+Without one the digest hashes *every* column, so the column list becomes the
+hash preimage: one column arriving upstream re-buckets every row and moves some
+across the train/test boundary (measured at three of ten).
+The Snowflake and Spark adapters always refused that path; requiring it here is
+what stops a spec passing on the dev plane and failing on the prod one.
+
+**`label.horizon`** states how long after the prediction date the outcome is
+observed.
+It is declarative: it joins nothing and shifts nothing.
+Declaring it is what lets mbt check that the three places a project spells this
+one number agree - it warns when `split.embargo` is absent or shorter than the
+horizon, and when a scoring pipeline's `ground_truth.maturity` is shorter (which
+would grade predictions against outcomes that have not happened).
 
 **Leakage scan ceiling:** `label_leakage_scan` is a *univariate* screen on the
 *train* split only.

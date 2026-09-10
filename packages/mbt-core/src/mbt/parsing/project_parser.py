@@ -29,6 +29,7 @@ from mbt.contracts import (
     SourceTable,
     SplitStrategy,
     TaskType,
+    parse_time_offset,
 )
 from mbt.dag.graph import build_graph, find_cycle
 from mbt.exceptions import ConfigError
@@ -422,29 +423,91 @@ def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: Par
             )
 
 
+#: Nominal days per duration unit, for comparing two declared durations only.
+#: Calendar months are not 30 days, but this never resolves a window - it only
+#: answers "is this embargo shorter than that horizon", where being approximate
+#: at the boundary is fine and being absent is not.
+_NOMINAL_DAYS = {"h": 1 / 24, "d": 1.0, "w": 7.0, "mo": 30.0}
+
+
+def _duration_days(duration: str) -> float:
+    value, unit = parse_time_offset(duration)
+    return abs(value) * _NOMINAL_DAYS[unit]
+
+
 def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
     """Warn on split configurations that invite leakage (FR-RES-09).
 
-    Warnings, not errors: a random split over truly exchangeable rows is
-    legitimate; these flag the configurations that usually are not.
+    Warnings, not errors, with one exception: a random split over truly
+    exchangeable rows is legitimate, and these flag the configurations that
+    usually are not. The missing ``sample_key`` below is the exception, because
+    it is not a judgement call - see the error's own reasoning.
     """
+    if not spec.sample_key_columns:
+        # Without a declared row identity, sampling and random splits hash
+        # EVERY column, so the column list is the hash preimage: adding one
+        # column upstream re-buckets every row and moves rows across the
+        # train/test boundary (a measured ten-row case moved three). Under
+        # ADR-29 the relation is a single evolving panel, which makes that the
+        # normal case rather than an edge one. Snowflake and Spark already
+        # refused the keyless path outright; local only warned, so a spec could
+        # pass on the dev plane and fail on the prod plane.
+        report.error(
+            "a dataset needs 'sample_key': the stable row identity used for "
+            "deterministic sampling and seeded random splits",
+            file=rel,
+            resource=uid,
+            field_path="/sample_key",
+            hint="set it to the entity id column(s), e.g. sample_key: [customer_id] "
+            "- without one, sampling hashes every column, so adding a column "
+            "upstream moves rows across the train/test boundary",
+        )
     # Temporal split + a label horizon but no embargo (R2-7): rows near the
     # train boundary have their labels observed inside the evaluation window and
     # leak. The embargo mechanism exists; guide the user to actually set it.
+    # `time_offset` executes the alignment, `label.horizon` only declares it
+    # (ADR-29); either one names the label horizon, and the guidance is the
+    # same. Without the horizon arm, moving the alignment upstream would
+    # silently switch this warning off on exactly the shape ADR-29 recommends.
     label_offset = spec.inputs.label_time_offset if spec.inputs is not None else None
+    horizon = spec.label.horizon or label_offset
+    if label_offset is not None and spec.label.horizon not in (None, label_offset):
+        report.error(
+            f"label.horizon ({spec.label.horizon}) and inputs.label.time_offset "
+            f"({label_offset}) are two spellings of one number and disagree",
+            file=rel,
+            resource=uid,
+            field_path="/label/horizon",
+            hint="declare the outcome window once",
+        )
     if (
         spec.split.strategy is SplitStrategy.TEMPORAL
-        and label_offset is not None
+        and horizon is not None
         and spec.split.embargo is None
     ):
         report.warning(
-            "temporal split with a label 'time_offset' but no 'split.embargo': "
-            "training rows near the boundary have labels observed inside the "
-            "evaluation window and can leak into it",
+            "temporal split with a declared label horizon but no "
+            "'split.embargo': training rows near the boundary have labels "
+            "observed inside the evaluation window and can leak into it",
             file=rel,
             resource=uid,
             field_path="/split/embargo",
-            hint=f"set split.embargo to at least the label horizon ({label_offset})",
+            hint=f"set split.embargo to at least the label horizon ({horizon})",
+        )
+    if (
+        spec.split.strategy is SplitStrategy.TEMPORAL
+        and horizon is not None
+        and spec.split.embargo is not None
+        and _duration_days(spec.split.embargo) < _duration_days(horizon)
+    ):
+        report.warning(
+            f"split.embargo ({spec.split.embargo}) is shorter than the label "
+            f"horizon ({horizon}), so the gap does not cover the window in "
+            "which the label is observed",
+            file=rel,
+            resource=uid,
+            field_path="/split/embargo",
+            hint=f"set split.embargo to at least {horizon}",
         )
     if spec.split.strategy is not SplitStrategy.RANDOM:
         return
@@ -456,20 +519,6 @@ def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: Pars
             resource=uid,
             field_path="/split/strategy",
             hint="use 'strategy: temporal', or drop 'time_column' if it is not event time",
-        )
-    if not spec.sample_key_columns:
-        report.warning(
-            "random split without 'sample_key': rows are split independently, so "
-            "repeated entities can straddle train and test, AND split membership "
-            "is computed by hashing every column - adding or removing one moves "
-            "rows across the train/test boundary, so metric history stops being "
-            "comparable across any schema change",
-            file=rel,
-            resource=uid,
-            field_path="/split",
-            hint="set 'sample_key' to the entity id: it keeps an entity's rows "
-            "together, keeps the split stable across schema evolution, and is "
-            "required outright by the Snowflake and Spark adapters",
         )
 
 
@@ -972,6 +1021,7 @@ def _link_and_check(
         if model_res is not None:
             deps.append(model_res.unique_id)
             _resolve_scoring_metric_specs(sc_spec, sc, model_res, metrics, report)
+            _check_maturity_vs_horizon(sc_spec, sc, model_res, dataset_by_name, report)
         for group, table in sc.sources:
             source_uid = source_unique_id(project.name, group, table)
             if source_uid not in sources:
@@ -1141,6 +1191,58 @@ def _check_model_vs_dataset(
             file=model.path,
             resource=model.unique_id,
             field_path="/evaluation/protocol/test_window",
+        )
+
+
+def _check_maturity_vs_horizon(
+    spec: ScoringSpec,
+    scoring: ParsedResource,
+    model_res: ParsedResource,
+    dataset_by_name: dict[str, ParsedResource],
+    report: ParseReport,
+) -> None:
+    """`ground_truth.maturity` must not be shorter than the label horizon.
+
+    A prediction run is evaluated once ``scored_at + maturity`` has passed. If
+    that is shorter than the window in which the outcome is actually observed,
+    the monitor grades predictions against labels that have not happened yet,
+    and the realized metrics are quietly wrong rather than missing. The three
+    places a project states this one number (``label.horizon``,
+    ``split.embargo``, ``ground_truth.maturity``) now have to agree (ADR-29).
+    """
+    if spec.ground_truth is None:
+        return
+    model_spec = model_res.spec
+    assert isinstance(model_spec, ModelSpec)
+    match = _REF_RE.match(model_spec.dataset)
+    dataset_res = dataset_by_name.get(match.group("name")) if match else None
+    if dataset_res is None:
+        return
+    ds_spec = dataset_res.spec
+    assert isinstance(ds_spec, DatasetSpec)
+    horizon = ds_spec.label.horizon or (
+        ds_spec.inputs.label_time_offset if ds_spec.inputs is not None else None
+    )
+    if horizon is None:
+        return
+    try:
+        too_short = _duration_days(spec.ground_truth.maturity) < _duration_days(horizon)
+    except ValueError:
+        # A malformed maturity is already reported by _validate_scoring_windows,
+        # and parsing collects every error in one pass rather than stopping, so
+        # this runs anyway. Units cannot KeyError: parse_time_offset accepts
+        # only the four _NOMINAL_DAYS knows.
+        return
+    if too_short:
+        report.warning(
+            f"ground_truth.maturity ({spec.ground_truth.maturity}) is shorter "
+            f"than the label horizon ({horizon}) declared by dataset "
+            f"{ds_spec.name!r}: predictions would be evaluated against outcomes "
+            "that have not been observed yet",
+            file=scoring.path,
+            resource=scoring.unique_id,
+            field_path="/ground_truth/maturity",
+            hint=f"set ground_truth.maturity to at least {horizon}",
         )
 
 

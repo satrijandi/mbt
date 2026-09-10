@@ -76,6 +76,10 @@ def run_checks(
         # label-associated features; declare the check to tune thresholds,
         # exclude reviewed columns, or opt out (`enabled: false`).
         checks.append("label_leakage_scan")
+    if spec.columns is not None and "panel_columns" not in declared:
+        # The panel contract is not optional once declared: `columns:` IS the
+        # assertion, so it does not also need to be listed under `checks:`.
+        checks.append("panel_columns")
     return _run_named_checks(checks, spec, handle, resolved_windows, resource, sources)
 
 
@@ -165,6 +169,51 @@ def _check_schema(
                     f"column {name!r} has type {actual[name]!r}, expected {expected_type!r}"
                 )
     return TestResult(name="schema", passed=not problems, message="; ".join(problems))
+
+
+def _check_panel_columns(
+    spec: Any,
+    handle: _CheckableHandle,
+    windows: dict[str, Any],
+    params: dict[str, Any],
+    resource: str,
+    sources: "SourceAccess | None" = None,
+) -> TestResult:
+    """The panel is exactly the declared column set: no more, no less (ADR-29).
+
+    Auto-appended whenever a dataset declares ``columns:``. It is what keeps a
+    feature addition reviewable once the join lives upstream: the relation
+    gaining a column is otherwise indistinguishable from a routine data
+    refresh, so nothing in the mbt repo would move and no reviewer would see it.
+
+    Unlike ``schema``, which asserts that named columns exist, this is closed on
+    both sides. That is the whole point: ``schema`` cannot fail on a column
+    nobody named.
+    """
+    declared = getattr(spec, "columns", None)
+    if not declared:
+        return TestResult(
+            name="panel_columns",
+            passed=False,
+            message=(
+                "panel_columns needs a 'columns:' list on the dataset - it "
+                "checks the panel against that contract"
+            ),
+        )
+    split = "train" if "train" in handle.splits() else min(sorted(handle.splits()))
+    actual = list(handle.read(split).column_names)
+    expected = set(declared)
+    undeclared = [c for c in actual if c not in expected]
+    missing = [c for c in declared if c not in set(actual)]
+    problems = []
+    if undeclared:
+        problems.append(
+            f"undeclared column(s): {', '.join(undeclared)} - add them to "
+            "'columns:' to take them, or drop them upstream"
+        )
+    if missing:
+        problems.append(f"declared column(s) absent from the relation: {', '.join(missing)}")
+    return TestResult(name="panel_columns", passed=not problems, message="; ".join(problems))
 
 
 def _check_not_null(
@@ -720,6 +769,7 @@ _CHECKS = {
     "row_count": _check_row_count,
     "freshness": _check_freshness,
     "label_join_coverage": _check_label_join_coverage,
+    "panel_columns": _check_panel_columns,
     "no_future_columns": _check_no_future_columns,
     "label_leakage_scan": _check_label_leakage_scan,
     "class_balance_report": _check_class_balance_report,

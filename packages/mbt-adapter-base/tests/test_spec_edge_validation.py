@@ -277,3 +277,75 @@ def test_calibration_and_backtest_folds_compose() -> None:
     with pytest.raises(ValidationError, match="needs a 'tuning' block"):
         _spec(with_tuning=False)
     assert _spec(with_tuning=True).evaluation.protocol.nested_cv
+
+
+def test_label_horizon_grammar_and_declarative_nature() -> None:
+    """`label.horizon` states the outcome window without executing it (ADR-29).
+
+    ADR-22 argued that pre-aligning label dates upstream hides the outcome
+    window, which is the thing a training-set definition should state. ADR-29
+    moved the join to the gold layer, so this keeps the statement without the
+    mechanism - and it has to parse, or the cross-checks against `split.embargo`
+    and `ground_truth.maturity` have nothing to compare.
+    """
+    from mbt_adapter_base.specs import LabelSpec
+
+    assert LabelSpec(column="is_churn", horizon="1mo").horizon == "1mo"
+    assert LabelSpec(column="is_churn").horizon is None
+    with pytest.raises(ValidationError, match="invalid time_offset"):
+        LabelSpec(column="is_churn", horizon="one month")
+
+
+def _panel_payload(**overrides: object) -> dict:
+    payload: dict = {
+        "name": "panel",
+        "source": "source('lake', 'ml_churn_panel')",
+        "columns": ["customer_id", "inference_date", "is_churn", "age_band"],
+        "sample_key": ["customer_id"],
+        "label": {"column": "is_churn"},
+        "split": {
+            "strategy": "temporal",
+            "time_column": "inference_date",
+            "train": "-180d:-28d",
+            "test": "-28d:now",
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_panel_columns_contract_must_cover_the_columns_mbt_itself_reads() -> None:
+    """`columns:` declares the panel, so it cannot omit what the spec depends on.
+
+    The label, the split time column and the sample key are all read by mbt
+    regardless of which of them a model happens to use as a feature; a contract
+    that leaves one out would pass parse and then fail at build with a much
+    worse message.
+    """
+    from mbt_adapter_base.specs import DatasetSpec
+
+    assert DatasetSpec.model_validate(_panel_payload()).columns is not None
+
+    with pytest.raises(ValidationError, match="must include the label column"):
+        DatasetSpec.model_validate(
+            _panel_payload(columns=["customer_id", "inference_date", "age_band"])
+        )
+    with pytest.raises(ValidationError, match="must include the split time column"):
+        DatasetSpec.model_validate(_panel_payload(columns=["customer_id", "is_churn", "age_band"]))
+    with pytest.raises(ValidationError, match="must include the sample_key"):
+        DatasetSpec.model_validate(
+            _panel_payload(columns=["inference_date", "is_churn", "age_band"])
+        )
+
+
+def test_panel_columns_rejects_empty_and_repeated() -> None:
+    from mbt_adapter_base.specs import DatasetSpec
+
+    with pytest.raises(ValidationError, match="omit it instead"):
+        DatasetSpec.model_validate(_panel_payload(columns=[]))
+    with pytest.raises(ValidationError, match="repeats: age_band"):
+        DatasetSpec.model_validate(
+            _panel_payload(
+                columns=["customer_id", "inference_date", "is_churn", "age_band", "age_band"]
+            )
+        )

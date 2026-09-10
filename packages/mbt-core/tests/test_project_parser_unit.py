@@ -1,5 +1,6 @@
 """Unit tests for mbt.parsing.project_parser: accessors, error branches, linking."""
 
+import re
 from pathlib import Path
 
 from core_helpers import write
@@ -961,3 +962,203 @@ def test_dependency_cycle_is_reported_by_graph_builder() -> None:
     _build_project_graph({}, datasets, {}, {}, {}, report)
     cycle = [i for i in report.errors if "dependency cycle detected" in i.message]
     assert cycle and "dataset.p.a" in cycle[0].message
+
+
+# -- the outcome window, declared once (ADR-29) ---------------------------------------
+
+
+def _panel_dataset(**fields: str) -> str:
+    extra = "".join(f"            {k}: {v}\n" for k, v in fields.items())
+    return (
+        "datasets:\n"
+        "  - name: churn_training\n"
+        "    source: source('lakehouse', 'subscribers')\n"
+        "    sample_key: user_id\n"
+        "    label:\n"
+        "      column: churned\n"
+        '      horizon: "1mo"\n'
+        "    split:\n"
+        "      strategy: temporal\n"
+        "      time_column: snapshot_date\n"
+        '      train: "-180d:-28d"\n'
+        '      test: "-28d:now"\n'
+    ) + extra
+
+
+def test_label_horizon_drives_the_embargo_warnings(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """The embargo advice used to be gated on `inputs.label.time_offset`.
+
+    Moving the label alignment upstream, which is the whole point of ADR-29,
+    would otherwise have switched mbt's only leakage-embargo warning off on
+    exactly the shape it recommends. `label.horizon` is what keeps it firing.
+    """
+    (demo_project / "datasets/churn_training.yml").write_text(_panel_dataset())
+    parsed = parse_project(demo_project, registry=fake_registry)
+    messages = [i.message for i in parsed.report.warnings]
+    assert any("declared label horizon but no 'split.embargo'" in m for m in messages)
+
+    # an embargo shorter than the horizon does not cover the observation window
+    (demo_project / "datasets/churn_training.yml").write_text(
+        _panel_dataset().replace('test: "-28d:now"\n', 'test: "-28d:now"\n      embargo: "7d"\n')
+    )
+    parsed = parse_project(demo_project, registry=fake_registry)
+    messages = [i.message for i in parsed.report.warnings]
+    assert any("shorter than the label horizon (1mo)" in m for m in messages)
+
+    # matching it silences both
+    (demo_project / "datasets/churn_training.yml").write_text(
+        _panel_dataset().replace('test: "-28d:now"\n', 'test: "-28d:now"\n      embargo: "1mo"\n')
+    )
+    parsed = parse_project(demo_project, registry=fake_registry)
+    assert not [i for i in parsed.report.warnings if "horizon" in i.message]
+
+
+def test_ground_truth_maturity_shorter_than_the_horizon_warns(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A maturity below the label horizon grades predictions against outcomes
+    that have not been observed, so the realized metrics are quietly wrong
+    rather than missing."""
+    (demo_project / "datasets/churn_training.yml").write_text(
+        _panel_dataset().replace('test: "-28d:now"\n', 'test: "-28d:now"\n      embargo: "1mo"\n')
+    )
+    write(
+        demo_project / "scoring/retention.yml",
+        """
+        scoring:
+          - name: retention
+            owner: ds@example.com
+            model: ref('churn_model')
+            input:
+              source: source('lakehouse', 'subscribers')
+            ground_truth:
+              label:
+                source: source('lakehouse', 'subscribers')
+                column: churned
+              join_key: user_id
+              maturity: "7d"
+              metrics: [pr_auc]
+            output: {path: predictions/a, columns: [user_id]}
+        """,
+    )
+    parsed = parse_project(demo_project, registry=fake_registry)
+    messages = [i.message for i in parsed.report.warnings]
+    assert any(
+        "ground_truth.maturity (7d) is shorter than the label horizon (1mo)" in m for m in messages
+    )
+
+    (demo_project / "scoring/retention.yml").write_text(
+        (demo_project / "scoring/retention.yml")
+        .read_text()
+        .replace('maturity: "7d"', 'maturity: "1mo"')
+    )
+    parsed = parse_project(demo_project, registry=fake_registry)
+    assert not [i for i in parsed.report.warnings if "maturity" in i.message]
+
+
+def test_horizon_and_time_offset_must_agree(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """Two spellings of one number cannot disagree."""
+    write(
+        demo_project / "sources.yml",
+        """
+        sources:
+          - name: lakehouse
+            tables:
+              - name: subscribers
+                path: data/subscribers/*.parquet
+              - name: labels
+                path: data/subscribers/*.parquet
+        """,
+    )
+    write(
+        demo_project / "datasets/churn_training.yml",
+        """
+        datasets:
+          - name: churn_training
+            inputs:
+              population: source('lakehouse', 'subscribers')
+              label:
+                source: source('lakehouse', 'labels')
+                using: [user_id, snapshot_date]
+                time_offset: "1mo"
+              features:
+                - source: source('lakehouse', 'subscribers')
+                  using: [user_id, snapshot_date]
+            sample_key: user_id
+            label:
+              column: churned
+              horizon: "2mo"
+            split:
+              strategy: temporal
+              time_column: snapshot_date
+              train: "-180d:-28d"
+              test: "-28d:now"
+              embargo: "2mo"
+        """,
+    )
+    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
+    assert any(
+        "two spellings of one number and disagree" in i.message for i in parsed.report.errors
+    )
+
+
+def test_sample_key_is_required(demo_project: Path, fake_registry: AdapterRegistry) -> None:
+    """Without a declared row identity, sampling and random splits hash EVERY
+    column, so a column arriving upstream moves rows across the train/test
+    boundary. Snowflake and Spark always refused it; the parser now does too,
+    so a spec cannot pass on the dev plane and fail on the prod one."""
+    path = demo_project / "datasets/churn_training.yml"
+    path.write_text(re.sub(r"^ *sample_key:.*\n", "", path.read_text(), flags=re.M))
+    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
+    errors = [i for i in parsed.report.errors if "sample_key" in i.message]
+    assert errors and "stable row identity" in errors[0].message
+    assert "entity id column(s)" in (errors[0].hint or "")
+
+
+def test_maturity_horizon_check_survives_a_broken_project(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """The cross-check runs in the same pass as the errors it sits beside.
+
+    Parsing collects every error rather than stopping at the first, so this
+    check is reached with a model whose dataset ref does not resolve, and with
+    a maturity that does not parse. Neither may mask the real error with a
+    traceback.
+    """
+    (demo_project / "datasets/churn_training.yml").write_text(
+        _panel_dataset().replace('test: "-28d:now"\n', 'test: "-28d:now"\n      embargo: "1mo"\n')
+    )
+    write(
+        demo_project / "scoring/retention.yml",
+        """
+        scoring:
+          - name: retention
+            owner: ds@example.com
+            model: ref('churn_model')
+            input:
+              source: source('lakehouse', 'subscribers')
+            ground_truth:
+              label:
+                source: source('lakehouse', 'subscribers')
+                column: churned
+              join_key: user_id
+              maturity: "not-a-duration"
+              metrics: [pr_auc]
+            output: {path: predictions/a, columns: [user_id]}
+        """,
+    )
+    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
+    assert any(
+        (i.field_path or "").endswith("/ground_truth/maturity") for i in parsed.report.errors
+    )
+    assert not [i for i in parsed.report.warnings if "shorter than the label horizon" in i.message]
+
+    # and with the model's dataset edge itself broken
+    model = demo_project / "models/churn_model.yml"
+    model.write_text(model.read_text().replace("ref('churn_training')", "ref('no_such_dataset')"))
+    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
+    assert any("unknown dataset" in i.message for i in parsed.report.errors)

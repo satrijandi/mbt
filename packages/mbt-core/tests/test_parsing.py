@@ -23,8 +23,12 @@ def test_valid_project_parses(demo_project: Path, fake_registry: AdapterRegistry
 
 
 def test_random_split_protocol_warnings(demo_project: Path, fake_registry: AdapterRegistry) -> None:
-    """Random splits warn on temporal-leakage and entity-straddle risks
-    (FR-RES-09); both warnings are addressable and then disappear."""
+    """A random split over a dataset with a time column warns (FR-RES-09).
+
+    The entity-straddle half of this warning is gone: `sample_key` is required
+    outright now (ADR-29), so a keyless random split cannot be parsed at all
+    and there is nothing left to warn about. The warning is addressable and
+    then disappears."""
     write(
         demo_project / "datasets/random_split.yml",
         """
@@ -33,6 +37,7 @@ def test_random_split_protocol_warnings(demo_project: Path, fake_registry: Adapt
             source: source('lakehouse', 'subscribers')
             label:
               column: churned
+            sample_key: user_id
             split:
               strategy: random
               time_column: snapshot_date
@@ -44,7 +49,6 @@ def test_random_split_protocol_warnings(demo_project: Path, fake_registry: Adapt
     parsed = parse_project(demo_project, registry=fake_registry)
     messages = [issue.message for issue in parsed.report.warnings]
     assert any("temporal leakage" in m for m in messages)
-    assert any("sample_key" in m for m in messages)
 
     write(
         demo_project / "datasets/random_split.yml",
@@ -54,12 +58,12 @@ def test_random_split_protocol_warnings(demo_project: Path, fake_registry: Adapt
             source: source('lakehouse', 'subscribers')
             label:
               column: churned
+            sample_key: user_id
             split:
               strategy: random
               train: "0.8"
               test: "0.2"
               seed: 7
-            sample_key: user_id
         """,
     )
     parsed = parse_project(demo_project, registry=fake_registry)

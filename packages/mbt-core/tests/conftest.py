@@ -52,6 +52,7 @@ def demo_project(tmp_path: Path) -> Path:
             label:
               column: churned
             filters: ["is_active = true"]
+            sample_key: user_id
             split:
               strategy: temporal
               time_column: snapshot_date
