@@ -251,11 +251,17 @@ def _check_unique(
 ) -> TestResult:
     """Each listed column must hold no duplicated (non-null) value in any split.
 
-    dbt-parity ``unique``: this catches a multi-table join that fanned out the
-    population spine (a feature/label table that is not unique on its join key
-    multiplies rows), which otherwise silently over-weights an entity in both
-    training and the reported metric (F2). Nulls are ignored, as in dbt - pair
-    with ``not_null`` when the key must also be present.
+    dbt-parity ``unique``: this catches an upstream join that fanned the panel
+    out (a feature or label table that is not unique on its join key multiplies
+    rows), which otherwise silently over-weights an entity in both training and
+    the reported metric (F2). Nulls are ignored, as in dbt - pair with
+    ``not_null`` when the key must also be present.
+
+    Note the two forms differ in more than WHERE they read. This one checks each
+    listed column INDIVIDUALLY; the ``source:`` form below treats the whole list
+    as one composite key. A panel keyed by (entity, date) has neither column
+    unique on its own, so it needs the composite form - pointed at the panel's
+    own source, which is also the relation a fan-out would have damaged.
 
     With ``source: <group.name>`` the check runs PRE-JOIN against the raw
     source table instead, treating ``columns`` as one composite key - the 1:1

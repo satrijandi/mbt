@@ -224,13 +224,16 @@ datasets:
       - class_balance_report        # report-only
       - schema: {columns: {churned_90d: int64}}
       - not_null: {columns: [churned_90d]}
-      # each listed value must be distinct within every split (nulls ignored):
-      # catches an upstream join that fanned the panel out on a non-unique key
-      - unique: {columns: [user_id, inference_date]}
-      # with source:, unique runs against a RAW table instead of the panel,
-      # treating the columns as one composite key - so you can assert the key
-      # uniqueness your panel depends on, on the table that owes it
-      - unique: {source: lakehouse.txn_features, columns: [safe_id, snapshot_date]}
+      # EACH listed column, individually, must hold no duplicated non-null value
+      # in any split. Catches an upstream join that fanned the panel out on a
+      # non-unique key - but only where a single column is the key
+      - unique: {columns: [user_id]}
+      # with source:, unique reads a relation directly instead of the split
+      # panel, and treats the columns as ONE COMPOSITE key. That is the form a
+      # panel needs: keyed by (entity, date), neither column is unique alone.
+      # Point it at the panel itself for its natural key, or at an upstream
+      # table to assert the uniqueness your panel depends on
+      - unique: {source: lakehouse.ml_churn_panel, columns: [user_id, inference_date]}
       # a column's non-null values must all lie in the allowed set (nulls
       # ignored): catches a categorical that drifted to an unexpected level
       # (a new code, a typo, an upstream enum change)

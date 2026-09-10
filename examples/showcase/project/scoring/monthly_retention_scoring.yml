@@ -14,7 +14,11 @@ scoring:
         - "is_active = true"
         - "tenure_days >= 30"
       time_column: inference_date
-      window: "-31d:now"           # exactly the newest month-start batch
+      # Exactly the newest month-start batch, and no newer: ending the window
+      # 28 days back rather than at `now` is also what makes the 14d maturity
+      # below reach the 30d label horizon (a row is already 28 days old when it
+      # is scored, so 14 more days carries it past its outcome window).
+      window: "-31d:-28d"
 
     checks:
       - not_null:
@@ -27,6 +31,8 @@ scoring:
         threshold: 0.25
 
     # Maturity counts from scored_at (the scoring run's anchor, 2026-06-30).
+    # Maturity counts from scored_at (the run's anchor) while the label horizon
+    # counts from inference_date; the window above is what bridges the two.
     # The batch's 30-day outcomes are fully realized one day later (month
     # -start snapshot + 30d = 2026-07-01), so 14d models label-arrival lag
     # and matures inside the pinned monitor anchor (2026-07-14 <= 2026-07-20).

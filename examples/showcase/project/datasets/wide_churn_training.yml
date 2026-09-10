@@ -55,11 +55,16 @@ datasets:
       - not_null:
           columns: [is_churn, inference_date, as_of_date, customer_id, safe_id]
       # The upstream join can no longer be measured from here, so the two
-      # things it used to guarantee are asserted on the result instead: one row
-      # per customer per cohort (a non-unique feature table would have fanned
-      # the population out), and a volume floor that turns a silently collapsed
-      # join into a loud failure.
-      - unique:
-          columns: [customer_id, inference_date]
+      # things it used to guarantee are asserted on the result instead.
+      #
+      # One row per customer per cohort: the panel's natural key. This uses the
+      # `source:` form, which treats `columns` as ONE composite key - the bare
+      # form checks each column individually, and neither customer_id nor
+      # inference_date is unique on its own in a panel (that is what a panel
+      # is). Pointing it at the panel also runs it before filters and splits,
+      # so it measures the relation as delivered rather than the slice used.
+      - unique: {source: lake.monthly_panel, columns: [customer_id, inference_date]}
+      # A volume floor: a silently collapsed upstream join becomes a loud
+      # failure instead of a quietly smaller model.
       - row_count: {min: 1000}
     tags: [churn, wide]
