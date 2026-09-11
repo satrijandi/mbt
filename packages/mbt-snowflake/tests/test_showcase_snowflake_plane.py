@@ -81,7 +81,7 @@ def test_source_identifiers_match_the_seeding_script() -> None:
     """sources.yml and seed_snowflake.py must not drift apart.
 
     The seeder owns two kinds of relation now (ADR-29): ``TABLES`` are loaded
-    from parquet, ``PANELS`` are dynamic tables joined over them. Both are
+    from parquet, ``PANELS`` are joined over them by a CTAS. Both are
     declared in sources.yml, and both must use the same identifier the seeder
     creates.
     """
@@ -194,7 +194,7 @@ def _synthetic_panel() -> tuple[str, pa.Table]:
     """The wide panel as the upstream join produces it, Snowflake-shaped.
 
     Built by joining `_synthetic()`'s six gold tables exactly the way the
-    panel's dynamic table does: INNER to the labels, each history on its own
+    panel's CTAS does: INNER to the labels, each history on its own
     key, `ETL_LOADED_AT` pruned per table before it can collide. Doing the join
     here rather than declaring the result keeps this fixture honest about what
     upstream owes mbt - notably that transaction_history can only match through
@@ -337,7 +337,7 @@ def test_wide_tables_covers_everything_the_wide_specs_can_reach() -> None:
     collects demo data for cadences this plane never runs.
 
     ADR-29 put one level of indirection in the middle: the specs now reference
-    PANELS, which are dynamic tables that read the loaded tables. So the
+    PANELS, which are materialized from the loaded tables. So the
     invariant is no longer "WIDE_TABLES equals what the specs reference" but
     "everything the specs reference is either a panel or a loaded table, and
     every table a panel reads is loaded" - the second half being the one that
@@ -363,7 +363,7 @@ def test_wide_tables_covers_everything_the_wide_specs_can_reach() -> None:
 
     # Every table a panel reads must hold rows, or the panel is empty.
     for panel in panels:
-        sql = module.panel_sql(DATABASE, SCHEMA, panel, "ML_WH")
+        sql = module.panel_sql(DATABASE, SCHEMA, panel)
         read = {name for name in module.TABLES if module.table_name(name) in sql}
         assert read <= loaded, (
             f"panel {panel!r} reads {read - loaded}, which the seeder creates empty"
@@ -374,7 +374,7 @@ def test_wide_tables_covers_everything_the_wide_specs_can_reach() -> None:
         name
         for panel in panels
         for name in module.TABLES
-        if module.table_name(name) in module.panel_sql(DATABASE, SCHEMA, panel, "ML_WH")
+        if module.table_name(name) in module.panel_sql(DATABASE, SCHEMA, panel)
     }
     assert loaded == panel_inputs | (referenced & set(module.TABLES)), (
         f"WIDE_TABLES drifted: extra={loaded - panel_inputs - referenced}"
@@ -531,9 +531,14 @@ def test_seeder_trims_padded_env_identifiers(monkeypatch) -> None:
     assert connect_kwargs["password"] == "  pw with space  "
 
     # Path 1: the DDL, which succeeded even when padded and so hid the problem.
+    # One CREATE per table plus one CTAS per panel, all qualified with the
+    # trimmed names - the panel bodies interpolate database/schema too.
     ddl = [s for s in statements if s.startswith("CREATE OR REPLACE TABLE")]
-    assert len(ddl) == len(module.TABLES)
+    assert len(ddl) == len(module.TABLES) + len(module.PANELS)
     assert all(s.startswith("CREATE OR REPLACE TABLE DB.SC.MBT_SHOWCASE_") for s in ddl), ddl[:1]
+    panels = [s for s in ddl if "AS SELECT" in s]
+    assert len(panels) == len(module.PANELS)
+    assert all("FROM DB.SC.MBT_SHOWCASE_MONTHLY_POPULATION" in s for s in panels), panels[:1]
 
     # Path 2: the COPY INTO identifier(?) binding, which did not.
     assert {k["database"] for k in loads} == {"DB"}
@@ -613,14 +618,14 @@ def test_transaction_history_joins_through_safe_id_only() -> None:
     """The heterogeneous-key claim, asserted where the join now lives.
 
     It used to be read off the dataset spec's per-table `using:` columns. ADR-29
-    moved the join upstream, so the claim moved with it: the panel's dynamic
-    table is where transaction_history matches through safe_id, the key only the
+    moved the join upstream, so the claim moved with it: the panel's CTAS is
+    where transaction_history matches through safe_id, the key only the
     population's crosswalk provides. Getting this wrong upstream is why the
     panel is worth asserting - a wrong key produces an empty or fanned-out panel
     long before mbt sees it.
     """
     module = _seed_module()
-    sql = module.panel_sql(DATABASE, SCHEMA, "monthly_panel", "ML_WH")
+    sql = module.panel_sql(DATABASE, SCHEMA, "monthly_panel")
 
     for table, keys in (
         ("DEMOGRAPHIC_HISTORY", "USING (customer_id, inference_date)"),
@@ -635,10 +640,64 @@ def test_transaction_history_joins_through_safe_id_only() -> None:
     # serving twin must keep it.
     assert "MBT_SHOWCASE_MONTHLY_LABELS" in sql
     assert "LEFT JOIN" not in sql
-    scoring = module.panel_sql(DATABASE, SCHEMA, "monthly_panel_scoring", "ML_WH")
+    scoring = module.panel_sql(DATABASE, SCHEMA, "monthly_panel_scoring")
     assert "MBT_SHOWCASE_MONTHLY_LABELS" not in scoring
 
-    # A dynamic table, not a view: the change token and HASH_AGG must reflect
-    # the panel's own rows, or a re-deploy adding a column is invisible (ADR-29).
-    assert "CREATE OR REPLACE DYNAMIC TABLE" in sql
-    assert "TARGET_LAG" in sql and "WAREHOUSE = ML_WH" in sql
+    # A physical relation, not a view: the change token and HASH_AGG must
+    # reflect the panel's own rows, or a re-deploy adding a column is invisible
+    # (ADR-29). A materialized table satisfies that exactly as a dynamic table
+    # would, and needs no privilege beyond CREATE TABLE - see
+    # test_the_seeder_needs_no_dynamic_table_privilege.
+    assert "CREATE OR REPLACE TABLE" in sql
+
+
+def test_the_seeder_needs_no_dynamic_table_privilege() -> None:
+    """Seeding must stay inside CREATE TABLE.
+
+    The panels were dynamic tables until an operator whose role could not
+    create one found the whole warehouse plane unreachable. ADR-29 asks for a
+    PHYSICAL relation rather than a view, which a CTAS table already is, so the
+    dynamic table bought only auto-refresh - and this plane's data is static at
+    a pinned anchor. Asserting the absence keeps a future edit from quietly
+    raising the privilege floor again.
+    """
+    module = _seed_module()
+    for panel in module.PANELS:
+        sql = module.panel_sql(DATABASE, SCHEMA, panel)
+        assert "DYNAMIC" not in sql, (panel, sql)
+        assert "TARGET_LAG" not in sql, (panel, sql)
+        assert sql.startswith("CREATE OR REPLACE TABLE "), (panel, sql)
+
+
+def test_drop_removes_the_panels_in_either_kind() -> None:
+    """--drop must leave nothing behind, whichever kind is in the schema.
+
+    Two bugs in one guard. The old --drop iterated TABLES only, so both panels
+    survived it and accumulated in the operator's sandbox. And an account
+    seeded before the CTAS change holds them as DYNAMIC tables, which
+    `DROP TABLE` refuses - Snowflake's DDL is kind-specific in both directions.
+    """
+    module = _seed_module()
+
+    for panel in module.PANELS:
+        name = module.table_name(panel)
+        plain = module.drop_relation_sql(DATABASE, SCHEMA, name, dynamic=False)
+        dynamic = module.drop_relation_sql(DATABASE, SCHEMA, name, dynamic=True)
+        assert plain == f"DROP TABLE IF EXISTS {DATABASE}.{SCHEMA}.{name}"
+        assert dynamic == f"DROP DYNAMIC TABLE IF EXISTS {DATABASE}.{SCHEMA}.{name}"
+
+    # The kind probe reports only panels the schema actually holds as dynamic.
+    class _Cursor:
+        def __init__(self, held: list[str]) -> None:
+            self.held = held
+            self.sql = ""
+
+        def execute(self, sql: str) -> None:
+            self.sql = sql
+
+        def fetchall(self) -> list[tuple[str, str]]:
+            return [("2026-09-11", name) for name in self.held]
+
+    stale = module.dynamic_panels(_Cursor([module.table_name("monthly_panel")]), DATABASE, SCHEMA)
+    assert stale == {"monthly_panel"}
+    assert module.dynamic_panels(_Cursor([]), DATABASE, SCHEMA) == set()

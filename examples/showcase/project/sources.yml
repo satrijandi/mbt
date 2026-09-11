@@ -94,8 +94,9 @@ sources:
       # The panel the wide cadence actually reads (ADR-29): the five gold
       # tables above, joined upstream into one relation. On the lake and Spark
       # planes that join is a step in scripts/generate_wide_data.py; on the
-      # Snowflake plane it is a DYNAMIC TABLE, which is what a dbt deployment
-      # would own. mbt declares one relation and never sees the join.
+      # Snowflake plane it is a table the seeder materializes with a CTAS,
+      # standing in for the dbt model a real deployment would own. mbt
+      # declares one relation and never sees the join.
       - name: monthly_panel
         path: monthly_panel/*.parquet
         identifier: MBT_SHOWCASE_MONTHLY_PANEL

@@ -2,8 +2,8 @@
 # population + matured labels + three feature histories, on their own entity
 # keys and the one uniform inference_date - lives upstream, where relational
 # work belongs: a step in scripts/generate_wide_data.py on the lake and Spark
-# planes, a Snowflake DYNAMIC TABLE on the warehouse plane, and a dbt model in
-# a real deployment. mbt never sees it.
+# planes, a table the seeder materializes in-warehouse on the Snowflake plane,
+# and a dbt model in a real deployment. mbt never sees it.
 #
 # What moved upstream with the join:
 #   - the label join, INNER, so the newest cohort (whose outcome window has not

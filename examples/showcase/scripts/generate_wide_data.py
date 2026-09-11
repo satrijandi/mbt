@@ -282,7 +282,8 @@ def _write_panels(out: Path) -> None:
     This stands in for the dbt model a real deployment would own (ADR-29): mbt
     declares one relation per dataset and the join lives upstream. Doing it here
     with DuckDB rather than in mbt is the whole point - it is the same SQL a dbt
-    model would hold, and the Snowflake plane materializes it as a dynamic table.
+    model would hold, and the Snowflake plane materializes it with the same join
+    (scripts/seed_snowflake.py, as a CTAS).
 
     The label join is INNER: a cohort whose outcome window has not closed is not
     a training example, so the newest cohort drops out of the training panel and

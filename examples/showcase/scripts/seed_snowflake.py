@@ -18,6 +18,12 @@ Sources, mirroring the Makefile's `workspace` target:
     examples/showcase/data/               the 9 monthly + wide tables
     tests/fixtures/churn_demo/data/       the 3 daily tables
 
+On top of those 12 tables it materializes the 2 panels mbt actually reads
+(ADR-29), joining the five gold tables IN the warehouse with a plain CTAS.
+Seeding therefore needs no privilege beyond CREATE TABLE - see the PANELS
+block below for why a dynamic table is the right answer in a real deployment
+and the wrong one here.
+
 COLUMN CASE IS LOAD-BEARING: tables are written with quote_identifiers=False,
 so column names fold to Snowflake's default UPPERCASE. The adapter's generated
 SQL emits unquoted lowercase identifiers (which resolve to the same uppercase)
@@ -111,11 +117,25 @@ WIDE_TABLES: frozenset[str] = frozenset(
 
 
 #: The panels mbt actually reads on this plane (ADR-29): one relation per
-#: dataset, built upstream by a DYNAMIC TABLE over the six tables above. That
-#: is the warehouse-native stand-in for the dbt model a real deployment owns,
-#: and it is why it must be a dynamic table rather than a view: a dynamic table
-#: has its own rows, so both the change token and --deep-snapshot's HASH_AGG
-#: reflect what the panel actually contains.
+#: dataset, joined upstream over the six tables above. That is the
+#: warehouse-native stand-in for the dbt model a real deployment owns.
+#:
+#: A PLAIN TABLE (CREATE TABLE AS SELECT), not a dynamic table. ADR-29's
+#: requirement is that the panel be a PHYSICAL relation rather than a view: a
+#: view's change token is DDL-blind, so re-deploying it with an extra column
+#: from an already-loaded table moves neither of mbt's hashes and a pinned
+#: manifest re-verifies clean against a relation that changed shape. A
+#: materialized table has its own rows, so the commit-time token and
+#: --deep-snapshot's HASH_AGG both mean what they say - exactly as a dynamic
+#: table would. What it gives up is auto-refresh, which this plane never uses:
+#: the seeded data is static and every showcase run pins the same anchor.
+#:
+#: The payoff is the privilege floor. Seeding needs nothing but CREATE TABLE,
+#: so the warehouse plane runs on a sandbox role that cannot create a dynamic
+#: table. A real deployment should still own the panel as a dbt model, where
+#: a dynamic table earns its keep: incremental refresh shared across every
+#: model reading it, guarded consumer-side by a `freshness: {max_lag: ...}`
+#: check.
 #:
 #: `_scoring` is the serving twin: the same joins, minus the label and its
 #: INNER join, so the newest cohort survives. They share one definition here
@@ -136,22 +156,14 @@ PANELS: dict[str, str] = {
     "monthly_panel_scoring": "",
 }
 
-#: How stale the panel may be before Snowflake refreshes it. mbt's
-#: `freshness: {max_lag: ...}` dataset check guards the same property from the
-#: consumer side, so a lag that stops being honored fails a build rather than
-#: silently training on old data.
-PANEL_TARGET_LAG = "1 hour"
 
-
-def panel_sql(database: str, schema: str, panel: str, warehouse: str) -> str:
-    """The DDL for one panel dynamic table."""
+def panel_sql(database: str, schema: str, panel: str) -> str:
+    """The DDL for one panel, materialized as a plain table."""
     refs = {source: f"{database}.{schema}.{table_name(source)}" for source in TABLES}
     joins = PANEL_FEATURE_JOINS.format(**refs)
     label_join = PANELS[panel].format(**refs)
     return (
-        f"CREATE OR REPLACE DYNAMIC TABLE {database}.{schema}.{table_name(panel)}\n"
-        f"  TARGET_LAG = '{PANEL_TARGET_LAG}'\n"
-        f"  WAREHOUSE = {warehouse}\n"
+        f"CREATE OR REPLACE TABLE {database}.{schema}.{table_name(panel)}\n"
         f"AS SELECT * FROM {refs['monthly_population']} AS pop\n"
         f"  {label_join}{joins}"
     )
@@ -292,12 +304,40 @@ def _connection_config() -> dict[str, Any]:
 
 
 def existing_tables(cursor: Any, database: str, schema: str) -> list[str]:
-    names = ", ".join(f"'{table_name(s)}'" for s in TABLES)
+    """Every showcase relation already present, panels included.
+
+    The panels are covered so a half-seeded schema trips the --force guard
+    instead of being silently half-replaced.
+    """
+    names = ", ".join(f"'{table_name(s)}'" for s in (*TABLES, *PANELS))
     cursor.execute(
         f"SELECT table_name FROM {database}.INFORMATION_SCHEMA.TABLES "
         f"WHERE table_schema = '{schema.upper()}' AND table_name IN ({names})"
     )
     return sorted(row[0] for row in cursor.fetchall())
+
+
+def dynamic_panels(cursor: Any, database: str, schema: str) -> set[str]:
+    """Panel names currently held by a DYNAMIC table.
+
+    This script used to create the panels as dynamic tables, and Snowflake's
+    DDL is kind-specific in both directions: DROP TABLE refuses a dynamic
+    table, and CREATE OR REPLACE TABLE will not replace one either. So an
+    account seeded before that change needs the old kind removed by name
+    before either path here can proceed. Probing the kind beats guessing at
+    IF EXISTS semantics across kinds - on a schema that never held one this
+    returns an empty set and nothing else changes.
+    """
+    cursor.execute(f"SHOW DYNAMIC TABLES LIKE '{PREFIX}%' IN SCHEMA {database}.{schema}")
+    # SHOW returns the object name in column 1 ("name"); column 0 is created_on.
+    held = {row[1] for row in cursor.fetchall()}
+    return {panel for panel in PANELS if table_name(panel) in held}
+
+
+def drop_relation_sql(database: str, schema: str, name: str, *, dynamic: bool) -> str:
+    """DROP for one relation, in the kind Snowflake will accept."""
+    kind = "DYNAMIC TABLE" if dynamic else "TABLE"
+    return f"DROP {kind} IF EXISTS {database}.{schema}.{name}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -347,10 +387,9 @@ def main(argv: list[str] | None = None) -> int:
         sample = "monthly_population"
         print(f"\nDDL for {table_name(sample)} (the rest follow the same mapping):\n")
         print(create_table_sql(database, schema, table_name(sample), read_table(TABLES[sample])))
-        warehouse = _env("warehouse") or "ML_WH"
         print("\nThe panels mbt reads (ADR-29) - one relation per dataset:\n")
         for panel in PANELS:
-            print(panel_sql(database, schema, panel, warehouse))
+            print(panel_sql(database, schema, panel))
             print()
         return 0
 
@@ -364,9 +403,16 @@ def main(argv: list[str] | None = None) -> int:
         cursor = connection.cursor()
         try:
             if args.drop:
-                for source in TABLES:
-                    name = table_name(source)
-                    cursor.execute(f"DROP TABLE IF EXISTS {database}.{schema}.{name}")
+                # Panels first, then the tables they read: the reverse of the
+                # order they are created in. A panel left behind is the leak
+                # this used to have - it iterated TABLES only, so both panels
+                # survived every --drop.
+                stale = dynamic_panels(cursor, database, schema)
+                for relation in (*PANELS, *TABLES):
+                    name = table_name(relation)
+                    cursor.execute(
+                        drop_relation_sql(database, schema, name, dynamic=relation in stale)
+                    )
                     print(f"dropped {database}.{schema}.{name}")
                 return 0
 
@@ -426,18 +472,22 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"failed loading {database}.{schema}.{name}")
             print(f"loaded {database}.{schema}.{name:40s} {rows:>8,} rows")
 
-        # The panels come last: a dynamic table refuses to be created over
-        # tables that do not exist yet, and its first refresh reads them.
-        warehouse = str(config.get("warehouse") or "")
-        if not warehouse:
-            raise SystemExit("SNOWFLAKE_WAREHOUSE is required to create the panel dynamic tables")
-        for panel in PANELS:
-            panel_cursor = connection.cursor()
-            try:
-                panel_cursor.execute(panel_sql(database, schema, panel, warehouse))
-            finally:
-                panel_cursor.close()
-            print(f"created {database}.{schema}.{table_name(panel):40s}    dynamic table")
+        # The panels come last: the CTAS reads the tables loaded above, so it
+        # would otherwise materialize an empty panel.
+        panel_cursor = connection.cursor()
+        try:
+            # A panel left over from a pre-CTAS seeding is a dynamic table,
+            # which CREATE OR REPLACE TABLE will not replace.
+            stale = dynamic_panels(panel_cursor, database, schema)
+            for panel in PANELS:
+                name = table_name(panel)
+                if panel in stale:
+                    panel_cursor.execute(drop_relation_sql(database, schema, name, dynamic=True))
+                    print(f"dropped {database}.{schema}.{name:40s}    stale dynamic table")
+                panel_cursor.execute(panel_sql(database, schema, panel))
+                print(f"created {database}.{schema}.{name:40s}    table (CTAS)")
+        finally:
+            panel_cursor.close()
     finally:
         connection.close()
 

@@ -148,6 +148,16 @@ where a dynamic table computes it once per `TARGET_LAG`.
 mbt's `freshness: {max_lag: ...}` check guards the lag the same way it guards
 any other upstream.
 
+The requirement is therefore that the panel be a PHYSICAL relation, and a
+dynamic table is the production-grade way to keep one fresh rather than the only
+shape that qualifies.
+A `CREATE TABLE AS SELECT` is the same physical relation without auto-refresh,
+and it needs no privilege beyond `CREATE TABLE`.
+`examples/showcase` uses that form so its warehouse plane runs on a sandbox role
+that cannot create a dynamic table, which costs it nothing: its data is static
+and every run pins the same anchor.
+A deployment whose panel actually changes wants the dynamic table.
+
 The lake and Spark planes take the same shape as a pre-joined table, so one spec
 set still runs across all three planes via `--target`.
 
@@ -211,7 +221,7 @@ change the meaning of every project's existing spec.
   with the scoring model differing only by dropping the label and selecting the
   unlabeled cohort. That is a rule for the other repo, written here so the
   contract exists on both sides of the boundary.
-- **`examples/showcase` becomes the reference implementation**, seeding a
-  Snowflake dynamic table and an equivalent pre-joined parquet from the same
+- **`examples/showcase` becomes the reference implementation**, materializing a
+  Snowflake panel table and an equivalent pre-joined parquet from the same
   generator, and proving the single-relation spec runs unchanged across all
   three planes.
