@@ -57,7 +57,11 @@ Issues = "https://github.com/satrijandi/mbt/issues"
 
 [project.optional-dependencies]
 # H2O distributed on Spark executors; version-locked to the Spark minor.
-sparkling = ["h2o-pysparkling-3.5>=3.46", "pyspark>=3.5.2,<3.6"]  # 3.5.2: PYSEC-2025-184
+# 3.5.8: PYSEC-2026-3966 (CVE-2026-32773); the 3.5.2 it replaced cleared
+# PYSEC-2025-184. It is also the pin the showcase runner image already builds
+# on (examples/showcase/scripts/build_image.sh), so the sparkling fork is known
+# to resolve and train there.
+sparkling = ["h2o-pysparkling-3.5>=3.46", "pyspark>=3.5.8,<3.6"]
 
 [project.entry-points."mbt.adapters"]
 h2o_automl = "mbt_h2o.plugin:PLUGIN"

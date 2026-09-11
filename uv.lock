@@ -2297,7 +2297,7 @@ requires-dist = [
     { name = "h2o-pysparkling-3-5", marker = "extra == 'sparkling'", specifier = ">=3.46" },
     { name = "mbt-adapter-base", extras = ["metrics"], editable = "packages/mbt-adapter-base" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pyspark", marker = "extra == 'sparkling'", specifier = ">=3.5.2,<3.6" },
+    { name = "pyspark", marker = "extra == 'sparkling'", specifier = ">=3.5.8,<3.6" },
 ]
 provides-extras = ["sparkling"]
 
@@ -2411,7 +2411,7 @@ requires-dist = [
     { name = "mbt-core", editable = "packages/mbt-core" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.0" },
-    { name = "pyspark", specifier = ">=3.5.2,<4.2" },
+    { name = "pyspark", specifier = ">=3.5.8,<4.2" },
 ]
 
 [[package]]
