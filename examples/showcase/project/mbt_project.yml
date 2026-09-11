@@ -17,9 +17,10 @@ vars:
   # Suffix appended to the wide models' REGISTERED names, so a second data
   # plane can train the same specs without its versions colliding with the
   # lake plane's in the shared MLflow registry. Empty everywhere except the
-  # `snowflake` target, which sets "_snowflake" (target vars override these).
-  # It reaches a spec through var(), so it enters the config hash by design:
-  # the two planes are genuinely different nodes.
+  # `seaweedfs` and `snowflake` targets, which set "_seaweedfs" and
+  # "_snowflake" (target vars override these). It reaches a spec through
+  # var(), so it enters the config hash by design: the planes are genuinely
+  # different nodes.
   plane_suffix: ""
 
 model_defaults:

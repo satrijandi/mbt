@@ -1,8 +1,14 @@
 """Sync the SeaweedFS lake to the local scoring plane (runs in the runner).
 
-mbt score/monitor use the LOCAL data adapter (mbt-spark implements no
-contract-1.1 scoring methods), rooted at /workspace/lake_local. This mirrors
-s3://mbt-lake there.
+The `prod_score` target scores and monitors through the LOCAL (DuckDB) data
+adapter, rooted at /workspace/lake_local. This mirrors s3://mbt-lake there.
+
+That plane is a deliberate second engine, not a workaround for Spark: since
+6c399c9 mbt-spark implements contract 1.1 (build_scoring_input,
+open_predictions), and the `seaweedfs` target scores straight off the object
+store with no sync step at all (tests/test_showcase_seaweedfs.py). What
+prod_score demonstrates is the cluster-free batch plane - DuckDB over parquet,
+champion MOJOs in a local JVM - which is what the monthly cadence runs on.
 
 Downloaded files get a FIXED mtime: the local adapter's default snapshot
 tokens hash (path, size, mtime) listings, and a run_key that forked on every

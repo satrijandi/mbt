@@ -116,7 +116,8 @@ Note: boto3's env chain is the only S3 endpoint mechanism (nothing in mbt parses
 | `dev` | spark `master: local[2]`, s3a to lake | h2o local backend, `sample_fraction: 0.1` | shared MLflow, `s3://mbt-artifacts/...` | DS fast inner loop |
 | `ci` | same as dev | same as dev | **per-run sqlite MLflow + local artifact store** | PR checks: green PRs must never register versions or re-point the shared `staging` alias; tradeoff: champion gates render "none (bootstrap)" in PR comments, documented |
 | `prod` | spark `master: spark://spark-master:7077` | `h2o_backend: sparkling`, driver-host conf per section 2 | shared MLflow, `s3://mbt-artifacts/...` | Prod builds, weekly retrain |
-| `prod_score` | **local adapter**, `root: /workspace/lake_local` | n/a (MOJO scoring is local-JVM by design; remote cluster is train-time only) | shared MLflow | `mbt score` / `mbt monitor` |
+| `prod_score` | **local adapter**, `root: /workspace/lake_local` | n/a (MOJO scoring is local-JVM by design; remote cluster is train-time only) | shared MLflow | `mbt score` / `mbt monitor` on the cluster-free DuckDB plane |
+| `seaweedfs` | spark `master: local[2]`, s3a to lake, `predictions_root: /workspace/seaweedfs_predictions` | h2o local backend, in the stack | shared MLflow + `s3://mbt-artifacts/churn_seaweedfs` | The object-store plane (section 11, P8): the same wide cadence built AND scored/monitored off s3a, with no synced copy. Registers `*_seaweedfs` names via `plane_suffix` |
 | `snowflake` | **snowflake adapter**, tables by `identifier:` | h2o local backend, on the host | shared MLflow + `s3://mbt-artifacts/churn_snowflake`, both over PUBLISHED ports | The warehouse plane (section 11): the same wide cadence, `--target snowflake`. Runs on the host, not in a container. Registers `*_snowflake` names via `plane_suffix` |
 
 ### 4.4 Scoring resource
@@ -208,7 +209,7 @@ Every mbt surface is a batch job that exits, so there is no live scrape target; 
 
 ## 9. Known constraints this design respects (do not "fix" silently)
 
-- `mbt score`/`mbt monitor` cannot use the spark data adapter (no contract-1.1 `build_scoring_input`/`open_predictions`); the scoring plane is local-adapter over a synced lake copy. A future `mbt-spark` contract-1.1 implementation would remove the sync hop (candidate follow-up, outside this showcase).
+- **No longer a constraint (was: "`mbt score`/`mbt monitor` cannot use the spark data adapter").** `mbt-spark` implemented contract 1.1 (`build_scoring_input`, `open_predictions`) in `6c399c9`, and the candidate follow-up this bullet used to name became P8: the `seaweedfs` target scores and monitors straight off the object store with no sync hop. What still holds is that `prod_score` keeps its synced copy on purpose - it is the cluster-free DuckDB plane the monthly cadence runs on, a second engine by choice rather than by constraint, so do not "fix" the sync away either.
 - Remote cluster is train-time only: evaluate/score load MOJOs in a local JVM by design; never promise cluster-side scoring.
 - `--manifest` reads local files only; the manifest travels baked inside the image (which is the design), while `--state` accepts s3:// URIs.
 - `mbt clean` refuses s3:// stores and nothing protects champion objects server-side: **SeaweedFS buckets are created with retention/TTL disabled by the seed path**, not just documented.
@@ -255,6 +256,8 @@ tests/
   test_showcase_monthly.py     # SHOW-17
   test_showcase_make.py        # SHOW-18
   test_showcase_wide.py        # SHOW-19/SHOW-20 (ADR-29)
+  test_showcase_seaweedfs.py   # P8 object-store plane
+  test_showcase_snowflake.py   # P7 warehouse plane (extra gates)
   showcase_utils.py
 ```
 
@@ -295,6 +298,33 @@ tests/
    `packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py` builds the committed wide spec through the real Snowflake adapter with its SQL executed in DuckDB (no account), and holds the both-addresses invariant plus seeder/sources agreement.
    `tests/test_showcase_snowflake.py` is triple-gated (MBT_LIVE_SHOWCASE=1 + MBT_LIVE_SNOWFLAKE=1 + complete SNOWFLAKE_*) and proves the loop on a real account, including a cross-plane assertion that both planes materialize the same panel.
    The triple gate keeps the hermetic grand-suite guarantee intact: the showcase tier still needs docker and nothing else.
+
+8. **P8 Object-store plane**: IMPLEMENTED 2026-09-11.
+   The same wide cadence as P7, sourced straight out of SeaweedFS instead of a warehouse: `--target seaweedfs`, one word, no spec edited.
+
+   **What it exists to prove, which P7 could not.**
+   P7 closed the serving leg against a second data plane, but only behind three gates - `MBT_LIVE_SHOWCASE=1` + `MBT_LIVE_SNOWFLAKE=1` + complete `SNOWFLAKE_*`.
+   On a machine with no account the showcase's "one project, many data planes" claim reverted to prose.
+   This target needs docker and nothing else, so the claim is enforced by a test on every run of the default tier (`tests/test_showcase_seaweedfs.py`).
+
+   **The gap it actually fills is the serving leg, not the training one.**
+   `dev`/`prod` already trained the wide cadence off s3a, so the build half was covered.
+   Every batch leg in the showcase, though, ran on `prod_score` - the LOCAL (DuckDB) adapter over `/workspace/lake_local`, which `bootstrap/sync_lake.py` mirrors out of the bucket.
+   So nothing here ever read a live object store at score time, and an s3a read that broke at serving would have been indistinguishable from one that worked.
+   `mbt score --target seaweedfs` materializes the batch by reading the bucket and stages the run under `predictions_root` (ADR-23 v1); `mbt monitor` reads the matured labels the same way.
+   That exercises `mbt_spark`'s contract-1.1 methods (`build_scoring_input`, `open_predictions`), which shipped in `6c399c9` and had unit coverage only.
+
+   Consequences worth knowing:
+
+   - `prod_score` stays, and its justification changed rather than expired. It used to be documented as a workaround ("mbt-spark has no contract-1.1 scoring methods") - false since `6c399c9`, and the stale comment is corrected in `profiles.yml` and `bootstrap/sync_lake.py`. What it demonstrates is the cluster-free batch plane, which is the whole plane the monthly cadence (SHOW-17) runs on.
+   - **No `--deep-snapshot` on this plane, deliberately.** For a URI source `SparkDataAdapter.snapshot_id` hashes the table's input-file listing, which is already mtime-independent, so deep and shallow tokens agree; ADR-11's fresh-checkout problem is a local-path problem. The other recipes pass the flag because they read a downloaded copy whose mtimes really do move. Mixing the two schemes on one pipeline is exactly what the "one token scheme per pipeline" rule forbids.
+   - Registered names are namespaced `_seaweedfs` through the same `plane_suffix` var P7 introduced, with its own experiment (`churn_lake_seaweedfs`) and artifact prefix (`s3://mbt-artifacts/churn_seaweedfs`). Three planes now share one registry without interleaving.
+   - It runs IN the stack, unlike P7. There is no host-side dependency to justify anything else, so `make seaweedfs` goes through `$(EXEC)` like every other recipe.
+
+   Testing is two-tier, as P7's is, and here BOTH tiers run by default.
+   `tests/test_showcase_seaweedfs_plane.py` is hermetic - it holds the target's object-store addressing, the per-plane namespacing across all six targets, and the no-credentials property, in the fast suite.
+   That module is not optional politeness: `-m e2e` excludes the `live_showcase` tier and `-m "not e2e"` deselects it, so a full five-phase battery can go green while every showcase spec is broken - which is what happened on the ADR-29 sweep (26 live failures from one root cause, invisible to five green phases).
+   `tests/test_showcase_seaweedfs.py` proves the loop on the real stack, including the cross-plane assertion that the object-store and DuckDB planes materialize the same panel.
 
 ## 12. Open questions
 

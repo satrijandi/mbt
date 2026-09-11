@@ -16,12 +16,20 @@
 #                inside executors. Run from the jupyterlab container (the
 #                driver advertises spark.driver.host=jupyterlab; executors
 #                connect back on the fixed ports below).
-#   prod_score - batch scoring/monitoring plane: LOCAL data adapter over the
-#                synced lake copy (mbt-spark has no contract-1.1 scoring
-#                methods); champion MOJOs load in a local JVM by design.
-#                Also the monthly cadence's whole plane (SHOW-17): the
-#                tag:monthly pipeline trains here too - a monthly xgboost
-#                needs no cluster, DuckDB over the synced parquet suffices.
+#   prod_score - the cluster-free batch plane: LOCAL (DuckDB) data adapter
+#                over the synced lake copy; champion MOJOs load in a local
+#                JVM by design. Also the monthly cadence's whole plane
+#                (SHOW-17): the tag:monthly pipeline trains here too - a
+#                monthly xgboost needs no cluster, DuckDB over the synced
+#                parquet suffices. This is a DELIBERATE second engine, not a
+#                workaround: mbt-spark has implemented contract 1.1
+#                (build_scoring_input/open_predictions) since 6c399c9, and
+#                the `seaweedfs` target below is the Spark-side proof.
+#   seaweedfs  - the object-store plane: the SAME wide cadence, sourced
+#                STRAIGHT out of SeaweedFS over s3a for build AND for
+#                score/monitor, with no sync_lake copy anywhere in the loop.
+#                Its own registry namespace (plane_suffix) and experiment, so
+#                it never interleaves with the lake plane's history.
 #
 # dev and ci MUST keep identical vars: var lookups resolve into node config
 # hashes at compile time, so a var that differed between the PR side (ci)
@@ -129,6 +137,62 @@ churn_lake:
       vars:
         sample_fraction: 1.0
 
+    # The object-store plane (DESIGN.md section 11, P8): the SAME wide cadence, the
+    # same dataset/model/scoring specs, sourced straight out of SeaweedFS - for
+    # SCORING AND MONITORING too, not just training. Every other plane here
+    # serves the batch legs from `prod_score`'s synced local copy, so until this
+    # target existed nothing in the showcase ever read a live object store at
+    # score time; `mbt score --target seaweedfs` reads s3a://mbt-lake directly
+    # and stages the prediction runs (ADR-23 v1) under predictions_root.
+    #
+    # Runs IN the stack like every lake target - the in-network service names
+    # below are deliberate. Unlike the `snowflake` plane it needs no host
+    # credentials, no browser, and no account, so it is the second plane the
+    # default (docker-only) showcase tier actually exercises.
+    #
+    # Snapshot tokens need no --deep-snapshot here: for a URI source the spark
+    # adapter hashes the table's input-file LISTING, which is already
+    # mtime-independent, so deep and shallow agree (ADR-11 applies to local
+    # paths). Passing one anyway would be a second token scheme on one pipeline.
+    seaweedfs:
+      data:
+        adapter: spark
+        config:
+          master: local[2]
+          root: s3://mbt-lake
+          source_address: path        # as on dev
+          conf: *s3a_conf
+          # ADR-23 v1 stages prediction runs as parquet. /workspace is the
+          # shared bind mount, so the runs outlive the container the way the
+          # lake plane's do under lake_local - and never land in the project
+          # dir, whose target/ is wiped (F20).
+          predictions_root: /workspace/seaweedfs_predictions
+      tracking:
+        adapter: mlflow
+        config:
+          uri: "http://mlflow:5000"
+          # Its own experiment, churn_lake_seaweedfs (ADR-28 composes
+          # <project>_<experiment>), so this plane's history is separately
+          # comparable instead of interleaved with the lake plane's.
+          experiment: seaweedfs
+      registry: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
+      compute: {adapter: local}
+      # Its own prefix in the same bucket, as the warehouse plane has.
+      artifact_store: s3://mbt-artifacts/churn_seaweedfs
+      threads: 1
+      vars:
+        sample_fraction: 1.0
+        # Local H2O JVM, as dev does: this plane is about where the DATA comes
+        # from, and a sparkling cluster would only add the flake the wide
+        # module already isolates.
+        h2o_backend: local
+        h2o_max_mem: 1G
+        # Registers churn_wide_automl_seaweedfs, so this plane's versions never
+        # mix with the lake plane's in the shared registry. (The probe declares
+        # no registration at all - it is a selection tool.) Project default is
+        # "" - see mbt_project.yml.
+        plane_suffix: _seaweedfs
+
     # The warehouse plane (DESIGN.md section 11): the SAME wide cadence, the
     # same dataset/model/scoring specs, reading Snowflake instead of the lake.
     # Every table in sources.yml carries an identifier: alongside its path:,
@@ -191,7 +255,8 @@ churn_lake:
         # No cluster on the host: AutoML trains in a local H2O JVM, as dev does.
         h2o_backend: local
         h2o_max_mem: 1G
-        # Registers churn_wide_automl_snowflake / churn_wide_probe_snowflake,
-        # so this plane's versions never mix with the lake plane's in the
-        # shared registry. Project default is "" - see mbt_project.yml.
+        # Registers churn_wide_automl_snowflake, so this plane's versions never
+        # mix with the lake plane's in the shared registry. (The probe declares
+        # no registration at all - it is a selection tool.) Project default is
+        # "" - see mbt_project.yml.
         plane_suffix: _snowflake

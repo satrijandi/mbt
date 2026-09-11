@@ -1,6 +1,6 @@
 """The runbook itself, exercised (SHOW-18): drive the README golden path
-through `make` exactly as a human would - up, demo, monthly, score, monitor,
-inject-drift + recovery, down, clean.
+through `make` exactly as a human would - up, demo, wide, seaweedfs, ci,
+monthly, score, monitor, inject-drift + recovery, down, clean.
 
 Every other module tests the platform through its own harness; this one
 tests that the COMMANDS THE README TELLS A HUMAN TO TYPE still work, so the
@@ -163,6 +163,19 @@ def test_runbook_golden_path(runbook) -> None:
     assert (ws / "monitoring" / "wide_reference.parquet").exists(), (
         "make wide exported no stability reference"
     )
+
+    # The object-store plane (DESIGN.md 11, P8): the same wide cadence sourced
+    # straight off SeaweedFS, scoring and monitoring included, with no lake
+    # sync anywhere in the recipe. tests/test_showcase_seaweedfs.py proves the
+    # plane; what this covers is the RECIPE - its --target, its promote name,
+    # and the absence of the --deep-snapshot the other recipes pass.
+    runner.make("seaweedfs")
+    staged = list(
+        (ws / "seaweedfs_predictions" / "predictions" / "wide_retention_scores").glob(
+            "*/predictions.json"
+        )
+    )
+    assert staged, "make seaweedfs staged no prediction run off the object store"
 
     # The CI seeding target, then the two things its output tells a human
     # to do: open the repo URL and log into Woodpecker with the Gitea

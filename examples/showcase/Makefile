@@ -35,7 +35,7 @@ ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 
 .PHONY: help image workspace up seed down clean urls demo score monthly wide monitor ci \
-  snowflake-seed snowflake snowflake-drop
+  seaweedfs snowflake-seed snowflake snowflake-drop
 .DEFAULT_GOAL := help
 
 # The warehouse plane (DESIGN.md section 11). Unlike every other recipe here
@@ -64,6 +64,7 @@ help:
 	@echo "  make score         rerun daily scoring (lake sync, mbt score, metric push)"
 	@echo "  make monitor       rerun ground-truth monitoring at the pinned anchor"
 	@echo "  make inject-drift  poison the scoring batch and watch MbtShiftBreach fire"
+	@echo "  make seaweedfs     the same wide cadence sourced straight off SeaweedFS - build, score, and monitor with no synced copy"
 	@echo "  make snowflake-seed  load the wide cadence's tables into Snowflake (needs SNOWFLAKE_*)"
 	@echo "  make snowflake       the same wide cadence, reading Snowflake instead of the lake"
 	@echo "  make snowflake-drop  remove the MBT_SHOWCASE_* tables from Snowflake"
@@ -221,6 +222,31 @@ wide:
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
 	@echo "drift report: $(SHOWCASE_WORKSPACE)/project/drift_report.html"
 	@echo "selection report: $(SHOWCASE_WORKSPACE)/project/target/feature_selection_report.json"
+
+# The SAME wide cadence as `make wide`, sourced STRAIGHT off SeaweedFS - for
+# scoring and monitoring too, not just training (DESIGN.md section 11, P8).
+# `make wide` runs its batch legs on prod_score, the DuckDB copy sync_lake.py
+# mirrors out of the bucket, so nothing there ever reads a live object store at
+# score time. This recipe does, through mbt-spark's contract-1.1 methods, and
+# never calls sync_lake at all.
+#
+# Needs only `make up` - no credentials, no account, no browser, and it runs in
+# the stack like every other recipe here.
+#
+# No --deep-snapshot anywhere: for a URI source the spark adapter hashes the
+# table's input-file listing, which is already mtime-independent, so the deep
+# and shallow tokens agree. Passing one would be a second token scheme on one
+# pipeline (ADR-11's fresh-checkout problem is a local-path problem).
+seaweedfs:
+	$(EXEC) mbt build --target seaweedfs --select tag:wide --anchor $(ANCHOR)
+	# --target matters on promote: the registered name only exists because of
+	# this target's plane_suffix.
+	$(EXEC) mbt promote --target seaweedfs --model churn_wide_automl_seaweedfs --to production
+	$(EXEC) mbt score --target seaweedfs --select tag:wide --anchor $(ANCHOR)
+	$(EXEC) mbt monitor --target seaweedfs --select tag:wide --anchor $(MONITOR_ANCHOR)
+	@echo "object-store plane done: versions are registered as churn_wide_automl_seaweedfs"
+	@echo "predictions staged under: $(SHOWCASE_WORKSPACE)/seaweedfs_predictions/predictions/wide_retention_scores/"
+	@echo "MLflow: this plane's training runs land in the churn_lake_seaweedfs experiment"
 
 # The SAME wide cadence as `make wide`, reading Snowflake instead of the lake
 # (DESIGN.md section 11). The dataset, model, and scoring specs are unedited -

@@ -56,6 +56,10 @@ Spark warehouse scoring has the same shape (a label-free scoring DataFrame, pred
 **That follow-up landed** (`6c399c9`): `mbt_spark.data` implements both halves of contract 1.1 - `build_scoring_input` mirrors `build_dataset` (spine + feature joins, filters, key sampling, the `score` window, zero rows a warning) with no label and no snapshot verification, and `open_predictions` takes the same v1 staged-parquet stance as Snowflake, with a lakehouse-table store left to v2.
 So the deferral above is history, not current state: `mbt score` / `mbt monitor` run against a Spark data adapter today, and the contract-1.1 refusal fires for neither warehouse adapter.
 
+**Verified end to end 2026-09-11.** Until then the Spark half had unit coverage only - the showcase served every batch leg from a synced local copy, so nothing exercised `build_scoring_input` or `open_predictions` through the real CLI against a real object store.
+The showcase's `seaweedfs` target (DESIGN.md section 11, P8) now runs the whole loop - build, gate, register, promote, score, monitor - straight off `s3a://mbt-lake` with no sync hop, and `tests/test_showcase_seaweedfs.py` asserts the staged run, its exactly-once marker, the realized metrics at maturity, and panel parity with the DuckDB plane.
+That is the Spark counterpart of the gate issue #1 still holds open for Snowflake, and it needs no account: it runs in the default showcase tier.
+
 ## Consequences
 
 Snowflake teams can now run `mbt score` and `mbt monitor` (features read from Snowflake, predictions staged), and the contract-1.1 refusal no longer fires for the Snowflake adapter.

@@ -104,12 +104,31 @@ def test_panel_sampling_is_reproducible_and_monotone(wide) -> None:
     build_at(0.5)
     build_at(0.2)
     root = stack.workspace / "project" / "target" / "datasets" / "wide_churn_training"
-    customer_sets = [
-        set(pq.read_table(path, columns=["customer_id"]).column("customer_id").to_pylist())
-        for path in root.glob("*/train.parquet")
-    ]
-    assert len(customer_sets) == 3  # one materialization key per fraction
-    fifth, half, full = sorted(customer_sets, key=len)
+    # Group by the fraction each materialization RECORDS rather than counting
+    # directories. Counting them asserted that nothing else had ever built this
+    # dataset, which is not this test's claim and is not true on a shared
+    # stack: the cross-plane parity build in test_showcase_seaweedfs.py
+    # materializes the same panel through the local adapter, a different key at
+    # the same fraction. What this test is about is that the FRACTION
+    # partitions the key and the hash keeps subsets.
+    by_fraction: dict[float, list[set]] = {}
+    for path in root.glob("*/train.parquet"):
+        metadata = json.loads((path.parent / "materialization.json").read_text())
+        customers = set(
+            pq.read_table(path, columns=["customer_id"]).column("customer_id").to_pylist()
+        )
+        by_fraction.setdefault(metadata["sample_fraction"], []).append(customers)
+
+    assert sorted(by_fraction) == [0.2, 0.5, 1.0], sorted(by_fraction)
+    # Two planes landing on the same fraction is extra signal, not noise: the
+    # canonical cross-adapter row digest (F19) means their MEMBERSHIP has to
+    # agree, not merely their row count.
+    for fraction, sets in by_fraction.items():
+        assert all(members == sets[0] for members in sets), (
+            f"the planes disagree on which customers the {fraction} sample keeps"
+        )
+
+    fifth, half, full = (by_fraction[f][0] for f in (0.2, 0.5, 1.0))
     assert 0 < len(fifth) < len(half) < len(full)
     assert fifth <= half <= full  # threshold hashing: subsets, not resamples
 

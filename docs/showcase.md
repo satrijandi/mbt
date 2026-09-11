@@ -94,9 +94,31 @@ It follows the live-tier double gate: skipped everywhere unless `MBT_LIVE_SHOWCA
 The k3d/ArgoCD module carries one more gate (`MBT_LIVE_SHOWCASE_K3D=1`, needs `k3d` and `kubectl`) and stays local-only.
 CI runs the rest nightly via `.github/workflows/live.yml`, alongside the live Snowflake tier.
 
+## The object-store plane
+
+The showcase's batch legs - `mbt score` and `mbt monitor` - normally run on the `prod_score` target: the local (DuckDB) adapter over `/workspace/lake_local`, a copy that `bootstrap/sync_lake.py` mirrors out of the bucket.
+That plane is the cluster-free one the monthly cadence models, and it is a deliberate second engine rather than a workaround.
+It does mean, though, that nothing else in the showcase reads a live object store at score time.
+
+The `seaweedfs` target closes that leg: the same wide cadence, the same specs, built **and** scored **and** monitored straight off `s3a://mbt-lake` with no sync step anywhere.
+
+```bash
+make up          # the stack, and nothing else
+make seaweedfs   # build -> promote -> score -> monitor, all off the object store
+```
+
+It needs no account and no credentials, so it runs under the ordinary tier gate, and it is what exercises `mbt-spark`'s contract-1.1 methods (`build_scoring_input`, `open_predictions`) end to end:
+
+```bash
+MBT_LIVE_SHOWCASE=1 uv run pytest -q tests/test_showcase_seaweedfs.py
+```
+
+Prediction runs stage as parquet under `predictions_root` (ADR-23 v1), versions register as `churn_wide_automl_seaweedfs` through the `plane_suffix` var, and the module asserts this plane and the DuckDB one materialize the same panel.
+Nothing on this plane passes `--deep-snapshot`: for a URI source the spark adapter hashes the table's input-file listing, which is mtime-independent already, so deep and shallow agree and passing it would put a second token scheme on one pipeline.
+
 ## The warehouse plane
 
-The showcase runs its wide cadence over the SeaweedFS lake by default, but the same project also reads **Snowflake** - not a fork of the project, the same DAG and the same dataset, model, and scoring specs.
+The showcase also reads **Snowflake** - not a fork of the project, the same DAG and the same dataset, model, and scoring specs.
 Every table in `sources.yml` carries an `identifier:` beside its `path:`; the spark and local adapters read the path, the Snowflake adapter reads the identifier, and the plane becomes a target choice:
 
 ```bash
