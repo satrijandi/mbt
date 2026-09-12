@@ -7,6 +7,14 @@ from mbt.adapters.registry import AdapterRegistry
 from mbt.config.profiles import LoadedProfiles
 from mbt.contracts import AdapterRef
 
+#: Joins the two halves of a tracking experiment name (ADR-28). TWO
+#: underscores, because both halves are themselves snake_case and a single one
+#: leaves the boundary unreadable: LOAN_APPLY_PROPENSITY_V1_0_0 does not say
+#: where the project ends, and `a_b` + `c` collides with `a` + `b_c` on one
+#: name. This buys legibility, not a uniqueness proof - a project name may
+#: itself contain `__` - so do not lean on it to parse a name back apart.
+EXPERIMENT_SEPARATOR = "__"
+
 
 def normalized_adapter_config(
     ref: AdapterRef, project_dir: Path, *, path_keys: tuple[str, ...] = ("root",)
@@ -35,7 +43,7 @@ def tracking_adapter_config(
     Two names, both the user's: the project (``name:`` in mbt_project.yml) and
     the experiment (``experiment:`` in the target's tracking config, which the
     profiles pre-render already lets you write as ``env('EXPERIMENT_NAME')``).
-    They compose to ``<project>_<experiment>``, so one tracking server holds
+    They compose to ``<project>__<experiment>``, so one tracking server holds
     many projects without collision and one project holds many modelling
     efforts. With no ``experiment:`` the project name stands alone, which is
     why a fresh project's runs land under its own name rather than a literal
@@ -48,9 +56,11 @@ def tracking_adapter_config(
     declared = config.get("experiment")
     if isinstance(declared, str) or declared is None:
         # An empty string counts as unset: `env('EXPERIMENT_NAME', '')` with
-        # the variable absent must not produce a trailing-underscore name, or
+        # the variable absent must not produce a trailing-separator name, or
         # worse an experiment named "".
-        config["experiment"] = f"{project_name}_{declared}" if declared else project_name
+        config["experiment"] = (
+            f"{project_name}{EXPERIMENT_SEPARATOR}{declared}" if declared else project_name
+        )
     # Anything else (a mapping, a number) is left untouched so the adapter
     # raises its own error naming the shape it wanted.
     return config

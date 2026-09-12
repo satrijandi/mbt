@@ -13,7 +13,7 @@
 # Only training logs to the tracker (ADR-28): `mbt score` writes to the
 # prediction store and `mbt monitor` to the ground-truth ledger, both read
 # back with `mbt predictions show`. The experiment is named
-# <project>_<experiment>, or the project name alone when `experiment:` is
+# <project>__<experiment>, or the project name alone when `experiment:` is
 # omitted below; each run is named <run_id>-<model>, so re-training does not
 # produce a second run with the same name.
 __PROJECT_NAME__:

@@ -8,7 +8,7 @@ autocomplete. This page summarizes the shapes.
 ## mbt_project.yml
 
 ```yaml
-name: churn_project          # ^[a-z][a-z0-9_]*$
+name: churn_project          # ^[A-Za-z][A-Za-z0-9_]*$
 version: "0.1.0"
 require_mbt_version: ">=0.1,<0.2"   # optional PEP 440 guard
 vars: {pr_auc_floor: 0.42}          # project-level var defaults
@@ -28,7 +28,7 @@ macro_paths: [macros]
   outputs:
     dev:
       data:     {adapter: local,  config: {root: .}}
-      # only training logs here; the experiment is <project>_<experiment>,
+      # only training logs here; the experiment is <project>__<experiment>,
       # or the project name alone when `experiment:` is omitted
       # (see "Where tracking runs land" below)
       tracking: {adapter: mlflow, config: {uri: "sqlite:///mlflow.db", experiment: wide_v2}}
@@ -94,9 +94,12 @@ The experiment name is composed from two names you give:
           experiment: "{{ env('EXPERIMENT_NAME', 'wide_v2') }}"
 ```
 
-That gives an MLflow experiment named `churn_lake_wide_v2`. Omit `experiment:`
-and the project name stands alone (`churn_lake`), so a fresh project's runs
-land under their own name rather than under a literal `mbt`. One tracking
+That gives an MLflow experiment named `churn_lake__wide_v2`. The separator is
+two underscores because both halves are themselves snake_case, and a single one
+leaves the boundary unreadable - `LOAN_APPLY_PROPENSITY_V1_0_0` does not say
+where the project name ends. Omit `experiment:` and the project name stands
+alone (`churn_lake`), so a fresh project's runs land under their own name rather
+than under a literal `mbt`. One tracking
 server can then hold many projects, and one project many modelling efforts,
 without collision.
 
@@ -104,7 +107,7 @@ Each run is named `<run_id>-<model>`, where `run_id` is the invocation id mbt
 already stamps on the artifact store and on `run_results.json`:
 
 ```
-experiment "churn_lake_wide_v2"
+experiment "churn_lake__wide_v2"
 ├─ 20260909T101500Z-a1b2c3d4-churn_wide_automl
 │   ├─ trial-000                       # tuning trials nest under their parent
 │   └─ trial-001

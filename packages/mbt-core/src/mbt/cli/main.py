@@ -240,7 +240,12 @@ def guard(fn: Callable[..., Any]) -> Callable[..., Any]:
 @app.command()
 @guard
 def init(
-    name: Annotated[str, typer.Argument(help="Project name (lowercase snake_case).")],
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Project name: letters, digits, underscores; must start with a letter."
+        ),
+    ],
     project_dir: ProjectDirOpt = Path("."),
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,

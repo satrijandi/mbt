@@ -246,7 +246,7 @@ seaweedfs:
 	$(EXEC) mbt monitor --target seaweedfs --select tag:wide --anchor $(MONITOR_ANCHOR)
 	@echo "object-store plane done: versions are registered as churn_wide_automl_seaweedfs"
 	@echo "predictions staged under: $(SHOWCASE_WORKSPACE)/seaweedfs_predictions/predictions/wide_retention_scores/"
-	@echo "MLflow: this plane's training runs land in the churn_lake_seaweedfs experiment"
+	@echo "MLflow: this plane's training runs land in the churn_lake__seaweedfs experiment"
 
 # The SAME wide cadence as `make wide`, reading Snowflake instead of the lake
 # (DESIGN.md section 11). The dataset, model, and scoring specs are unedited -
@@ -270,7 +270,7 @@ snowflake:
 	$(HOST_MBT) monitor $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(MONITOR_ANCHOR)
 	@echo "warehouse plane done: versions are registered as churn_wide_automl_snowflake"
 	@echo "predictions staged under: $(SHOWCASE_DIR)/project/target/snowflake_predictions"
-	@echo "MLflow: 2 training runs in the churn_lake experiment, named <run_id>-<model>; score/monitor log nothing"
+	@echo "MLflow: 2 training runs in the churn_lake__snowflake experiment, named <run_id>-<model>; score/monitor log nothing"
 
 snowflake-drop:
 	uv run --project $(REPO_ROOT) python $(SHOWCASE_DIR)/scripts/seed_snowflake.py --drop

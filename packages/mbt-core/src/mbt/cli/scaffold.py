@@ -5,6 +5,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import mbt
+from mbt.config.project import PROJECT_NAME_PATTERN
 from mbt.exceptions import ConfigError
 
 _TOKEN = "__PROJECT_NAME__"
@@ -14,7 +15,10 @@ _VERSION_TOKEN = "__MBT_VERSION__"
 #: Replaced by exact `==` pins for the packages below, at the versions installed
 #: in the environment running `mbt init`.
 _PINS_TOKEN = "__PINNED_DEPS__"
-_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+#: One pattern with mbt_project.yml's own `name:` field, imported rather than
+#: restated: they were two copies of the same regex and could drift, so
+#: `mbt init NAME` could reject a name a hand-written project accepts.
+_NAME_RE = re.compile(PROJECT_NAME_PATTERN)
 
 #: The numerics stack the scaffold pins by version, in install order.
 #:
@@ -89,7 +93,8 @@ def scaffold_project(name: str, parent_dir: Path, *, home: Path | None = None) -
     if not _NAME_RE.match(name):
         raise ConfigError(
             f"invalid project name {name!r}",
-            hint="use lowercase snake_case starting with a letter, e.g. churn_models",
+            hint="use letters, digits and underscores, starting with a letter - "
+            "e.g. churn_models or LOAN_APPLY_PROPENSITY",
         )
     destination = parent_dir / name
     if destination.exists() and any(destination.iterdir()):

@@ -171,8 +171,8 @@ churn_lake:
         adapter: mlflow
         config:
           uri: "http://mlflow:5000"
-          # Its own experiment, churn_lake_seaweedfs (ADR-28 composes
-          # <project>_<experiment>), so this plane's history is separately
+          # Its own experiment, churn_lake__seaweedfs (ADR-28 composes
+          # <project>__<experiment>), so this plane's history is separately
           # comparable instead of interleaved with the lake plane's.
           experiment: seaweedfs
       registry: {adapter: mlflow, config: {uri: "http://mlflow:5000"}}
@@ -232,7 +232,7 @@ churn_lake:
           # middle of unrelated floats in run_results.json (FEEDBACK v3 A-1).
           uri: "{{ env('SHOWCASE_MLFLOW_URI', 'http://localhost:5501') }}"
           # The warehouse plane's training runs get their own experiment,
-          # churn_lake_snowflake (ADR-28 composes <project>_<experiment>), so
+          # churn_lake__snowflake (ADR-28 composes <project>__<experiment>), so
           # the two planes' histories are separately comparable instead of
           # interleaved. The other targets omit this and land in churn_lake.
           experiment: snowflake

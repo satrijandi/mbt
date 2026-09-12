@@ -615,6 +615,33 @@ mbt refuses to pick one of the two names for you: silently honouring `model:` an
 **Fix:** replace the mapping with the single name you want, or delete the key and let the experiment default to the project name.
 A related error, `tracking config: experiment must be a name, got list`, means the value parsed as a YAML list - usually an unquoted string containing a comma.
 
+## A new, empty MLflow experiment appeared after upgrading (migration procedure)
+
+**Situation:** you upgraded, ran a build, and the experiment your runs used to land in has stopped growing.
+A new one sits beside it, named the same but with a double underscore - `churn_lake__wide_v2` where you had `churn_lake_wide_v2`.
+Nothing errored and the build exited 0.
+
+This is the ADR-28 separator change.
+The experiment name is composed from two halves, `name:` in `mbt_project.yml` and `experiment:` in the target's tracking config, and they are now joined by `__` rather than `_` so the boundary between them is readable.
+Only targets that set `experiment:` are affected.
+If you never set it, your runs land in the bare project name and nothing has moved - stop here.
+
+**Steps:**
+
+1. Before the first build after upgrading, rename the existing experiment to the composed name. mbt resolves the experiment by name and adopts whatever it finds, so every prior run, metric, tag and document carries over:
+
+   ```python
+   from mlflow.tracking import MlflowClient
+
+   client = MlflowClient(tracking_uri="...")
+   old = client.get_experiment_by_name("churn_lake_wide_v2")
+   client.rename_experiment(old.experiment_id, "churn_lake__wide_v2")
+   ```
+
+2. If a build already ran and you now have two, MLflow cannot merge them. Rename the new (near-empty) one out of the way first, then rename the old one onto the composed name.
+
+3. Do not look for a config that restores the old name - there is none. `experiment:` supplies the second half only, and core always composes, so no value of it can produce a single-underscore name.
+
 ## `data adapter '<name>' does not support batch scoring`
 
 **Symptom (hard error, exit 1, before any job runs):**

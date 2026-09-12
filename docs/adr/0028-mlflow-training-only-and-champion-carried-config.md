@@ -56,7 +56,7 @@ trained.
    with no model nodes, so a scoring cadence cannot fail on a tracker outage
    and does not create an experiment on a store that has never trained.
 
-2. **The experiment is `<project>_<experiment>`, composed in core.**
+2. **The experiment is `<project>__<experiment>`, composed in core.**
    The project is `name:` in `mbt_project.yml`; the experiment is `experiment:`
    in the target's tracking config, which the profiles pre-render already lets
    you write as `env('EXPERIMENT_NAME')`.
@@ -64,6 +64,20 @@ trained.
    runs land under their own name rather than under `mbt`.
    Composition lives in `mbt.runtime.tracking_adapter_config`, not in each
    adapter, so the rule is stated once and applies to every tracker.
+
+   **Amended: the separator was a single underscore until `EXPERIMENT_SEPARATOR`
+   landed.**
+   Both halves are themselves snake_case, so one underscore left the boundary
+   unreadable: `LOAN_APPLY_PROPENSITY_V1_0_0` does not say where the project
+   name ends, and `a_b` + `c` collides with `a` + `b_c` on a single name.
+   Two underscores make the boundary legible.
+   They do not make it recoverable - a project name may itself contain `__` -
+   so nothing should parse a composed name back apart.
+   The same change relaxed `ProjectConfig.name` to `^[A-Za-z][A-Za-z0-9_]*$`,
+   because the project half is an org-facing label once it reaches the tracker
+   and forcing it lowercase forces a casing the org does not use.
+   Resource names stay lowercase: the project name is only a `unique_id`
+   segment, while a resource name is what a selector matches.
 
 3. **The run name is `<run_id>-<model>`, also composed in core.**
    `run_id` is the coordinator's existing per-invocation id
@@ -157,9 +171,14 @@ already composed in core. One naming policy, one place.
 
 - **Upgrading splits history at the upgrade point.** Existing runs stay in
   `mbt` and `mbt_serving`; new training runs land in `<project>` or
-  `<project>_<experiment>`. Nothing moves and nothing is lost. Setting
-  `experiment:` to the old literal name restores the old namespace for
-  training.
+  `<project>__<experiment>`. Nothing moves and nothing is lost. There is no
+  config that reproduces an arbitrary old name: `experiment:` supplies the
+  second half only, and core always composes, so the remedy is to RENAME the
+  old experiment to the composed name before the first build after upgrading -
+  mbt resolves by name and adopts it, history intact
+  (`docs/troubleshooting.md`). The separator change from `_` to `__` splits
+  history a second time, for targets that set `experiment:` only; a project
+  with no `experiment:` key is unaffected.
 - **A per-node-kind `experiment:` mapping is now an error**, not a value mbt
   silently picks one name out of. The message names ADR-26 so the fix is
   obvious.

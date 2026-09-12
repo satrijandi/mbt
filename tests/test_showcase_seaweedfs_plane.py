@@ -78,7 +78,7 @@ def test_the_seaweedfs_target_reads_the_object_store_directly(s3a_env) -> None:
     assert target.registry.config["uri"] == "http://mlflow:5000"
     assert target.tracking.config["uri"] == "http://mlflow:5000"
     # Its own experiment, so the planes' histories stay separately comparable
-    # rather than interleaved (ADR-28 composes <project>_<experiment>).
+    # rather than interleaved (ADR-28 composes <project>__<experiment>).
     assert target.tracking.config["experiment"] == "seaweedfs"
 
 

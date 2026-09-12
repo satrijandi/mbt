@@ -74,7 +74,7 @@ Three things are worth knowing before you run it:
 
 - **There is no sync step.** `mbt score --target seaweedfs` materializes the scoring batch by reading the bucket and stages the prediction run as parquet under `predictions_root` (ADR-23 v1), at `~/.cache/mbt-showcase/workspace/seaweedfs_predictions/`; `mbt monitor` reads the matured labels from the same bucket. That is mbt-spark's contract-1.1 half (`build_scoring_input`, `open_predictions`), which had unit coverage only until this plane existed.
 - **No `--deep-snapshot`,** unlike every other recipe here. For a URI source the spark adapter hashes the table's input-file *listing*, which is already mtime-independent, so the deep and shallow tokens agree. ADR-11's fresh-checkout problem is a local-path problem, and the other recipes pass the flag because they read a downloaded copy whose mtimes really do move. One token scheme per pipeline.
-- **Versions register as `churn_wide_automl_seaweedfs`**, in the `churn_lake_seaweedfs` experiment, with artifacts under `s3://mbt-artifacts/churn_seaweedfs` - the same `plane_suffix` mechanism the warehouse plane uses, for the same reason.
+- **Versions register as `churn_wide_automl_seaweedfs`**, in the `churn_lake__seaweedfs` experiment, with artifacts under `s3://mbt-artifacts/churn_seaweedfs` - the same `plane_suffix` mechanism the warehouse plane uses, for the same reason.
 
 It runs *in* the stack like every other recipe here, and that is the operational difference that matters.
 This is the second data plane the default test tier can exercise, so "switching planes is one word" is proven on every run of `tests/test_showcase_seaweedfs.py` (gated on `MBT_LIVE_SHOWCASE=1` alone) rather than only on a machine with a warehouse attached.

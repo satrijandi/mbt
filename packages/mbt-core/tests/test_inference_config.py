@@ -14,7 +14,7 @@ from mbt.execute.inference_config import (
     build_inference_config,
     operating_points,
 )
-from mbt.runtime import tracking_adapter_config
+from mbt.runtime import EXPERIMENT_SEPARATOR, tracking_adapter_config
 from mbt_adapter_base import AdapterRef, ArtifactRef, ManifestNode
 
 # -- the experiment name core composes ----------------------------------------
@@ -26,7 +26,7 @@ def _ref(**config: object) -> AdapterRef:
 
 def test_project_and_experiment_compose(tmp_path: Path) -> None:
     resolved = tracking_adapter_config(_ref(uri="x", experiment="wide_v2"), tmp_path, "churn_lake")
-    assert resolved["experiment"] == "churn_lake_wide_v2"
+    assert resolved["experiment"] == "churn_lake__wide_v2"
     assert resolved["uri"] == "x"  # everything else is passed through untouched
 
 
@@ -43,6 +43,36 @@ def test_an_empty_experiment_name_is_treated_as_unset(tmp_path: Path) -> None:
     assert (
         tracking_adapter_config(_ref(uri="x", experiment=""), tmp_path, "churn_lake")["experiment"]
         == "churn_lake"
+    )
+
+
+def test_the_two_halves_are_joined_by_a_double_underscore(tmp_path: Path) -> None:
+    """Both halves are snake_case, so a single underscore leaves the boundary
+    unreadable: LOAN_APPLY_PROPENSITY_V1_0_0 does not say where the project
+    ends. The negative half is the point - it is what fails if the separator
+    quietly reverts."""
+    resolved = tracking_adapter_config(
+        _ref(uri="x", experiment="V1_0_0"), tmp_path, "LOAN_APPLY_PROPENSITY"
+    )
+    assert resolved["experiment"] == "LOAN_APPLY_PROPENSITY__V1_0_0"
+    assert resolved["experiment"] != "LOAN_APPLY_PROPENSITY_V1_0_0"
+
+
+def test_underscores_inside_either_half_survive_composition(tmp_path: Path) -> None:
+    """The naive implementation - doubling every underscore - passes the test
+    above and corrupts every real name. Exactly one separator is introduced,
+    wherever the halves already contain underscores of their own."""
+    resolved = tracking_adapter_config(_ref(uri="x", experiment="wide_v2"), tmp_path, "churn_lake")
+    assert resolved["experiment"] == "churn_lake__wide_v2"
+    assert resolved["experiment"].count(EXPERIMENT_SEPARATOR) == 1
+
+
+def test_an_uppercase_project_name_is_composed_verbatim(tmp_path: Path) -> None:
+    """The project name is an org-facing label once it reaches MLflow, so
+    nothing on this path may case-fold or slugify it."""
+    assert (
+        tracking_adapter_config(_ref(uri="x"), tmp_path, "LOAN_APPLY_PROPENSITY")["experiment"]
+        == "LOAN_APPLY_PROPENSITY"
     )
 
 
@@ -218,6 +248,29 @@ def test_the_run_is_named_for_the_invocation_and_the_model(
     assert payload["run_name"] == f"{payload['tags']['mbt.run_id']}-churn_model"
     assert payload["tags"]["mbt.project"] == "demo"
     assert payload["experiment"] == "demo"  # no experiment: set, so the project name
+
+
+def test_the_composed_experiment_reaches_the_tracker_through_a_real_build(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """The end-to-end pin the pure-function tests cannot give.
+
+    Composition runs TWICE on different paths: once in the coordinator
+    (execute/runners.py) and once inside the training-job subprocess
+    (execute/job.py), which re-renders the profiles Jinja from its own
+    environment first. Only a real build exercises the second one.
+    """
+    profiles = demo_project / "profiles.yml"
+    # The fixture absolutises ./target, and `dev` is the first of its two
+    # blocks, so anchor on the trailing brace and rewrite exactly one.
+    profiles.write_text(
+        profiles.read_text().replace("fake_tracking}}", "fake_tracking, experiment: V1_0_0}}", 1)
+    )
+    invoke(demo_project, fake_registry)
+    payload = next(
+        json.loads(p.read_text()) for p in (demo_project / "target/fake_tracking").glob("*.json")
+    )
+    assert payload["experiment"] == "demo__V1_0_0"
 
 
 def _rewrite_champion_config(project: Path, mutate) -> None:

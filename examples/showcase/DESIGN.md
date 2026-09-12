@@ -318,7 +318,7 @@ tests/
 
    - `prod_score` stays, and its justification changed rather than expired. It used to be documented as a workaround ("mbt-spark has no contract-1.1 scoring methods") - false since `6c399c9`, and the stale comment is corrected in `profiles.yml` and `bootstrap/sync_lake.py`. What it demonstrates is the cluster-free batch plane, which is the whole plane the monthly cadence (SHOW-17) runs on.
    - **No `--deep-snapshot` on this plane, deliberately.** For a URI source `SparkDataAdapter.snapshot_id` hashes the table's input-file listing, which is already mtime-independent, so deep and shallow tokens agree; ADR-11's fresh-checkout problem is a local-path problem. The other recipes pass the flag because they read a downloaded copy whose mtimes really do move. Mixing the two schemes on one pipeline is exactly what the "one token scheme per pipeline" rule forbids.
-   - Registered names are namespaced `_seaweedfs` through the same `plane_suffix` var P7 introduced, with its own experiment (`churn_lake_seaweedfs`) and artifact prefix (`s3://mbt-artifacts/churn_seaweedfs`). Three planes now share one registry without interleaving.
+   - Registered names are namespaced `_seaweedfs` through the same `plane_suffix` var P7 introduced, with its own experiment (`churn_lake__seaweedfs`) and artifact prefix (`s3://mbt-artifacts/churn_seaweedfs`). Three planes now share one registry without interleaving.
    - It runs IN the stack, unlike P7. There is no host-side dependency to justify anything else, so `make seaweedfs` goes through `$(EXEC)` like every other recipe.
 
    Testing is two-tier, as P7's is, and here BOTH tiers run by default.

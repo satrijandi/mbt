@@ -32,9 +32,28 @@ def test_scaffold_creates_project_and_home_profiles(tmp_path: Path) -> None:
 
 
 def test_scaffold_rejects_invalid_names(tmp_path: Path) -> None:
-    for bad in ("CamelCase", "1_starts_with_digit", "has-dash", ""):
+    for bad in ("1_starts_with_digit", "has-dash", "has space", "has.dot", ""):
         with pytest.raises(ConfigError, match="invalid project name"):
             scaffold_project(bad, tmp_path, home=tmp_path / "home")
+
+
+def test_scaffold_accepts_an_uppercase_name_and_stamps_it_into_both_files(tmp_path: Path) -> None:
+    """`mbt init LOAN_APPLY_PROPENSITY` must work, or the tool rejects a name a
+    hand-written mbt_project.yml accepts. The two files must agree exactly:
+    profiles.yml is looked up by the project name as a case-sensitive dict key
+    (config/profiles.py), so a mismatch is a runtime error, not a warning."""
+    destination = scaffold_project("LOAN_APPLY_PROPENSITY", tmp_path, home=tmp_path / "home")
+    assert destination.name == "LOAN_APPLY_PROPENSITY"
+    assert "name: LOAN_APPLY_PROPENSITY" in (destination / "mbt_project.yml").read_text()
+    assert "LOAN_APPLY_PROPENSITY:" in (destination / "profiles.yml").read_text()
+
+
+def test_the_scaffold_and_the_project_schema_share_one_name_pattern() -> None:
+    """They were two copies of one regex and could drift apart silently."""
+    from mbt.cli.scaffold import _NAME_RE
+    from mbt.config.project import PROJECT_NAME_PATTERN
+
+    assert _NAME_RE.pattern == PROJECT_NAME_PATTERN
 
 
 def test_scaffold_refuses_nonempty_destination(tmp_path: Path) -> None:

@@ -12,6 +12,17 @@ from mbt.exceptions import ConfigError
 PROJECT_FILE = "mbt_project.yml"
 
 
+#: Project names admit UPPERCASE, unlike resource names (mbt_adapter_base's
+#: NAME_PATTERN, and _valid_name in the project parser, both stay lowercase).
+#: The project name is half the tracking experiment name (ADR-28), which is an
+#: org-facing label - LOAN_APPLY_PROPENSITY__V1_0_0 - so forcing it lowercase
+#: forces a casing the org does not use. It is safe because the name is never a
+#: filesystem path and never a warehouse identifier: it is a unique_id segment
+#: and the top-level key in profiles.yml, both compared verbatim. The widening
+#: is additive - every name that validated before still does.
+PROJECT_NAME_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*$"
+
+
 class ProjectConfig(BaseModel):
     """The project-level configuration."""
 
@@ -19,7 +30,7 @@ class ProjectConfig(BaseModel):
     # not pydantic's model_* namespace (warns on pydantic < 2.10).
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
-    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    name: str = Field(pattern=PROJECT_NAME_PATTERN)
     version: str
     require_mbt_version: str | None = None  # PEP 440 specifier, checked at parse
     model_defaults: dict[str, Any] = Field(default_factory=dict)
