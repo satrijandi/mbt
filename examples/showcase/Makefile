@@ -35,7 +35,7 @@ ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 
 .PHONY: help image workspace up seed down clean urls demo score monthly wide monitor ci \
-  seaweedfs snowflake-seed snowflake snowflake-drop
+  inject-drift seaweedfs snowflake-seed snowflake snowflake-drop
 .DEFAULT_GOAL := help
 
 # The warehouse plane (DESIGN.md section 11). Unlike every other recipe here
@@ -201,14 +201,14 @@ monitor:
 	$(EXEC) mbt monitor --target prod_score --anchor $(MONITOR_ANCHOR) --deep-snapshot
 	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
 
-# The wide multi-table batch-monthly cadence (SHOW-19/SHOW-20, ADR-22):
-# population spine + three feature histories joined by different keys, the
-# ds-helper selection funnel as a committed diff, an Evidently stability
-# gate before promotion (train vs test on the selected features; a breach
-# exits 2 and stops this recipe before promote), sparkling AutoML on the
-# selected columns, the population-form scoring input, and a second
-# Evidently gate on the scored batch. `make monitor` evaluates the
-# one-month-later outcomes once they mature.
+# The wide batch-monthly cadence (SHOW-19/SHOW-20, ADR-29): one panel joined
+# upstream from a population spine and three feature histories keyed
+# differently, the ds-helper selection funnel as a committed diff, sparkling
+# AutoML on the selected columns, an Evidently stability gate before
+# promotion (train vs test on the selected features; a breach exits 2 and
+# stops this recipe before promote), scoring from the panel's label-free
+# twin, and a second Evidently gate on the scored batch. `make monitor`
+# evaluates the one-month-later outcomes once they mature.
 wide:
 	$(EXEC) python /workspace/bootstrap/sync_lake.py
 	$(EXEC) mbt build --target dev --select churn_wide_probe --anchor $(ANCHOR)

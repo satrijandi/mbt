@@ -1,5 +1,5 @@
 # The scoring schedule rendered as a Kubernetes CronJob for the optional
-# k3d + ArgoCD fidelity profile (DESIGN.md P6). Suspended on purpose: the
+# k3d + ArgoCD fidelity tier (DESIGN.md P6). Suspended on purpose: the
 # showcase's executing schedules live on the compose side (Airflow); this
 # object exists to prove the CD mechanics - ArgoCD syncing this repo,
 # insecure pulls from zot, digest bumps rolling the spec, selfHeal.

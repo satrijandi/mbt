@@ -10,10 +10,11 @@
 # (generated_at == anchor, ADR-19).
 #
 # No --deep-snapshot anywhere in this project's build pipelines (a documented
-# deviation from the GitHub scaffold): the spark data adapter rejects it, and
-# its URI snapshot tokens hash object-store listings, which are
-# checkout-mtime-independent - the "one token scheme per pipeline" rule is
-# satisfied with the spark scheme on both the baseline and diff sides.
+# deviation from the GitHub scaffold). It would be a no-op, not an error: for a
+# URI source the spark data adapter hashes the object-store listing and
+# ignores `deep`, and that listing is checkout-mtime-independent - so the
+# "one token scheme per pipeline" rule is satisfied with the spark scheme on
+# both the baseline and diff sides.
 when:
   - event: pull_request
 

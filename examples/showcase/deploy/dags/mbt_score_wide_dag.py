@@ -15,8 +15,9 @@ Task containers are ephemeral (`run_in_unit` starts a fresh unit per task
 and `/app/project/target` dies with it), so the score task copies the
 scoring batch out to the mounted /workspace/monitoring/ in the SAME
 container, and the gate compares it against the reference exported there
-by the train-phase gate (`make wide` or the CI flow). Gate exit 2 is a
-quality verdict: AirflowFailException, model owner notified, no retries.
+by the train-phase gate (`make wide`, or the wide test module; the CI
+pipelines do not run it). Gate exit 2 is a quality verdict:
+AirflowFailException, model owner notified, no retries.
 """
 
 import sys

@@ -278,3 +278,41 @@ def test_host_run_s3_credentials_match_the_stack() -> None:
     assert f'os.environ.get("SHOWCASE_S3_SECRET", "{secret}")' in utils, (
         f"showcase_utils.host_env must fall back to {secret}"
     )
+
+
+# -- SeaweedFS capacity (must not follow the host's free disk) ----------------
+
+SEED_LAKE = REPO_ROOT / "examples" / "showcase" / "bootstrap" / "seed_lake.py"
+#: Volumes SeaweedFS grows for a no-replication collection on its first write.
+SEAWEED_GROWTH_PER_COLLECTION = 7
+
+
+def test_seaweedfs_capacity_does_not_follow_free_disk() -> None:
+    """weed server's defaults make 1GB volumes and cap their number at free
+    disk / volume size, and each bucket is a collection that grows 7 volumes
+    on first write. On a docker disk with ~7GB free that cap was 7: seeding
+    the lake took every slot, and every model upload to mbt-artifacts then
+    failed with S3 InternalError ("No writable volumes and no free volumes
+    left") - a whole `make demo` red over how full the laptop's disk was.
+
+    The compose command pins both knobs instead, and the ceiling has to seat
+    every collection the stack writes (each bucket plus the filer's own
+    default collection) with a full growth step to spare.
+    """
+    import yaml
+
+    command = yaml.safe_load(COMPOSE.read_text())["services"]["seaweedfs"]["command"]
+    flags = dict(token.split("=", 1) for token in command.split() if "=" in token)
+
+    assert "-master.volumeSizeLimitMB" in flags, "seaweedfs volume size is left to the default"
+    assert int(flags["-master.volumeSizeLimitMB"]) <= 256, flags
+    assert "-volume.max" in flags, "seaweedfs volume count is left to free disk"
+
+    buckets = len(re.findall(r'^[A-Z_]+_BUCKET = "', SEED_LAKE.read_text(), re.M))
+    assert buckets == 2, f"seed_lake.py creates {buckets} buckets; update this test"
+    collections = buckets + 1  # plus the filer's default collection
+    needed = (collections + 1) * SEAWEED_GROWTH_PER_COLLECTION
+    assert int(flags["-volume.max"]) >= needed, (
+        f"-volume.max={flags['-volume.max']} cannot seat {collections} collections "
+        f"growing {SEAWEED_GROWTH_PER_COLLECTION} volumes each, plus one growth step"
+    )

@@ -4,8 +4,8 @@
 # 2 quality failure), so every executing CI step runs mbt through here:
 #
 #   1. run the wrapped command and capture its exit code;
-#   2. write target/ci_exit_class (one line: "<class> <label>") - the PR
-#      comment step, the alert below, and the test tier all read this file;
+#   2. write target/ci_exit_class (one line: "<class> <label>"), the verdict
+#      a human or a later step can read without parsing mbt's output;
 #   3. classify the alert: exit 2 notifies the failed nodes' owner (a model
 #      quality verdict), any other nonzero pages on-call (infrastructure);
 #   4. push metrics best-effort (an absent Pushgateway never fails CI);

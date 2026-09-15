@@ -103,7 +103,7 @@ def newest_dir(root: Path, required: tuple[str, ...], hint: str, by: str = "mtim
 
 
 def load_frame(path: Path, features: list[str], codes: list[str]) -> pd.DataFrame:
-    """The frame restricted to the selected features, hook-cast applied.
+    """The frame restricted to the selected features, declared categoricals cast.
 
     Casting the categorical codes on BOTH sides mirrors what core does for
     a declared `features.categorical` column (ADR-27), so

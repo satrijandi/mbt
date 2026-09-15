@@ -1,13 +1,15 @@
-"""The wide multi-table batch-monthly cadence (SHOW-19/SHOW-20, ADR-22).
+"""The wide batch-monthly cadence (SHOW-19/SHOW-20, ADR-29).
 
-The realistic churn shape end to end: a population spine with the entity
-crosswalk, three feature histories joined by DIFFERENT keys (transactions
-only reach the panel through the population's safe_id), matured labels
-keyed by the cohort's own inference_date, the ds-helper selection
-funnel as a committed reviewable diff, the shared hooks categorical cast,
-sparkling H2O AutoML on the selected columns, the Evidently stability
-gates around promotion and scoring, and the population-form scoring input
-with shift monitors and ground truth.
+The realistic churn shape end to end: five gold tables - a population spine
+with the entity crosswalk, three feature histories keyed DIFFERENTLY
+(transactions only reach the panel through the population's safe_id), and
+matured labels keyed by the cohort's own inference_date - joined UPSTREAM
+into one panel that mbt reads as a single relation. On top of it: the
+ds-helper selection funnel as a committed reviewable diff, the declared
+categorical `contract_code` (ADR-27), sparkling H2O AutoML on the selected
+columns, the Evidently stability gates around promotion and scoring, and
+scoring from the panel's label-free twin with shift monitors and ground
+truth.
 
 Sparkling lives here and in the lifecycle module only (flake isolation):
 a cluster hiccup fails this module without poisoning the CI/promotion/
@@ -218,8 +220,8 @@ def test_train_gate_passes_and_exports_reference(wide) -> None:
 
 
 def test_population_scoring_input_and_monitors(wide) -> None:
-    """The newest cohort scores through the population-form input (per-table
-    keys at scoring time) and passes both shift monitors."""
+    """The newest cohort scores from the panel's label-free twin
+    (monthly_panel_scoring) and passes both shift monitors."""
     stack = wide
     before = len(_sidecars(stack))
     stack.mbt(

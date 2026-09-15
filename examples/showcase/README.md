@@ -3,7 +3,7 @@
 A laptop-runnable reference environment that demonstrates mbt end to end on real services instead of local stand-ins:
 SeaweedFS is the S3 data lake (gold-layer feature tables) and artifact store, MLflow (over HTTP) is the tracking server and model registry, a standalone Spark cluster does dataset pushdown and in-executor H2O (sparkling) AutoML training, JupyterLab is the DS workbench, Gitea + Woodpecker run the state-diff CI loop with PR comments and gate-classified alerts, Zot holds the digest-pinned deployable unit and its oras provenance artifacts, Airflow (fed by git-sync from the Gitea `deploy` repo) schedules retrain/score/monitor runs of that unit, and Prometheus + Grafana observe production scoring through the Pushgateway spec documented in the tutorial.
 A second, cluster-free cadence rides the same lake: the `tag:monthly` churn pipeline trains, scores, and monitors entirely on the DuckDB batch plane (`prod_score`) over the synced S3 parquet (SHOW-17).
-A third, wide batch-monthly cadence (`tag:wide`, SHOW-19/SHOW-20) exercises the single-relation shape (ADR-29) end to end: five gold tables - a monthly population spine carrying the customer_id-to-safe_id crosswalk, matured labels, and three feature histories joined by different keys (transactions only reach the panel through the crosswalk) - are joined UPSTREAM into one panel, as a generator step on the lake planes and a seeder-materialized panel table on the warehouse plane, and mbt reads that one relation. Plus the project naming convention from docs/naming-conventions.md (one uniform `inference_date` join key across every table; feature rows describe balances as of `inference_date` - 1 day, recorded in the spine's informational `as_of_date` column; matured labels key on each cohort's own `inference_date`; the spine's `as_of_date` and `loaded_at_time` lineage/audit columns are DS-excluded), the ds-helper feature-selection funnel committed as a reviewable diff, DS-declared numeric-coded categoricals cast by a shared hooks file, Evidently feature-stability gates around promotion and every monthly scoring batch, and sparkling H2O AutoML on the selected columns.
+A third, wide batch-monthly cadence (`tag:wide`, SHOW-19/SHOW-20) exercises the single-relation shape (ADR-29) end to end: five gold tables - a monthly population spine carrying the customer_id-to-safe_id crosswalk, matured labels, and three feature histories joined by different keys (transactions only reach the panel through the crosswalk) - are joined UPSTREAM into one panel, as a generator step on the lake planes and a seeder-materialized panel table on the warehouse plane, and mbt reads that one relation. Plus the project naming convention from docs/naming-conventions.md (one uniform `inference_date` join key across every table; feature rows describe balances as of `inference_date` - 1 day, recorded in the spine's informational `as_of_date` column; matured labels key on each cohort's own `inference_date`; the spine's `as_of_date` and `loaded_at_time` lineage/audit columns are DS-excluded), the ds-helper feature-selection funnel committed as a reviewable diff, numeric-coded categoricals the DS declares under `features.categorical` (ADR-27), Evidently feature-stability gates around promotion and every monthly scoring batch, and sparkling H2O AutoML on the selected columns.
 
 The design of record is [DESIGN.md](DESIGN.md).
 Every phase of its plan is implemented: P1 (runner image + data/ML core), P2 (CI loop), P3 (deployable unit + provenance), P4 (scheduling + CD + the scoring/promotion/monitoring plane), P5 (observability), P6 (k3d + ArgoCD - local-only, behind its own `MBT_LIVE_SHOWCASE_K3D=1` gate), P7 (the Snowflake warehouse plane, `make snowflake` - needs credentials on top of the stack), and P8 (the object-store plane, `make seaweedfs`).
@@ -12,47 +12,47 @@ Everything mbt-related runs inside ONE runner image (Jupyter kernel, Spark maste
 
 ## Run it
 
-Requirements: docker with ~10GB free RAM, `uv`, and this checkout.
+Requirements: docker with ~10GB of RAM to spare (see [Knobs](#knobs) for the measured budget), `make`, `rsync`, `uv`, and this checkout.
 
 ```bash
 cd examples/showcase
-make up        # build the runner image (first time ~10 min), boot, seed the lake
+make up        # build the runner image (first build 10-15 min), boot, seed the lake
 make demo      # the whole lifecycle, narrated (build dev -> build prod -> promote -> score -> monitor)
 make ci        # seed Gitea + Woodpecker + the deploy repo: org, repos, OAuth app, activation
 make down      # stop and remove containers, volumes, and the network (the workspace survives)
 make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/workspace)
 ```
 
-After `make ci`, pushing to main runs prod-build end to end: economy build, `mbt-state` baseline publish, deployable-unit bake to Zot (digest-pinned in the deploy repo), and oras provenance push; git-sync feeds the deploy repo's DAGs into Airflow, where `mbt_retrain`/`mbt_score`/`mbt_score_monthly`/`mbt_monitor` run the pinned unit on demand.
+After `make ci`, pushing to main runs prod-build end to end: economy build, `mbt-state` baseline publish, deployable-unit bake to Zot (digest-pinned in the deploy repo), and oras provenance push; git-sync feeds the deploy repo's DAGs into Airflow, where `mbt_retrain`/`mbt_score`/`mbt_score_monthly`/`mbt_score_wide`/`mbt_monitor` run the pinned unit on demand.
 
 `make up` prints every UI URL with its login (`make urls` re-prints them); a bare `make` lists the targets.
 
 After `make up`, start where a data scientist would: open JupyterLab (http://localhost:8899), open `project/notebooks/ds_inner_loop.ipynb`, and run it top to bottom.
 It explores the seeded lake from the shared mount, walks the YAML that IS the model, builds the probe on the dev target, runs the ds-helper selection funnel (reproducing the committed include list byte for byte), analyzes the run artifacts, and experiments on a hash-sampled slice against a scratch copy - the committed contract stays clean throughout.
+The live tier executes the notebook top to bottom, so it cannot rot.
 The notebook ends where the PR begins; `make demo` and `make wide` below are the platform side of that same story.
 
 After `make demo`, look at:
 
 - **MLflow**: registered `churn_automl` versions, the `production` alias set by the promotion, and one experiment named after the project, `churn_lake` (ADR-28). It holds training runs only - named `<run_id>-<model>`, carrying metrics, `mbt.*` provenance tags, and an `inference_config.json` document describing exactly what was trained. `mbt score` and `mbt monitor` log nothing here; their records are in the prediction store, read with `mbt predictions ls` / `show`.
-- **Lake browser** (SeaweedFS filer UI, no login): the seeded gold tables under `/buckets/mbt-lake/` and the MLflow artifacts under `/buckets/mbt-artifacts/`.
+- **Lake browser** (SeaweedFS filer UI, no login): the seeded gold tables under `/buckets/mbt-lake/` and the model artifacts mbt stores (the MOJOs and model files MLflow only points at) under `/buckets/mbt-artifacts/`.
   The raw S3 API port accepts signed requests only (`mbtadmin`/`mbtsecret`), so a bare browser GET there returns `AccessDenied` by design - browse through the filer UI instead.
-- **Grafana** (`admin`/`admin`): the "mbt Model Health" dashboard - gate margins, realized metrics, shift-vs-threshold.
+- **Grafana** (`admin`/`admin`): the "mbt Model Health" dashboard - gate margins, realized metrics, shift-vs-threshold, node durations.
 - **Predictions** on disk, one directory per cadence under `~/.cache/mbt-showcase/workspace/lake_local/predictions/`: `retention_scores/<run_key>/` (daily), `monthly_retention_scores/` and `wide_retention_scores/` likewise.
-- `make inject-drift` then Grafana/Prometheus: the scoring batch is poisoned, `mbt score` exits 2 (mbt enforces), and the pushed breach fires the `MbtShiftBreach` alert (observability observes). `make score` recovers.
+- `make inject-drift` then Grafana/Prometheus: the scoring batch is poisoned, `mbt score` exits 2 (mbt enforces), and the pushed breach fires the `MbtShiftBreach` alert in Prometheus (observability observes; no Alertmanager is wired, so the alert is visible rather than delivered). `make score` recovers.
 
 `make score` and `make monitor` also work standalone: they rerun just the daily scoring stage (lake sync, `mbt score --select tag:daily`, metric push) or just the ground-truth monitoring stage (all matured cadences), with the same pinned anchors as the demo.
 `make monthly` runs the monthly cadence end to end on the DuckDB plane: lake sync, `tag:monthly` retrain, gate-verified promote, and month-start batch scoring - no cluster involved.
 `make wide` runs the batch-monthly wide cadence (SHOW-19/SHOW-20, ADR-29) the way a DS team would ship it.
-The DS's own view of this loop is a committed notebook: open `project/notebooks/ds_inner_loop.ipynb` in JupyterLab to explore the lake, build the probe, run the funnel, and experiment on a hash-sampled slice - with the model itself staying in reviewed YAML throughout (the live tier executes the notebook top to bottom, so it cannot rot).
 The LightGBM probe builds the full-width panel on the dev target; `scripts/select_features.py` then runs the ds-helper funnel over the materialized train split (drop >95%-missing columns, drop single-value columns, drop |corr| > 0.9 pairs, then a seeded LightGBM randomized search keeping importance > 0) and rewrites `churn_wide_automl`'s committed include list - the printed `git diff --stat` is the reviewable selection, and `target/feature_selection_report.json` documents every stage.
 `features.categorical` on the wide specs declares the numeric-coded categoricals (`contract_code`), so every adapter treats them as categoricals at train and scoring time alike (ADR-27). The probe declares the full candidate width; `scripts/select_features.py` narrows it into the AutoML spec alongside the include list.
 The models' `exclude:` list is the DS's ignored-columns contract, and the funnel honors it: it names the entity ids plus `tenure_months`, a time-anchored feature the funnel would otherwise select - predictive inside the training window, but guaranteed to breach the PSI monitor at serving because every newer cohort's tenure sits above the training window's.
 After sparkling AutoML trains on the cluster, `scripts/evidently_gate.py --phase train` checks the selected features for stability between the train and test windows and BLOCKS promotion on a breach (exit 2); on a pass it exports the persisted reference baseline.
-After the population-form scoring run on the DuckDB plane, `--phase serving` re-checks the scored batch against that baseline, so the features stay verified stable from training through first deployment and every monthly batch after it (mbt's own PSI/KS shift monitors keep enforcing in parallel; Evidently adds the per-column drift tests and the pre-promotion phase, plus the DS-facing HTML report).
+After the scoring run on the DuckDB plane (its input is `monthly_panel_scoring`, the panel's label-free twin), `--phase serving` re-checks the scored batch against that baseline, so the features stay verified stable from training through first deployment and every monthly batch after it (mbt's own PSI/KS shift monitors keep enforcing in parallel; Evidently adds the per-column drift tests and the pre-promotion phase, plus the DS-facing HTML report).
 In a real deployment the `mbt_score_wide` DAG runs this cadence on `schedule="0 0 1 * *"` - the Airflow logical date (execution_date) becomes mbt's `--anchor`, so `inference_date` = the logical date and the features describe `as_of_date` = the day before (docs/naming-conventions.md).
 
 For the real-world scale this cadence models (~7M rows x up to 2000 columns per feature table), the committed tables are the small deterministic default of `scripts/generate_wide_data.py`; its `--customers`/`--filler-columns` knobs synthesize the same shape as large as your disk allows, and the code paths are identical.
-Joins and sampling push down into the source query, so only sampled rows ever leave the lake: `sample_key: customer_id` hash-samples whole customers per `sample_fraction` (a target var or `--vars '{sample_fraction: 0.1}'`; same fraction -> same rows, smaller fractions are subsets of larger ones), which is how the probe + funnel run cheaply on a slice while prod trains on everything.
+Sampling pushes down into the source query, so only sampled rows ever leave the lake: `sample_key: customer_id` hash-samples whole customers per `sample_fraction` (a target var or `--vars '{sample_fraction: 0.1}'`; same fraction -> same rows, smaller fractions are subsets of larger ones), which is how the probe + funnel run cheaply on a slice while prod trains on everything.
 The width problem is handled by selection, not sampling: only the probe ever reads all columns (once per snapshot, cached by materialization key; parquet is columnar, so the funnel touches only surviving columns), and the committed include list cuts the panel down before AutoML ever sees it.
 Reproducibility is a chain: the generator seed fixes the data, the spec `seed: 42` drives the probe, the funnel's randomized search, and AutoML (the seed ladder derives every later stage), hash sampling is deterministic by key, the AutoML spec shape is the documented deterministic one (fixed `max_models`, no time budgets), and the selection itself is a committed diff - so a rerun reproduces the include list byte for byte.
 
@@ -88,7 +88,7 @@ Switching the data plane really is one word.
 ```bash
 set -a; source .env; set +a          # SNOWFLAKE_* - see packages/mbt-snowflake/.env.example
 make up                              # the stack supplies MLflow + the artifact store
-make snowflake-seed                  # creates 12 MBT_SHOWCASE_* tables (loads the 6 wide ones) + the 2 panels
+make snowflake-seed                  # creates 12 MBT_SHOWCASE_* tables (rows in the 6 the wide cadence needs) + the 2 panels
 make snowflake                       # build -> promote -> score -> monitor, on the warehouse
 make snowflake-drop                  # remove the tables and panels when you are done
 ```
@@ -106,8 +106,8 @@ The DS view of this plane is a committed notebook, `project/notebooks/ds_inner_l
 Open it with a HOST kernel, not the stack's JupyterLab - `uv run --with jupyterlab jupyter lab --notebook-dir examples/showcase/project` from the repo root, with the same environment `make snowflake` uses.
 The runner image ships no `mbt-snowflake`, so the notebook at http://localhost:8899 cannot reach the warehouse; its first cell says so and checks the environment, including the `AWS_*` pair this plane needs even though it never touches s3a (profiles.yml renders whole, and the shared s3a anchor calls `env_var()` with no default).
 
-**Why 12 tables when the cadence reads 6.** `mbt compile` pins a snapshot for every source referenced by any dataset or scoring node, regardless of `--select`, so all 12 must exist or the compile fails before selection narrows anything.
-Pinning is a metadata call, so the six belonging to the daily and monthly cadences are created **empty** - your sandbox gets the wide cadence's data and nothing else.
+**Why the seeder creates tables this cadence never reads.** mbt's wide cadence reads only `monthly_panel`, `monthly_panel_scoring` and `wide_churn_outcomes`, but `mbt compile` pins a snapshot for every source any dataset or scoring node references, regardless of `--select` - nine relations across the three cadences - so every one of them must exist or the compile fails before selection narrows anything.
+Pinning is a metadata call, so the six belonging to the daily and monthly cadences are created **empty**; rows go only where this plane needs them, into the five gold tables the panels are joined from and the outcomes table `mbt monitor` reads.
 Pass `--all-cadences` to the seeder if you want to point this target at `tag:daily` or `tag:monthly` too; that is also the fallback if your account ever refuses to pin a never-written table (`could not read a snapshot token`).
 
 ## The CI loop (make ci)
@@ -120,24 +120,46 @@ Exit-code fidelity survives Woodpecker's binary pass/fail: `scripts/run_mbt.sh` 
 ## The E2E test tier (the honest version of the demo)
 
 Opt-in, following the live-tier double gate: skipped everywhere unless `MBT_LIVE_SHOWCASE=1`; once opted in, a missing docker fails loudly instead of skipping.
+Three invocations cover it, from the repo root and one after another - each boots a full stack of its own, and two at once exceed the RAM budget:
 
 ```bash
+# the main tier: one shared session stack, every module below except the extra-gated ones
 MBT_LIVE_SHOWCASE=1 uv run pytest -q -m live_showcase --timeout 3600 -rA
+
+# the runbook tier: the README's make targets, on a second isolated stack
+MBT_LIVE_SHOWCASE=1 MBT_LIVE_SHOWCASE_MAKE=1 uv run pytest -q tests/test_showcase_make.py --timeout 3600 -rA
+
+# the k3d + ArgoCD tier (needs k3d and kubectl; local-only)
+MBT_LIVE_SHOWCASE=1 MBT_LIVE_SHOWCASE_K3D=1 uv run pytest -q tests/test_showcase_k3d.py --timeout 3600 -rA
 ```
 
-Modules (repo-root `tests/`), which boot their own isolated compose project on ephemeral ports with a tmp workspace and tear everything down:
+| Tier | Gate | Wall time (10-core laptop, image already built) | Runs in CI |
+|---|---|---|---|
+| main | `MBT_LIVE_SHOWCASE=1` | 26-33 min | nightly, `live.yml` |
+| runbook | + `MBT_LIVE_SHOWCASE_MAKE=1` | 8-13 min | nightly, after the main tier |
+| k3d + ArgoCD | + `MBT_LIVE_SHOWCASE_K3D=1` | 6-8 min | never - this is its only coverage |
+| warehouse | + `MBT_LIVE_SNOWFLAKE=1` and complete `SNOWFLAKE_*` | depends on the account | never |
 
-- `test_showcase_infra.py` - services healthy, real S3 round-trip, seeded lake (browsable from the host through the filer UI; the raw S3 port correctly refuses unsigned requests), `mbt` runs in the image, and the h2o-client == pysparkling-embedded-H2O version probe (an exact match is required by H2O; the image pins `h2o==3.46.0.6` for this).
+The first run builds the runner image (10-15 minutes) and the harness rebuilds it whenever package sources, `uv.lock` or the image inputs have moved since, so budget for that on top.
+`MBT_SHOWCASE_KEEP=1` leaves a session's stack running for a post-mortem instead of tearing it down.
+
+The modules (repo-root `tests/`) share one isolated compose project per session, on ephemeral ports with a tmp workspace, torn down with its volumes at the end:
+
+- `test_showcase_infra.py` - services healthy, real S3 round-trip, seeded lake (browsable from the host through the filer UI; the raw S3 port correctly refuses unsigned requests), `mbt` runs in the image, the h2o-client == pysparkling-embedded-H2O version probe (an exact match is required by H2O; the image pins `h2o==3.46.0.6` for this), and a stopped registry turns `mbt build` into exit 1, never 2.
 - `test_showcase_ci.py` - the Woodpecker loop driven exactly as a user would (git pushes and PRs against Gitea): the browser OAuth login works from the host (driven headlessly for the non-admin persona, first consent included), the first push honors `fetch_state.sh` exit 3 and full-builds (and bakes the first deployable unit), a no-change merge trains nothing yet republishes an identical baseline (and re-bakes nothing - the digest pin is untouched), a one-gate-edit PR slim-builds exactly the edited model (no dataset churn across fresh clones - URI snapshot stability), merging it retrains only that model (and pins a fresh unit), an impossible gate fails the pipeline with mbt's exit 2 classified as a quality failure (the PR comment shows `gate_failed`, the shared registry is untouched, webhook-sink records exactly one owner-classified alert), and promotions.yml is governed: branch protection + CODEOWNERS reject the unauthorized direct push, the owner-approved merge runs the promote pipeline, and the production alias moves with the deploy repo byte-identical.
 - `test_showcase_provenance.py` - the deployable unit reproduces: the oras provenance artifact is byte-identical to the mbt-state baseline of the same run and secret-free, `mbt run --manifest` inside the pulled unit reproduces metrics (xgboost exactly, H2O within its documented 0.02 tier), and a tampered environment is refused with exit 1 (`--allow-env-mismatch` downgrades to a warning).
-- `test_showcase_scheduling.py` - Airflow runs the pinned unit: the retrain DAG builds on the prod target (cluster pushdown from a scheduled container), two score DAG runs straddling a promotion serve different champions while the deploy repo HEAD and digest stay byte-identical (the ADR-20 inversion), the monthly score DAG runs the `tag:monthly` batch on the DuckDB plane from the scheduler, and monitor exit codes route correctly (a realized-gate breach fails on try 1 with no retry; a hard error consumes a retry).
+- `test_showcase_scheduling.py` - Airflow runs the pinned unit: the retrain DAG builds on the prod target (cluster pushdown from a scheduled container), two score DAG runs straddling a promotion serve different champions while the deploy repo HEAD and digest stay byte-identical (the ADR-20 inversion), the monthly score DAG runs the `tag:monthly` batch on the DuckDB plane from the scheduler (the Spark master sees no new application), monitor exit codes route correctly (a realized-gate breach fails on try 1 with no retry; a hard error consumes a retry), and the wide score DAG runs sync -> score -> Evidently serving gate from the scheduler.
 - `test_showcase_k3d.py` (extra gate: `MBT_LIVE_SHOWCASE_K3D=1`, local-only) - ArgoCD core in a k3d cluster on the compose network syncs the deploy repo's `k8s/`: the CronJob lands pinned to the baked digest, an insecure-HTTP pull from zot runs the unit, a digest bump rolls the spec, and selfHeal recreates a deleted CronJob.
 - `test_showcase_lifecycle.py` - the narrative: dev build from the s3a lake registering to HTTP MLflow with S3 artifacts (integration items A2 + A3, live), sparkling training on the actual cluster, gate-verified GitOps promotion with pinned-replay idempotency and the unpinned-replay refusal, run-time champion resolution, prediction-store idempotency (same anchor overwrites, new anchor partitions), and ground-truth monitoring (evaluated exactly once; a realized-gate breach exits 2, never 1).
 - `test_showcase_monthly.py` - the monthly cadence (SHOW-17): `tag:monthly` trains on the prod_score plane (DuckDB over the synced lake, no cluster), gate-verified promote, the month-start batch scores with the run-time champion under both shift monitors, and its 30-day labels mature at the pinned monitor anchor and evaluate exactly once.
-- `test_showcase_wide.py` - the wide batch-monthly cadence (SHOW-19/SHOW-20, ADR-29): the single-relation dataset (its panel joined upstream, matured labels inner-joined on `inference_date`) builds via Spark pushdown against the s3a lake, the ds-helper funnel reproduces the committed feature list byte-for-byte (selection report included, `contract_code` surviving through the shared hooks cast), `--vars sample_fraction` panel-samples whole customers with the subset property, sparkling AutoML trains on the selected columns, the Evidently train gate passes and exports the serving baseline, the panel's label-free twin scores the newest cohort under both shift monitors plus the serving gate, its outcomes evaluate exactly once at maturity, and a poisoned batch trips the serving gate with exit 2.
+- `test_showcase_wide.py` - the wide batch-monthly cadence (SHOW-19/SHOW-20, ADR-29): the single-relation dataset (its panel joined upstream, matured labels inner-joined on `inference_date`) builds via Spark pushdown against the s3a lake, the ds-helper funnel reproduces the committed feature list byte-for-byte (selection report included, the declared categorical `contract_code` surviving selection), the committed DS notebook executes top to bottom without dirtying the contract, `--vars sample_fraction` panel-samples whole customers with the subset property, sparkling AutoML trains on the selected columns, the Evidently train gate passes and exports the serving baseline, the panel's label-free twin scores the newest cohort under both shift monitors plus the serving gate, its outcomes evaluate exactly once at maturity, and a poisoned batch trips the serving gate with exit 2.
 - `test_showcase_seaweedfs.py` - the object-store plane (section 11 P8 in DESIGN.md): the same wide cadence on `--target seaweedfs`, built, scored and monitored straight off s3a with no synced copy anywhere, registering under its own `_seaweedfs` namespace, staging prediction runs under `predictions_root` (ADR-23 v1), evaluating matured labels exactly once, and materializing a panel identical to the DuckDB plane's. This is the module that exercises mbt-spark's serving leg live, and the second data plane the tier can prove without an external account.
-- `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules, and `MbtShiftBreach` actually firing on injected shift.
-- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, ci + the browser login its output instructs, wide, monthly, score, monitor, inject-drift + recovery, down, clean), so these documented commands cannot drift from the tested harness silently.
+- `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules loaded, Grafana healthy, and `MbtShiftBreach` entering pending/firing on injected shift.
+- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, wide, seaweedfs, ci + the browser login its output instructs, monthly, score, monitor, inject-drift + recovery, down, a re-stage over the previous run's output, clean), so these documented commands cannot drift from the tested harness silently.
+- `test_showcase_snowflake.py` (extra gates: `MBT_LIVE_SNOWFLAKE=1` plus complete `SNOWFLAKE_*`) - the warehouse plane described above: seed, build, promote, score and monitor on `--target snowflake` from the host, and a panel with the same row counts as the DuckDB plane's.
+
+Four hermetic modules keep the showcase honest in the ordinary fast suite, where the gated modules above only skip: `test_showcase_gates.py` (every gated module keeps its opt-in gate, and opting in without docker fails loudly), `test_showcase_image_pins.py` (the runner image's hand pins and extras closure agree with the declared metadata), `test_showcase_seaweedfs_plane.py` (the object-store target's addressing and namespacing), and `test_showcase_wide_scripts.py` (the selection funnel, the Evidently gate, the categorical declarations, clean notebooks).
+The warehouse plane's hermetic half lives in `packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py`.
 
 ## Deviations from the scaffold defaults (documented, deliberate)
 
@@ -151,5 +173,8 @@ Modules (repo-root `tests/`), which boot their own isolated compose project on e
 ## Knobs
 
 See `.env.example` for host ports (defaults dodge common squatters), S3 credentials, workspace location, the runner image tag, and `DOCKER_SOCK_GID` (the docker-socket group airflow-scheduler joins to run DAG tasks; the Makefile and the test harness probe it - 0 on Docker Desktop, the `docker` group on native Linux).
-RAM guardrails live in the compose file: 1 Spark worker (4 cores / 4g), executor 1-2g per session, `h2o_max_mem: 1G` on the dev target, `WOODPECKER_MAX_WORKFLOWS=1`, Airflow on LocalExecutor.
-Budget roughly: ~5GB steady state with every profile up, 8-9GB peak during sparkling training, +~1.5GB while the optional k3d/ArgoCD profile runs.
+RAM guardrails are config, not prose: 1 Spark worker (4 cores / 4g) in the compose file, `spark.cores.max` and executor memory (1-2g) per session and `h2o_max_mem: 1G` on the local-H2O targets in `profiles.yml`, `WOODPECKER_MAX_WORKFLOWS=1`, Airflow on LocalExecutor.
+Measured on a 10-core OrbStack machine, summing `docker stats` every few seconds across the stack's containers through two full main-tier runs: median 4.3GB, 90th percentile 5.5-5.8GB, highest sample 6.8GB (with JupyterLab, MLflow and the Spark worker all busy at once).
+Sampling can miss a short spike, so leave ~10GB to docker for one stack; the k3d tier adds a k3d node running ArgoCD on top of it (1.5GB at its largest sample).
+Budget disk too: the runner image unpacks to 3.7GB (2.1GB compressed), the pinned service images add about 1.7GB compressed, and the first build also leaves a pip cache mount behind.
+SeaweedFS's capacity is pinned in the compose command (64MB volumes under a 100-volume ceiling) so it never depends on how much of that disk is free; left to its defaults it scaled with free disk, and a nearly full docker disk failed every model upload (`docs/troubleshooting.md`).

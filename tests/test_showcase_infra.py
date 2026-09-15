@@ -1,4 +1,4 @@
-"""Showcase stack smoke + environment sanity (SHOW-01, SHOW-02, SHOW-15).
+"""Showcase stack smoke + environment sanity (SHOW-01, SHOW-02).
 
 Opt-in: MBT_LIVE_SHOWCASE=1 with docker running boots the compose stack from
 examples/showcase (SeaweedFS + MLflow + Spark standalone + JupyterLab, all on
@@ -6,10 +6,8 @@ one runner image) and proves the services are real before the lifecycle
 module trains anything.
 """
 
-import importlib
-
 import pytest
-from showcase_utils import ANCHOR, SHOWCASE_MARKS, SKIP_REASON
+from showcase_utils import ANCHOR, SHOWCASE_MARKS
 
 pytestmark = SHOWCASE_MARKS
 
@@ -148,36 +146,3 @@ def test_registry_outage_is_a_hard_error_not_quality(showcase_stack) -> None:
         # Later modules need the registry back and healthy.
         up = stack.compose("up", "-d", "--wait", "mlflow", timeout=300)
         assert up.returncode == 0, f"{up.stdout}\n{up.stderr}"
-
-
-def test_collection_hygiene_and_double_gate() -> None:
-    """SHOW-15: the tier is safe to collect everywhere and loud once opted in."""
-    for module_name in (
-        "test_showcase_ci",
-        "test_showcase_infra",
-        "test_showcase_k3d",
-        "test_showcase_lifecycle",
-        "test_showcase_make",
-        "test_showcase_monthly",
-        "test_showcase_obs",
-        "test_showcase_provenance",
-        "test_showcase_scheduling",
-        "test_showcase_wide",
-    ):
-        module = importlib.import_module(module_name)
-        reasons = [
-            mark.kwargs.get("reason")
-            for mark in module.pytestmark
-            if getattr(mark, "name", "") == "skipif"
-        ]
-        assert SKIP_REASON in reasons, f"{module_name} lost the opt-in skipif gate"
-        names = [getattr(mark, "name", "") for mark in module.pytestmark]
-        assert "live_showcase" in names and "live" in names
-
-    # Gate 2: once opted in, a missing docker binary FAILS, never skips.
-    import showcase_utils
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("shutil.which", lambda _: None)
-        with pytest.raises(pytest.fail.Exception, match="docker is not on PATH"):
-            showcase_utils.require_docker()

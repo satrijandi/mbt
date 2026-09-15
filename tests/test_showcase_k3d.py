@@ -1,4 +1,4 @@
-"""The optional k3d + ArgoCD CD-fidelity profile (SHOW-16, DESIGN.md P6).
+"""The optional k3d + ArgoCD CD-fidelity tier (SHOW-16, DESIGN.md P6).
 
 Local-only and DOUBLY opt-in (MBT_LIVE_SHOWCASE=1 AND MBT_LIVE_SHOWCASE_K3D=1;
 the nightly job sets only the former): a k3d cluster attached to the compose
@@ -24,12 +24,12 @@ pytestmark = [
     *SHOWCASE_MARKS,
     pytest.mark.skipif(
         os.environ.get("MBT_LIVE_SHOWCASE_K3D") != "1",
-        reason="k3d/ArgoCD fidelity profile is separately opt-in: set MBT_LIVE_SHOWCASE_K3D=1",
+        reason="k3d/ArgoCD fidelity tier is separately opt-in: set MBT_LIVE_SHOWCASE_K3D=1",
     ),
 ]
 
 ARGOCD_CORE = (
-    "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.5/manifests/core-install.yaml"
+    "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.9/manifests/core-install.yaml"
 )
 # The core install ships no API server, and it is the API server that
 # normally creates the `default` AppProject - without this, the Application
@@ -135,7 +135,7 @@ class K3d:
             "import",
             "-c",
             self.name,
-            "quay.io/argoproj/argocd:v3.4.5",
+            "quay.io/argoproj/argocd:v3.4.9",
             "public.ecr.aws/docker/library/redis:8.2.3-alpine",
             check=False,
             timeout=600,

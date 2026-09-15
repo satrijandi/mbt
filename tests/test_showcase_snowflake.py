@@ -4,17 +4,19 @@ The same wide cadence the lake planes run - the same dataset, model, and
 scoring specs, unedited - reading Snowflake instead of parquet. What differs is
 one word on the command line: `--target snowflake`.
 
-Why this tier exists separately from the lake modules: it proves the ADR-22
-wide shape is genuinely data-plane-agnostic rather than lake-shaped, and it
-closes the serving leg (`mbt score` / `mbt monitor`) against a warehouse
-adapter, which is the half of issue #1 that shipped.
+Why this tier exists separately from the lake modules: it proves the wide
+cadence's single-relation shape (ADR-29) is genuinely data-plane-agnostic
+rather than lake-shaped, and it closes the serving leg (`mbt score` /
+`mbt monitor`) against a warehouse adapter, which is the half of issue #1
+that shipped.
 
 Shape of the run:
 
   seed  -> the SAME parquet the lake is seeded from, uploaded to Snowflake, so
-           the two planes are comparable by construction
-  build -> the wide panel joined IN Snowflake (heterogeneous entity keys), the
-           gate, and registration as churn_wide_automl_snowflake
+           the two planes are comparable by construction, plus the two panels
+           the seeder joins IN Snowflake with a CTAS (heterogeneous entity keys)
+  build -> the wide panel read from its warehouse table, the gate, and
+           registration as churn_wide_automl_snowflake
   score -> the newest cohort, predictions staged as parquet (ADR-23 v1)
   monitor -> realized metrics once the labels mature
 
@@ -25,7 +27,7 @@ ship mbt-snowflake. The stack is reached over its published ports.
 TRIPLE gated (MBT_LIVE_SHOWCASE=1 + MBT_LIVE_SNOWFLAKE=1 + complete
 SNOWFLAKE_*), so the hermetic showcase guarantee is untouched and credentials
 alone never trigger warehouse traffic. The hermetic half of this coverage -
-the join SQL, the both-addresses invariant, the seeder/sources agreement -
+the panel SQL, the both-addresses invariant, the seeder/sources agreement -
 lives in packages/mbt-snowflake/tests/test_showcase_snowflake_plane.py and
 needs no account.
 """

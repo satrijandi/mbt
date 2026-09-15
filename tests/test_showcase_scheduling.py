@@ -65,7 +65,7 @@ def sched(showcase_ci):
     ci.ensure_seeded()
 
     # git-sync + the DAG processor need a few cycles after the deploy repo
-    # gained its digest pin; all three DAGs must be registered and live.
+    # gained its digest pin; every DAG must be registered and live.
     for dag_id in DAGS:
         ci.wait_dag(dag_id)
 

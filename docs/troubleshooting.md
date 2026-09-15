@@ -911,6 +911,32 @@ DAG task containers are ephemeral (`target/` dies with each one), so the baselin
 
 **Fix:** run the train phase once after a wide build - `python scripts/evidently_gate.py --phase train --export-reference /workspace/monitoring/wide_reference.parquet` (or simply `make wide`, which does this between the AutoML build and promotion).
 
+### `S3UploadFailedError ... (InternalError) when calling the PutObject operation` on every model in the showcase
+
+**Symptom (hard error, exit 1):** the datasets build, every model trains, and every artifact upload to `mbt-artifacts` fails:
+
+```text
+[8/8] ERROR model model.churn_lake.churn_wide_probe in 22.11s -
+S3UploadFailedError('Failed to upload
+/workspace/tmp/tmpd2ualzq6/model.lgb.json to
+mbt-artifacts/churn_lake/churn_wide_probe/20260915T035926Z-c1e27641/model.lgb.json: An error occurred (InternalError) when calling the PutObject operation (reached max retries: 5): We encountered an internal error, please try again.')
+build finished [error]: 3 ok, 5 failed, 0 skipped in 135.6s
+```
+
+The `InternalError` is SeaweedFS's, not mbt's, and `docker compose logs seaweedfs` names the cause:
+
+```text
+failed to find writable volumes for collection: replication:000 ttl: error: No writable volumes and no free volumes left for {"replication":{},"ttl":{"Count":0,"Unit":0},"version":3}
+```
+
+**Why:** the object store ran out of volume slots, not disk.
+With its defaults, `weed server` makes 1GB volumes and caps how many it may hold at free disk divided by volume size, and each S3 bucket is a collection that grows 7 volumes on its first write.
+On a docker disk with about 7GB free the cap was 7, so seeding `mbt-lake` took every slot and nothing was left for `mbt-artifacts` - or for the filer's own metadata log.
+Whether it happens depends only on how full docker's disk is, which is why the same stack can pass on one run and fail on the next.
+
+**Fix:** the showcase's compose file now pins `-master.volumeSizeLimitMB=64 -volume.max=100`, which seats every collection at any free-disk level (`tests/test_showcase_image_pins.py` holds it there); pull that change and recreate the stack with `make down && make up`, because a running SeaweedFS keeps the flags it booted with.
+For any other SeaweedFS, set the same two flags, or free docker disk space (`docker system df` shows what is reclaimable).
+
 ## Reading the event log
 
 ### Informational event lines

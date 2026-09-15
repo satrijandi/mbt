@@ -1,6 +1,7 @@
 """Deterministic wide multi-table demo data for the showcase (SHOW-19).
 
-The realistic churn shape (ADR-22): examples come from a monthly population
+The realistic churn shape (docs/naming-conventions.md; joined upstream per
+ADR-29): examples come from a monthly population
 table carrying the entity crosswalk, features live in three history tables
 joined by DIFFERENT keys, and the outcome is observed one calendar month
 after the prediction snapshot.
@@ -27,17 +28,17 @@ as_of_date are excluded from features.
 Every FEATURE table additionally carries its own ``etl_loaded_at`` ingest
 audit column, under the same name on all three - which is what real gold
 tables look like, and which would collide in the joined panel if it reached
-it. It does not: the wide specs prune it per table at the source (ADR-25), so
-it is never scanned, transferred, or materialized. That pruning is the reason
-these columns can exist here at all.
+it. It does not: the panel join below excludes it per table, the same
+EXCLUDE the Snowflake seeder's CTAS uses, so no relation mbt reads carries
+it. That pruning is the reason these columns can exist here at all.
 
 monthly_labels follows the gold-layer label contract: each row is keyed by
 the cohort's OWN inference_date, and rows appear only once the outcome
 window has closed (one calendar month later) - so the newest cohort is
 deliberately absent from monthly_labels; its outcomes live only in
 wide_churn_outcomes until the monitor anchor. A raw upstream feed keyed by
-observation date would instead be joined with the dataset spec's
-`time_offset` (ADR-22).
+observation date would instead be realigned inside the upstream join that
+builds the panel (ADR-29), never in an mbt spec.
 
 demographic_history carries one NUMERIC-CODED categorical on purpose:
 contract_code (int8, 0 = month-to-month ... 3 = two-year). Its churn effect
@@ -188,11 +189,11 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
                 "contract_code": contract_code[idx],
                 "household_size": rng.integers(1, 6, n),
                 "tenure_months": np.full(n, month_idx) + rng.integers(1, 60, n),
-                # Per-table ingest audit column, pruned AT THE SOURCE by the
-                # specs' per-table `exclude:` (ADR-25). Every feature table
-                # carries one under the same name, exactly as real gold tables
-                # do; without source-side pruning they would collide in the
-                # joined panel, which is why they could not exist here before.
+                # Per-table ingest audit column, excluded per table by the panel
+                # join below (_PANEL_FEATURE_JOINS). Every feature table carries
+                # one under the same name, exactly as real gold tables do;
+                # without that per-table pruning they would collide in the
+                # joined panel.
                 "etl_loaded_at": np.full(n, loaded_at, dtype="datetime64[us]"),
                 **_filler(rng, "dem", filler_columns, n),
             }
@@ -251,8 +252,8 @@ def generate(customers: int, filler_columns: int, out: Path) -> None:
     total = sum(len(p["customer_id"]) for p in demo_parts)
     rate = np.concatenate(labels["is_churn"]).mean()
     # Minus the 4 duplicated join keys, and minus the 3 per-table
-    # etl_loaded_at columns the specs prune at the source (ADR-25) - they are
-    # generated but never reach the panel, so counting them would overstate it.
+    # etl_loaded_at columns the panel join excludes - they are generated but
+    # never reach the panel, so counting them would overstate it.
     width = len(demo_parts[0]) + len(login_parts[0]) + len(txn_parts[0]) - 4 - 3
     print(f"population rows: {total}, churn rate: {rate:.1%}, joined feature columns: ~{width}")
     print(f"newest cohort (scoring batch {MONTHS[-1]:%Y-%m-%d}): {newest_cohort.size} customers")

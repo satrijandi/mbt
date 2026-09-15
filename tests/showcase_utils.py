@@ -52,8 +52,8 @@ RUNNER_IMAGE = os.environ.get("MBT_SHOWCASE_RUNNER_IMAGE", "mbt-showcase-runner:
 # -- the Snowflake data plane (DESIGN.md section 11) ---------------------------
 # TRIPLE gated: the stack gate above, plus the live-Snowflake opt-in, plus
 # complete credentials. Warehouse traffic must never follow from docker alone,
-# and the hermetic grand-suite guarantee ("31 tests, docker and nothing else")
-# must survive - so this tier is additive, never a precondition.
+# and the showcase tier's own guarantee (docker and nothing else) must survive -
+# so this tier is additive, never a precondition.
 SNOWFLAKE_SKIP_REASON = (
     "the showcase Snowflake plane is opt-in on TOP of the stack: set "
     "MBT_LIVE_SHOWCASE=1 MBT_LIVE_SNOWFLAKE=1 plus SNOWFLAKE_* "
@@ -134,6 +134,23 @@ def docker_sock_gid() -> int:
     return 0
 
 
+def service_log_tails(compose, lines: int = 80, chars_per_service: int = 4000) -> str:
+    """The last lines of EVERY service's log, each truncated on its own.
+
+    One flat `compose logs` truncated at the end keeps whichever services
+    happen to print last - on a failed runbook run that was 8000 characters of
+    airflow-init permission noise, while the SeaweedFS line naming the actual
+    cause had scrolled away. `compose` runs a compose subcommand and returns
+    its stdout.
+    """
+    services = sorted(set(compose("ps", "-a", "--format", "{{.Service}}").split()))
+    return "\n".join(
+        f"--- {service} ---\n"
+        + compose("logs", "--no-color", "--tail", str(lines), service)[-chars_per_service:]
+        for service in services
+    )
+
+
 class ComposeStack:
     """One compose project (core+spark+dev+obs+ci profiles), tmp workspace."""
 
@@ -193,9 +210,9 @@ class ComposeStack:
         )
 
     def logs(self) -> str:
-        # --tail is per SERVICE: a chatty service (spark, airflow) must not
-        # scroll the interesting one out of the single flat truncation.
-        return self.compose("logs", "--no-color", "--tail", "150", timeout=120).stdout[-60000:]
+        return service_log_tails(
+            lambda *args: self.compose(*args, timeout=120).stdout,
+        )
 
     def up(self) -> None:
         self._stage_workspace()
@@ -381,7 +398,8 @@ def ensure_daily_champion(stack: ComposeStack) -> None:
 
 
 def build_runner_image() -> None:
-    """Idempotent: no-op when the image already exists."""
+    """Idempotent: build_image.sh skips the build when the existing image's
+    content label matches the checkout, and rebuilds when it does not."""
     proc = subprocess.run(
         [str(SHOWCASE_DIR / "scripts" / "build_image.sh")],
         capture_output=True,

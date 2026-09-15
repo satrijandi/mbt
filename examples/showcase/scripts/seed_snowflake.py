@@ -82,7 +82,7 @@ TABLES: dict[str, Path] = {
     "monthly_subscribers": SHOWCASE_DATA / "monthly_subscribers",
     "monthly_scoring_batch": SHOWCASE_DATA / "monthly_scoring_batch",
     "monthly_churn_outcomes": SHOWCASE_DATA / "monthly_churn_outcomes",
-    # wide multi-table cadence (ADR-22) - what the Snowflake plane trains on
+    # wide cadence's gold tables - the inputs of the panels below (ADR-29)
     "monthly_population": SHOWCASE_DATA / "monthly_population",
     "monthly_labels": SHOWCASE_DATA / "monthly_labels",
     "demographic_history": SHOWCASE_DATA / "demographic_history",
@@ -91,9 +91,9 @@ TABLES: dict[str, Path] = {
     "wide_churn_outcomes": SHOWCASE_DATA / "wide_churn_outcomes",
 }
 
-#: The only tables the Snowflake plane reads: the wide cadence's training
-#: inputs plus its ground-truth outcomes. Everything else in TABLES belongs to
-#: the daily/monthly cadences, which live on the lake planes.
+#: The tables this plane needs ROWS in: the five gold tables the PANELS join,
+#: plus the ground-truth outcomes `mbt monitor` reads. Everything else in
+#: TABLES belongs to the daily/monthly cadences, which live on the lake planes.
 #:
 #: They still get CREATED (empty), because compile pins a snapshot for every
 #: source referenced by ANY dataset or scoring node regardless of --select - a

@@ -30,8 +30,7 @@ scoring:
       prediction_shift:
         threshold: 0.25
 
-    # Maturity counts from scored_at (the scoring run's anchor, 2026-06-30).
-    # Maturity counts from scored_at (the run's anchor) while the label horizon
+    # Maturity counts from scored_at (the run's anchor, 2026-06-30) while the label horizon
     # counts from inference_date; the window above is what bridges the two.
     # The batch's 30-day outcomes are fully realized one day later (month
     # -start snapshot + 30d = 2026-07-01), so 14d models label-arrival lag

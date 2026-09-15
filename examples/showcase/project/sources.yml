@@ -1,6 +1,6 @@
-# One sources.yml serves ALL THREE data planes (DESIGN.md sections 4.2 + 11):
-# every table declares BOTH addresses, and each target's data adapter reads
-# only the field it understands.
+# One sources.yml serves EVERY data plane (DESIGN.md sections 4.2 + 11): every
+# table declares BOTH addresses, and each target's data adapter reads the one
+# it is meant to (see the Spark note below).
 #
 #   path:        RELATIVE, with the adapter supplying the root - the spark
 #                targets use root s3://mbt-lake (the s3:// spelling is exempt
@@ -26,10 +26,13 @@
 # identifiers for the Snowflake plane silently redirected the lake planes at
 # catalog tables that do not exist, and only the nightly live run caught it.
 #
-# ALL tables carry an identifier, not only the wide ones the Snowflake plane
-# actually trains on: compile pins a snapshot for every source referenced by
-# ANY dataset or scoring node regardless of --select, so a missing identifier
-# would fail the compile before selection is applied.
+# ALL tables carry an identifier, not only the ones the Snowflake plane
+# actually reads: compile pins a snapshot for every source referenced by ANY
+# dataset or scoring node regardless of --select, so a missing identifier on
+# a daily or monthly table would fail the compile before selection is
+# applied. The five gold tables no node references are never pinned; they
+# carry identifiers because the seeder creates them and joins the panels
+# from them (scripts/seed_snowflake.py).
 #
 # The MBT_SHOWCASE_ prefix mirrors the live suite's MBT_LIVE_ convention so
 # these demo tables can never be confused with (or clobber) real ones.
@@ -61,11 +64,12 @@ sources:
         path: monthly_churn_outcomes/*.parquet
         identifier: MBT_SHOWCASE_MONTHLY_CHURN_OUTCOMES
         description: Realized 30-day churn outcomes for the monthly batch, arriving ~30 days later.
-      # The wide multi-table shape (ADR-22, docs/naming-conventions.md): a
+      # The wide cadence's gold tables (docs/naming-conventions.md): a
       # population spine carrying the entity crosswalk, three feature
-      # -history tables joined by DIFFERENT entity keys on the one uniform
+      # -history tables keyed by DIFFERENT entity keys on the one uniform
       # inference_date, and matured labels keyed by the cohort's own
-      # inference_date. This is the cadence the Snowflake plane runs.
+      # inference_date. No node reads them: they are the inputs of the
+      # upstream join that builds the panels below (ADR-29).
       - name: monthly_population
         path: monthly_population/*.parquet
         identifier: MBT_SHOWCASE_MONTHLY_POPULATION

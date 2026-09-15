@@ -27,6 +27,7 @@ from showcase_utils import (
     SHOWCASE_MARKS,
     docker_sock_gid,
     free_port,
+    service_log_tails,
 )
 
 pytestmark = [
@@ -36,6 +37,9 @@ pytestmark = [
         reason="make-runbook tier is separately opt-in: set MBT_LIVE_SHOWCASE_MAKE=1",
     ),
 ]
+
+#: The Makefile boots every profile, so a log dump has to name them all too.
+PROFILES = ("core", "spark", "dev", "obs", "ci", "orch")
 
 PORT_VARS = (
     "SHOWCASE_S3_PORT",
@@ -81,26 +85,31 @@ class MakeRunner:
             check=False,
         )
         if proc.returncode != 0:
-            logs = subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "-p",
-                    self.project,
-                    "logs",
-                    "--no-color",
-                    "--tail",
-                    "100",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            ).stdout
+            logs = service_log_tails(self.compose)
             pytest.fail(
                 f"make {target} exited {proc.returncode}\n--- stdout ---\n{proc.stdout[-8000:]}"
-                f"\n--- stderr ---\n{proc.stderr[-8000:]}\n--- stack logs ---\n{logs[-8000:]}"
+                f"\n--- stderr ---\n{proc.stderr[-8000:]}\n--- stack logs ---\n{logs}"
             )
+
+    def compose(self, *args: str) -> str:
+        """A compose subcommand against this runner's project; its stdout."""
+        return subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                self.project,
+                "-f",
+                str(SHOWCASE_DIR / "compose" / "docker-compose.yml"),
+                *(flag for profile in PROFILES for flag in ("--profile", profile)),
+                *args,
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        ).stdout
 
     def containers(self) -> list[str]:
         proc = subprocess.run(
