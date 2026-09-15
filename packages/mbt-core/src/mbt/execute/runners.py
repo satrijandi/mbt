@@ -286,7 +286,7 @@ class BuildContext:
     """DataBuildContext implementation handed to DataAdapters."""
 
     node: ManifestNode
-    source: SourceTable  # the spine (single source, or the label table)
+    source: SourceTable  # the one relation the node reads (ADR-29)
     source_tables: dict[str, SourceTable]  # every source dep by unique_id
     resolved_windows: dict[str, tuple[str, str]]
     sample_fraction: float
@@ -560,6 +560,8 @@ class ModelRunner:
         job_result: Any,
         champion: ModelVersion | None,
         metric_specs: list[MetricSpec],
+        *,
+        evaluated_is_champion: bool = False,
     ) -> list[GateResult]:
         adapter = self.ctx.registry.training(spec.adapter)
         return evaluate_gates(
@@ -572,6 +574,7 @@ class ModelRunner:
             determinism=adapter.determinism,
             champion_delta_bounds=job_result.champion_delta_bounds,
             backtest_metrics=job_result.backtest_metrics,
+            evaluated_is_champion=evaluated_is_champion,
         )
 
     def _register(
@@ -724,8 +727,20 @@ class ModelRunner:
         """
         metric_specs = self._metric_specs(spec, node)
         champion, _stage = self._champion(spec, node) if apply_gates else (None, None)
+        # Re-evaluating the champion itself: loading it a second time as its own
+        # comparator would only produce a zero delta (see evaluate_gates).
+        is_champion = (
+            champion is not None
+            and champion.artifact is not None
+            and champion.artifact.uri == artifact.uri
+        )
         job = self._assemble_job(
-            node, spec, metric_specs, champion, mode="evaluate", artifact=artifact
+            node,
+            spec,
+            metric_specs,
+            None if is_champion else champion,
+            mode="evaluate",
+            artifact=artifact,
         )
         job_result = self.ctx.run_job(job)
         gates: list[GateResult] = []
@@ -735,7 +750,9 @@ class ModelRunner:
             and job_result.metrics is not None
             and spec.evaluation.gates
         ):
-            gates = self._gate_results(spec, node, job_result, champion, metric_specs)
+            gates = self._gate_results(
+                spec, node, job_result, champion, metric_specs, evaluated_is_champion=is_champion
+            )
         return job_result, gates
 
 

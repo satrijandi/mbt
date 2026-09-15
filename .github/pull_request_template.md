@@ -18,13 +18,14 @@ and what that same thing does now.
 
 - [ ] `uv run pytest -q -m "not e2e" --cov` (the 100% coverage gate is enforced)
 - [ ] `uv run ruff check . && uv run ruff format --check .`
-- [ ] `uv run mypy` over the packages you touched (CI runs all ten, strict)
+- [ ] `uv run mypy` over the packages you touched (CI runs all eleven, strict)
 - [ ] `uv run pytest -q -m e2e` if you touched an adapter, the CLI, or the scaffold
-- [ ] `uv run mkdocs build --strict` if you touched docs
+- [ ] `uv run mkdocs build --strict` if you touched docs or a docstring the API reference renders
 
 ## Things that fail CI if missed
 
 - [ ] A new CLI command or flag is documented in `docs/cli-reference.md` (a test enforces this)
+- [ ] A spec example added to the docs or a README validates (`tests/test_docs_examples.py`)
 - [ ] A changed error message is reflected in `docs/troubleshooting.md`, and vice versa
 - [ ] Golden manifests regenerated *deliberately* if spec/gate/hook changes moved config hashes
       (`UPDATE_GOLDEN=1 uv run pytest tests/test_golden_manifest.py`) - say so in the description

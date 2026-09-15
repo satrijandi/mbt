@@ -114,8 +114,17 @@ def evaluate_gates(
     determinism: DeterminismTier | None = None,
     champion_delta_bounds: dict[str, BootstrapDelta] | None = None,
     backtest_metrics: dict[str, float] | None = None,
+    evaluated_is_champion: bool = False,
 ) -> list[GateResult]:
-    """Evaluate all gates for one model; emits GateEvaluated events."""
+    """Evaluate all gates for one model; emits GateEvaluated events.
+
+    ``evaluated_is_champion`` marks a re-evaluation of the registered champion
+    itself (``mbt evaluate --stage production --gates``, the decay check).
+    There is no challenger then, so champion gates are not applicable: the
+    artifact would be compared with its own predictions, a delta of exactly 0
+    that fails every positive ``min_delta``, which turned the documented decay
+    check into a deterministic exit 2. Threshold and disparity gates still run.
+    """
     bus = get_bus()
     results: list[GateResult] = []
     for gate in gates:
@@ -152,6 +161,19 @@ def evaluate_gates(
                 passed=passed,
                 expected=gate.threshold,
                 actual=actual,
+            )
+        elif evaluated_is_champion:
+            result = GateResult(
+                metric=gate.metric,
+                kind="champion",
+                slice=gate.slice,
+                passed=True,
+                actual=actual,
+                min_delta=gate.min_delta,
+                message=(
+                    f"the evaluated version is the '{gate.compare_to}' champion itself - "
+                    "no challenger to compare, gate not applicable"
+                ),
             )
         elif champion is None:
             # Bootstrap: no champion exists yet -> pass with a loud WARN

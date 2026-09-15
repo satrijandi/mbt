@@ -22,7 +22,7 @@ _NAME_RE = re.compile(PROJECT_NAME_PATTERN)
 
 #: The numerics stack the scaffold pins by version, in install order.
 #:
-#: Pinning the three mbt packages pins NONE of these, and these are the versions
+#: Pinning the mbt packages pins NONE of these, and these are the versions
 #: that decide model numerics. requirements.txt's own header states the reason
 #: the file exists - "a floating training environment invalidates the manifest's
 #: env digest, so CI always installs from this file" - and with only the mbt

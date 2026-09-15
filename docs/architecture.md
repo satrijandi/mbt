@@ -4,7 +4,7 @@ This page is the contributor's map of the `mbt-core` engine: how one CLI command
 It is deliberately internals-facing.
 If you are *using* mbt, read [Concepts](concepts.md) and the [Spec reference](spec-reference.md) instead; if you are *writing an adapter*, read [Adapter authoring](adapter-authoring.md) - you never need anything on this page to do that.
 
-Every load-bearing decision below has an Architecture Decision Record under [`docs/adr/`](adr/0001-arrow-interchange.md); the [ADR index by subsystem](#where-the-decisions-live) at the end maps each part of the engine to the record that justifies it.
+Every load-bearing decision below has an [Architecture Decision Record](adr/index.md); the [table at the end](#where-the-decisions-live) maps each part of the engine to the record that justifies it.
 When the code looks surprising, the ADR is the authority - read it before "fixing" the surprise.
 
 ## The shape of the system
@@ -21,26 +21,29 @@ One package holds the engine; every framework integration is a separate, indepen
               ▲   ▲   ▲   ▲          types + shared metric engine + the
               │   │   │   │          adapter compliance suite
    ┌──────────┘   │   │   └──────────┐
-mbt-xgboost   mbt-mlflow   mbt-spark   mbt-snowflake   mbt-lightgbm
-mbt-h2o       mbt-optuna   mbt-testing   ...            (adapters)
+mbt-xgboost    mbt-lightgbm   mbt-sklearn   mbt-h2o      (training)
+mbt-snowflake  mbt-spark      mbt-mlflow    mbt-optuna   (data, compute, tracking, tuning)
+mbt-testing                                              (fakes for every role)
 ```
 
-The one rule that keeps this honest: **`mbt-core` never imports an ML framework, and no adapter imports `mbt-core`.**
-Adapters build against `mbt-adapter-base` only, and the compliance suite's `test_no_core_imports` fails any adapter that reaches into core internals.
+The rule that keeps this honest: **`mbt-core` never imports an ML framework, and adapters build against `mbt-adapter-base`, not core internals.**
+The compliance suite's `test_plugin_imports_no_mbt_core` fails any adapter whose plugin loads an `mbt.*` module.
+The two deliberate exceptions are compute adapters that run core's own job entrypoint: `mbt-spark`'s `spark-submit` wrapper and `mbt-testing`'s inline runner both call `mbt.execute.job` lazily, inside the method that runs a job, and declare `mbt-core` as a dependency.
 `mbt.contracts` is a thin re-export of `mbt-adapter-base` (`packages/mbt-core/src/mbt/contracts.py`) so core code and the contract share one source of truth while the contract stays versioned on its own cadence.
 
 | Package | Layer | Responsibility |
 |---|---|---|
 | `mbt-core` | engine | CLI, parsing, DAG, compile/manifest, execution engine, gates, state, docs generation |
 | `mbt-adapter-base` | contract | Adapter protocols, interchange types, the shared metric engine, and the compliance test suite |
-| `mbt-xgboost`, `mbt-lightgbm`, `mbt-h2o` | training adapters | Fit a model, predict, export an artifact, declare a determinism tier |
+| `mbt-xgboost`, `mbt-lightgbm`, `mbt-sklearn`, `mbt-h2o` | training adapters | Fit a model, predict, export an artifact, declare a determinism tier |
 | `mbt-spark` | data + compute + training | Lakehouse datasets, `spark-submit` compute, distributed SparkML training |
 | `mbt-snowflake` | data adapter | Warehouse-native datasets with push-down sampling and batch scoring |
 | `mbt-mlflow` | tracking + registry | Experiment tracking and the model registry |
-| `mbt-optuna` | tuning engine | Seeded TPE hyperparameter search |
+| `mbt-optuna` | tuning engine | Seeded TPE or random hyperparameter search, with median pruning |
 | `mbt-testing` | fake adapters | Framework-free adapters so a project's specs can be tested without JVMs or GPUs |
 
-`mbt-lightgbm` is the extensibility proof: it is built against the public contract only, with no privileged access, so anyone can ship an adapter the same way.
+`mbt-lightgbm` and `mbt-sklearn` are the extensibility proof: each is built against the public contract only, with no privileged access, so anyone can ship an adapter the same way.
+[Adapters](adapters.md) compares what every shipped adapter supports.
 
 ## One command, end to end
 
@@ -64,7 +67,7 @@ The functions, in order (`execute/orchestrator.py`):
 1. `prepare()` - parse the project (`parsing/`), load `profiles.yml` (`config/profiles.py`), then either compile a fresh manifest (`compile/compiler.py`) or, with `--manifest`, read a stored one **verbatim** and verify the environment it runs in (ADR-19).
 2. `plan_execution()` (`execute/planner.py`) - turn selectors into the set of nodes to run, plus every upstream dataset a selected model needs.
 3. `execute_plan()` (`execute/scheduler.py`) - walk the DAG in parallel, calling a runner per node.
-4. `run_command()` assembles a `RunResults` (`artifacts/run_results.py`) and writes `target/run_results.json`; its exit code is the command's exit code.
+4. `run_command()` assembles a `RunResults` (`artifacts/run_results.py`) and writes `target/run_results.json` plus its per-command sibling (see [below](#run_resultsjson-is-latest-write-wins-the-siblings-are-not)); its exit code is the command's exit code.
 
 `mbt evaluate` and `mbt monitor` are siblings of this flow; neither trains.
 `evaluate` (`run_evaluate` in the orchestrator) reuses `prepare()` and the model runner to re-score a registered artifact on fresh data.
@@ -168,9 +171,10 @@ There are four runners, all sharing one node-lifecycle wrapper (`run_with_lifecy
   Materialization is cache-aware: the key is `sha256(input_hash + resolved windows [+ sample_fraction])`, so a warm `target/datasets/<name>/<key>` with a `_SUCCESS` marker is reused, and a sampled dev build never satisfies a full build's cache probe.
 - **`ModelRunner`** - resolve the champion, assemble the job, run it, call `evaluate_gates`, and register the artifact **only if every gate passes** (transitioning it to `stage_on_pass` and stamping `mbt.gates_passed=true`, plus the config/input/hooks hashes and the baseline reference, into the registry metadata).
 - **`ScoringRunner`** - resolve the champion from the registry **at run time by stage alias** (so a promotion takes effect on the next scheduled run without a spec edit, ADR-5/ADR-20), verify hooks parity against the champion's `mbt.hooks_hash`, read the model spec back from the champion's own `mbt.inference_config_uri` (ADR-28), materialize the input, run input `checks` (a failure skips scoring entirely), score, then evaluate shift `monitors`. It opens no tracking run.
-- **`ModelTestRunner`** - `mbt test` on a model re-evaluates the latest registered version against the current champion; it **never trains** (TSD §11.3). No registered version means `skipped`, not a train.
+- **`ModelTestRunner`** - `mbt test` on a model re-evaluates the version in the spec's `stage_on_pass` stage against its gates; it **never trains** (TSD §11.3). No version in that stage means `skipped`, not a train.
 
 `mbt evaluate` and `mbt test` share `ModelRunner.evaluate_artifact` and the `evaluation_node_result` assembler, so the two commands cannot drift on error handling or the metrics/gates shape.
+When the artifact being evaluated is the champion itself, `evaluate_artifact` does not load it a second time as its own comparator, and its champion gates report "not applicable" instead of a zero delta.
 
 ## Quality: gates, checks, monitors
 
@@ -179,7 +183,7 @@ All three verdicts are pure comparisons in the coordinator, with zero ML depende
 - **Gates** (`quality/gates.py`) - a *threshold* gate compares the challenger metric to an absolute floor, widened by the adapter's determinism tolerance in the model's favor only.
   A *champion* gate compares against the production version re-evaluated inside the same job on the same pinned test split; with a confidence set (the default), it passes only when the **paired-bootstrap delta lower bound** clears `min_delta` (ADR-18), so a challenger that is ahead on test-set noise alone does not promote.
   No champion yet → pass with a loud warning (ADR-10). A champion that exists but cannot load → hard error, never a silent pass.
-- **Checks** (`quality/checks.py`) - declarative data assertions on datasets and on scoring inputs: `schema`, `not_null`, `no_future_columns`, `class_balance_report`, and a `label_leakage_scan` that is **auto-appended to every dataset build** unless you opt out (numeric correlation or categorical association above threshold against the label fails the build). Scoring inputs skip the leakage scan - there is no label to leak.
+- **Checks** (`quality/checks.py`) - declarative data assertions on datasets and on scoring inputs: `schema`, `not_null`, `unique`, `accepted_values`, `relationships`, `row_count`, `freshness`, `no_future_columns`, `class_balance_report`, the `panel_columns` contract that runs whenever a dataset declares `columns:`, and a `label_leakage_scan` that is **auto-appended to every dataset build** unless you opt out (numeric correlation or categorical association above threshold against the label fails the build). Scoring inputs skip the label-dependent checks - there is no label to leak.
 - **Monitors** (`quality/monitors.py`) - scoring-time distribution shift (PSI or KS) of features and scores against the champion's training-time baseline, and, via `mbt monitor`, realized-metric gates once ground-truth labels mature (ADR-21).
 
 Any quality verdict of "no" is exit code **2** and a distinct node status (`gate_failed`, `test_failed`, `monitor_failed`), kept separate from a hard `error` (exit **1**).
@@ -198,24 +202,27 @@ A plugin (`AdapterPlugin`) bundles typed component slots, instantiated on demand
 
 | Component | What it does | Example |
 |---|---|---|
-| `training` | Fit / predict / evaluate / export a model; declare a determinism tier and supported tasks | xgboost, lightgbm, h2o, spark |
+| `training` | Fit / predict / evaluate / export a model; declare a determinism tier and supported tasks | xgboost, lightgbm, sklearn, h2o, spark |
 | `data` | Build datasets and scoring inputs from sources; open the prediction store | local (DuckDB), snowflake, spark |
 | `tracking` | Log params, metrics, artifacts, documents, and tuning trials - training only (ADR-28) | mlflow |
 | `registry` | Register versions, resolve champions by stage, transition stages | mlflow |
 | `compute` | Run a `TrainingJob` (subprocess, `spark-submit`, cluster) | local, spark |
 | `tuning` | Search hyperparameters against an objective | optuna |
 
-Two `Supports*` capabilities are optional and probed with `hasattr` rather than declared: batch-scoring data adapters add `build_scoring_input`/`open_predictions` (contract 1.1, ADR-23), and a training adapter that sets `data_access == "path"` receives its splits as Parquet files rather than in-memory Arrow, so JVM/cluster frameworks ingest natively while still seeing exactly what Arrow adapters see (ADR-17).
+Several capabilities are optional and probed rather than declared.
+Batch-scoring data adapters add `build_scoring_input`/`open_predictions` (contract 1.1, ADR-23).
+Training adapters may add `feature_importance`, `shap_importance`, `explain`, and `train_with_report`, each with a `Supports*` protocol that pins its signature, and set class flags such as `supports_calibration` that the parser reads before accepting a spec that needs them.
+A training adapter that sets `data_access = "path"` receives its splits as Parquet files rather than in-memory Arrow, so JVM and cluster frameworks ingest natively while still seeing exactly what Arrow adapters see (ADR-17).
 Tracking adapters are probed the same way for `prepare()`, `log_trial()`, and `log_document()`.
 
-The compliance suite in `mbt-adapter-base` (`TrainingAdapterCompliance`, `PredictionStoreCompliance`) is the ship bar: subclass it, keep `test_no_core_imports` green, and the adapter is correct by construction.
+The compliance suite in `mbt-adapter-base` (`TrainingAdapterCompliance`, `PredictionStoreCompliance`) is the ship bar: subclass it and keep it green, and the adapter meets the contract.
 
 ## Events and artifacts
 
 **Events** (`events/`) are structured objects on a process-wide bus.
 In text mode a `ConsoleSink` renders them one-per-line to **stderr** (`err_console`), keeping **stdout** clean for command *data* (`mbt ls`, `mbt show`).
-In `--log-format json` a `JsonLinesSink` writes redacted JSON to stdout instead.
-Job subprocesses always use the JSON-lines sink, and the coordinator forwards those lines onto its own bus - one event stream regardless of how many subprocesses ran.
+In `--log-format json` a `JsonLinesSink` writes redacted JSON lines to stderr instead, so stdout stays command data in both modes.
+Job subprocesses always use the JSON-lines sink on their own stdout, and the coordinator reads those lines and forwards them onto its own bus - one event stream regardless of how many subprocesses ran.
 Every sink redacts tainted values, so a credential in a traceback never reaches a log or a result file.
 
 The engine writes two artifacts to `target/`, and the difference matters:
@@ -244,7 +251,7 @@ Because scoring resolves the champion by stage alias at run time, a promotion ta
 
 ## Module map
 
-Where to start reading, by directory under `packages/mbt-core/src/mbt/` (~11k LOC total):
+Where to start reading, by directory under `packages/mbt-core/src/mbt/` (about 15,000 lines of Python):
 
 | Directory | What is in it |
 |---|---|
@@ -273,8 +280,9 @@ Start with the decision, not the code:
 | Adapter boundary & interchange | ADR-1 (Arrow), ADR-2 (local adapters in core), ADR-14 (import hygiene), ADR-15 (contract refinements), ADR-17 (JVM adapters, path data access) |
 | Coordinator / job split | ADR-3 |
 | Identity & reproducibility | ADR-4 (two hashes), ADR-5 (profiles excluded), ADR-12 (windows & anchor), ADR-19 (env digest & `--manifest` verification) |
-| Selection, state & datasets | ADR-7 (env not modifying), ADR-11 (snapshot listing), ADR-13 (datasets auto-materialize), ADR-16 (key sampling & warehouse snapshots), ADR-29 (one relation per dataset; ADR-16 §1/ADR-22/ADR-25 superseded) |
+| Selection, state & datasets | ADR-7 (env not modifying), ADR-11 (snapshot listing), ADR-13 (datasets auto-materialize), ADR-29 (one relation per dataset; supersedes ADR-16, ADR-22, ADR-25) |
 | Gates & tuning | ADR-6 (gate edits retrain), ADR-8 (tuning never sees test), ADR-9 (champion re-evaluated in job), ADR-10 (missing vs unloadable champion), ADR-18 (paired-bootstrap gates) |
+| Features | ADR-27 (declarative feature treatment: transforms, monotone constraints, declared categoricals) |
 | Scoring & monitoring | ADR-20 (scoring resource & runtime champion), ADR-21 (prediction store & ground-truth ledger), ADR-23 (warehouse batch scoring), ADR-28 (champion-carried inference config) |
 | Tracking | ADR-26 (superseded), ADR-28 (training-only tracking, timestamped runs, named experiments) |
 | Task verticals | ADR-24 (regression as a second vertical) |

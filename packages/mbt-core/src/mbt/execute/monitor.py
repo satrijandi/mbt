@@ -233,6 +233,26 @@ def _metric_specs(spec: ScoringSpec, node: ManifestNode, manifest: Manifest) -> 
     return resolved
 
 
+class _LabelReadEvents:
+    """The event bus as a label read sees it: everything but the row count.
+
+    Labels are read through ``build_scoring_input`` (no new contract), so every
+    data adapter announces the table as "N rows to score" - or, when empty, as
+    "nothing to score". On an ``mbt monitor`` run nothing is being scored, and
+    that line sent operators looking for a scoring pass that never happened.
+    The row count is re-emitted in the monitor's own words instead.
+    """
+
+    def __init__(self, bus: Any) -> None:
+        self._bus = bus
+
+    def emit(self, event: object) -> None:
+        message = getattr(event, "message", None)
+        if isinstance(message, str) and "to score" in message:
+            return
+        self._bus.emit(event)
+
+
 def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: ScoringSpec) -> Any:
     """Build the matured-label table through the data adapter (no new contract).
 
@@ -261,10 +281,16 @@ def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: Scoring
         sample_fraction=1.0,  # never sample labels: evaluation wants them all
         deep_snapshot=ctx.manifest.metadata.deep_snapshot,
         output_dir=ctx.project_dir / "target" / "scoring_inputs" / f"{node.name}_labels" / key,
-        events=get_bus(),
+        events=_LabelReadEvents(get_bus()),
     )
     handle = ctx.data_adapter.build_scoring_input(ScoringInputSpec(source=label_uid), build_ctx)
     table = handle.read("score")
+    get_bus().emit(
+        LogMessage(
+            unique_id=node.unique_id,
+            message=f"ground-truth labels: read {table.num_rows} row(s) from {label_uid}",
+        )
+    )
     needed = [*spec.ground_truth.join_columns, spec.ground_truth.label.column]
     missing = [c for c in needed if c not in table.column_names]
     if missing:

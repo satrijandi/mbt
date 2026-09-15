@@ -1,8 +1,14 @@
 # mbt-sklearn
 
-scikit-learn training adapter for [mbt](../../README.md): declare a
+The scikit-learn training adapter for [mbt](https://github.com/satrijandi/mbt): declare a
 LogisticRegression, Ridge, RandomForest, or HistGradientBoosting model as YAML
 and let mbt handle the splits, gates, registry, and reproducibility.
+
+```bash
+pip install mbt-sklearn        # plus mbt-core
+```
+
+mbt is not on PyPI yet; see [Installation](https://satrijandi.github.io/mbt/installation/) for installing from a release tag.
 
 ```yaml
 # models/churn_classifier.yml
@@ -67,7 +73,7 @@ min_samples_split, n_estimators, n_jobs
   unseen level becomes the `-1` sentinel (trees) or an all-zero row (one-hot)
   at prediction time.
 - **Calibration**: `supports_calibration` is true, so `calibration:` in a spec
-  fits a post-hoc calibrator on the dedicated calibration slice (ADR-18 / F17)
+  fits a post-hoc calibrator on the dedicated calibration slice carved from train
   and every downstream metric, gate, and prediction sees calibrated scores.
 - **Feature importance**: `feature_importances_` for the tree estimators,
   `|coef_|` for the linear ones, with a one-hot expanded categorical reported
@@ -94,5 +100,9 @@ them silently:
 
 Like `mbt-lightgbm`, this package imports **only** `mbt-adapter-base` - never
 `mbt-core` internals - and passes the shared compliance suite. See
-[`docs/adapter-authoring.md`](../../docs/adapter-authoring.md) to write your
+[Adapter authoring](https://satrijandi.github.io/mbt/adapter-authoring/) to write your
 own.
+
+## License
+
+Apache License 2.0.

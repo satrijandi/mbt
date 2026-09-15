@@ -19,6 +19,11 @@ scoring:
         - "tenure_days >= 30"
       time_column: snapshot_date
       window: "-7d:now"            # resolved against the run's anchor
+      # The row identity the dev target's sample_fraction hashes. Optional on
+      # a scoring input, but any target that samples needs it: without one the
+      # hash would cover every column, so a schema change draws a different
+      # sample, and mbt refuses that rather than guess.
+      sample_key: user_id
 
     checks:
       - not_null:

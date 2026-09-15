@@ -1,13 +1,13 @@
 # Adapter API reference
 
-Generated from `mbt-adapter-base`, the only package an adapter may import
-(the compliance suite's `test_no_core_imports` enforces it).
+Generated from `mbt-adapter-base`, the only mbt package an adapter should import
+(the compliance suite's `test_plugin_imports_no_mbt_core` enforces it).
 Prose guide: [Adapter authoring](adapter-authoring.md).
 
 ## Protocols
 
 What an adapter implements.
-The two `Supports*` protocols are optional capabilities probed with `hasattr`; implementing them with these exact signatures is what keeps adapters from drifting apart.
+The four `Supports*` protocols (`SupportsFeatureImportance`, `SupportsShapImportance`, `SupportsExplain`, `SupportsTrainWithReport`) are optional capabilities probed with `hasattr`; implementing them with these exact signatures is what keeps adapters from drifting apart.
 
 ::: mbt_adapter_base.protocols
     options:

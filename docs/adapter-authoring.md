@@ -1,13 +1,11 @@
 # Adapter authoring guide
 
-An mbt adapter is a pip package exposing an `AdapterPlugin` descriptor
-through the `mbt.adapters` entry-point group. It depends only on
-**mbt-adapter-base** - never on mbt-core. Two adapters were built exactly this
-way and are the reference implementations: `packages/mbt-lightgbm` (the
-original extensibility proof, one estimator) and `packages/mbt-sklearn` (which
-selects among several estimators in the spec, so it shows how to model
-per-estimator hyperparameters and how the encoding a model needs can depend on
-the estimator family rather than on the data).
+An mbt adapter is a pip package that exposes an `AdapterPlugin` descriptor through the `mbt.adapters` entry-point group.
+It depends on **mbt-adapter-base**, the versioned contract, and not on mbt-core's internals.
+One plugin can fill any of six roles - training, data, tracking, registry, compute, tuning - and most fill one.
+
+Two training adapters were built exactly this way and are the reference implementations: `packages/mbt-lightgbm` (the original extensibility proof, one estimator) and `packages/mbt-sklearn` (which selects among several estimators in the spec, so it shows how to model per-estimator hyperparameters and how the encoding a model needs can depend on the estimator family rather than on the data).
+For the other roles, read the shipped adapters listed on the [Adapters](adapters.md) page; the [Adapter API reference](api-reference.md) is generated from the contract itself.
 
 ## 1. Package skeleton
 
@@ -16,8 +14,8 @@ mbt-myframework/
 ├── pyproject.toml
 └── src/mbt_myframework/
     ├── __init__.py
-    ├── params.py      # Pydantic param models - no framework imports
-    ├── adapter.py     # the TrainingAdapter - framework imported lazily
+    ├── params.py      # Pydantic parameter models - no framework imports
+    ├── adapter.py     # the adapter - framework imported lazily
     └── plugin.py      # the descriptor - must stay import-light
 ```
 
@@ -37,105 +35,148 @@ from mbt_myframework.adapter import MyTrainingAdapter
 PLUGIN = AdapterPlugin(
     name="myframework",
     contract_version=CONTRACT_VERSION,
-    training=MyTrainingAdapter,
-    fingerprint_packages=["myframework"],  # joins the env digest
+    training=MyTrainingAdapter,  # also: data=, tracking=, registry=, compute=, tuning=
+    fingerprint_packages=["myframework"],  # joins the manifest's env_digest
 )
 ```
 
-## 2. The import hygiene rule (ADR-14)
+The entry-point name is what users write in YAML (`adapter: myframework`).
+`fingerprint_packages` lists the distributions whose versions decide your adapter's numerics: their versions enter the manifest's `env_digest`, so `mbt run --manifest` refuses to reproduce a run on a different version (ADR-19).
+`task_schemas` lets a plugin register a new task type without core changes.
 
-Importing `plugin.py` (and constructing your adapter class) **must not
-import the framework**. `mbt parse` loads every referenced plugin to
-validate tasks and hyperparameters inside a 2-second budget; frameworks
-load lazily inside `train`/`evaluate`/`predict`/`load`/`export`. The
-compliance suite enforces this with a subprocess `sys.modules` probe.
+Every adapter class is constructed as `MyAdapter(config: dict)`, where `config` is the rendered `config:` mapping from the target (or `{}`).
 
-## 3. The TrainingAdapter contract
+## 2. Import rules
 
-Construction convention: `MyTrainingAdapter(config: dict)` - the (usually
-empty) config dict. Required surface (see `mbt_adapter_base.protocols`):
+**Importing `plugin.py` must not import the framework** (ADR-14).
+`mbt parse` loads every referenced plugin to validate tasks and hyperparameters within a two-second budget, so frameworks load lazily inside the methods that use them (`train`, `evaluate`, `predict`, `load`, `export`, or a data adapter's `build_dataset`).
+
+**Importing `plugin.py` must not load `mbt-core` either.**
+Core internals are not a contract: an adapter that imports them breaks on the next core refactor without any contract version changing.
+The compliance suite enforces both rules with subprocess `sys.modules` probes.
+The only shipped exceptions are compute adapters that run core's own job entrypoint - `mbt-spark`'s `spark-submit` wrapper and `mbt-testing`'s inline runner - and they import it lazily, inside the method that runs a job.
+
+Every mbt package ships a PEP 561 `py.typed` marker, so the protocols are real types in your checkout: run mypy over your adapter and a drifted signature is an error in your own build.
+
+## 3. Training adapters
+
+### Required surface
+
+See `mbt_adapter_base.protocols.TrainingAdapter`.
 
 | Member | Notes |
 |---|---|
-| `name`, `contract_version`, `supported_tasks`, `determinism` | plain attributes |
-| `param_model(task)` | a Pydantic model with `extra="forbid"`; validates static hyperparameters at parse time |
-| `validate(spec)` | extra spec-level checks; return `ValidationIssue`s |
-| `resolve_auto(spec, profile)` | replace `AUTO` sentinels from the dataset profile; must be idempotent |
-| `train(spec, data, ctx)` | return an opaque trained-model object; seed with `ctx.seed` |
-| `evaluate(model, data, split, metrics, slices=None)` | compute the requested `MetricSpec`s; return `MetricResults` |
-| `predict(model, data, split)` | the split's table + a `prediction` column; must work WITHOUT the target column (batch scoring feeds unlabeled `score` splits, ADR-20) |
-| `export(model, format, store)` | write via `store.put_file(...)`; return the `ArtifactRef` |
-| `load(ref, store)` | reconstruct the model from an artifact (champion evaluation, `mbt evaluate`) |
-| `nondeterminism_warnings(spec)` | strings describing settings that break your determinism tier |
-| `feature_importance(model)` | optional: normalized per-feature fractions; rendered in model cards and `run_results.json` (FR-DOCS-02). Return `{}` when the winning model cannot attribute (e.g. an ensemble leader) |
-| `shap_importance(model, data, split)` | optional: normalized mean-\|SHAP\| importance over `split` - additive and not cardinality-biased like split-gain, so the card prefers it over `feature_importance` when you expose it (the tree adapters do). Data-grounded, hence the split argument |
-| `train_with_report(spec, data, ctx, report)` | optional: train while calling `report(step, value)` per iteration with a HIGHER-IS-BETTER validation value (e.g. AUC on the `validation` split); lets tuning pruners stop weak trials early. The callback may raise - let that exception propagate out of your training loop |
-| `explain(model, data, split, top_k)` | optional, but **required** if a scoring node sets `output.explain_top_k`: return one JSON string per row - that row's `top_k` features by \|SHAP\| as `[[feature, contribution], ...]` ordered by descending \|contribution\| (`mbt_adapter_base.training_helpers.top_k_explanations` builds it) - so a consumer can see why each row scored as it did. Core raises a `ConfigError` at score time if `explain_top_k` is set and you do not define this |
-| `supports_calibration` (class attribute, default `False`) | optional: set `True` and implement post-hoc probability calibration to accept a `calibration:` spec. When set, fit a `Calibrator` (`mbt_adapter_base.calibration`) on the split named by `mbt_adapter_base.training_helpers.calibration_split(data)` - the dedicated `calibration` slice core carves from train (never the selection split, F17), falling back to `validation` for direct callers, failing loudly when neither exists - persist it in your artifact, and apply it - to both the challenger and the re-loaded champion - at predict time. The parser rejects a `calibration:` spec on an adapter that leaves this `False` |
+| `name`, `contract_version`, `supported_tasks`, `determinism` | Plain attributes |
+| `param_model(task)` | A Pydantic model with `extra="forbid"`; validates static hyperparameters at parse time |
+| `validate(spec)` | Extra spec-level checks; return `ValidationIssue`s with `severity` `error` or `warning` |
+| `resolve_auto(spec, profile)` | Replace `{{ auto }}` sentinels from the dataset profile; must be idempotent |
+| `train(spec, data, ctx)` | Return an opaque trained model; seed with `ctx.seed` |
+| `evaluate(model, data, split, metrics, slices=None)` | Compute the requested `MetricSpec`s and return `MetricResults` |
+| `predict(model, data, split)` | The split's table plus a `prediction` column; must work **without** the target column, because batch scoring passes an unlabeled `score` split (ADR-20) |
+| `export(model, format, store)` | Write through `store.put_file(...)` and return the `ArtifactRef`; `mbt build` always asks for `"native"` |
+| `load(ref, store)` | Rebuild the model from an artifact, for champion gates and `mbt evaluate` |
+| `nondeterminism_warnings(spec)` | Strings describing settings that break your determinism tier; shown at parse |
 
-The optional members are probed with `hasattr` (or, for `supports_calibration`,
-read with `getattr(..., False)`); each has a `@runtime_checkable` protocol in
-`mbt_adapter_base.protocols` -
-`SupportsFeatureImportance`/`SupportsShapImportance`/`SupportsExplain`/`SupportsTrainWithReport`.
-`runtime_checkable` verifies only that the method is present by name (that is the
-`hasattr` probe); the signature is pinned statically - an adapter that implements
-a capability adds a `_capability_conformance` mypy variable (see mbt-xgboost /
-mbt-lightgbm) so strict mypy rejects a drifted signature. The compliance suite
-also checks `feature_importance` output when present - see the
-[Adapter API reference](api-reference.md).
+### Optional capabilities
 
-Every mbt package ships a PEP 561 `py.typed` marker, so those protocols are
-real types in *your* checkout too: run mypy over your adapter and a drifted
-signature is an error in your own build, not a surprise at runtime inside mbt.
-(Up to and including v0.1.0 the marker was missing, and a consumer's mypy
-silently skipped every `mbt_*` import - if you have an adapter written against
-an older release, expect a first strict run to surface real findings.)
+Core probes for these rather than requiring them, and the model card, scoring, and tuning use whichever you provide.
 
-Shared implementation helpers
-(`mbt_adapter_base.training_helpers`) cover the common `evaluate()` body,
-`{{ auto }}` scale_pos_weight resolution, and the staged-parquet fallback
-for `data_access="path"` frameworks - prefer them over re-implementing.
+| Member | Enables |
+|---|---|
+| `feature_importance(model)` | Normalized per-feature fractions on the model card and in `run_results.json`. Return `{}` when the winning model cannot attribute (an ensemble leader, say) |
+| `shap_importance(model, data, split)` | Normalized mean absolute SHAP importance over `split`; the card prefers it to `feature_importance`, since it is additive and not biased toward high-cardinality features |
+| `explain(model, data, split, top_k)` | Required if a scoring node sets `output.explain_top_k`: one JSON string per row, `[[feature, contribution], ...]` for the row's top `top_k` features by absolute SHAP value (`training_helpers.top_k_explanations` builds it). Without it, `mbt score` fails with a `ConfigError` |
+| `train_with_report(spec, data, ctx, report)` | Train while calling `report(step, value)` each iteration with a higher-is-better validation value, so a tuning pruner can stop weak trials. The callback may raise - let that exception propagate out of your training loop |
+| `supports_calibration = True` | Accept a `calibration:` spec. Fit a `mbt_adapter_base.calibration.Calibrator` on the split `training_helpers.calibration_split(data)` names - the dedicated `calibration` slice core carves from train, never the selection split (F17) - persist it in the artifact, and apply it at predict time to both the challenger and a reloaded champion |
+| `supports_monotonic_constraints = True` | Accept `features.monotonic` and `transforms.*.monotonic`; `training_helpers.monotone_vector` aligns the directions to your feature order |
+| `supports_categorical_pooling = True` | Accept `categorical.*.min_frequency`, which needs the train-fitted level map `mbt_adapter_base.encoding` keeps |
+| `data_access = "path"` | Receive splits as Parquet files instead of in-memory Arrow, for JVM and cluster frameworks (ADR-17); `training_helpers.staged_split_path` stages them |
 
-### What your `train`/`evaluate` tables contain
+The method capabilities each have a `@runtime_checkable` protocol in `mbt_adapter_base.protocols`: `SupportsFeatureImportance`, `SupportsShapImportance`, `SupportsExplain`, `SupportsTrainWithReport`.
+A runtime check only confirms the method exists by name, so pin the signature statically too: add a `_capability_conformance` variable typed with the protocols, as `mbt-xgboost` and `mbt-lightgbm` do, and strict mypy rejects a drifted signature.
+A class flag left `False` makes the parser reject a spec that needs the capability, naming your adapter, so a user never trains a silently unconstrained or uncalibrated model.
 
-selected features + the target column + declared slice columns. The split
-time column never reaches you. Derive features as
-`columns - {spec.target} - set(spec.evaluation.slices)` - the shared
-`mbt_adapter_base.encoding` helpers do this and split off string columns as
-categoricals. If your framework supports categoricals natively, train them
-that way with deterministic (sorted) train-time levels persisted in the
-artifact, and map unseen levels to missing - see `mbt-xgboost` and
-`mbt-lightgbm`. Reject other non-numeric types (timestamps, nested) with an
-actionable error - do not encode silently.
+### What `train` and `evaluate` receive
+
+The tables hold the selected features, the target column, and any declared slice columns; the split time column never reaches you.
+Derive features as `columns - {spec.target} - set(spec.evaluation.slices)` - `mbt_adapter_base.encoding.split_feature_columns` does this and separates string columns as categoricals.
+If your framework supports categoricals natively, train them that way with deterministic (sorted) train-time levels persisted in the artifact, and map unseen levels to missing; `features.categorical` policies (`levels`, `min_frequency`, `max_levels`, `null_as_level`) are applied by `encoding.train_categories` and `categorical_codes`.
+Reject other non-numeric types (timestamps, nested types) with an actionable error rather than encoding them silently.
+
+A `validation` split is present when the dataset declares `split.validation`, or during a tuning trial, where core carves one from train.
+If your adapter honours early stopping, call `training_helpers.note_early_stopping_without_validation` so a user who set it without a validation split is told every round trained.
 
 ### Determinism
 
-Declare a `DeterminismTier`: `exact` if same seed + same data reproduce
-metrics bit-for-bit (fix thread counts!), else `tolerance` with per-metric
-absolute tolerances. Threshold gates widen by your tolerance in the model's
-favor; champion deltas never widen.
+Declare a `DeterminismTier`: `exact` if the same seed and data reproduce metrics bit for bit (fix thread counts), otherwise `tolerance` with per-metric absolute tolerances.
+Threshold gates widen by your tolerance in the model's favor; champion deltas never do.
 
 ### Metrics
 
-`mbt_adapter_base.metrics.compute_results` (via the shared
-`training_helpers.evaluate_split`) gives you the builtin implementations plus
-slice group-bys - use it so champion/challenger comparisons across adapters
-compute every metric identically. Split membership is portable too (F19): a
-data adapter that implements random splits or sampling must bucket rows by the
-canonical cross-adapter digest - the unsigned lower 64 bits of the md5 of the
-'|'-joined key (salt first when present, columns COALESCEd to '' and cast to
-the engine's string type), modulo 1,000,000 - which is Snowflake's
-`MD5_NUMBER_LOWER64`, Spark's `conv(substring(md5(...), 17, 16), 16, 10)`, and
-local DuckDB's `('0x' || substring(md5(...), 17, 16))::UBIGINT`. Pin your SQL
-to the Python reference `int(md5(preimage).hexdigest()[16:32], 16) % 1_000_000`
-in a test, as the built-in adapters do, so the same fraction/seed selects the
-same rows on every backend.
-It dispatches on the metric name: binary classification
-(roc_auc, pr_auc, logloss, brier, accuracy, ece, recall_at_precision_*,
-precision_at_recall_*) and regression (rmse, mae, r2, mape) share one entry
-point, so an adapter that supports both tasks needs no metric-side branching.
+Use `mbt_adapter_base.metrics.compute_results`, through `training_helpers.evaluate_split`, rather than computing metrics yourself.
+It implements every builtin metric and the slice group-bys, so champion/challenger comparisons across adapters compute every metric with identical code.
+It dispatches on the metric name, so an adapter that supports both tasks needs no metric-side branching: binary classification (`roc_auc`, `pr_auc`, `logloss`, `brier`, `accuracy`, `ece`, and the parameterized `recall_at_precision_*`, `precision_at_recall_*`, `lift_at_*`, `gain_at_*`, `threshold_at_precision_*`, `threshold_at_recall_*`) and regression (`rmse`, `mae`, `r2`, `mape`).
 
-## 4. Pass the compliance suite - the ship bar
+Other shared helpers cover `{{ auto }}` class-weight resolution (`resolve_scale_pos_weight`) and the staged-Parquet fallback for path-based frameworks; prefer them to re-implementing.
+
+## 4. Data adapters
+
+A data adapter turns a source into materialized splits, pins snapshots, and - from contract 1.1 - builds scoring batches and opens the prediction store.
+See `mbt_adapter_base.protocols.DataAdapter`; `packages/mbt-snowflake` is a compact SQL-pushdown example and the built-in `local` adapter in mbt-core the simplest one.
+
+| Member | Notes |
+|---|---|
+| `name` | Plain attribute |
+| `snapshot_id(source, deep=False)` | A stable token for the relation's current state, cheap by default and content-based when `deep`. It must move whenever the data or the relation's shape changes, and only then |
+| `build_dataset(spec, ctx)` | Read the one relation `ctx.source` names (ADR-29), apply `spec.filters`, sampling, and the split windows in `ctx.resolved_windows`, write one Parquet file per split under `ctx.output_dir`, and return a `DatasetHandle`. Verify the relation still matches `ctx.node.snapshot_id` first, and fail if it moved |
+| `from_locator(locator)` | Reopen a materialization inside a job subprocess from its serialized `DatasetLocator` |
+| `build_scoring_input(spec, ctx)` | Contract 1.1: one unlabeled `score` split, with the same filters and sampling and the `score` window. Zero rows is a warning, not an error, and a scoring batch is never verified against a pin - it is expected to change every run (R2-10) |
+| `open_predictions(output)` | Contract 1.1: a `PredictionStore` for the scoring node's `output` |
+| `supported_source_formats` | A frozenset such as `{"parquet"}`; compilation rejects a source declaring any other format before anything runs |
+| `count_source_duplicates(source, columns)` | Optional: the number of composite keys appearing more than once in a raw table, nulls ignored - backs `unique: {source: ...}`. Push it down; only a scalar should come back |
+| `read_source_distinct(source, column)` | Optional: distinct non-null values as a single `value` column - backs `relationships` |
+
+Reuse `mbt_adapter_base.materialization.MaterializedDatasetHandle` and `write_materialization_metadata` for the on-disk layout, and `mbt_adapter_base.predictions.LocalPredictionStore` for a file-based prediction store; training adapters and `mbt monitor` already read those layouts.
+Report progress through `ctx.events.emit("...")` with a plain string - the contract gives adapters no event types - as the built-in adapters do with their row counts.
+A data adapter that lacks the optional source-level methods still works; the checks that need them fail with an actionable message rather than passing silently.
+Core probes for the contract 1.1 methods, so a 1.0 data adapter keeps training and fails only `mbt score`, with a clear message.
+
+**Sampling and random splits must use the canonical digest (F19)**, so a given fraction and seed select the same rows on every backend:
+the unsigned lower 64 bits of the md5 of the `|`-joined key (salt first when present, each column cast to the engine's string type and coalesced to `''`), modulo 1,000,000.
+That is Snowflake's `MD5_NUMBER_LOWER64`, Spark's `conv(substring(md5(...), 17, 16), 16, 10)`, and DuckDB's `('0x' || substring(md5(...), 17, 16))::UBIGINT`.
+Pin your SQL to the Python reference `int(md5(preimage).hexdigest()[16:32], 16) % 1_000_000` in a test, as the built-in adapters do.
+Hash the declared `sample_key`; with no key, refuse rather than hashing every column, because a keyless digest re-buckets every row whenever a column is added (ADR-29).
+
+## 5. Tracking and registry adapters
+
+**Tracking** (`TrackingAdapter`) records training runs only: `mbt score` and `mbt monitor` never open one (ADR-28).
+Implement `start_run(node, meta)`, `log(run, params=..., metrics=..., tags=..., artifacts=...)`, `end_run(run, status)`, and `resume(run_id)`.
+The training job starts and ends the run; afterwards the coordinator resumes it by id to attach the gate verdicts and the registered version, so `resume` must work from a different process.
+Three members are optional and probed: `prepare()` to warm the backend before parallel jobs start, `log_trial(run, index, params, value)` for tuning history, and `log_document(run, path)` to upload a file mbt wrote, such as `inference_config.json`.
+Core composes the experiment name and passes it as `config["experiment"]`; use it as given.
+
+**Registry** (`RegistryAdapter`) implements `register(artifact, name, metadata)`, `get_champion(name, stage)`, `get_version(name, version)`, and `transition(version, stage)`.
+Store `metadata` as version tags and return them on read: `mbt promote` reads `mbt.gates_passed`, and scoring reads the artifact, baseline, and inference-config references from them.
+Keep stages exclusive per version, and archive a displaced production champion on promotion, so `mbt rollback` has something to roll back to.
+Return `None` only for a model, version, or stage that genuinely does not exist, and raise on anything else: a transient backend error read as "no champion" would silently pass a champion gate (F9).
+
+## 6. Compute adapters
+
+A compute adapter (`ComputeAdapter`) runs a serialized `TrainingJob` somewhere and returns its `JobResult`.
+Implement `submit(job)`, returning a handle with a `job_id`, and `wait(handle)`.
+The job runs `python -m mbt.execute.job <job.json>`, which writes `<job.json>.result.json` and streams JSON events on stdout; the result file is authoritative, so a job that dies without writing one must come back as an error result.
+Forward each event line to the coordinator's bus as it arrives, so logs interleave in real time.
+`mbt.adapters.local.compute` exposes `parse_job_line`, `result_path_for`, and `parse_job_timeout` as public helpers for exactly this, which is why a compute adapter may depend on mbt-core.
+Implement the optional `terminate(handle, reason)` so `job_timeout_seconds` and `--fail-fast` can stop a running job.
+
+## 7. Tuning engines
+
+A tuning engine (`TuningEngine`) has a `name` and `tune(spec, objective, n_trials, seed)` returning a `TuningResult` (best parameters, best value, trial and pruned counts).
+Call `objective(params)` once per trial; the trial loop, data, and metrics belong to the job.
+When `spec.pruner` is set, call `objective(params, report=report)` instead, where your `report(step, value)` receives higher-is-better values and may raise to prune the trial.
+Seed every source of randomness from `seed`, so the same spec proposes the same trials, and read operational knobs such as sampler choice from `config`, never from the spec: they must not change a model's identity.
+
+## 8. Pass the compliance suite
 
 ```python
 # tests/test_myframework_compliance.py
@@ -151,37 +192,17 @@ class TestMyFrameworkCompliance(TrainingAdapterCompliance):
     auto_hyperparameter = "scale_pos_weight"  # or None
 ```
 
-The suite asserts: contract metadata, plugin import hygiene, unknown-param
-rejection, seed determinism within your declared tier, `resolve_auto`
-idempotence with no leftover sentinels, train → export → load → evaluate
-round-trip stability, `predict` shape (with and without the target column),
-and that the model actually learns on a signal-bearing dataset.
+Install `mbt-adapter-base[compliance]` for the suite.
+For a training adapter it checks contract metadata, both import rules, rejection of unknown parameters, seed determinism within your declared tier, `resolve_auto` idempotence with no leftover sentinels, a stable train, export, load, and evaluate round trip, `predict` with and without the target column, that the model learns from both a numeric and a categorical signal, regression when supported, and every optional capability you claim.
 
-DataAdapters that implement batch scoring (contract 1.1: `build_scoring_input`
-+ `open_predictions`) subclass `PredictionStoreCompliance` too - it asserts
-idempotent `write_run` by run key, `scored_at` ordering, column projection,
-and the marker-ledger roundtrip (ADR-21). Reuse
-`mbt_adapter_base.predictions.LocalPredictionStore` for file-based layouts.
+A data adapter that implements batch scoring also subclasses `PredictionStoreCompliance`, which checks idempotent `write_run` by run key, `scored_at` ordering, column projection, and the marker ledger (ADR-21).
 
-DataAdapters may also implement the optional source-level check methods
-(F2/F21), `hasattr`-probed by the check layer: `count_source_duplicates(source,
-columns) -> int` (distinct COMPOSITE keys appearing more than once in the raw
-table, nulls ignored - the pre-join `unique: {source: ...}` contract; push it
-down, only a scalar returns) and `read_source_distinct(source, column) ->
-pa.Table` (DISTINCT non-null values as a single ``value`` column - the parent
-side of `relationships`). An adapter lacking them fails those checks with an
-actionable message rather than silently passing. Note that these read a table
-the dataset does not otherwise touch: since ADR-29 a dataset reads exactly one
-relation, so `build_dataset` never joins, but a project may still assert the
-key uniqueness or referential integrity its panel depends on against the raw
-tables upstream - the three built-in data adapters show the pattern.
+Passing the suite is the ship bar.
+Then add an end-to-end test that drives a small project through the real CLI against your adapter; the repository's `tests/test_adapter_swap.py` does this for `lightgbm` and `sklearn` by editing only the spec.
 
-## 5. Contract versioning
+## 9. Contract versioning
 
-`mbt-adapter-base` is SemVer'd independently. Pin `contract_version` to the
-version you built against; core accepts the same major with a minor ≤ its
-own and refuses otherwise with an upgrade hint. Deprecations warn for one
-minor and are removed the next major. Contract 1.1 added the scoring surface
-(`DataAdapter.build_scoring_input`, `DataAdapter.open_predictions`); core
-probes for it with `hasattr`, so 1.0 data adapters keep training and fail
-only `mbt score`, with a clear message.
+`mbt-adapter-base` versions the contract separately from its packages.
+Pin `contract_version` to the version you built against; core loads an adapter with the same major version and a minor version no newer than its own, and refuses anything else with an upgrade hint.
+A deprecation warns for one minor version and is removed at the next major.
+Contract 1.1 added the scoring surface (`DataAdapter.build_scoring_input`, `DataAdapter.open_predictions`).

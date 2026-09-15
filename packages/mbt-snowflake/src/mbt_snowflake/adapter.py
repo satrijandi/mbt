@@ -468,8 +468,8 @@ class SnowflakeDataAdapter:
             if not keys:
                 raise SnowflakeAdapterError(
                     "sampling a Snowflake scoring input needs a stable row identity",
-                    hint="declare sample_key on the input (or use the inputs form, "
-                    "whose join_key is used)",
+                    hint="declare input.sample_key (the entity id column(s)) in the "
+                    "scoring spec, or set sample_fraction: 1.0 for this target",
                 )
             where.append(sampling_predicate(keys, ctx.sample_fraction))
 

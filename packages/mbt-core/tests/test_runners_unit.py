@@ -33,36 +33,6 @@ from mbt.execute.runners import (
 
 OLD_GATE = "threshold: \"{{ var('default_threshold') }}\""
 
-MULTI_SOURCES_YML = """
-sources:
-  - name: lakehouse
-    tables:
-      - name: subscribers
-        path: data/subscribers/*.parquet
-      - name: scoring_spine
-        path: data/scoring_spine/*.parquet
-      - name: scoring_features
-        path: data/scoring_features/*.parquet
-"""
-
-MULTI_SCORING_YML = """
-scoring:
-  - name: churn_scoring
-    owner: lifecycle-eng@example.com
-    model: ref('churn_model')
-    input:
-      inputs:
-        spine: source('lakehouse', 'scoring_spine')
-        features:
-          - source('lakehouse', 'scoring_features')
-        join_key: user_id
-      time_column: snapshot_date
-      window: "-7d:now"
-    output:
-      path: predictions/churn_scores
-      columns: [user_id]
-"""
-
 
 def _score_setup(project_dir: Path) -> None:
     write(project_dir / "sources.yml", SOURCES_WITH_BATCH)

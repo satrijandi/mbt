@@ -1,40 +1,43 @@
 # Roadmap
 
-## v0.1 (this release)
+## v0.1 - released
 
-A tabular vertical done extremely well: declarative **binary classification and regression** on all five training adapters, with the full PR → CI → registry → promotion → batch scoring → ground-truth monitoring loop, exact reproducibility via stored manifests, and state-aware retraining.
-Data comes from local Parquet, **Snowflake**, or a **Spark lakehouse**; training adapters cover **XGBoost/LightGBM/scikit-learn** plus **SparkML** and **H2O AutoML** (optionally distributed via Sparkling Water); **MLflow** tracks and registers; **Optuna** tunes.
-The dockerized showcase (`examples/showcase`) proves the loop nightly in CI against real services end to end.
+A tabular vertical done thoroughly: declarative **binary classification and regression** on five training adapters, with the whole loop from pull request to CI build, registry, gate-verified promotion, batch scoring, and ground-truth monitoring.
+Stored manifests reproduce runs exactly, and state-aware selection retrains only what changed.
 
-## v1 candidates (architecture already accommodates)
+- **Data**: local Parquet through DuckDB, **Snowflake**, and a **Spark lakehouse** (Parquet, Delta, catalog tables), each reading one relation per dataset (ADR-29).
+- **Training**: **XGBoost**, **LightGBM**, **scikit-learn**, **SparkML**, and **H2O AutoML**, optionally distributed through Sparkling Water.
+- **Compute**: a local subprocess per job, or `spark-submit` for cluster-sized drivers.
+- **Tracking and registry**: **MLflow**. **Tuning**: **Optuna**, with median pruning.
+- **Serving and monitoring**: `scoring` resources run by `mbt score` with PSI and KS shift monitors, and `mbt monitor` for delayed ground-truth evaluation (ADR-20, ADR-21).
+- **Quality**: threshold, paired-bootstrap champion, slice, backtest, and disparity gates; declarative data checks; post-hoc calibration; declarative feature treatment (ADR-27).
 
-- **Remote compute** - shipped for Spark (`mbt-spark` compute adapter:
-  spark-submit'd jobs); K8s/Ray reuse the same serialized `TrainingJob`
-  seam.
-- **sklearn adapter** - shipped (`mbt-sklearn`): LogisticRegression/Ridge,
-  RandomForest, and HistGradientBoosting against the same public contract,
-  exact determinism tier, zero mbt-core changes. It adds no dependency a
-  metric-computing install does not already have.
-- **PyTorch adapter** - a new package against the same contract, declaring a
-  tolerance determinism tier.
-- **Survival & ranking tasks** - adapters register task schemas via
-  `AdapterPlugin.task_schemas`; no core changes.
-- **Feast DataAdapter** - `source()` gains a feature-view form behind the
-  same `DatasetHandle`/`DatasetLocator`.
-- **Ensembles/stacking** - models with `ref()` inputs from other models;
-  the DAG and manifest already support model → model edges.
-- **`mbt score`** - shipped: batch scoring pipelines are a first-class
-  `scoring` resource (1 config = 1 serving pipeline) executed by
-  `mbt score`, with shift monitors against training-time baselines and
-  delayed ground-truth evaluation via `mbt monitor` (ADR-20/21). Online
-  serving remains a non-goal; warehouse prediction sinks are follow-ups.
-- **Airflow provider** - an operator shelling out to `mbt build` per
-  manifest-derived task group. Reference DAGs that run the digest-pinned
-  deployable unit with exit-code routing (quality verdicts never retried)
-  ship in `examples/showcase`; a first-class provider package remains open.
-- **Slice-level gates** - shipped: threshold and champion gates on slices
-  are evaluated and block registration. The open piece is statistical:
-  champion slice gates compare point deltas, not the ADR-18 paired-bootstrap
-  lower bound used for whole-split champion gates.
-- **Iceberg sources** - snapshot IDs from table metadata via
-  `mbt-core[iceberg]`.
+The [v0.1 status](v0.1-status.md) page carries the evidence, and the dockerized [showcase](showcase.md) runs the loop nightly against real services.
+
+## Next
+
+These build on seams the architecture already has; none needs a change to the adapter contract's major version.
+
+| Item | State |
+|---|---|
+| **PyPI publication** | The release workflow builds and attests wheels for every package; publishing waits on creating the PyPI projects and their Trusted Publishers (see CONTRIBUTING) |
+| **Warehouse-native prediction stores** | Designed in [ADR-23](adr/0023-warehouse-batch-scoring.md): predictions written back into Snowflake or lakehouse tables instead of staged Parquet. Gated on a live verification of the Snowflake serving leg, tracked in [issue #1](https://github.com/satrijandi/mbt/issues/1) |
+| **PyTorch adapter** | A new training package against the same contract, declaring a tolerance determinism tier |
+| **Survival and ranking tasks** | Adapters register task schemas through `AdapterPlugin.task_schemas`, with no core changes |
+| **Multiclass classification** | Not started; binary classification and regression are the two verticals today |
+| **Feast data adapter** | `source()` gains a feature-view form behind the same dataset handle and locator |
+| **Ensembles and stacking** | Models with `ref()` inputs from other models; the DAG and manifest already support model-to-model edges |
+| **Champion slice gates with a confidence bound** | Slice gates block registration today, but champion slice gates compare point deltas rather than the paired-bootstrap lower bound whole-split gates use |
+| **Kubernetes and Ray compute** | New compute adapters over the same serialized training-job seam `mbt-spark` already uses |
+| **Airflow provider** | The showcase ships reference DAGs that run a digest-pinned image with exit-code routing; a first-class provider package is still open |
+| **Iceberg sources** | Snapshot ids read from table metadata |
+
+[MLOps alignment](mlops-alignment.md) lists the practices mbt does not cover yet - fairness metrics beyond the disparity gate, drift-triggered retraining, delivery metrics, and others - and says which of them are candidates and which are out of scope.
+
+## Non-goals
+
+Recorded so the question does not have to be reopened each time it comes up.
+
+- **Online, request/response serving.** mbt's serving surface is batch scoring: every command terminates like a job. Serving infrastructure reacts to registry stages instead (ADR-20).
+- **Joining tables, or accepting a SQL query as a dataset.** A dataset reads one relation; the join that builds it belongs upstream in dbt or the warehouse, and `filters:` and `hooks.py` stay the only escape hatches (ADR-29).
+- **A feature store or a model catalog product.** mbt integrates with them rather than rebuilding them.

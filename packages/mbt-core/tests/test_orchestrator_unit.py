@@ -200,6 +200,54 @@ def test_run_evaluate_apply_gates(demo_project: Path, fake_registry: AdapterRegi
     assert model.gates and not model.gates[0].passed
 
 
+def test_evaluating_the_champion_itself_does_not_gate_it_against_itself(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """`mbt evaluate --stage production --gates` is the documented decay check.
+
+    With a champion gate in the spec it used to score the champion against its
+    own predictions: a delta of exactly 0, which fails any positive min_delta,
+    so the check exited 2 on every run no matter how healthy the model was.
+    """
+    from test_scoring_execution import _promote
+
+    model_yml = demo_project / "models/churn_model.yml"
+    threshold_only = model_yml.read_text()
+    with_champion_gate = threshold_only.replace(
+        OLD_GATE,
+        OLD_GATE + "\n        - metric: pr_auc\n          compare_to: production"
+        "\n          min_delta: 0.005",
+    )
+    model_yml.write_text(with_champion_gate)
+    assert invoke(demo_project, fake_registry, "build").exit_code() == 0
+    _promote(demo_project)
+
+    decay = _evaluate(
+        demo_project, fake_registry, model_name="churn_model", stage="production", apply_gates=True
+    )
+    assert decay.exit_code() == 0
+    model = {r.unique_id: r for r in decay.results}[MODEL_UID]
+    threshold, champion = model.gates
+    assert threshold.kind == "threshold" and threshold.passed  # still really evaluated
+    assert champion.kind == "champion" and champion.passed
+    assert champion.message and "champion itself" in champion.message
+    assert champion.champion_value is None  # no self-comparison was computed
+
+    # A version that is NOT the champion is still compared for real. Register
+    # v2 without the champion gate, then evaluate it with the gate back: a
+    # retrain on the same data cannot clear min_delta over its twin.
+    model_yml.write_text(threshold_only)
+    assert invoke(demo_project, fake_registry, "build").exit_code() == 0
+    model_yml.write_text(with_champion_gate)
+    challenger = _evaluate(
+        demo_project, fake_registry, model_name="churn_model", version="2", apply_gates=True
+    )
+    assert challenger.exit_code() == 2
+    gate = {r.unique_id: r for r in challenger.results}[MODEL_UID].gates[1]
+    assert gate.kind == "champion" and not gate.passed
+    assert gate.champion_version == "1" and gate.champion_value is not None
+
+
 def test_run_evaluate_job_error_lands_in_results(
     demo_project: Path, fake_registry: AdapterRegistry
 ) -> None:

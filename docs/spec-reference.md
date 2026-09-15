@@ -152,13 +152,13 @@ actually trained with rather than whatever the working tree says today:
   "resolved": {
     "feature_columns": ["...the exact order the model was fit on..."],
     "target": "churned_90d", "task": "binary_classification",
-    "adapter": "h2o", "seed": 42, "calibration": "isotonic",
+    "adapter": "h2o_automl", "seed": 42, "calibration": "isotonic",
     "categorical": {...}, "transforms": {...}, "monotonic": {...},
     "operating_points": {"threshold_at_precision_0.35": 0.41}
   },
   "hooks": {"path": "models/wide_hooks.py", "hash": "sha256:..."},
   "identity": {"config_hash": "sha256:...", "manifest_hash": "sha256:...", ...},
-  "artifact": {"uri": "s3://...", "format": "mojo", ...},
+  "artifact": {"uri": "s3://...", "format": "h2o_mojo", ...},
   "baseline_uri": "s3://..."
 }
 ```
@@ -195,8 +195,9 @@ fails loudly up front instead of being silently read as parquet.
 
 ## datasets/*.yml
 
-Data comes from exactly one of ``source`` (a single table) or ``inputs``
-(feature tables joined onto a label table):
+A dataset reads exactly one relation, named by `source:` - a table, a view, or
+a warehouse dynamic table (ADR-29). Whatever joins that relation together is
+upstream of mbt:
 
 ```yaml
 datasets:
@@ -330,13 +331,15 @@ gets the embargoed window; an embargo that consumes the whole train window is a
 compile error.
 
 **Random splits:** `strategy: random` uses fractions (`train: "0.8"`),
-requires `seed`, and supports `stratify_by: <column>`. Two guardrail
-warnings fire at parse time: combining a random split with a `time_column`
-(temporal leakage: rows from after the test period can train the model),
-and a random split without `sample_key` (rows split independently, so
-repeated entities can straddle train and test). `sample_key` is the
-grouped-split control: set it to the entity id and hash-based ranking
-keeps all of an entity's rows on one side of the split.
+requires `seed`, and supports `stratify_by: <column>`. Combining a random split
+with a `time_column` warns at parse time (temporal leakage: rows from after the
+test period can train the model). `sample_key` is the grouped-split control:
+set it to the entity id and hash-based bucketing keeps all of an entity's rows
+on one side of the split.
+
+**Temporal embargo checks:** with `label.horizon` declared, parse warns when
+`split.embargo` is missing or shorter than the horizon, and when a scoring
+pipeline's `ground_truth.maturity` is shorter than it.
 
 Random-split membership is stable and portable (F19): every adapter buckets a
 row by the same canonical digest - the unsigned lower 64 bits of the md5 of the
@@ -526,7 +529,7 @@ single-split value, so a single lucky split can no longer flatter the estimate
 and an unstable model (one whose folds disagree, i.e. a large std) is visible at
 a glance. A threshold gate can gate the mean instead of the single
 split with `source: backtest` (whole-split threshold gates only). It works on all
-four adapters; note it refits `N` (or, walk-forward, `N-1`) extra models, so the
+five training adapters; note it refits `N` (or, walk-forward, `N-1`) extra models, so the
 training-time cost is real (and larger on the distributed adapters, which
 retrain per fold).
 `protocol.nested_cv: true` makes it NESTED cross-validation: each outer fold
@@ -622,7 +625,7 @@ scoring:
       filters: ["is_active = true"]     # SQL WHERE fragments, ANDed
       time_column: snapshot_date        # optional
       window: "-7d:now"                 # optional; resolved against the anchor
-      sample_key: user_id               # optional, as on datasets
+      sample_key: user_id               # required when the target samples (sample_fraction < 1)
 
     checks:                             # label-free subset only
       - schema: {columns: [user_id]}

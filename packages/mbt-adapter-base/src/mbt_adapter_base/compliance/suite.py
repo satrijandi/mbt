@@ -303,6 +303,30 @@ class TrainingAdapterCompliance:
             "frameworks must load lazily inside adapter methods (ADR-14)"
         )
 
+    def test_plugin_imports_no_mbt_core(self) -> None:
+        """An adapter builds against mbt-adapter-base only (G4).
+
+        Importing the plugin must not load any ``mbt.*`` module: core internals
+        are not a contract, and an adapter that reaches into them breaks on the
+        next core refactor without a contract version ever changing. mbt-lightgbm
+        and mbt-sklearn carried this check privately; the ship bar is where it
+        belongs, so every adapter that claims compliance is held to it.
+        """
+        probe = (
+            "import json, sys\n"
+            f"import {self.plugin_module}\n"
+            "loaded = sorted(m for m in sys.modules if m == 'mbt' or m.startswith('mbt.'))\n"
+            "print(json.dumps(loaded))\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+        loaded = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert loaded == [], (
+            f"importing {self.plugin_module} loaded mbt-core module(s) {loaded}; "
+            "adapters import mbt_adapter_base, never mbt-core internals"
+        )
+
     def test_param_model_rejects_unknown_params(self) -> None:
         import pytest
 

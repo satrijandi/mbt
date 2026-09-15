@@ -4,7 +4,9 @@
 #
 # What this file pins, and what it does not:
 #
-#  - The three mbt packages are pinned to the release tag v__MBT_VERSION__.
+#  - The four mbt packages are pinned to the release tag v__MBT_VERSION__.
+#    mbt-adapter-base is one of them because the other three depend on it and
+#    it is not on PyPI, so pip can only resolve it from a ref listed here.
 #    Reproducible AND installable straight from a fresh checkout, with no
 #    private index. Note that a git TAG is movable, on GitHub included; the
 #    immutable form is a commit SHA, so replace @v__MBT_VERSION__ with the SHA
@@ -17,9 +19,10 @@
 #    pinning mbt pins none of them.
 #  - Their own transitive dependencies are NOT pinned, and nothing here is
 #    hash-verified. That needs a real lock, which needs mbt on PyPI (a git ref
-#    has no wheel hash to record). Once it is published, switch the three refs
+#    has no wheel hash to record). Once it is published, switch the four refs
 #    to plain version pins (mbt-core==X.Y.Z) and generate the full lock:
 #      uv pip compile --generate-hashes requirements.in -o requirements.txt
+mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-adapter-base
 mbt-core @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-core
 mbt-xgboost @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-xgboost
 mbt-mlflow @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-mlflow

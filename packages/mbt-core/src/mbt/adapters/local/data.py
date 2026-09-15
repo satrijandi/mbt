@@ -1,18 +1,16 @@
 """Local Parquet DataAdapter via DuckDB (TSD §13.2, FR-ADPT-04).
 
 Sources resolve to Parquet globs under ``config.root``. ``build_dataset``
-runs one DuckDB query: read the source table(s) - joining feature tables
-onto the label table for multi-table ``inputs`` datasets - then filters,
+runs one DuckDB query over the dataset's single relation (ADR-29): filters,
 deterministic hash sampling, and split assignment (resolved temporal
 windows, or seeded hash split), writing one Parquet file per split.
 
 Sampling and random-split reproducibility: rows hash to a bucket via the
 canonical cross-adapter digest - the unsigned lower 64 bits of
-``md5('|'-joined key)`` modulo 1_000_000 - over the dataset's ``sample_key``
-(or join key). The same fraction always keeps the same rows, smaller
-fractions are subsets of larger ones, and the same key lands in the same
-bucket on Snowflake and Spark too (F19). Without a key the digest falls
-back to hashing every column - correct, but slow on wide tables.
+``md5('|'-joined key)`` modulo 1_000_000 - over the declared ``sample_key``.
+The same fraction always keeps the same rows, smaller fractions are subsets
+of larger ones, and the same key lands in the same bucket on Snowflake and
+Spark too (F19). There is no keyless fallback: see ``_digest_columns``.
 """
 
 import glob as globlib
@@ -294,6 +292,17 @@ class LocalDataAdapter:
         """
         if sample_keys:
             return sample_keys
+        if ctx.node.resource_type == "scoring":
+            # The only node kind that still reaches this: a scoring input's key
+            # is optional, and it has no split, so say what actually moves.
+            raise AdapterError(
+                f"no 'sample_key' declared on the scoring input, so {purpose} would "
+                "hash every column - adding or removing any column then draws a "
+                "different sample of the batch",
+                resource=ctx.node.unique_id,
+                hint="declare input.sample_key (the entity id column(s)) in the "
+                "scoring spec, or set sample_fraction: 1.0 for this target",
+            )
         raise AdapterError(
             f"no 'sample_key' declared, so {purpose} would hash every column - "
             "adding or removing any column then re-buckets every row and moves "

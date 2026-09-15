@@ -21,6 +21,7 @@ They carry the reasoning behind a large share of the current design, and several
 - `reviews/feedback-v1.md` - reviews 1 and 2, closed 2026-07-20. Section IDs `2.6`, `3.6`, ... and `R2-*`.
 - `reviews/feedback-v2.md` - review 3, closed 2026-07-22. Finding IDs `F1`-`F27`, `P3`.
 - `reviews/feedback-v3.md` - review 4, closed 2026-09-01. Finding IDs `A-1`-`G-2`, cited as `FEEDBACK v3 A-1`.
+- `reviews/feedback-v4.md` - review 5, closed 2026-09-09. Finding IDs `A-1`-`E-1`; code comments cite them as `FEEDBACK B-1`, `FEEDBACK D-3`.
 
 There is no review in flight right now.
 While one is, it lives at the repo root as `FEEDBACK_v<n>.md` so it is impossible to miss, and moves here once its progress log is closed.
@@ -32,5 +33,5 @@ For the current design of the system, read these - they supersede the sketches a
 - **`docs/architecture.md`** - the living map of the `mbt-core` engine (compile pipeline, coordinator/job split, module layout).
 - **`docs/adr/`** - Architecture Decision Records are the authoritative design record.
   ADR-15 ("v0 contract refinements beyond the original TSD sketch") explicitly supersedes `TSD.md`.
-- **`docs/`** - the published documentation (concepts, spec reference, CLI reference, mlops-alignment, v0.1 status).
+- **`docs/`** - the published documentation at <https://satrijandi.github.io/mbt/>.
 - **`CLAUDE.md`** - the working guide and load-bearing decisions.

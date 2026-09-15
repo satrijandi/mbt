@@ -47,9 +47,12 @@ dependencies = [
     "jinja2>=3.1.6",
     "networkx>=3.2",
     # 1.2: first release parsing `SELECT * RENAME (...)`, which the local
-    # adapter emits for every label-offset join (adapters/local/data.py). On
-    # 1.0/1.1 that is a ParserException at build time, so the old `>=1.0` was
-    # not a conservative bound but a broken install a user could actually get.
+    # adapter emitted for every label-offset join. On 1.0/1.1 that was a
+    # ParserException at build time, so the old `>=1.0` was not a conservative
+    # bound but a broken install a user could actually get. ADR-29 removed that
+    # join, so the original reason is gone; 1.2 stays because it is the bound
+    # the floors job actually tests. Lower it only after that job passes on
+    # the lower version.
     "duckdb>=1.2",
     "pyarrow>=23.0.1",  # 23.0.1 clears PYSEC-2026-113 (15.0 also carries PYSEC-2024-161)
     "PyYAML>=6.0",

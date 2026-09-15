@@ -263,10 +263,11 @@ def _check_unique(
     unique on its own, so it needs the composite form - pointed at the panel's
     own source, which is also the relation a fan-out would have damaged.
 
-    With ``source: <group.name>`` the check runs PRE-JOIN against the raw
-    source table instead, treating ``columns`` as one composite key - the 1:1
-    join-cardinality contract that stops the fan-out before it happens (F2):
-    a source unique on its ``using`` key cannot multiply the spine.
+    With ``source: <group.name>`` the check reads the raw source table instead,
+    treating ``columns`` as one composite key (F2). Since ADR-29 the join that
+    builds a panel lives upstream, so this asserts the key uniqueness the panel
+    depends on against the table that owes it - a duplicated key there is what
+    fans a joined panel out.
     """
     columns = list(params.get("columns") or [])
     if not columns:
@@ -302,7 +303,7 @@ def _check_unique(
                 passed=False,
                 message=(
                     f"source {label}: composite key ({key}): {duplicates} duplicated "
-                    "key(s) - a non-unique join key fans out the spine (F2)"
+                    "key(s) - any join on this key upstream fans the panel out (F2)"
                 ),
             )
         return TestResult(name="unique", passed=True, message=f"source {label}: ({key}) unique")

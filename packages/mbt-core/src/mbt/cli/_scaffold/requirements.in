@@ -13,9 +13,15 @@
 # the exact condition ADR-19 exists to detect. Renovate keeps them moving on
 # purpose, one reviewed PR at a time.
 #
-# Once mbt is on PyPI, switch the three git refs to plain version pins and
+# mbt-adapter-base is listed although nothing here imports it: every other mbt
+# package depends on it, it is not on PyPI either, and pip can only satisfy
+# that dependency from a ref it was given. Drop it and the install fails with
+# "No matching distribution found for mbt-adapter-base".
+#
+# Once mbt is on PyPI, switch the four git refs to plain version pins and
 # regenerate the fully transitive, hash-verified lock:
 #   uv pip compile --generate-hashes requirements.in -o requirements.txt
+mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-adapter-base
 mbt-core @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-core
 mbt-xgboost @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-xgboost
 mbt-mlflow @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-mlflow

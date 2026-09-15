@@ -209,3 +209,25 @@ def test_overlapping_monitor_does_not_re_evaluate_a_recorded_run(
     assert node.status == "success"
     assert "evaluated 0 of 1" in (node.message or "")  # re-claim lost -> skipped
     assert any("already evaluated by a concurrent monitor run" in m for m in sink.messages())
+
+
+def test_label_read_events_drop_only_the_scoring_row_count() -> None:
+    """Every adapter's scoring-input row count ("N rows to score", "nothing to
+    score") is filtered from a label read; anything else an adapter says - a
+    warning, a snapshot note - still reaches the operator."""
+    from misc_unit_helpers import RecordingSink
+
+    from mbt.events.models import LogMessage
+    from mbt.execute.monitor import _LabelReadEvents
+
+    sink = RecordingSink()
+    events = _LabelReadEvents(sink)
+    events.emit(LogMessage(message="scoring input materialized 120 rows to score"))
+    events.emit(
+        LogMessage(level="warn", message="scoring input materialized 0 rows; nothing to score")
+    )
+    events.emit(LogMessage(message="scoring input source.x: materialized 9 rows to score"))
+    kept = LogMessage(level="warn", message="snapshot token moved under a pinned manifest")
+    events.emit(kept)
+    events.emit("a foreign object from a hook")
+    assert sink.events == [kept, "a foreign object from a hook"]

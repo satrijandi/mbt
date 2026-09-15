@@ -278,3 +278,32 @@ def test_calibration_requires_a_holdout_split() -> None:
         adapter.train(
             _spec(hyperparameters={"n_estimators": 10}, calibration="isotonic"), data, _ctx()
         )
+
+
+def test_early_stopping_without_validation_is_announced_not_silent() -> None:
+    """With no validation split the booster trains every round; the adapter
+    now says so instead of reading as if early stopping happened."""
+
+    class _Recording:
+        def __init__(self) -> None:
+            self.messages: list[object] = []
+
+        def emit(self, event: object) -> None:
+            self.messages.append(event)
+
+    base = tiny_binary_dataset()
+    hp = {"n_estimators": 20, "num_leaves": 15, "min_child_samples": 5, "early_stopping_rounds": 5}
+    ctx = _ctx()
+    sink = _Recording()
+    ctx = RunContext(**{**ctx.__dict__, "events": sink})
+    LightGBMTrainingAdapter({}).train(_spec(hyperparameters=hp), base, ctx)
+    assert any("has no validation split to stop on" in str(m) for m in sink.messages)
+
+    with_validation = InMemoryDatasetHandle(
+        {"train": base.read("train"), "validation": base.read("test"), "test": base.read("test")},
+        label_column="label",
+    )
+    quiet = _Recording()
+    ctx = RunContext(**{**_ctx().__dict__, "events": quiet})
+    LightGBMTrainingAdapter({}).train(_spec(hyperparameters=hp), with_validation, ctx)
+    assert not any("has no validation split" in str(m) for m in quiet.messages)

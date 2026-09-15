@@ -103,6 +103,25 @@ def test_quality_events_render() -> None:
     assert TestEvaluatedEvent(test="no_leakage").human() == "test no_leakage: PASS"
     gate = GateEvaluated(metric="pr_auc", kind="threshold", passed=False, expected=0.4, actual=0.3)
     assert gate.human() == "gate pr_auc (threshold): FAIL - expected 0.4, got 0.3"
+    # a raw metric float is trimmed for the console ...
+    noisy = GateEvaluated(
+        metric="pr_auc", kind="threshold", expected=0.3, actual=0.45782833946947715
+    )
+    assert noisy.human() == "gate pr_auc (threshold): PASS - expected 0.3, got 0.4578"
+    # ... but never so far that a failing value reads as equal to its floor
+    close = GateEvaluated(
+        metric="pr_auc", kind="threshold", passed=False, expected=0.3, actual=0.29996
+    )
+    assert close.human() == "gate pr_auc (threshold): FAIL - expected 0.3, got 0.29996"
+    same = GateEvaluated(metric="rmse", kind="threshold", expected=12.0, actual=12.0)
+    assert same.human() == "gate rmse (threshold): PASS - expected 12, got 12"
+    # adjacent doubles only separate at full precision, which is where it stops
+    tiny = GateEvaluated(metric="m", kind="threshold", expected=0.1, actual=0.1 + 2**-56)
+    assert tiny.human() == (
+        "gate m (threshold): PASS - expected 0.10000000000000001, got 0.10000000000000002"
+    )
+    unset = GateEvaluated(metric="m", kind="threshold", expected=None, actual=0.5)
+    assert unset.human() == "gate m (threshold): PASS - expected None, got 0.5"
     champion = GateEvaluated(metric="pr_auc", kind="champion", passed=True, message="beats v2")
     assert champion.human() == "gate pr_auc (champion): PASS - beats v2"
 

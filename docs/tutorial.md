@@ -79,8 +79,10 @@ sources:
 Open `datasets/churn_training_set.yml`.
 This file is the entire "training set construction" surface:
 
-- `source:` which table feeds it.
-- `label:` the target column and its business definition.
+- `source:` the one relation that feeds it. Whatever joins that relation together - a dbt model, a warehouse table - is upstream of mbt (ADR-29).
+- `columns:` (commented out in the scaffold) the panel contract: once declared, a column arriving upstream fails the build until the spec asks for it, so a new feature is a reviewed diff here.
+- `label:` the target column and its business definition; `label.horizon` can declare when the outcome is observed, and mbt then checks the split's embargo and the scoring pipeline's maturity against it.
+- `sample_key:` the entity id that sampling and random splits hash, so a schema change never reshuffles rows across the train/test boundary.
 - `filters:` population rules (`is_active = true`, `tenure_days >= 30`).
 - `split:` a temporal policy (`train: "-180d:-28d"`, `test: "-28d:now"`) resolved against one compile-time anchor, never against wall-clock per node.
 - `checks:` data quality (`not_null`, `no_future_columns`, class balance).
@@ -131,21 +133,36 @@ mbt build
 
 **What happens, in order:** compile (pin everything into `target/manifest.json`), materialize datasets with checks, train each model in an isolated job, evaluate gates, register passing models, write `target/run_results.json`.
 
-**Expect output like** (numbers vary slightly with your run date; the sample data yields pr_auc around 0.32):
+**Expect output like** this on stderr, timestamps omitted (the sample data is generated relative to today, so the numbers move a little; pr_auc lands around 0.43-0.46):
 
+```text
+Compiling against target 'dev'
+Compiled 3 nodes in 0.22s (anchor 2026-09-14T23:06:13Z) -> target/manifest.json
+build: 2 node(s) selected on target 'dev'
+[1/2] START dataset dataset.acme_models.churn_training_set
+materialized 2097 rows: test=333, train=1764
+check class_balance_report: PASS - label balance (train): 0=78.741%, 1=21.259%
+check no_future_columns: PASS
+check not_null: PASS
+check label_leakage_scan: PASS
+test test_label_is_binary: PASS - label classes: [0, 1]
+test test_minimum_rows: PASS - 2097 rows
+[1/2] SUCCESS dataset dataset.acme_models.churn_training_set in 0.16s
+[2/2] START model model.acme_models.churn_classifier
+auto-resolved scale_pos_weight = 3.704
+gate pr_auc (threshold): PASS - expected 0.3, got 0.4262
+registered churn_classifier v1 -> staging (mlflow)
+[2/2] SUCCESS model model.acme_models.churn_classifier in 2.85s
+build finished [success]: 2 ok, 0 failed, 0 skipped in 4.9s
 ```
-Compiled 3 nodes (anchor 2026-07-08T19:54:23Z) -> target/manifest.json
-[1/2] dataset churn_training_set   label balance (train): 0=78.4%, 1=21.6%   SUCCESS
-[2/2] model churn_classifier       auto-resolved scale_pos_weight = 3.62
-      gate pr_auc (threshold): PASS - expected 0.25, got 0.3161
-      registered churn_classifier v1 -> staging (mlflow)
-build finished [success]: 2 ok, 0 failed in 4.0s
-```
+
+A results table follows on stdout.
+The very first run against a new `mlflow.db` also prints two `INFO mlflow.store.db.utils` lines while MLflow creates its tables.
 
 **Verify three artifacts:**
 
 1. `target/manifest.json` pins the anchor, per-source `snapshot_id`, per-node `config_hash` and transitive `input_hash`, and environment digests.
-2. `target/run_results.json` records statuses, timings, metrics, and full gate records, machine-readable.
+2. `target/run_results.json` records statuses, timings, metrics, and full gate records, machine-readable; `target/run_results.build.json` keeps the same record under the command's name, so a later `mbt score` cannot overwrite it.
 3. The registry holds `churn_classifier` v1 at `staging`, and the gate pass was recorded with it.
 
 **Exit codes matter from here on:** 0 success, 1 hard error, 2 quality failure (a gate, check, test, or monitor said no).
@@ -168,7 +185,7 @@ cp target/manifest.json baseline_manifest.json
 mbt run --manifest baseline_manifest.json
 ```
 
-**Expect:** identical metrics to step 6, digit for digit (XGBoost documents an exact determinism tier).
+**Expect:** identical metrics to step 6, digit for digit (XGBoost documents an exact determinism tier), and a `registered churn_classifier v2 -> staging` line: the reproduced model is registered as a new version.
 The command first verifies the running environment against the manifest's `env_digest` and refuses on mismatch, so "it reproduced" also means "on a compatible environment".
 
 **Verify:** compare the metrics lines; they must match exactly.
@@ -216,23 +233,34 @@ mbt state diff --state baseline_manifest.json
 mbt build --select state:modified+ --state baseline_manifest.json
 ```
 
-**Expect from `state diff`:** only the model (component `config`) and its downstream scoring pipeline (component `upstream`) are flagged; the dataset is untouched and will not rebuild.
-That is the "retrain only what changed" economy; the required upstream dataset is still auto-materialized on a cold runner.
+**Expect from `state diff`:**
+
+```text
+┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ change   ┃ unique_id                          ┃ components ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ modified │ model.acme_models.churn_classifier │ config     │
+│ modified │ scoring.acme_models.churn_scoring  │ upstream   │
+└──────────┴────────────────────────────────────┴────────────┘
+```
+
+Only the model (its `config` changed) and its downstream scoring pipeline (an `upstream` node changed) are flagged; the dataset is not modified, so only the model retrains.
+That is the "retrain only what changed" economy.
+The dataset the model needs is still materialized for it - `auto-materializing required upstream dataset(s)` - which is what lets the same command work on a cold CI runner.
 
 **Expect from the build:** quite possibly a refusal, and that is the system working:
 
-```
-gate pr_auc (threshold): PASS - got 0.3109
-gate pr_auc (champion):  FAIL - paired bootstrap (1000 resamples):
-                         delta lower bound -0.0269 < required 0.005
-GATE_FAILED model churn_classifier
-build finished [quality_failure]        exit code 2
+```text
+gate pr_auc (threshold): PASS - expected 0.3, got 0.4537
+gate pr_auc (champion): FAIL - paired bootstrap (1000 resamples): delta lower bound -0.005325 at 95% confidence
+[2/2] GATE_FAILED model model.acme_models.churn_classifier in 3.32s - gate breach: pr_auc: challenger delta lower bound -0.0053 < required 0.005
+build finished [quality_failure]: 1 ok, 1 failed, 0 skipped in 4.6s
 ```
 
 Two lessons to internalize together:
 
 1. A challenger must beat the production champion by `min_delta` at 95% confidence, estimated by a seeded paired bootstrap on the identical pinned test split.
-   Even a challenger with a *higher* point metric (say 0.331 vs 0.316) is refused when the confidence bound does not clear the delta; being ahead on test-set noise does not ship (ADR-18).
+   The run above is the case in point: the deeper challenger's point metric is *higher* than the champion's (0.4537 against 0.4262), and it is still refused, because the lower confidence bound of the improvement does not clear the required delta - being ahead on test-set noise does not ship (ADR-18).
 2. Exit code 2 (quality) is not exit code 1 (broken).
    The PR goes red with a gate table, metrics vs champion, the retrained node list, and a cost estimate in the PR comment; nobody gets paged.
 
@@ -251,6 +279,7 @@ The scaffold ships the whole loop as GitHub Actions:
 | `prod_build.yml` | merge to main | prod build of `state:modified+`, then publish the manifest baseline |
 | `promote.yml` | `promotions.yml` change or manual dispatch | `mbt promote` |
 | `scheduled_retrain.yml` | cron weekly | `mbt build --target prod --select tag:weekly` |
+| `scheduled_retrain_monthly.yml` | cron monthly | `mbt build --target prod --select tag:monthly` |
 | `scheduled_score.yml` | cron daily | `mbt score --target prod --select tag:daily` |
 | `scheduled_monitor.yml` | cron weekly | `mbt monitor --target prod` |
 
@@ -272,7 +301,7 @@ Use one task per mbt command rather than one per model (mbt is itself the DAG sc
 Open `scoring/churn_scoring.yml`; one file is one serving pipeline:
 
 - `model: ref('churn_classifier')` with `stage: production` resolves the champion from the registry at run time, so promotions take effect on the next scheduled run with no coordination.
-- `input:` applies the same population filters as training, which keeps the shift monitors honest.
+- `input:` applies the same population filters as training, which keeps the shift monitors honest, and declares `sample_key: user_id` so the `dev` target's sampling draws a stable half of the batch.
 - `monitors:` PSI thresholds for per-feature and score-distribution shift against the champion's training-time baseline.
 - `ground_truth:` declares how outcomes join back (label source, `join_key`, `maturity: "14d"`, realized-metric gates).
 - `output.path:` where predictions land.
@@ -301,7 +330,7 @@ To see the end state today, simulate the scheduled run two weeks out:
 mbt monitor --anchor <ISO timestamp 15 days from now>
 ```
 
-**Expect:** realized metrics computed by joining arrived outcomes to stored predictions, e.g. `pr_auc=0.3988  roc_auc=0.7145`, gated against the spec's floor.
+**Expect:** a `ground-truth labels: read 500 row(s)` line, then `evaluated 1 of 1 matured prediction run(s)` with realized metrics computed by joining the arrived outcomes to the stored predictions - for example `pr_auc=0.4765  roc_auc=0.8039` - gated against the spec's floor.
 A realized-metric gate failure is exit 2, the signal that the production model has decayed and the retrain/promote loop should spin.
 
 **Verify:** run `mbt monitor` again with the same anchor; it evaluates nothing new (exactly-once).
@@ -323,7 +352,7 @@ A workable metric spec:
 | `mbt_node_success` / `mbt_node_duration_seconds` | per-node health and cost |
 | `mbt_test_metric{metric=}` | train-time metrics on the pinned test split |
 | `mbt_realized_metric{metric=}` | matured ground-truth metrics from `mbt monitor` |
-| `mbt_gate_passed` / `mbt_gate_margin{kind=threshold\|champion\|ground_truth}` | gate outcomes and signed headroom |
+| `mbt_gate_passed` / `mbt_gate_margin{kind=...}` | gate outcomes and signed headroom, with `kind` one of `threshold`, `champion`, `ground_truth` |
 | `mbt_shift_value` / `mbt_shift_threshold` | PSI per feature and for the score distribution |
 | `push_time_seconds` | free per group; powers staleness alerts |
 

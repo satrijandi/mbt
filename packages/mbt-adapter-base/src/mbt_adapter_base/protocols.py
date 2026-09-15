@@ -400,13 +400,16 @@ class DataBuildContext(Protocol):
 
     @property
     def source(self) -> SourceTableLike:
-        """The spine table: the single source, or the label table for
-        multi-table ``inputs`` datasets."""
+        """The one relation this dataset or scoring input reads (ADR-29)."""
         ...
 
     @property
     def source_tables(self) -> dict[str, SourceTableLike]:
-        """Every source table by unique_id (spine + feature tables)."""
+        """Every source the node depends on, by unique_id.
+
+        Since ADR-29 a node reads exactly one relation (``source``), so this is
+        that relation plus any other source its declaration references - for
+        example a ``relationships`` check's parent table."""
         ...
 
     @property

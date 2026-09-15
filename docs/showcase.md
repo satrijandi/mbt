@@ -12,7 +12,7 @@ Where the [tutorial](tutorial.md) walks a team through the concepts, the showcas
 | Gitea + Woodpecker | The CI loop: state-diff slim PR checks with update-in-place build-report comments, merge-time economy builds publishing the `mbt-state` baseline, exit-code-classified alerts, and protected GitOps promotion (branch protection + CODEOWNERS on `promotions.yml`) |
 | Zot | OCI registry: the digest-pinned deployable unit (runner image + project + compiled manifest) and oras-pushed provenance artifacts (`manifest.json` + `run_results.json` per source sha) |
 | Airflow + git-sync | Scheduling/CD: git-sync reconciles the Gitea `deploy` repo (digest pin + DAGs); retrain/score/monitor DAGs run the pinned unit with exit-code routing (quality verdicts never retry) |
-| Pushgateway + Prometheus + Grafana | The observability spec from tutorial step 14, implemented verbatim: gauges, dashboards, and the four canonical alert rules |
+| Pushgateway + Prometheus + Grafana | The observability spec from [tutorial step 14](tutorial.md#step-14-mlops-metrics-dashboards-and-the-two-alerting-layers), implemented verbatim: gauges, dashboards, and the four canonical alert rules |
 | k3d + ArgoCD (optional, `MBT_LIVE_SHOWCASE_K3D=1`) | CD fidelity: ArgoCD core syncs the same deploy repo into CronJobs on a k3d cluster attached to the compose network, pulling from zot over insecure HTTP |
 
 Everything mbt-related runs inside one runner image (Jupyter kernel, Spark master and worker, every `mbt` invocation), which makes ADR-19 `env_digest` verification hold by construction.
@@ -38,7 +38,7 @@ Start where a data scientist would: open JupyterLab and run `project/notebooks/d
 `make monthly` runs the second, cluster-free cadence: the `tag:monthly` churn pipeline trains, promotes, and scores entirely on the DuckDB batch plane over the synced S3 parquet lake.
 `make wide` runs the third, wide batch-monthly cadence (ADR-29): one panel joined upstream from a monthly population spine with an entity crosswalk, three feature histories keyed differently, and matured labels keyed by each cohort's own `inference_date`, plus a ds-helper LightGBM selection funnel committed as a reviewable diff, DS-declared categorical codes cast by a shared hooks file, sparkling H2O AutoML on the selected columns, and Evidently feature-stability gates (exit 2 blocks promotion; every scored batch re-checks against the exported baseline) beside mbt's own enforcing monitors.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md) is the full runbook, including the RAM knobs and the documented deviations from the scaffold defaults (snapshot scheme, local scoring plane, PR-scoped registry).
-The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); every phase of its plan is implemented (the k3d/ArgoCD fidelity profile local-only behind its own gate, and P7's Snowflake warehouse plane needing credentials on top of the stack).
+The design of record is [DESIGN.md](https://github.com/satrijandi/mbt/blob/main/examples/showcase/DESIGN.md); every phase of its plan is implemented (the k3d/ArgoCD fidelity profile local-only behind its own gate, P7's Snowflake warehouse plane needing credentials on top of the stack, and P8's object-store plane).
 
 ## What it proves
 
@@ -52,7 +52,7 @@ The demo narrative exercises mbt's differentiators against real service boundari
 - CD that promotion never touches: two scheduled score runs straddling a promotion serve different champions while the deploy repo HEAD and the pinned image digest stay byte-identical.
 - Run-time champion resolution (ADR-20): a promotion changes the next scoring run with zero redeploy.
 - Adapter portability on one lake: the monthly cadence trains, scores, and ground-truth-monitors the same project's `tag:monthly` pipeline on the DuckDB local adapter - no cluster - while the daily/weekly cadences use Spark, from the same `sources.yml`.
-- Real training-set topology ([naming conventions](naming-conventions.md)): the wide cadence's five gold tables are joined UPSTREAM into one panel (ADR-29) - on the one uniform `inference_date` key, through a population spine carrying the `customer_id`-to-`safe_id` entity crosswalk that transaction history can only match through, with matured labels keyed by each cohort's own `inference_date` (the gold-layer label contract) inner-joined so an immature cohort drops out. That join is a step in `scripts/generate_wide_data.py` on the lake and Spark planes and a Snowflake **dynamic table** on the warehouse plane, which is what a dbt deployment would own. mbt declares one relation, panel-samples by `customer_id` with pushdown hash sampling, prunes ~66 panel columns to a committed funnel-selected include list, and scores the newest cohort from the panel's label-free twin - identical declarations on every plane.
+- Real training-set topology ([naming conventions](naming-conventions.md)): the wide cadence's five gold tables are joined UPSTREAM into one panel (ADR-29) - on the one uniform `inference_date` key, through a population spine carrying the `customer_id`-to-`safe_id` entity crosswalk that transaction history can only match through, with matured labels keyed by each cohort's own `inference_date` (the gold-layer label contract) inner-joined so an immature cohort drops out. That join is a step in `scripts/generate_wide_data.py` on the lake and Spark planes and a table the seeder materializes in Snowflake on the warehouse plane - the job a dbt model owns in a real deployment. mbt declares one relation, panel-samples by `customer_id` with pushdown hash sampling, prunes ~66 panel columns to a committed funnel-selected include list, and scores the newest cohort from the panel's label-free twin - identical declarations on every plane.
 - Prediction-store idempotency (ADR-21): same-anchor re-runs overwrite one `run_key`, new anchors partition.
 - Ground-truth monitoring: realized metrics are evaluated exactly once per prediction run, and a realized-gate breach exits 2, never 1.
 - Observability: `run_results.json` becomes Pushgateway gauges, and injected shift makes the provisioned Prometheus rule actually fire.
@@ -64,7 +64,8 @@ The wide batch-monthly cadence makes the split concrete:
 
 | Decision | Owner | Where |
 |---|---|---|
-| Training population, the matured-label contract keyed by `inference_date`, per-table join keys | DS | `project/datasets/wide_churn_training.yml` |
+| The panel's shape: training population, the matured-label contract keyed by `inference_date`, the join keys that assemble it | DS, with the data engineers who own the upstream join | the panel build (`scripts/generate_wide_data.py`, the Snowflake seeder, or a dbt model in a real deployment) |
+| The relation mbt reads and what it does with it: panel sampling, the split, the checks | DS | `project/datasets/wide_churn_training.yml` |
 | ID columns: `sample_key: customer_id` (panel sampling) and entity ids as non-features | DS | dataset `sample_key` + model `features.exclude` |
 | The split date column and exact train/test cohort boundaries (ISO ranges) | DS | the dataset's `split:` block |
 | Ignored columns the selection funnel must never offer, including the time-anchored `tenure_months` | DS | the model's `features.exclude` (honored by `select_features.py`) |

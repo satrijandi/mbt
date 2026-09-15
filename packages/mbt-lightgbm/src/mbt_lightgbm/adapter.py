@@ -37,7 +37,10 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
-from mbt_adapter_base.training_helpers import monotone_vector
+from mbt_adapter_base.training_helpers import (
+    monotone_vector,
+    note_early_stopping_without_validation,
+)
 from mbt_lightgbm.params import LightGBMBinaryParams, LightGBMRegressionParams
 
 if TYPE_CHECKING:
@@ -208,6 +211,9 @@ class LightGBMTrainingAdapter:
         valid_sets = None
         callbacks: list[Any] = []
         want_eval = params.early_stopping_rounds is not None or report is not None
+        note_early_stopping_without_validation(
+            data, params.early_stopping_rounds, ctx.events, adapter="lightgbm"
+        )
         if want_eval and "validation" in data.splits():
             val_table = data.read("validation")
             val_x = self._features_matrix(val_table, features, categories)

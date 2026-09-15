@@ -147,7 +147,12 @@ def test_scaffold_ci_installs_are_pinned(scaffold: Path) -> None:
         pins = (scaffold / name).read_text()
         assert "__MBT_VERSION__" not in pins, f"{name} kept the version token"
         assert "__PINNED_DEPS__" not in pins, f"{name} kept the dependency token"
-        for package in ("mbt-core", "mbt-xgboost", "mbt-mlflow"):
+        # mbt-adapter-base is in the set although no workflow imports it: the
+        # other three depend on it and it is not on PyPI, so without its own
+        # ref `pip install -r requirements.txt` stopped at "No matching
+        # distribution found for mbt-adapter-base" - every scaffolded project's
+        # CI died at the install step, tag or no tag.
+        for package in ("mbt-adapter-base", "mbt-core", "mbt-xgboost", "mbt-mlflow"):
             # Pinned to a release tag: reproducible and installable from a fresh
             # checkout without a private index. (A tag is movable; the header
             # says so and names the commit-SHA form.)
@@ -156,10 +161,39 @@ def test_scaffold_ci_installs_are_pinned(scaffold: Path) -> None:
                 f"@v{mbt.__version__}#subdirectory=packages/{package}"
             )
             assert ref in pins, f"{name}: {package} not pinned to the release tag"
+        _assert_mbt_pins_are_closed(pins, name)
+
+
+def _assert_mbt_pins_are_closed(pins: str, name: str) -> None:
+    """Every mbt package a pinned mbt package requires must be pinned too.
+
+    Derived from the workspace metadata rather than listed, so the next
+    internal dependency (an adapter starting to need mbt-core, say) fails here
+    instead of in a user's first CI run. Nothing mbt publishes is on PyPI yet,
+    so an unpinned one is not a looser pin - it is an install that cannot
+    resolve at all.
+    """
+    import re
+    import tomllib
+
+    from e2e_utils import REPO_ROOT
+
+    pinned = set(re.findall(r"^(mbt-[a-z0-9-]+) @ git\+", pins, flags=re.MULTILINE))
+    assert pinned, f"{name}: no mbt refs found"
+    for package in sorted(pinned):
+        pyproject = REPO_ROOT / "packages" / package / "pyproject.toml"
+        requires = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+        for requirement in requires:
+            dependency = re.match(r"mbt-[a-z0-9-]+", requirement)
+            if dependency:
+                assert dependency.group(0) in pinned, (
+                    f"{name}: {package} requires {dependency.group(0)}, which has no ref - "
+                    "pip cannot resolve it (not on PyPI)"
+                )
 
 
 def test_scaffold_pins_the_numerics_stack_it_was_scaffolded_from(scaffold: Path) -> None:
-    """Pinning the three mbt packages pins none of the libraries that decide
+    """Pinning the mbt packages pins none of the libraries that decide
     model numerics (FEEDBACK B-1).
 
     requirements.txt's header states the reason the file exists - "a floating
@@ -567,6 +601,55 @@ def test_project_dir_from_foreign_cwd_confines_writes_to_project(
     diff_out = mbt_from_elsewhere("state", "diff", "--state", "./baseline.json", "--output", "json")
     assert json.loads(diff_out.stdout)["modified"] == []
     assert list(elsewhere.iterdir()) == [baseline]
+
+
+@pytest.mark.e2e
+def test_quickstart_serving_loop_runs_on_the_default_target(scaffold: Path) -> None:
+    """The quickstart's steps 5, 8 and 9, exactly as docs/quickstart.md types
+    them: no --target, so the dev target and its `sample_fraction: 0.5`.
+
+    Nothing drove `mbt score` on a fresh scaffold, and after ADR-29 turned the
+    keyless-sampling warning into an error the documented step failed with exit
+    1: the scaffold's scoring input declared no `sample_key`, and the dev target
+    samples. Every other scaffold test either stops at `mbt build` or runs the
+    prod target, whose `sample_fraction: 1.0` never reaches the guard.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    # the quickstart runs the generator with its default size, not the fixture's 400
+    data = subprocess.run(
+        [sys.executable, str(scaffold / "scripts" / "generate_sample_data.py")],
+        cwd=scaffold,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert data.returncode == 0, data.stderr
+
+    run_mbt(["build"], scaffold)
+    run_mbt(["promote", "--model", "churn_classifier", "--to", "production"], scaffold)
+
+    def said(proc: subprocess.CompletedProcess[str]) -> str:
+        return " ".join(proc.stderr.split())  # the console word-wraps at 80 columns
+
+    scored = run_mbt(["score"], scaffold)
+    assert "rows to score" in said(scored)
+    runs = list((scaffold / "predictions" / "churn_scores").glob("*/_SUCCESS"))
+    assert len(runs) == 1, "mbt score wrote no prediction run"
+
+    # right after scoring nothing has matured (maturity: 14d) ...
+    fresh = run_mbt(["monitor"], scaffold)
+    assert "0 matured prediction runs" in said(fresh)
+
+    # ... and once it has, the run is evaluated exactly once
+    later = (datetime.now(UTC) + timedelta(days=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    matured = run_mbt(["monitor", "--anchor", later], scaffold)
+    assert "evaluated 1 of 1 matured prediction run(s)" in said(matured)
+    again = run_mbt(["monitor", "--anchor", later], scaffold)
+    assert "0 matured prediction runs" in said(again)
+
+    listed = json.loads(run_mbt(["predictions", "ls", "--output", "json"], scaffold).stdout)
+    assert [(r["matured"], r["evaluated"]) for r in listed] == [(True, True)], listed
 
 
 def test_unknown_option_prints_clean_usage_error(scaffold: Path) -> None:

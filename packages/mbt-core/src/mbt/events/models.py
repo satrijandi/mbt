@@ -148,8 +148,31 @@ class GateEvaluated(Event):
 
     def human(self) -> str:
         status = "PASS" if self.passed else "FAIL"
-        detail = self.message or f"expected {self.expected}, got {self.actual}"
+        if self.message:
+            detail = self.message
+        else:
+            expected, actual = _comparable_pair(self.expected, self.actual)
+            detail = f"expected {expected}, got {actual}"
         return f"gate {self.metric} ({self.kind}): {status} - {detail}"
+
+
+def _comparable_pair(expected: float | None, actual: float | None) -> tuple[str, str]:
+    """Render a gate's two numbers as short as they can be while still differing.
+
+    The raw float (``got 0.45782833946947715``) is noise on a console line, but
+    a fixed precision is worse: a FAIL at 0.29996 against a 0.3 floor would
+    render ``expected 0.3, got 0.3``. So widen the precision only as far as it
+    takes to keep two different values visibly different. The JSON event keeps
+    the exact floats either way.
+    """
+    if expected is None or actual is None:
+        return str(expected), str(actual)
+    for digits in range(4, 17):
+        shown = f"{expected:.{digits}g}", f"{actual:.{digits}g}"
+        if expected == actual or shown[0] != shown[1]:
+            return shown
+    # 17 significant digits distinguish any two distinct doubles
+    return f"{expected:.17g}", f"{actual:.17g}"
 
 
 class AutoResolved(Event):

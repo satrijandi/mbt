@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from core_helpers import TEST_ANCHOR, write
+from exec_unit_helpers import recording_bus
 from test_execution import invoke
 from test_scoring_execution import SCORING, _build_and_promote, _prediction_runs, _write_batch
 
@@ -95,11 +96,18 @@ def test_matured_run_is_evaluated_once(
     _build_and_promote(monitored_project, fake_registry)
     _score(monitored_project, fake_registry)
 
-    results = monitor(monitored_project, fake_registry)
+    with recording_bus() as sink:
+        results = monitor(monitored_project, fake_registry)
     assert results.exit_code() == 0
     node = next(r for r in results.results if r.unique_id == SCORING)
     assert node.status == "success"
     assert node.message and "evaluated 1 of 1" in node.message
+    # The labels are read through build_scoring_input, whose row count says
+    # "rows to score". Nothing is scored on a monitor run, so that line must not
+    # surface here; the monitor reports the read in its own words instead.
+    said = sink.messages()
+    assert not [m for m in said if "to score" in m], said
+    assert "ground-truth labels: read 120 row(s) from source.demo.lakehouse.churn_outcomes" in said
     assert 0.0 <= node.metrics["roc_auc"] <= 1.0
     assert node.metrics["pr_auc"] >= 0.15
     gate = node.monitors[0]

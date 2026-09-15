@@ -1,8 +1,12 @@
 site_name: mbt - Model Build Tool
-site_description: dbt for machine learning models
+site_description: dbt for machine learning models - declarative, adapter-based, GitOps-native model builds
 site_url: https://satrijandi.github.io/mbt/
 repo_url: https://github.com/satrijandi/mbt
+repo_name: satrijandi/mbt
 edit_uri: edit/main/docs/
+extra_css:
+  - stylesheets/extra.css
+copyright: Copyright 2026 Nugroho Satrijandi - Apache License 2.0
 theme:
   name: material
   palette:
@@ -13,63 +17,83 @@ theme:
       primary: indigo
       toggle: {icon: material/brightness-4, name: light mode}
   features:
+    - navigation.tabs
     - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
     - content.code.copy
+    - content.action.edit
 
 nav:
   - Home: index.md
-  - Quickstart: quickstart.md
-  - Tutorial: tutorial.md
-  - DS primer: ds-primer.md
-  - Showcase: showcase.md
-  - Concepts: concepts.md
-  - Spec reference: spec-reference.md
-  - Naming conventions: naming-conventions.md
-  - CLI reference: cli-reference.md
-  - GitOps & CI: gitops.md
-  - Troubleshooting: troubleshooting.md
-  - Adapter authoring: adapter-authoring.md
-  - Adapter API reference: api-reference.md
-  - Architecture: architecture.md
-  - Roadmap: roadmap.md
-  - v0.1 status: v0.1-status.md
-  - MLOps alignment: mlops-alignment.md
-  - ADRs:
-      - adr/0001-arrow-interchange.md
-      - adr/0002-local-adapters-in-core.md
-      - adr/0003-coordinator-job-split.md
-      - adr/0004-two-hashes.md
-      - adr/0005-profiles-excluded-from-hashes.md
-      - adr/0006-gate-edits-retrain.md
-      - adr/0007-env-digest-not-modifying.md
-      - adr/0008-tuning-never-sees-test.md
-      - adr/0009-champion-reevaluated-in-job.md
-      - adr/0010-missing-vs-unloadable-champion.md
-      - adr/0011-snapshot-mtime-listing.md
-      - adr/0012-window-expressions-and-anchor.md
-      - adr/0013-upstream-datasets-auto-materialize.md
-      - adr/0014-plugin-import-hygiene.md
-      - adr/0015-contract-refinements.md
-      - adr/0016-multi-table-inputs-and-key-sampling.md
-      - adr/0017-jvm-adapters-and-path-data-access.md
-      - adr/0018-paired-bootstrap-champion-gates.md
-      - adr/0019-env-freeze-digest-and-manifest-verification.md
-      - adr/0020-scoring-resource-and-runtime-champion.md
-      - adr/0021-prediction-store-and-ground-truth-ledger.md
-      - adr/0022-population-spine-and-per-table-joins.md
-      - adr/0023-warehouse-batch-scoring.md
-      - adr/0024-regression-task-vertical.md
-      - adr/0025-per-table-column-projection.md
-      - adr/0026-tracking-experiment-per-node-kind.md
-      - adr/0027-declarative-feature-treatment.md
-      - adr/0028-mlflow-training-only-and-champion-carried-config.md
-      - adr/0029-single-relation-datasets.md
+  - Get started:
+      - Installation: installation.md
+      - Quickstart: quickstart.md
+      - Tutorial: tutorial.md
+      - Training, explained for data scientists: ds-primer.md
+  - Guides:
+      - Concepts: concepts.md
+      - GitOps & CI: gitops.md
+      - Naming conventions: naming-conventions.md
+      - Showcase: showcase.md
+      - Troubleshooting: troubleshooting.md
+  - Reference:
+      - Spec reference: spec-reference.md
+      - CLI reference: cli-reference.md
+      - Adapters: adapters.md
+      - Adapter API: api-reference.md
+  - Extending mbt:
+      - Adapter authoring: adapter-authoring.md
+      - Architecture: architecture.md
+  - Project:
+      - Roadmap: roadmap.md
+      - v0.1 status: v0.1-status.md
+      - MLOps alignment: mlops-alignment.md
+      - Changelog: https://github.com/satrijandi/mbt/blob/main/CHANGELOG.md
+      - Contributing: https://github.com/satrijandi/mbt/blob/main/CONTRIBUTING.md
+  - Decisions:
+      - adr/index.md
+      - "ADR-1: Arrow interchange": adr/0001-arrow-interchange.md
+      - "ADR-2: Local adapters in core": adr/0002-local-adapters-in-core.md
+      - "ADR-3: Coordinator/job split": adr/0003-coordinator-job-split.md
+      - "ADR-4: Two hashes": adr/0004-two-hashes.md
+      - "ADR-5: Profiles excluded from hashes": adr/0005-profiles-excluded-from-hashes.md
+      - "ADR-6: Gate edits retrain": adr/0006-gate-edits-retrain.md
+      - "ADR-7: env_digest not modifying": adr/0007-env-digest-not-modifying.md
+      - "ADR-8: Tuning never sees test": adr/0008-tuning-never-sees-test.md
+      - "ADR-9: Champion re-evaluated in job": adr/0009-champion-reevaluated-in-job.md
+      - "ADR-10: Missing vs unloadable champion": adr/0010-missing-vs-unloadable-champion.md
+      - "ADR-11: Snapshot mtime listing": adr/0011-snapshot-mtime-listing.md
+      - "ADR-12: Window expressions and anchor": adr/0012-window-expressions-and-anchor.md
+      - "ADR-13: Upstream datasets auto-materialize": adr/0013-upstream-datasets-auto-materialize.md
+      - "ADR-14: Plugin import hygiene": adr/0014-plugin-import-hygiene.md
+      - "ADR-15: Contract refinements": adr/0015-contract-refinements.md
+      - "ADR-16: Multi-table inputs (superseded)": adr/0016-multi-table-inputs-and-key-sampling.md
+      - "ADR-17: JVM adapters and path data access": adr/0017-jvm-adapters-and-path-data-access.md
+      - "ADR-18: Paired-bootstrap champion gates": adr/0018-paired-bootstrap-champion-gates.md
+      - "ADR-19: Env freeze digest": adr/0019-env-freeze-digest-and-manifest-verification.md
+      - "ADR-20: Scoring resource and runtime champion": adr/0020-scoring-resource-and-runtime-champion.md
+      - "ADR-21: Prediction store and ground-truth ledger": adr/0021-prediction-store-and-ground-truth-ledger.md
+      - "ADR-22: Population spines (superseded)": adr/0022-population-spine-and-per-table-joins.md
+      - "ADR-23: Warehouse batch scoring": adr/0023-warehouse-batch-scoring.md
+      - "ADR-24: Regression task vertical": adr/0024-regression-task-vertical.md
+      - "ADR-25: Per-table column projection (superseded)": adr/0025-per-table-column-projection.md
+      - "ADR-26: Experiment per node kind (superseded)": adr/0026-tracking-experiment-per-node-kind.md
+      - "ADR-27: Declarative feature treatment": adr/0027-declarative-feature-treatment.md
+      - "ADR-28: Training-only tracking": adr/0028-mlflow-training-only-and-champion-carried-config.md
+      - "ADR-29: Single-relation datasets": adr/0029-single-relation-datasets.md
 
 markdown_extensions:
   - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
   - pymdownx.superfences
   - pymdownx.highlight
   - tables
+  - toc:
+      permalink: true
 
 plugins:
   - search
@@ -79,3 +103,9 @@ plugins:
           options:
             docstring_style: google
             show_root_heading: true
+
+# Strict builds fail on these too: a link to a heading that was renamed or
+# never existed is as broken as a link to a missing page, and mkdocs only
+# reports it at INFO level unless told otherwise.
+validation:
+  anchors: warn

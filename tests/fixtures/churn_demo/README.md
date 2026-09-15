@@ -1,6 +1,6 @@
 # churn_demo - the classification test fixture
 
-A complete mbt project: three XGBoost models over one committed dataset, exercising most of the spec surface.
+A complete mbt project: three XGBoost models and two datasets over one committed source table, exercising most of the spec surface.
 It lives under `tests/fixtures/` rather than `examples/` because that is what it is for - the golden-manifest test compiles it in the fast suite, the E2E suite copies it to a tmp dir and drives it through the real CLI, and the live showcase tier seeds its lake from `data/`.
 Everything in here is therefore guaranteed to work, which also makes it a useful thing to read.
 

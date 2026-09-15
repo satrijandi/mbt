@@ -35,7 +35,10 @@ from mbt_adapter_base import (
     ValidationIssue,
 )
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
-from mbt_adapter_base.training_helpers import monotone_vector
+from mbt_adapter_base.training_helpers import (
+    monotone_vector,
+    note_early_stopping_without_validation,
+)
 from mbt_xgboost.params import XGBoostBinaryParams, XGBoostRegressionParams
 
 if TYPE_CHECKING:
@@ -224,6 +227,9 @@ class XGBoostTrainingAdapter:
 
         evals = []
         want_eval = params.early_stopping_rounds is not None or report is not None
+        note_early_stopping_without_validation(
+            data, params.early_stopping_rounds, ctx.events, adapter="xgboost"
+        )
         if want_eval and "validation" in data.splits():
             dval, _ = self._matrix(data.read("validation"), features, categories, spec.target)
             evals = [(dval, "validation")]

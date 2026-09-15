@@ -10,6 +10,7 @@ from mbt_adapter_base.interchange import DatasetProfile
 from mbt_adapter_base.specs import MetricSpec
 from mbt_adapter_base.training_helpers import (
     evaluate_split,
+    note_early_stopping_without_validation,
     positive_rate,
     resolve_scale_pos_weight,
     staged_split_path,
@@ -91,3 +92,34 @@ def test_pooling_of_an_empty_column_is_a_no_op() -> None:
 
     table = pa.table({"r": pa.array([None, None], type=pa.string())})
     assert train_categories(table, ["r"], {"r": CategoricalPolicy(min_frequency=0.1)})["r"] == []
+
+
+def test_early_stopping_without_a_validation_split_is_said_out_loud() -> None:
+    from mbt_adapter_base.datasets import InMemoryDatasetHandle
+
+    class _Sink:
+        def __init__(self) -> None:
+            self.messages: list[object] = []
+
+        def emit(self, event: object) -> None:
+            self.messages.append(event)
+
+    base = tiny_binary_dataset()
+    no_validation = InMemoryDatasetHandle(
+        {"train": base.read("train"), "test": base.read("test")}, label_column="label"
+    )
+    with_validation = InMemoryDatasetHandle(
+        {"train": base.read("train"), "validation": base.read("test")}, label_column="label"
+    )
+
+    sink = _Sink()
+    assert note_early_stopping_without_validation(no_validation, 30, sink, adapter="xgboost")
+    assert sink.messages == [
+        "xgboost: early_stopping_rounds=30 has no validation split to stop on, so every "
+        "boosting round trains; declare split.validation on the dataset to stop early"
+    ]
+    # nothing to say when early stopping is off, or has a split to watch
+    quiet = _Sink()
+    assert not note_early_stopping_without_validation(no_validation, None, quiet, adapter="x")
+    assert not note_early_stopping_without_validation(with_validation, 30, quiet, adapter="x")
+    assert quiet.messages == []

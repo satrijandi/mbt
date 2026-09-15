@@ -2,6 +2,20 @@
 
 Thanks for your interest in mbt.
 This page covers the mechanics: setup, the verification battery, test conventions, and what a good PR looks like.
+Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Ways to contribute
+
+- **Report a bug** with the [bug report template](https://github.com/satrijandi/mbt/issues/new?template=bug_report.yml).
+  Check the [troubleshooting runbook](https://satrijandi.github.io/mbt/troubleshooting/) first: it is indexed by exact error text, and several things that look like bugs are deliberate refusals with a documented fix.
+- **Propose a feature** with the [feature request template](https://github.com/satrijandi/mbt/issues/new?template=feature_request.yml).
+  Read the [roadmap](https://satrijandi.github.io/mbt/roadmap/) and the [ADRs](https://satrijandi.github.io/mbt/adr/) before you do; a proposal that engages with the decision it would change is much easier to act on.
+- **Improve the documentation.**
+  The site sources are under `docs/`; `uv run mkdocs serve` previews them.
+  Every example and every command in the docs should be something you ran.
+- **Write an adapter.**
+  See [Writing an adapter](#writing-an-adapter) below.
+- **Report a security issue** privately, as [SECURITY.md](SECURITY.md) describes - never in a public issue.
 
 ## Setup
 
@@ -51,7 +65,8 @@ This is not hypothetical - it is how a 99.7% run reached main once.
 - **Exit codes are load-bearing:** 0 success, 1 hard error, 2 quality failure.
   Tests assert on them; do not conflate 1 and 2.
 - **Docs stay in sync by test.**
-  Every CLI command and non-boilerplate flag must appear in `docs/cli-reference.md` (`tests/test_cli_reference_sync.py` enforces it), and new docs pages must be added to `mkdocs.yml` nav or the strict build fails.
+  Every CLI command and non-boilerplate flag must appear in `docs/cli-reference.md` (`tests/test_cli_reference_sync.py`), and every complete `models:`, `datasets:`, `scoring:`, or `sources:` example in the docs and READMEs must validate against the spec models (`tests/test_docs_examples.py`; mark a deliberately partial snippet with a `# ...` line).
+  New pages must be added to the `mkdocs.yml` nav, and links to missing pages or headings fail the strict build.
 - **Error messages are documented.**
   `docs/troubleshooting.md` entries carry reproduced symptom text; if you change an error message, update the runbook.
 - **Dependency floors are tested.**
@@ -59,8 +74,9 @@ This is not hypothetical - it is how a 99.7% run reached main once.
 
 ## Writing an adapter
 
-`docs/adapter-authoring.md` is the guide.
-The ship bar is the compliance suite in `mbt-adapter-base`: subclass `TrainingAdapterCompliance` (and `PredictionStoreCompliance` where relevant) and keep `test_no_core_imports` green - adapters build against `mbt-adapter-base` only, never `mbt-core` internals.
+The [adapter authoring guide](https://satrijandi.github.io/mbt/adapter-authoring/) covers all six adapter roles.
+The ship bar is the compliance suite in `mbt-adapter-base`: subclass `TrainingAdapterCompliance` (and `PredictionStoreCompliance` for a data adapter that scores) and keep it green.
+Among other things it fails an adapter whose plugin imports `mbt-core` internals - adapters build against `mbt-adapter-base` only.
 
 ## Releasing
 

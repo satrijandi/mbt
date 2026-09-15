@@ -1,0 +1,8 @@
+/* CLI reference option tables: a flag like --state-include-env is the thing
+   a reader scans for and copies, so keep it on one line instead of letting the
+   narrow first column break it at a hyphen. Scoped to the tables wrapped in
+   <div class="cli-options">, because other pages put long event lines in a
+   first column and those must still wrap. */
+.md-typeset .cli-options td:first-child code {
+  white-space: nowrap;
+}

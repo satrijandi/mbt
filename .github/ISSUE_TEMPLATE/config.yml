@@ -7,5 +7,8 @@ contact_links:
     url: https://github.com/satrijandi/mbt/security/advisories/new
     about: Report privately - never in a public issue. See SECURITY.md.
   - name: Troubleshooting runbook
-    url: https://github.com/satrijandi/mbt/blob/main/docs/troubleshooting.md
+    url: https://satrijandi.github.io/mbt/troubleshooting/
     about: Indexed by exact error text; every entry came from a real reproduction.
+  - name: Documentation
+    url: https://satrijandi.github.io/mbt/
+    about: Installation, the quickstart and tutorial, and the spec and CLI references.

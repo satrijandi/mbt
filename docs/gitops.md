@@ -110,15 +110,24 @@ downgrades it), a freeze-only mismatch warns.
 ## Installing mbt in CI
 
 The scaffolded workflows install the toolchain from `requirements.txt`, which
-pins the mbt packages to an **immutable release tag** via git refs, e.g.:
+pins every mbt package the project uses to a **release tag** via git refs, and
+the numerics stack (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb,
+xgboost, mlflow) to exact versions:
 
 ```text
+mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-adapter-base
 mbt-core @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-core
+mbt-xgboost @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-xgboost
+mbt-mlflow @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-mlflow
 ```
 
-This is reproducible - a tag is immutable, so the training environment never
-floats and the manifest's `env_digest` stays stable - and installs straight
-from a fresh checkout, with no private package index required.
+This keeps the training environment from floating, so the manifest's
+`env_digest` stays stable, and installs straight from a fresh checkout with no
+private package index. `mbt-adapter-base` must be listed even though no workflow
+imports it: the other mbt packages depend on it, and because it is not on PyPI,
+pip can only resolve it from a ref. A git tag can be moved; where that matters,
+pin the commit SHA the tag points at instead. The pinned packages' own
+transitive dependencies still float - a hash-verified lock needs mbt on PyPI.
 
 !!! warning "Your CI will not install until the matching `vX.Y.Z` tag exists"
     The mbt repo's `release.yml` builds that tag's wheels (and, once Trusted

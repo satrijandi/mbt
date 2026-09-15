@@ -67,3 +67,5 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
 - `docs/v0.1-status.md` markets the project's rigor; keep its claims exactly true (the review dinged it for one overclaim).
 - The scaffold under `packages/mbt-core/src/mbt/cli/_scaffold/` is stamped into user projects by `mbt init`; its README, workflows, and pins are user-facing docs and are asserted by `tests/test_cli_basics.py`.
 - `docs/cli-reference.md` is guarded by `tests/test_cli_reference_sync.py`: every CLI command and every non-boilerplate `--flag` must appear in it, so adding a command/flag fails the suite until it is documented.
+- `tests/test_docs_examples.py` validates every complete `models:`/`datasets:`/`scoring:`/`sources:` YAML block in `docs/` (ADRs excluded), the READMEs, and the fixture READMEs against the spec models; mark a deliberately partial snippet with a `# ...` line. `mkdocs.yml` sets `validation: anchors: warn`, so a link to a missing heading fails `--strict` too.
+- Package READMEs are the PyPI long descriptions: use absolute `https://satrijandi.github.io/mbt/...` or GitHub links in them, never repo-relative paths.

@@ -58,8 +58,8 @@ def test_no_future_columns_skips_absent_splits() -> None:
 
 
 def test_unique_check_flags_a_duplicated_key() -> None:
-    # a multi-table join that fans out the population spine leaves a duplicated
-    # key; the unique check catches it and fails the build (F2).
+    # an upstream join that fanned the panel out leaves a duplicated key; the
+    # unique check catches it and fails the build (F2).
     table = pa.table({"user_id": [1, 2, 2, 3], "y": [0, 1, 0, 1]})
     handle = InMemoryDatasetHandle({"train": table}, label_column="y")
     spec = _spec([{"unique": {"columns": ["user_id"]}}, {"label_leakage_scan": {"enabled": False}}])

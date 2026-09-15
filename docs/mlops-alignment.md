@@ -18,7 +18,7 @@ mbt's coverage, cell by cell:
 | Principle | Data | ML Model | Code |
 |---|---|---|---|
 | **Versioning** | Every compiled manifest pins a snapshot token per source; new data arrives as a snapshot change that marks nodes modified ([concepts](concepts.md#identity-and-state), ADR-11) | Specs, hyperparameters, and hooks are reviewed YAML/Python in git; every training run lands in MLflow with config and input hashes and the inference config it was trained with (ADR-28) | One repo holds specs, tests, hooks, and CI; profiles never enter identity (ADR-5), so environments version separately from models |
-| **Testing** | Dataset `checks` (schema, `not_null`, `no_future_columns`, class balance, and `label_leakage_scan`, which runs by default) plus Python data tests gate the pipeline with exit code 2 ([spec reference](spec-reference.md)) | Threshold gates, paired-bootstrap champion gates (ADR-18), slice gates, and realized-metric gates block registration ([concepts](concepts.md#quality-gates)) | 750+ unit/property/golden/compliance/E2E tests on mbt itself (v0.1 status NFR-08); adapters must pass a shared compliance suite before they ship |
+| **Testing** | Dataset `checks` (schema, `not_null`, `no_future_columns`, class balance, and `label_leakage_scan`, which runs by default) plus Python data tests gate the pipeline with exit code 2 ([spec reference](spec-reference.md)) | Threshold gates, paired-bootstrap champion gates (ADR-18), slice gates, and realized-metric gates block registration ([concepts](concepts.md#quality-gates)) | Unit, property, golden-file, compliance, and end-to-end tests on mbt itself, under an enforced 100% coverage gate ([v0.1 status](v0.1-status.md) NFR-08); adapters must pass a shared compliance suite before they ship |
 | **Automation** | Dataset materialization is declarative, cached by snapshot, and auto-materializes upstream dependencies (ADR-13) | Training, Optuna tuning, evaluation, and registration all run from one `mbt build` | The scaffold ships seven workflows: PR check, prod build, promotion, scheduled retrain, monthly retrain, scheduled score, scheduled monitor ([GitOps & CI](gitops.md)) |
 | **Reproducibility** | Snapshot pinning end to end; a drifted source under a manifest pin is a hard error, never a silent retrain | Mandatory seeds with documented derivations, per-adapter determinism tiers, bit-identical `--manifest` reruns ([concepts](concepts.md#reproducibility-contract)) | `env_digest` and `env_freeze_digest` verification on manifest execution (ADR-19); the showcase bakes a digest-pinned runner image |
 | **Deployment** | The same specs serve dev and prod; targets differ only in profiles (sampling, trial caps, endpoints) | Registry stages with gate-verified promotion; run-time champion resolution makes promotion a zero-redeploy operation (ADR-20) | GitOps loop: reviewed promotion files, protected state baselines, and a digest-pinned deployable unit in the [showcase](showcase.md) |
@@ -39,7 +39,7 @@ An mbt project operates at level 2 from `mbt init` onward, because the scaffold 
 | Phase | Where it lives with mbt |
 |---|---|
 | 1. Business & data understanding | Organizational by design, but the spec forces the artifacts into review: `description`, `owner`, `label.definition`, and gates that encode the launch criteria as measurable thresholds |
-| 2. Data engineering | Declarative datasets with checks, temporal windows, joins, and reproducible sampling; snapshot pinning makes every input reconstructible |
+| 2. Data engineering | Declarative datasets over one upstream-built relation, with a column contract, checks, temporal windows, and reproducible sampling; snapshot pinning makes every input reconstructible |
 | 3. Model engineering | Adapter-executed training with mandatory seeds, Optuna tuning that never sees the test split (ADR-8), and full training metadata in the manifest and tracking server |
 | 4. Model evaluation | Held-out test metrics, threshold/champion/slice gates; the deploy/no-deploy decision is automated (exit 2 blocks registration) with human promotion approval layered on top |
 | 5. Model deployment | Registry stages, gate-verified `mbt promote`, batch scoring pipelines as first-class `scoring` resources |
@@ -53,7 +53,8 @@ Online (request/response) serving is an explicit non-goal ([roadmap](roadmap.md)
 
 ## Data science hygiene
 
-- Temporal splits are the default; random splits require a seed and emit parse-time warnings for time-column leakage and entity-straddle hazards ([spec reference](spec-reference.md)).
+- Temporal splits are the default; random splits require a seed and warn at parse time when the dataset has a time column, and a required `sample_key` keeps each entity's rows on one side of the split ([spec reference](spec-reference.md)).
+- A declared `label.horizon` is checked against `split.embargo` and `ground_truth.maturity`, so the outcome window cannot silently leak into evaluation (ADR-29).
 - The test split is carved at compile time and tuning never touches it (ADR-8).
 - Leakage guards are layered: target and time columns are always excluded, `label_leakage_scan` runs by default, and `no_future_columns` checks each split against its own window end.
 - Champion gates use a paired-bootstrap lower bound so a challenger ahead on test-set noise alone cannot promote (ADR-18).
@@ -88,7 +89,7 @@ Consistent with this project's documentation standards, they are stated plainly 
 | Feature store parity between dev and prod | Non-goal in v0.1; a Feast DataAdapter is a v1 candidate ([roadmap](roadmap.md)). The showcase's lake is plain parquet on S3, not a feature store |
 | Online serving, input pre-assertions at request time, canary/shadow rollout | Non-goal; batch scoring covers input checks and staged (dev/prod target) validation instead. A shadow-style comparison is a recipe: point a second scoring pipeline at the `staging` stage |
 | Named fairness metrics (equalized odds, demographic parity) | A relative-disparity gate ships (`across` + `min_ratio`: gate the worst group's metric as a ratio of the best across a column); the classic named fairness metrics and a formal protected-attribute type are not built in |
-| SHAP on the JVM adapters | xgboost/lightgbm cards rank features by SHAP and scoring can attach per-prediction SHAP drivers (`explain_top_k`); partial-dependence curves render for any adapter, but H2O and Spark importance stays model-intrinsic (no SHAP) |
+| SHAP beyond XGBoost and LightGBM | xgboost/lightgbm cards rank features by SHAP and scoring can attach per-prediction SHAP drivers (`explain_top_k`); partial-dependence curves render for any adapter, but scikit-learn, H2O, and Spark importance stays model-intrinsic (no SHAP) |
 | Multi-family model comparison | Not built in; comparing families means parallel specs over a shared dataset, tracked side by side in MLflow. Cross-validation itself now ships (walk-forward / k-fold / nested via `backtest_folds`/`nested_cv`), so a single pinned held-out split is no longer the only evaluation |
 | Non-ML baseline benchmark | No first-class baseline gate; a trivial-model spec can be trained alongside and compared in tracking, but nothing enforces it |
 | Drift-triggered retraining | Retraining is scheduled or change-driven; a shift breach alerts (exit 2) but does not automatically enqueue a retrain |
@@ -98,11 +99,10 @@ Consistent with this project's documentation standards, they are stated plainly 
 | Per-attribute dataset profiling catalog | Schema checks and class-balance reports ship; full attribute statistics (min/max/missing ratios/distributions) do not |
 | Sensitive-data classification (GDPR data sheets) | Organizational; mbt's contribution is keeping secrets out of manifests and redacting tainted values, not classifying data content |
 | Batch-composition independence of `percentile: batch` | The transform ranks within the batch being scored (ADR-27), so a filtered or unusually small batch changes the feature's meaning and predictions are not independent across rows. A `train`-relative percentile would remove the assumption and is not built |
-| A stable split for a dataset with no row identity | Hash-bucket membership is a function of the columns hashed, so a keyless dataset's split moves when the schema does. `sample_key` fixes it and both warehouse adapters require it; the local adapter warns and falls back to hashing every column |
 | A hash-verified lock for scaffolded projects | The scaffold pins the mbt packages by release tag and the numerics stack by exact version, but their transitive dependencies float and nothing is hash-verified. A real `--generate-hashes` lock needs mbt on PyPI, since a git ref has no wheel hash to record |
 
 ## Stack canvas, answered
 
 The [MLOps Stack Canvas](https://ml-ops.org/content/mlops-stack-canvas) asks teams to answer each infrastructure block explicitly and record decisions as ADRs.
 This repository practices what the canvas preaches: 29 [ADRs](adr/0001-arrow-interchange.md) record the load-bearing decisions with context and consequences, and the canvas blocks map to concrete choices - data versioning (snapshot tokens), experiment management (MLflow), pipelines (declarative DAG), registry (MLflow stages/aliases), deployment (GitOps + batch scoring), monitoring (shift + ground truth), and the metadata store (manifest + run results + tracking).
-The buy-vs-build stance is explicit throughout: integrate MLflow, Optuna, and Feast (v1) rather than rebuild them, and keep mbt itself a thin, deterministic build tool.
+The buy-vs-build stance is explicit throughout: integrate MLflow and Optuna today, and Feast next ([roadmap](roadmap.md)), rather than rebuild them, and keep mbt itself a thin, deterministic build tool.

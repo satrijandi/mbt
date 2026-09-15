@@ -103,6 +103,27 @@ def calibration_split(data: Any) -> str:
     )
 
 
+def note_early_stopping_without_validation(
+    data: Any, rounds: int | None, events: Any, *, adapter: str
+) -> bool:
+    """Say so when ``early_stopping_rounds`` has nothing to stop on.
+
+    Early stopping watches the ``validation`` split. Core only carves one for
+    tuning trials, so the final fit of a model whose dataset declares no
+    ``split.validation`` gets none - and the booster then trains every round
+    of ``n_estimators`` while the spec reads as if it stopped early. That was
+    silent. Returns True when the note was emitted, for the adapters' tests.
+    """
+    if rounds is None or "validation" in data.splits():
+        return False
+    events.emit(
+        f"{adapter}: early_stopping_rounds={rounds} has no validation split to stop on, "
+        "so every boosting round trains; declare split.validation on the dataset to "
+        "stop early"
+    )
+    return True
+
+
 def positive_rate(profile: DatasetProfile) -> float | None:
     """The positive-class share from a profile's label balance, if present."""
     balance = profile.label_balance or {}

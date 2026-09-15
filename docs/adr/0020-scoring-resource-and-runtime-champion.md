@@ -1,6 +1,6 @@
 # ADR-20: Scoring pipelines are a resource kind; champions resolve at run time
 
-**Status:** accepted, amended by [ADR-28](0028-mlflow-training-only-and-champion-carried-config.md)
+**Status:** accepted, amended by [ADR-28](0028-mlflow-training-only-and-champion-carried-config.md) and [ADR-29](0029-single-relation-datasets.md) (scoring inputs read one relation)
 
 Two amendments. Scoring no longer opens a tracking run, so the resolved
 champion version is recorded in run_results and the prediction sidecar but not

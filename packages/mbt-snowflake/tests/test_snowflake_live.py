@@ -16,9 +16,14 @@ SNOWFLAKE_AUTHENTICATOR=externalbrowser (SSO token caching is enabled so
 the whole session needs one browser prompt), or SNOWFLAKE_PRIVATE_KEY_FILE.
 See the package README for setup.
 
-The suite creates uniquely named MBT_LIVE_* tables in the configured
-database.schema (schema-level CREATE TABLE is the only privilege needed)
-and drops them at teardown.
+The suite creates uniquely named MBT_LIVE_* tables and views in the configured
+database.schema and drops them at teardown. It needs CREATE TABLE and CREATE
+VIEW on that schema. CREATE DYNAMIC TABLE is optional: the one test that uses
+it skips, naming the privilege, when the role lacks it.
+
+Every dataset here reads ONE relation (ADR-29). The seeded label and feature
+tables are joined into a panel table in the warehouse with a plain CTAS - the
+stand-in for the dbt model a real deployment owns - and mbt reads that panel.
 """
 
 import contextlib
@@ -70,8 +75,7 @@ WINDOWS = {
 }
 TEST_WINDOW_START = date(2026, 6, 2)
 
-LABELS_UID = "source.live_snowflake.snowflake.churn_labels"
-FEATURES_UID = "source.live_snowflake.snowflake.usage_features"
+PANEL_UID = "source.live_snowflake.snowflake.churn_panel"
 
 
 def _adapter_config() -> dict[str, Any]:
@@ -131,6 +135,7 @@ class LiveWarehouse:
     prefix: str
     labels_table: str
     features_table: str
+    panel_table: str
     rows: list[dict[str, Any]]
     created_tables: list[str] = field(default_factory=list)
     created_views: list[str] = field(default_factory=list)
@@ -200,6 +205,7 @@ def live() -> Iterator[LiveWarehouse]:
         prefix=prefix,
         labels_table=f"{prefix}_LABELS",
         features_table=f"{prefix}_FEATURES",
+        panel_table=f"{prefix}_PANEL",
         rows=_seed_rows(),
     )
     try:
@@ -221,6 +227,15 @@ def live() -> Iterator[LiveWarehouse]:
                 for r in warehouse.rows
             ],
         )
+        # The panel mbt reads: the join runs in the warehouse, upstream of mbt.
+        warehouse.execute(
+            f"CREATE TABLE {warehouse.qualified(warehouse.panel_table)} AS "
+            "SELECT customer_id, snapshot_date, churned_90d, monthly_usage, tenure_days "
+            f"FROM {warehouse.qualified(warehouse.labels_table)} "
+            f"JOIN {warehouse.qualified(warehouse.features_table)} "
+            "USING (customer_id, snapshot_date)"
+        )
+        warehouse.created_tables.append(warehouse.panel_table)
         yield warehouse
     finally:
         for table in warehouse.created_views:
@@ -261,11 +276,7 @@ class BuildContext:
 def _dataset_spec(**overrides: Any) -> DatasetSpec:
     base: dict[str, Any] = {
         "name": "churn_training_set",
-        "inputs": {
-            "label": LABELS_UID,
-            "features": [FEATURES_UID],
-            "join_key": ["customer_id", "snapshot_date"],
-        },
+        "source": PANEL_UID,
         "label": {"column": "churned_90d"},
         "sample_key": ["customer_id"],
         "split": {
@@ -281,10 +292,7 @@ def _dataset_spec(**overrides: Any) -> DatasetSpec:
 
 def _sources(live: LiveWarehouse) -> dict[str, SourceTable]:
     # bare table names: database/schema qualification comes from the config
-    return {
-        LABELS_UID: SourceTable(name="churn_labels", identifier=live.labels_table),
-        FEATURES_UID: SourceTable(name="usage_features", identifier=live.features_table),
-    }
+    return {PANEL_UID: SourceTable(name="churn_panel", identifier=live.panel_table)}
 
 
 def _ctx(
@@ -295,8 +303,6 @@ def _ctx(
     sample_fraction: float = 1.0,
 ) -> BuildContext:
     pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
-    spine_uid = spec.inputs.spine if spec.inputs is not None else spec.source
-    assert spine_uid is not None
     node = ManifestNode(
         unique_id=f"dataset.live_snowflake.{spec.name}",
         resource_type="dataset",
@@ -307,7 +313,7 @@ def _ctx(
     )
     return BuildContext(
         node=node,
-        source=sources[spine_uid],
+        source=sources[spec.source],
         source_tables=sources,
         resolved_windows=WINDOWS,
         sample_fraction=sample_fraction,
@@ -319,8 +325,8 @@ def _ctx(
 # -- adapter-level live tests ----------------------------------------------------------
 
 
-def test_multi_table_dataset_round_trip(live: LiveWarehouse, tmp_path: Path) -> None:
-    """Join push-down, temporal windows, Arrow streaming, case normalization."""
+def test_single_relation_dataset_round_trip(live: LiveWarehouse, tmp_path: Path) -> None:
+    """Temporal windows pushed down, Arrow streaming, case normalization."""
     adapter = SnowflakeDataAdapter(live.config)
     spec = _dataset_spec()
     ctx = _ctx(adapter, spec, _sources(live), tmp_path / "mat")
@@ -328,8 +334,7 @@ def test_multi_table_dataset_round_trip(live: LiveWarehouse, tmp_path: Path) -> 
 
     train = pq.read_table(ctx.output_dir / "train.parquet")
     test = pq.read_table(ctx.output_dir / "test.parquet")
-    # unquoted identifiers came back UPPERCASE and were normalized; the join
-    # deduplicated the key columns across the two tables
+    # unquoted identifiers came back UPPERCASE and were normalized
     expected_columns = {
         "customer_id",
         "snapshot_date",
@@ -414,7 +419,7 @@ def test_snapshot_tokens_track_dml_and_guard_pins(live: LiveWarehouse, tmp_path:
     assert deep == adapter.snapshot_id(source, deep=True)
     assert shallow != deep
 
-    spec = _dataset_spec(name="snap_set", inputs=None, source=uid)
+    spec = _dataset_spec(name="snap_set", source=uid)
     stale = _ctx(adapter, spec, {uid: source}, tmp_path / "stale")  # pins the current tokens
 
     live.execute(
@@ -495,19 +500,14 @@ def _write_project(live: LiveWarehouse, project: Path) -> Path:
         "sources:\n"
         "  - name: snowflake\n"
         "    tables:\n"
-        "      - name: churn_labels\n"
-        f"        identifier: {live.labels_table}\n"
-        "      - name: usage_features\n"
-        f"        identifier: {live.features_table}\n"
+        "      - name: churn_panel\n"
+        f"        identifier: {live.panel_table}\n"
     )
     (project / "datasets" / "churn_training_set.yml").write_text(
         "datasets:\n"
         "  - name: churn_training_set\n"
-        "    inputs:\n"
-        "      label: source('snowflake', 'churn_labels')\n"
-        "      features:\n"
-        "        - source('snowflake', 'usage_features')\n"
-        "      join_key: [customer_id, snapshot_date]\n"
+        "    source: source('snowflake', 'churn_panel')\n"
+        "    columns: [customer_id, snapshot_date, churned_90d, monthly_usage, tenure_days]\n"
         "    label: {column: churned_90d}\n"
         "    sample_key: [customer_id]\n"
         "    split:\n"
@@ -540,7 +540,7 @@ def _write_project(live: LiveWarehouse, project: Path) -> Path:
 def test_full_local_training_loop_from_live_snowflake(live: LiveWarehouse, tmp_path: Path) -> None:
     """The scenario a data scientist runs from a laptop: profiles point at
     the production warehouse (SSO or key-pair), `mbt build` materializes the
-    joined training set out of Snowflake and trains locally, gates pass, the
+    panel out of Snowflake - its column contract checked - and trains locally, gates pass, the
     model registers - then `mbt run --manifest` reproduces the metrics
     bit-for-bit, verifying the snapshot pins against the live tables."""
     project = _write_project(live, tmp_path / "live_project")
@@ -568,9 +568,10 @@ def test_full_local_training_loop_from_live_snowflake(live: LiveWarehouse, tmp_p
     assert reproduced["model.live_snowflake.churn_classifier"]["metrics"] == baseline
 
 
-# -- the wide multi-table cadence (examples/showcase) -------------------------------------
+# -- the wide cadence (examples/showcase) -------------------------------------------------
 
-SHOWCASE_PROJECT = Path(__file__).resolve().parents[3] / "examples" / "showcase" / "project"
+SHOWCASE = Path(__file__).resolve().parents[3] / "examples" / "showcase"
+SHOWCASE_PROJECT = SHOWCASE / "project"
 #: The showcase's committed windows span a year; narrow them to the months this
 #: fixture seeds, so the split boundaries stay meaningful at 4 cohorts.
 WIDE_WINDOWS = {
@@ -580,13 +581,27 @@ WIDE_WINDOWS = {
 WIDE_TEST_WINDOW_START = date(2026, 3, 1)
 
 
+def _showcase_seeder() -> Any:
+    """examples/showcase/scripts/seed_snowflake.py, loaded by path (it is a
+    script, not a package), so the panel join below is the showcase's own."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "showcase_seed_snowflake", SHOWCASE / "scripts" / "seed_snowflake.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _seed_wide_rows(n_customers: int = 120) -> list[dict[str, Any]]:
     """One row per customer per month-start (Jan-Apr 2026) for the wide tables.
 
-    The showcase shape: the spine carries the customer_id-to-safe_id crosswalk,
-    demographics/logins join by customer_id, and transactions join by safe_id
-    ALONE - so a broken crosswalk shows up as dropped rows rather than as a
-    column error.
+    The showcase shape: the population carries the customer_id-to-safe_id
+    crosswalk, demographics/logins join by customer_id, and transactions join
+    by safe_id ALONE - so a broken crosswalk in the panel join shows up as
+    dropped rows rather than as a column error.
     """
     months = [date(2026, m, 1) for m in (1, 2, 3, 4)]
     rows: list[dict[str, Any]] = []
@@ -613,8 +628,8 @@ def _seed_wide_rows(n_customers: int = 120) -> list[dict[str, Any]]:
 
 #: logical name (as in examples/showcase/project/sources.yml) -> (DDL, row->values).
 #: Each FEATURE table carries the same-named ETL_LOADED_AT audit column: three
-#: of them would collide in the panel, and the specs' per-table `exclude:`
-#: (ADR-25) is what stops them ever arriving. That is the point of this fixture.
+#: of them would collide in the panel, and the showcase's panel join prunes
+#: them upstream. Seeding them is what proves that pruning on the real engine.
 _WIDE_TABLES: dict[str, tuple[str, Any]] = {
     "monthly_population": (
         "CUSTOMER_ID INTEGER, SAFE_ID STRING, INFERENCE_DATE DATE, "
@@ -659,9 +674,10 @@ _WIDE_TABLES: dict[str, tuple[str, Any]] = {
 
 
 @pytest.fixture(scope="session")
-def wide_tables(live: LiveWarehouse) -> dict[str, str]:
-    """Seed the wide cadence's tables (spine + label + three feature histories);
-    dropped by the `live` teardown."""
+def wide_panel(live: LiveWarehouse) -> str:
+    """Seed the wide cadence's five gold tables, then materialize the training
+    panel over them with the showcase seeder's own join. Returns the panel's
+    table name; everything is dropped by the `live` teardown."""
     rows = _seed_wide_rows()
     names: dict[str, str] = {}
     for logical, (ddl, to_values) in _WIDE_TABLES.items():
@@ -672,33 +688,36 @@ def wide_tables(live: LiveWarehouse) -> dict[str, str]:
             f"INSERT INTO {live.qualified(table)} VALUES ({placeholders})",
             [to_values(r) for r in rows],
         )
-        names[logical] = table
-    return names
+        names[logical] = live.qualified(table)
+
+    seeder = _showcase_seeder()
+    panel = f"{live.prefix}_MONTHLY_PANEL"
+    live.execute(
+        f"CREATE TABLE {live.qualified(panel)} AS SELECT * FROM {names['monthly_population']} "
+        f"AS pop {seeder.PANELS['monthly_panel'].format(**names)}"
+        f"{seeder.PANEL_FEATURE_JOINS.format(**names)}"
+    )
+    live.created_tables.append(panel)
+    return panel
 
 
-def test_wide_cadence_multi_table_join_live(
-    live: LiveWarehouse, wide_tables: dict[str, str], tmp_path: Path
+def test_wide_cadence_panel_builds_live(
+    live: LiveWarehouse, wide_panel: str, tmp_path: Path
 ) -> None:
     """The showcase's committed wide dataset spec against real Snowflake.
 
     Distinct from tests/test_showcase_snowflake.py, which proves the same
-    cadence with the docker stack up: this needs only warehouse credentials, so
-    it is the laptop-only proof that the multi-table join, the heterogeneous
-    entity keys, and the ADR-25 source-side pruning all hold on the real engine.
+    cadence with the docker stack up: this needs only warehouse credentials.
+    It is the laptop-only proof that the showcase's upstream panel join - the
+    heterogeneous entity keys, the crosswalk, the pruning of the colliding
+    audit columns - runs on the real engine, and that the committed
+    single-relation spec (ADR-29) builds from what it produces.
     """
     doc = yaml.safe_load((SHOWCASE_PROJECT / "datasets" / "wide_churn_training.yml").read_text())
     spec = DatasetSpec.model_validate(doc["datasets"][0])
-
-    # Remap the project's source() refs onto the uniquely-named seeded tables.
-    refs = [
-        spec.inputs.spine,
-        spec.inputs.label_source,
-        *[entry.source for entry in spec.inputs.feature_entries],
-    ]
-    sources: dict[str, SourceTable] = {}
-    for ref in refs:
-        logical = re.findall(r"'([^']*)'", ref)[1]
-        sources[ref] = SourceTable(name=logical, identifier=wide_tables[logical])
+    logical = re.findall(r"'([^']*)'", spec.source)[1]
+    assert logical == "monthly_panel", "the committed spec no longer reads the panel"
+    sources = {spec.source: SourceTable(name=logical, identifier=wide_panel)}
 
     adapter = SnowflakeDataAdapter(live.config)
     pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
@@ -712,7 +731,7 @@ def test_wide_cadence_multi_table_join_live(
     )
     ctx = BuildContext(
         node=node,
-        source=sources[spec.inputs.spine],
+        source=sources[spec.source],
         source_tables=sources,
         resolved_windows=WIDE_WINDOWS,
         sample_fraction=1.0,
@@ -723,8 +742,8 @@ def test_wide_cadence_multi_table_join_live(
 
     train = pq.read_table(ctx.output_dir / "train.parquet")
     test = pq.read_table(ctx.output_dir / "test.parquet")
-    # Spine crosswalk + lineage columns, each history's payload, the label
-    # projected in, its join columns projected away - identifiers lowercased.
+    # Population crosswalk + lineage columns, each history's payload, and the
+    # label - with the join keys once each, identifiers lowercased.
     expected_columns = {
         "customer_id",
         "safe_id",
@@ -739,15 +758,12 @@ def test_wide_cadence_multi_table_join_live(
     }
     assert set(train.column_names) == expected_columns
     assert set(test.column_names) == expected_columns
-    # ADR-25 on the real engine: three identically-named ETL_LOADED_AT columns
-    # existed in the sources and none reached the panel. Without source-side
-    # pruning this join would have failed outright on duplicate columns.
+    # Three identically named ETL_LOADED_AT columns existed in the gold tables
+    # and none reached the panel.
     assert "etl_loaded_at" not in train.column_names
     # transaction_history joined through safe_id alone, so a broken crosswalk
-    # would show as nulls here rather than as a missing column.
+    # would have dropped rows; the counts below would then come up short.
     assert train.column("txn_cnt_30d").null_count == 0
-    # Every (customer, inference_date) in the spine joined its label and
-    # features, split exactly by the windows above.
     all_rows = _seed_wide_rows()
     expected_test = sum(1 for r in all_rows if r["inference_date"] >= WIDE_TEST_WINDOW_START)
     assert test.num_rows == expected_test
@@ -755,7 +771,7 @@ def test_wide_cadence_multi_table_join_live(
     assert handle.snapshot_id == ctx.node.snapshot_id
 
 
-def test_snapshot_id_pins_views_and_dynamic_tables(live: LiveWarehouse) -> None:
+def test_snapshot_id_pins_views(live: LiveWarehouse) -> None:
     """The single-relation panel (ADR-29) must be pinnable on a real account.
 
     This is the test the package did not have: before ADR-29 the word "view"
@@ -765,13 +781,16 @@ def test_snapshot_id_pins_views_and_dynamic_tables(live: LiveWarehouse) -> None:
 
     What it settles, in order:
 
-    1. ``snapshot_id`` succeeds on a plain view and on a dynamic table at all.
+    1. ``snapshot_id`` succeeds on a plain view at all.
     2. Re-deploying the view to select one more column from an ALREADY-LOADED
        table moves the snapshot id. The change token alone is DDL-blind here
        (no DML happened), and with a single-relation dataset the spec does not
        move either, so before the column fingerprint this addition was
        invisible to both of mbt's hashes.
-    3. ``--deep-snapshot`` works on both relation kinds.
+    3. ``--deep-snapshot`` works on a view.
+
+    Dynamic tables are covered by the next test, which needs a privilege a
+    sandbox role often lacks.
     """
     adapter = SnowflakeDataAdapter(live.config)
     labels, features = live.labels_table, live.features_table
@@ -802,7 +821,30 @@ def test_snapshot_id_pins_views_and_dynamic_tables(live: LiveWarehouse) -> None:
     deep = adapter.snapshot_id(source, deep=True)
     assert deep.startswith("sha256:") and deep != after
 
-    dynamic = live.create_dynamic_table(f"{live.prefix}_PANEL_DT", narrow)
+
+def test_snapshot_id_pins_dynamic_tables(live: LiveWarehouse) -> None:
+    """A dynamic table is the production-grade panel ADR-29 recommends, so it
+    must pin - shallow and deep - like any other relation.
+
+    Creating one needs CREATE DYNAMIC TABLE on the schema. That is not part of
+    this suite's documented privilege floor (the showcase's warehouse plane
+    moved to CTAS panels because the maintainer's own sandbox role lacks it),
+    so a role without it skips this one test and says why, instead of turning
+    the whole tier red over a grant.
+    """
+    from snowflake.connector.errors import ProgrammingError
+
+    adapter = SnowflakeDataAdapter(live.config)
+    narrow = (
+        "SELECT customer_id, snapshot_date, churned_90d, monthly_usage "
+        f"FROM {live.qualified(live.panel_table)}"
+    )
+    try:
+        dynamic = live.create_dynamic_table(f"{live.prefix}_PANEL_DT", narrow)
+    except ProgrammingError as exc:
+        if "insufficient privileges" not in str(exc).lower():
+            raise
+        pytest.skip(f"the role cannot CREATE DYNAMIC TABLE on this schema: {exc}")
     dt_source = SourceTable(name="panel_dt", identifier=dynamic)
     assert adapter.snapshot_id(dt_source).startswith("sha256:")
     assert adapter.snapshot_id(dt_source, deep=True).startswith("sha256:")

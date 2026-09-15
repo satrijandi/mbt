@@ -2,10 +2,10 @@
 
 Sources resolve either by ``path`` (parquet or Delta directories - local or
 object-store URIs) or by ``identifier`` (Spark catalog tables, e.g. Unity
-Catalog / Hive metastore). Joins, filters, deterministic key sampling, and
-split assignment all push down as Spark SQL; each split lands as one
-parquet file in the shared mbt materialization, so training jobs reopen
-datasets without a Spark session.
+Catalog / Hive metastore). A dataset reads one relation (ADR-29); filters,
+deterministic key sampling, and split assignment push down as Spark SQL, and
+each split lands as one parquet file in the shared mbt materialization, so
+training jobs reopen datasets without a Spark session.
 
 Sampling and random splits use the canonical cross-adapter digest (F19): the
 unsigned LOWER 64 BITS of the md5 of the '|'-joined key -
@@ -437,8 +437,8 @@ class SparkDataAdapter:
     ) -> MaterializedDatasetHandle:
         """Materialize one unlabeled Spark batch as a single ``score`` split.
 
-        Mirrors ``build_dataset`` (spine + feature joins, filters, key sampling,
-        the ``score`` window) but writes one ``score.parquet`` with no label.
+        Mirrors ``build_dataset`` (one relation, filters, key sampling, the
+        ``score`` window) but writes one ``score.parquet`` with no label.
         Zero rows is a warning, not an error - an empty nightly batch is
         legitimate (unlike a training split; ADR-20). No snapshot verification:
         the scoring input (and the monitor's arriving labels, read through this
@@ -461,8 +461,8 @@ class SparkDataAdapter:
             if not keys:
                 raise SparkAdapterError(
                     "sampling a Spark scoring input needs a stable row identity",
-                    hint="declare sample_key on the input (or use the inputs form, "
-                    "whose join_key is used)",
+                    hint="declare input.sample_key (the entity id column(s)) in the "
+                    "scoring spec, or set sample_fraction: 1.0 for this target",
                 )
             threshold = int(ctx.sample_fraction * SAMPLE_MODULUS)
             base = base.filter(f"{key_hash_sql(keys)} < {threshold}")

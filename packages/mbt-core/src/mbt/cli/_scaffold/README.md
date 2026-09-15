@@ -36,8 +36,9 @@ mbt show churn_classifier
   everywhere it could be printed; non-secret environment values (roots, hosts,
   schema names) go through `{{ env(...) }}` so they stay readable in logs.
   Never write a secret value into this file
-- `requirements.in` / `requirements.txt` - the CI install set: the three mbt
-  packages at the release tag `v__MBT_VERSION__`, plus the numerics stack
+- `requirements.in` / `requirements.txt` - the CI install set: the four mbt
+  packages (mbt-adapter-base, mbt-core, mbt-xgboost, mbt-mlflow) at the release
+  tag `v__MBT_VERSION__`, plus the numerics stack
   (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb, xgboost, mlflow) at the
   exact versions the mbt install that scaffolded this project was running -
   pinning mbt pins none of them, and they are what decides model numerics.

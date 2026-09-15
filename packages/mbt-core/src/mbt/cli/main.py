@@ -257,7 +257,9 @@ def init(
     # chdir=False: project_dir is the parent to scaffold into, not a project
     cli = make_ctx(project_dir, None, None, None, log_format, quiet, verbose, chdir=False)
     destination = scaffold_project(name, cli.project_dir)
-    out_console.print(f"Created [bold]{destination}[/bold]")
+    # soft_wrap: a path is the thing a user copies out of this line, and a
+    # hard-inserted newline would split it (FEEDBACK v3 E-5, as in ConsoleSink)
+    out_console.print(f"Created [bold]{destination}[/bold]", soft_wrap=True)
     out_console.print(
         f"Next steps:\n  cd {name}\n  python scripts/generate_sample_data.py\n  mbt build"
     )
@@ -463,7 +465,7 @@ def compile(
         cli_vars=cli.cli_vars,
     )
     manifest.write(path)
-    out_console.print(f"wrote {path}")
+    out_console.print(f"wrote {path}", soft_wrap=True)
 
 
 # -- run / build / test -----------------------------------------------------------------
@@ -534,7 +536,12 @@ def evaluate(
     target: TargetOpt = None,
     vars_: VarsOpt = None,
     version: Annotated[
-        str | None, typer.Option("--version", help="Registry version (default: latest).")
+        str | None,
+        typer.Option(
+            "--version",
+            help="Registry version (default: the version in --stage, else in the model's "
+            "stage_on_pass).",
+        ),
     ] = None,
     stage: Annotated[
         str | None, typer.Option("--stage", help="Stage to pull the version from.")
@@ -713,9 +720,14 @@ def promote(
     profiles_dir: ProfilesDirOpt = None,
     target: TargetOpt = None,
     vars_: VarsOpt = None,
-    model: Annotated[str | None, typer.Option("--model")] = None,
+    model: Annotated[
+        str | None, typer.Option("--model", help="Registered model name to promote.")
+    ] = None,
     to: Annotated[str | None, typer.Option("--to", help="Target stage.")] = None,
-    version: Annotated[str | None, typer.Option("--version")] = None,
+    version: Annotated[
+        str | None,
+        typer.Option("--version", help="Registry version (default: the current staging version)."),
+    ] = None,
     from_file: Annotated[
         Path | None, typer.Option("--from-file", help="Reviewed promotions.yml (GitOps).")
     ] = None,
@@ -1042,14 +1054,14 @@ def docs_generate(
         commands=("build", "run", "evaluate"),
     )
     index = generate_docs(current, run_results, cli.project_dir / "target" / "docs")
-    out_console.print(f"wrote {index}")
+    out_console.print(f"wrote {index}", soft_wrap=True)
 
 
 @docs_app.command("serve")
 @guard
 def docs_serve(
     project_dir: ProjectDirOpt = Path("."),
-    port: Annotated[int, typer.Option("--port", "-p")] = 8080,
+    port: Annotated[int, typer.Option("--port", "-p", help="Local port to listen on.")] = 8080,
 ) -> None:
     """Serve target/docs over HTTP on localhost."""
     import functools as ft

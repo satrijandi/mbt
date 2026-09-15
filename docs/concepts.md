@@ -4,7 +4,7 @@
 
 | Resource | File | Purpose |
 |---|---|---|
-| **source** | `sources.yml` | External inputs: parquet paths (warehouse tables, feature views in v1) |
+| **source** | `sources.yml` | External relations: Parquet or Delta paths, warehouse tables and views, catalog tables |
 | **dataset** | `datasets/*.yml` | Declarative training-set definition over ONE relation: source + panel contract + label + filters + split policy + checks. Whatever joins that relation is upstream (ADR-29) |
 | **model** | `models/*.yml` | Task, adapter, features, hyperparameters, tuning, gates, registration |
 | **scoring** | `scoring/*.yml` | Batch scoring (serving) pipeline: champion + input + prediction sink + shift monitors + delayed ground-truth evaluation |
@@ -160,8 +160,9 @@ anchor, same resolved windows, same snapshots, same hashes, same seeds.
 It first verifies the running environment against the manifest's digests
 and refuses on `env_digest` mismatch (ADR-19; `--allow-env-mismatch`
 downgrades this to a warning, transitive-drift mismatches always warn).
-All seeds derive from the model's mandatory `seed`: the adapter uses `seed`,
-tuning samples with `seed + 1`, implicit validation carves with `seed + 2`,
-and champion-gate bootstrap resampling uses `seed + 3` (ADR-18).
+All seeds derive from the model's mandatory `seed`: the adapter trains with `seed`,
+tuning samples with `seed + 1`, the implicit validation carve uses `seed + 2`,
+champion-gate bootstrap resampling `seed + 3` (ADR-18), random k-fold backtests
+`seed + 4`, and the calibration carve `seed + 5`.
 Each adapter documents a determinism tier - exact (XGBoost, LightGBM, and
 scikit-learn on CPU, single-threaded) or tolerance bands.

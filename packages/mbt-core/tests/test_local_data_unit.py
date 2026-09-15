@@ -432,10 +432,32 @@ def test_keyless_scoring_sampling_is_an_actionable_error(tmp_path: Path) -> None
                 adapter,
                 _tables(),
                 tmp_path / "target" / "scoring" / "keyless",
+                node=make_node("scoring.demo.churn_scoring"),
                 sample_fraction=0.5,
             ),
         )
     assert "hash every column" in str(excinfo.value)
+    # A scoring input has no split, and its key lives under `input:` - the
+    # hint must send the reader there, not to a dataset they are not editing
+    # (a fresh `mbt init` project hit exactly this on its first `mbt score`).
+    assert "on the scoring input" in str(excinfo.value)
+    assert "train/test" not in str(excinfo.value)
+    assert excinfo.value.hint is not None
+    assert "input.sample_key" in excinfo.value.hint
+
+    # The dataset wording stays for the runtime backstop behind the parser.
+    with pytest.raises(AdapterError, match="train/test boundary") as dataset_exc:
+        adapter.build_scoring_input(
+            spec,
+            _ctx(
+                adapter,
+                _tables(),
+                tmp_path / "target" / "scoring" / "keyless_dataset_node",
+                sample_fraction=0.5,
+            ),
+        )
+    assert dataset_exc.value.hint is not None
+    assert "on the dataset" in dataset_exc.value.hint
 
     # with a key declared the same build runs, and says nothing about it
     quiet = RecordingSink()
