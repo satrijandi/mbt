@@ -1,11 +1,11 @@
 # Adapters
 
 mbt's engine never imports an ML framework, a warehouse client, or a tracking server.
-Everything that touches one is an **adapter**: a separately installed package that implements one or more of six roles against the versioned contract in `mbt-adapter-base`.
+Everything that touches one is an **adapter**: a separately installed package that implements one or more of seven roles against the versioned contract in `mbt-adapter-base`.
 This page lists the adapters that ship in this repository and what each one supports.
 To write your own, read [Adapter authoring](adapter-authoring.md).
 
-## The six roles
+## The seven roles
 
 | Role | Configured in | What it does |
 |---|---|---|
@@ -15,6 +15,7 @@ To write your own, read [Adapter authoring](adapter-authoring.md).
 | **registry** | a target's `registry:` | Registers versions, resolves champions by stage, moves stages |
 | **compute** | a target's `compute:` | Runs a serialized training job somewhere: a subprocess, `spark-submit`, a cluster |
 | **tuning** | a model spec's `tuning.engine:` (knobs in a target's `tuning:`) | Proposes hyperparameters for the trial loop the job runs |
+| **reporting** | a model spec's `evaluation.report.stability.engine:` | Renders a drift report beside the training report's own tables; never gates |
 
 A target chooses its data, tracking, registry, and compute adapters, and a model chooses its training adapter.
 Specs therefore stay portable: the same model runs on DuckDB in development and on Snowflake or Spark in production by switching `--target`.
@@ -32,9 +33,10 @@ Specs therefore stay portable: the same model runs on DuckDB in development and 
 | `snowflake` | `mbt-snowflake` | data |
 | `mlflow` | `mbt-mlflow` | tracking, registry |
 | `optuna` | `mbt-optuna` | tuning |
-| `fake` | `mbt-testing` | training, tracking, registry, compute (inline), tuning |
+| `evidently` | `mbt-evidently` | reporting |
+| `fake` | `mbt-testing` | training, tracking, registry, compute (inline), tuning, reporting |
 
-All of them implement adapter contract 1.1.
+All of them implement adapter contract 1.2, which added the reporting role; a plugin built against 1.1 still loads.
 Core loads an adapter whose contract has the same major version and a minor version no newer than its own, and refuses anything else with an upgrade hint.
 
 ## Training adapters
@@ -143,8 +145,27 @@ tuning: {adapter: optuna, config: {sampler: tpe, multivariate: false}}
 
 Tuning never sees the test split ([ADR-8](adr/0008-tuning-never-sees-test.md)).
 
+## Reporting: `evidently`
+
+```yaml
+# a model spec
+evaluation:
+  report:
+    stability:
+      engine: evidently
+      feature_top_n: 20       # the most important features, plus the score
+      max_html_reports: 12    # the whole after-test window, then the newest months
+```
+
+Every training report already compares the months after the test window with the test split using mbt's own PSI and KS ([ADR-30](adr/0030-training-report-and-after-test-window.md)).
+With `mbt-evidently` installed, the job also runs Evidently's data-drift preset for the whole window and for each month, and writes its HTML page plus two tables under `stability/evidently/` in the report.
+Evidently chooses each column's test by type and sample size, so its verdicts can disagree with mbt's; they are shown, never gated, and a period Evidently cannot render becomes a warning on the report rather than a failed build.
+The engine's version stays out of the environment digest, because a report never changes a model.
+It needs a dataset with `split.out_of_time`; without one there is nothing after the test window to compare.
+
 ## Testing: `fake`
 
 `mbt-testing` provides framework-free adapters for every role, so you can test a project's specs, gates, and CI wiring without installing XGBoost, a JVM, or a tracking server.
 The `fake` training adapter's metrics are set by its `fake_metric_value` hyperparameter, which makes gate behaviour easy to drive; its tracking and registry persist under the project's `target/`.
+`engine: fake` gives the training report a dependency-free drift report, for testing the reporting wiring.
 See [mbt-testing](https://github.com/satrijandi/mbt/tree/main/packages/mbt-testing).

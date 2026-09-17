@@ -16,10 +16,10 @@ What does get updated in place is a record's account of what has shipped, so tha
 | Execution | [3](0003-coordinator-job-split.md) |
 | Identity and reproducibility | [4](0004-two-hashes.md), [5](0005-profiles-excluded-from-hashes.md), [12](0012-window-expressions-and-anchor.md), [19](0019-env-freeze-digest-and-manifest-verification.md) |
 | Selection, state, and datasets | [7](0007-env-digest-not-modifying.md), [11](0011-snapshot-mtime-listing.md), [13](0013-upstream-datasets-auto-materialize.md), [29](0029-single-relation-datasets.md) |
-| Gates and tuning | [6](0006-gate-edits-retrain.md), [8](0008-tuning-never-sees-test.md), [9](0009-champion-reevaluated-in-job.md), [10](0010-missing-vs-unloadable-champion.md), [18](0018-paired-bootstrap-champion-gates.md) |
+| Gates and tuning | [6](0006-gate-edits-retrain.md), [8](0008-tuning-never-sees-test.md), [9](0009-champion-reevaluated-in-job.md), [10](0010-missing-vs-unloadable-champion.md), [18](0018-paired-bootstrap-champion-gates.md), [30](0030-training-report-and-after-test-window.md) |
 | Features | [27](0027-declarative-feature-treatment.md) |
 | Scoring and monitoring | [20](0020-scoring-resource-and-runtime-champion.md), [21](0021-prediction-store-and-ground-truth-ledger.md), [23](0023-warehouse-batch-scoring.md) |
-| Tracking | [28](0028-mlflow-training-only-and-champion-carried-config.md) |
+| Tracking | [28](0028-mlflow-training-only-and-champion-carried-config.md), [30](0030-training-report-and-after-test-window.md) |
 | Task verticals | [24](0024-regression-task-vertical.md) |
 
 ## All records
@@ -29,9 +29,9 @@ What does get updated in place is a record's account of what has shipped, so tha
 | [1](0001-arrow-interchange.md) | Arrow is the data interchange format | accepted |
 | [2](0002-local-adapters-in-core.md) | The local data and compute adapters ship inside mbt-core | accepted |
 | [3](0003-coordinator-job-split.md) | Training always runs in a subprocess, apart from the coordinator | accepted |
-| [4](0004-two-hashes.md) | Two hashes per node; `state:modified` compares `input_hash` | accepted |
+| [4](0004-two-hashes.md) | Two hashes per node; `state:modified` compares `input_hash` | accepted, amended by [30](0030-training-report-and-after-test-window.md) |
 | [5](0005-profiles-excluded-from-hashes.md) | Profiles are excluded from config hashes and stored unrendered | accepted |
-| [6](0006-gate-edits-retrain.md) | Gate changes retrain the node | accepted |
+| [6](0006-gate-edits-retrain.md) | Gate changes retrain the node | accepted, amended by [30](0030-training-report-and-after-test-window.md) |
 | [7](0007-env-digest-not-modifying.md) | `env_digest` changes do not mark nodes modified by default | accepted |
 | [8](0008-tuning-never-sees-test.md) | Tuning never sees the test split | accepted |
 | [9](0009-champion-reevaluated-in-job.md) | The champion is re-evaluated inside the job, on the challenger's split | accepted |
@@ -46,15 +46,16 @@ What does get updated in place is a record's account of what has shipped, so tha
 | [18](0018-paired-bootstrap-champion-gates.md) | Champion gates decide on a paired-bootstrap lower bound | accepted |
 | [19](0019-env-freeze-digest-and-manifest-verification.md) | A freeze digest covers the whole environment; `--manifest` verifies it | accepted |
 | [20](0020-scoring-resource-and-runtime-champion.md) | Scoring pipelines are a resource kind; champions resolve at run time | accepted, amended by [28](0028-mlflow-training-only-and-champion-carried-config.md) and [29](0029-single-relation-datasets.md) |
-| [21](0021-prediction-store-and-ground-truth-ledger.md) | Prediction stores, training-time baselines, and the ground-truth ledger | accepted, amended by [28](0028-mlflow-training-only-and-champion-carried-config.md) |
+| [21](0021-prediction-store-and-ground-truth-ledger.md) | Prediction stores, training-time baselines, and the ground-truth ledger | accepted, amended by [28](0028-mlflow-training-only-and-champion-carried-config.md) and [30](0030-training-report-and-after-test-window.md) |
 | [22](0022-population-spine-and-per-table-joins.md) | Population spines, per-table join keys, and label time offsets | superseded by [29](0029-single-relation-datasets.md) |
 | [23](0023-warehouse-batch-scoring.md) | Warehouse batch scoring: staged versus native prediction stores | accepted; the staged store ships, the native store awaits live verification |
 | [24](0024-regression-task-vertical.md) | Regression is a second task vertical, with name-dispatched metrics | accepted |
 | [25](0025-per-table-column-projection.md) | Per-table column projection on multi-table inputs | superseded by [29](0029-single-relation-datasets.md) |
 | [26](0026-tracking-experiment-per-node-kind.md) | One tracking experiment per node kind | superseded by [28](0028-mlflow-training-only-and-champion-carried-config.md) |
 | [27](0027-declarative-feature-treatment.md) | Declarative feature treatment: transforms, monotone constraints, declared categoricals | accepted |
-| [28](0028-mlflow-training-only-and-champion-carried-config.md) | Tracking is training-only, runs are timestamped, and the champion carries its inference config | accepted |
+| [28](0028-mlflow-training-only-and-champion-carried-config.md) | Tracking is training-only, runs are timestamped, and the champion carries its inference config | accepted, amended by [30](0030-training-report-and-after-test-window.md) |
 | [29](0029-single-relation-datasets.md) | A dataset reads exactly one relation; the join belongs to dbt | accepted |
+| [30](0030-training-report-and-after-test-window.md) | The training report: an after-test window, same-slot periods, and stability judged against the test set | accepted |
 
 ## Writing a new ADR
 

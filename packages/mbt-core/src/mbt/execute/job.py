@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import traceback
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,7 @@ from mbt.contracts import (
 from mbt.events import EventBus, JsonLinesSink, get_bus, set_bus
 from mbt.events.models import AutoResolved, LogMessage
 from mbt.exceptions import AdapterError, ConfigError, MbtError
-from mbt.execute.handles import TransformedDatasetHandle
+from mbt.execute.handles import TrainingSplitView, TransformedDatasetHandle
 from mbt.quality.hooks import ModelHooks, load_hooks
 from mbt.runtime import normalized_adapter_config, tracking_adapter_config
 from mbt.secrets import taint
@@ -111,7 +112,10 @@ class _JobRuntime:
     adapter: Any
     handle: Any  # what the adapter reads (transformed, or a path materialization)
     transformed: TransformedDatasetHandle  # always the lazy transformed view
-    base_handle: Any  # pre-transform materialization (carries the time_column)
+    base_handle: Any  # pre-transform training view (carries the time_column)
+    #: The whole materialization, after-test split included (ADR-30). Only the
+    #: training report reads it; everything else goes through ``base_handle``.
+    materialization: Any
     base_profile: DatasetProfile
     hooks: ModelHooks | None
     builtin_specs: list[MetricSpec]
@@ -134,6 +138,8 @@ def run_job(job: TrainingJob) -> JobResult:
 
         if job.mode == "evaluate":
             return _run_evaluate(runtime)
+        if job.mode == "oot_check":
+            return _run_oot_check(runtime)
 
         result = _run_train(runtime, tracking, run_handle)
         if tracking is not None and run_handle is not None:
@@ -141,11 +147,18 @@ def run_job(job: TrainingJob) -> JobResult:
         return result
     except MbtError as exc:
         _best_effort_fail(tracking, run_handle)
-        return JobResult(status="error", error=str(exc))
+        return JobResult(status="error", error=str(exc), tracking_run_id=_run_id(run_handle))
     except Exception as exc:
         _best_effort_fail(tracking, run_handle)
         tail = traceback.format_exc(limit=8)
-        return JobResult(status="error", error=f"{exc!r}\n{tail}")
+        return JobResult(
+            status="error", error=f"{exc!r}\n{tail}", tracking_run_id=_run_id(run_handle)
+        )
+
+
+def _run_id(run_handle: Any) -> str | None:
+    """The failed run's id, so the coordinator can still attach its log."""
+    return str(run_handle.run_id) if run_handle is not None else None
 
 
 def _tracking_adapter(job: TrainingJob) -> Any:
@@ -200,13 +213,21 @@ def _materialize_for_path_adapter(handle: Any, spec: ModelSpec) -> Any:
 
 def _prepare(job: TrainingJob) -> _JobRuntime:
     registry = get_registry()
-    spec = ModelSpec.model_validate(job.node.config)
+    checking = job.mode == "oot_check"
+    # The pre-deploy check runs the version's own spec, like scoring (ADR-28).
+    spec = ModelSpec.model_validate((job.champion_spec if checking else None) or job.node.config)
 
     data_ref = _render_adapter_ref(job.data, _job_vars(job))
     data_adapter = registry.component(
         "data", data_ref.adapter, normalized_adapter_config(data_ref, Path(job.project_dir))
     )
-    base_handle = data_adapter.from_locator(job.dataset)
+    materialization = data_adapter.from_locator(job.dataset)
+    test_window = job.node.resolved.get("test_window")
+    base_handle = TrainingSplitView(
+        materialization,
+        time_column=getattr(materialization, "time_column", None),
+        test_window=(str(test_window[0]), str(test_window[1])) if test_window else None,
+    )
     base_profile = base_handle.profile()
 
     plugin = registry.get(spec.adapter)
@@ -217,7 +238,9 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
     # Run-time task validation now that the dataset profile exists (TSD §5.6).
     from mbt.config.tasks import get_task_schema
 
-    issues = get_task_schema(spec.task).validate_dataset(spec, base_profile)
+    # The check's materialization holds no train split, so there is no label
+    # balance to validate; the version was validated when it trained.
+    issues = [] if checking else get_task_schema(spec.task).validate_dataset(spec, base_profile)
     errors = [i for i in issues if i.severity == "error"]
     for issue in issues:
         if issue.severity == "warning":
@@ -249,7 +272,14 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
         return HookContext(spec=spec, profile=base_profile, split=split, logger=get_bus())
 
     time_column = getattr(base_handle, "time_column", None)
-    transformed = TransformedDatasetHandle(base_handle, spec, hooks, hook_ctx, time_column)
+    transformed = TransformedDatasetHandle(
+        base_handle,
+        spec,
+        hooks,
+        hook_ctx,
+        time_column,
+        pinned_features=job.champion_feature_columns if checking else None,
+    )
     handle: Any = transformed
     if getattr(adapter, "data_access", "arrow") == "path":
         handle = _materialize_for_path_adapter(transformed, spec)
@@ -261,6 +291,7 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
         handle=handle,
         transformed=transformed,
         base_handle=base_handle,
+        materialization=materialization,
         base_profile=base_profile,
         hooks=hooks,
         builtin_specs=[m for m in job.metric_specs if m.kind == "builtin"],
@@ -308,13 +339,14 @@ def _metrics_for(
     return results
 
 
-def _export_baseline(runtime: _JobRuntime, model: Any) -> Any:
+def _export_baseline(runtime: _JobRuntime, test_scores: Any) -> Any:
     """Build + export the monitoring baseline next to the model artifact (ADR-21).
 
     Post-hook train-split feature distributions plus the test-split score
     distribution: everything scoring-time shift monitors compare against.
     Built unconditionally on every training job - it is cheap (quantiles),
     and champions registered without one cannot be monitored later.
+    ``test_scores`` are the report's test predictions, scored once.
     """
     import tempfile
 
@@ -322,9 +354,7 @@ def _export_baseline(runtime: _JobRuntime, model: Any) -> Any:
 
     train = runtime.transformed.read("train")
     feature_columns = runtime.transformed.feature_columns or []
-    predictions: pa.Table = runtime.adapter.predict(model, runtime.handle, "test")
-    scores = predictions.column("prediction").to_numpy(zero_copy_only=False)
-    baseline = build_baseline(train, feature_columns, scores, model_name=runtime.spec.name)
+    baseline = build_baseline(train, feature_columns, test_scores, model_name=runtime.spec.name)
     with tempfile.TemporaryDirectory(prefix="mbt-baseline-") as staging:
         path = Path(staging) / "baseline.json"
         write_baseline(baseline, path)
@@ -336,6 +366,9 @@ def _export_inference_config(
     artifact: Any,
     baseline: Any,
     metrics: dict[str, float],
+    *,
+    hyperparameters: dict[str, Any] | None = None,
+    report: Any = None,
 ) -> Any:
     """Export the champion's own inference config next to the artifact (ADR-28).
 
@@ -348,6 +381,7 @@ def _export_inference_config(
     import tempfile
 
     from mbt.execute.inference_config import build_inference_config
+    from mbt.execute.training_report import dataset_record
 
     document = build_inference_config(
         node=runtime.job.node,
@@ -358,6 +392,9 @@ def _export_inference_config(
         artifact=artifact,
         baseline=baseline,
         meta=dict(runtime.job.tracking_meta),
+        hyperparameters=hyperparameters,
+        dataset=dataset_record(runtime),
+        report=report,
     )
     with tempfile.TemporaryDirectory(prefix="mbt-inference-config-") as staging:
         path = Path(staging) / "inference_config.json"
@@ -497,7 +534,8 @@ def _champion_delta_bounds(
             confidence=confidence,
             n_resamples=gate.bootstrap_resamples,
             seed=spec.seed + 3,  # seed ladder: train, +1 tuning, +2 validation
-            # carve, +3 bootstrap, +4 random k-fold, +5 calibration carve
+            # carve, +3 bootstrap, +4 random k-fold, +5 calibration carve,
+            # +6 permutation-importance sample (training_report)
         )
     return bounds
 
@@ -979,9 +1017,49 @@ def _walk_forward_backtest(
     return means, stds
 
 
+def _detail(runtime: _JobRuntime, message: str) -> None:
+    """A debug-level account of what the job did: hidden on the console
+    unless ``--verbose``, always in the node's run log (ADR-30)."""
+    get_bus().emit(LogMessage(level="debug", unique_id=runtime.job.node.unique_id, message=message))
+
+
+@contextlib.contextmanager
+def _phase(runtime: _JobRuntime, name: str) -> Iterator[None]:
+    import time
+
+    started = time.monotonic()
+    yield
+    _detail(runtime, f"{name} took {time.monotonic() - started:.2f}s")
+
+
+def _describe_inputs(runtime: _JobRuntime) -> None:
+    """Split sizes, label balance, time span and feature set, for the log."""
+    profile = runtime.materialization.profile()
+    rows = ", ".join(f"{split}={n}" for split, n in sorted(profile.n_rows.items()))
+    _detail(runtime, f"dataset {runtime.job.dataset.uri}: {rows}")
+    if profile.label_balance:
+        balance = ", ".join(f"{k}={v:.3%}" for k, v in sorted(profile.label_balance.items()))
+        _detail(runtime, f"label balance (train): {balance}")
+    if profile.time_range:
+        _detail(runtime, f"time span: {profile.time_range[0]} .. {profile.time_range[1]}")
+    windows = runtime.job.dataset_windows.get("windows") or {}
+    for split, bounds in sorted(windows.items(), key=lambda item: str(item[1][0])):
+        _detail(runtime, f"window {split}: [{bounds[0]}, {bounds[1]})")  # oldest first
+    test_window = runtime.job.node.resolved.get("test_window")
+    if test_window:
+        _detail(runtime, f"test narrowed by test_window to [{test_window[0]}, {test_window[1]})")
+    runtime.transformed.read("train")  # resolves the feature columns
+    features = runtime.transformed.feature_columns or []
+    shown = ", ".join(features[:30]) + (
+        f", ... ({len(features) - 30} more)" if len(features) > 30 else ""
+    )
+    _detail(runtime, f"{len(features)} feature(s): {shown}")
+
+
 def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResult:
     job = runtime.job
     bus = get_bus()
+    _describe_inputs(runtime)
 
     # 1. AUTO resolution from the dataset profile (FR-RES-10)
     spec = runtime.adapter.resolve_auto(runtime.spec, runtime.base_profile)
@@ -1025,28 +1103,46 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
     fit_handle = runtime.handle
     if spec.calibration is not None:
         carved = _carve_calibration(runtime, spec, runtime.transformed)
+        _detail(
+            runtime,
+            f"calibration ({spec.calibration}) carve: fit on {carved._base.read('train').num_rows} "
+            f"rows, calibrate on {carved._base.read('calibration').num_rows}",
+        )
         fit_handle = carved
         if getattr(runtime.adapter, "data_access", "arrow") == "path":
             fit_handle = _materialize_for_path_adapter(carved, spec)
-    model = runtime.adapter.train(spec, fit_handle, runtime.ctx)
+    _detail(
+        runtime, f"hyperparameters: {json.dumps(spec.hyperparameters, sort_keys=True, default=str)}"
+    )
+    with _phase(runtime, "fit"):
+        model = runtime.adapter.train(spec, fit_handle, runtime.ctx)
 
     # 4. evaluate challenger and (if provided) champion on the SAME test split
-    challenger = _metrics_for(runtime, model, "test", with_slices=True)
+    with _phase(runtime, "test evaluation"):
+        challenger = _metrics_for(runtime, model, "test", with_slices=True)
+    _detail(runtime, "test metrics: " + _metric_line(challenger.metrics))
     champion_metrics: MetricResults | None = None
     delta_bounds: dict[str, BootstrapDelta] = {}
     if job.champion is not None:
         champion_model = runtime.adapter.load(job.champion, runtime.store)
         champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
+        _detail(
+            runtime, "champion on the same test split: " + _metric_line(champion_metrics.metrics)
+        )
         delta_bounds = _champion_delta_bounds(runtime, model, champion_model)
 
-    # 5. export the artifact, the monitoring baseline (ADR-21), and the
-    #    inference config a later scoring run reads its spec from (ADR-28)
+    # 5. export the artifact and the monitoring baseline (ADR-21); score every
+    #    report split once (ADR-30) and reuse the test scores for the baseline
+    from mbt.execute import training_report as report_step
+
     artifact = runtime.adapter.export(model, "native", runtime.store)
-    baseline = _export_baseline(runtime, model)
-    inference_config = _export_inference_config(
-        runtime, artifact, baseline, dict(challenger.metrics)
-    )
+    _detail(runtime, f"artifact {artifact.uri} ({artifact.size_bytes} bytes, {artifact.format})")
+    with _phase(runtime, "scoring the report splits"):
+        scored = report_step.scored_splits(runtime, model, stage=_materialize_for_path_adapter)
+    baseline = _export_baseline(runtime, scored["test"].scores)
     importance = _feature_importance(runtime, model)
+    if not importance:
+        importance = report_step.permutation_importance(runtime, model, scored["test"])
     partial_dependence = _partial_dependence(runtime, model, importance)
     backtest_folds = spec.evaluation.protocol.backtest_folds
     nested = spec.evaluation.protocol.nested_cv
@@ -1058,19 +1154,45 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         else ({}, {})
     )
 
-    # 6. tracking: params, metrics, artifacts, documents, tuning history
+    # 6. the training report (ADR-30), then the inference config a later
+    #    scoring run reads its spec from (ADR-28), which records it
+    with _phase(runtime, "building the training report"):
+        report_data = report_step.build_report_data(runtime, spec, importance, scored)
+    summary = report_step.publish_report(
+        runtime,
+        report_data,
+        report_step.report_meta(runtime, spec, scored, kind="training"),
+        tracking=tracking,
+        run_handle=run_handle,
+        prefix="report",
+    )
+    _detail(
+        runtime,
+        f"training report: {len(summary.documents)} file(s) at {summary.report_uri}; "
+        f"{summary.out_of_time_rows} after-test row(s), "
+        f"{sum(1 for c in summary.periods if c.period != 'window')} period cell(s)",
+    )
+    inference_config = _export_inference_config(
+        runtime,
+        artifact,
+        baseline,
+        dict(challenger.metrics),
+        hyperparameters=dict(spec.hyperparameters),
+        report=summary,
+    )
+
+    # 7. tracking: params, metrics, artifacts, documents, tuning history
     tracking_run_id: str | None = None
     if tracking is not None and run_handle is not None:
         tracking_run_id = run_handle.run_id
-        params = {k: str(v) for k, v in spec.hyperparameters.items()}
-        params["seed"] = str(spec.seed)
         tracking.log(
             run_handle,
-            params=params,
-            metrics=dict(challenger.metrics),
+            params=_tracking_params(runtime, spec),
+            metrics={**challenger.metrics, **report_step.report_metrics(summary)},
             artifacts=[artifact],
         )
         _log_run_documents(runtime, tracking, run_handle, inference_config)
+        report_step.log_config_documents(runtime, tracking, run_handle, spec)
         if tuning_result is not None:
             tracking.log(
                 run_handle,
@@ -1096,8 +1218,43 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         artifact=artifact,
         baseline=baseline,
         inference_config=inference_config,
+        report=summary,
         tracking_run_id=tracking_run_id,
     )
+
+
+def _metric_line(metrics: dict[str, float]) -> str:
+    return ", ".join(f"{name}={value:.4f}" for name, value in sorted(metrics.items()))
+
+
+def _tracking_params(runtime: _JobRuntime, spec: ModelSpec) -> dict[str, str]:
+    """Bare hyperparameters and ``seed`` - what runs have always carried, kept
+    so history stays comparable - plus the flat model and dataset configs
+    (ADR-30)."""
+    from mbt.execute.training_report import dataset_record
+    from mbt.reporting.flatten import dataset_params, model_params
+
+    params = {k: str(v) for k, v in spec.hyperparameters.items()}
+    params["seed"] = str(spec.seed)
+    params.update(
+        model_params(spec.model_dump(mode="json"), runtime.transformed.feature_columns or [])
+    )
+    node = runtime.job.dataset_node
+    record = dataset_record(runtime)
+    if node is not None and record is not None:
+        windows = dict(record["windows"])
+        if record["test_window"]:
+            windows["test"] = record["test_window"]
+        params.update(
+            dataset_params(
+                node.config,
+                windows=windows,
+                anchor=record["anchor"],
+                sample_fraction=record["sample_fraction"],
+                row_counts=record["row_counts"],
+            )
+        )
+    return params
 
 
 def _run_score(job: TrainingJob) -> JobResult:
@@ -1275,6 +1432,69 @@ def _run_evaluate(runtime: _JobRuntime) -> JobResult:
         champion_delta_bounds=delta_bounds,
         feature_importance=_feature_importance(runtime, model),
         artifact=job.artifact,
+    )
+
+
+def _run_oot_check(runtime: _JobRuntime) -> JobResult:
+    """The pre-deploy check (mode="oot_check", ADR-30).
+
+    Loads a registered version, scores its recorded test window and the rows
+    since, and appends the report to the version's training run under
+    ``evaluations/<run_id>/``. It opens no run and logs no parameters: those
+    are immutable, and this run's windows are not the training run's.
+    """
+    from mbt.execute import training_report as report_step
+
+    job = runtime.job
+    if job.artifact is None:
+        raise ConfigError(
+            "oot_check mode requires the version's artifact reference",
+            resource=job.node.unique_id,
+        )
+    model = runtime.adapter.load(job.artifact, runtime.store)
+    scored = report_step.scored_splits(
+        runtime, model, stage=_materialize_for_path_adapter, include_train=False
+    )
+    importance = _feature_importance(runtime, model)
+    if not importance:
+        importance = report_step.permutation_importance(runtime, model, scored["test"])
+    data = report_step.build_report_data(runtime, runtime.spec, importance, scored)
+    tracking = None
+    run_handle = None
+    if job.tracking is not None and job.tracking_run_id:
+        tracking = _tracking_adapter(job)
+        run_handle = tracking.resume(job.tracking_run_id)
+    summary = report_step.publish_report(
+        runtime,
+        data,
+        report_step.report_meta(runtime, runtime.spec, scored, kind="check"),
+        tracking=tracking,
+        run_handle=run_handle,
+        prefix="report",
+        artifact_path=f"evaluations/{job.run_id}",
+    )
+    if tracking is not None and run_handle is not None:
+        metrics = report_step.report_metrics(summary)
+        with contextlib.suppress(Exception):  # the verdict does not hang on the tracker
+            tracking.log(
+                run_handle,
+                metrics={f"oot_check.{name}": value for name, value in metrics.items()},
+            )
+    # The check measures the rows after the test window, so its headline
+    # numbers are the declared metrics over that whole window (mature rows).
+    window = next((cell for cell in summary.periods if cell.period == "window"), None)
+    declared = {metric.name for metric in job.metric_specs}
+    after_test = {
+        f"oot_{name}": value
+        for name, value in (window.metrics if window is not None else {}).items()
+        if name in declared
+    }
+    return JobResult(
+        status="success",
+        metrics=MetricResults(metrics=after_test),
+        artifact=job.artifact,
+        report=summary,
+        tracking_run_id=job.tracking_run_id,
     )
 
 

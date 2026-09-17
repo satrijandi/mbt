@@ -19,7 +19,7 @@ Run what the change touches, from `CLAUDE.md`'s list:
 
 ```bash
 uv run pytest -q -m "not e2e" --cov          # always; CI enforces fail_under=100
-uv run pre-commit run --all-files            # always; includes ruff + strict mypy on all 11 packages
+uv run pre-commit run --all-files            # always; includes ruff + strict mypy on all 12 packages
 uv run mkdocs build --strict                 # if docs/ or mkdocs.yml changed
 uv run pytest -q -m e2e --timeout 1800       # if any package src/ changed; needs JAVA_HOME=/opt/homebrew/opt/openjdk@17
 uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples tests/fixtures .github

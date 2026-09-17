@@ -2,8 +2,9 @@
 
 ``config_hash`` covers the canonical JSON of the rendered spec plus the
 hooks file bytes. Excluded: ``description``, ``owner``, ``tags`` (cosmetic),
-resolved windows and the anchor (ADR-12), and everything from profiles
-(ADR-5: environment must not change node identity).
+a model's ``evaluation.report`` (presentation only, ADR-30), resolved
+windows and the anchor (ADR-12), and everything from profiles (ADR-5:
+environment must not change node identity).
 
 ``input_hash`` composes ``config_hash + snapshot_id + sorted upstream
 input_hashes`` in topological order: one comparison captures config, hooks,
@@ -20,6 +21,12 @@ from mbt.utils import canonical_json
 #: Spec fields that never affect node identity.
 HASH_EXCLUDED_FIELDS = frozenset({"description", "owner", "tags"})
 
+#: Nested spec fields that never affect node identity. ``evaluation.report``
+#: only decides what the training report shows; everything that decides
+#: pass/fail lives in hashed fields, so re-binning a report never retrains
+#: (ADR-30).
+HASH_EXCLUDED_PATHS = (("evaluation", "report"),)
+
 
 def _sha256(*chunks: bytes) -> str:
     digest = hashlib.sha256()
@@ -31,7 +38,22 @@ def _sha256(*chunks: bytes) -> str:
 def config_hash(rendered_config: dict[str, Any], hooks_bytes: bytes | None = None) -> str:
     """Identity hash of one node's rendered spec (+ hooks file bytes)."""
     hashable = {k: v for k, v in rendered_config.items() if k not in HASH_EXCLUDED_FIELDS}
+    for path in HASH_EXCLUDED_PATHS:
+        hashable = _without_path(hashable, path)
     return _sha256(canonical_json(hashable).encode("utf-8"), hooks_bytes or b"")
+
+
+def _without_path(config: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+    """A copy of ``config`` with the nested key at ``path`` removed, if present."""
+    head, *rest = path
+    if head not in config:
+        return config
+    if not rest:
+        return {k: v for k, v in config.items() if k != head}
+    child = config[head]
+    if not isinstance(child, dict):
+        return config
+    return {**config, head: _without_path(child, tuple(rest))}
 
 
 def input_hash(

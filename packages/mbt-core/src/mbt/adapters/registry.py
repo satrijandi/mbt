@@ -127,7 +127,7 @@ class AdapterRegistry:
         return set(adapter.supported_tasks)
 
     def component(self, kind: str, name: str, config: dict[str, Any]) -> Any:
-        """Instantiate one adapter component (data/tracking/registry/compute/tuning)."""
+        """Instantiate one adapter component (data/tracking/registry/compute/tuning/reporting)."""
         plugin = self.get(name)
         cls = getattr(plugin, kind, None)
         if cls is None:

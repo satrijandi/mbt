@@ -18,7 +18,7 @@ and what that same thing does now.
 
 - [ ] `uv run pytest -q -m "not e2e" --cov` (the 100% coverage gate is enforced)
 - [ ] `uv run ruff check . && uv run ruff format --check .`
-- [ ] `uv run mypy` over the packages you touched (CI runs all eleven, strict)
+- [ ] `uv run mypy` over the packages you touched (CI runs all twelve, strict)
 - [ ] `uv run pytest -q -m e2e` if you touched an adapter, the CLI, or the scaffold
 - [ ] `uv run mkdocs build --strict` if you touched docs or a docstring the API reference renders
 

@@ -32,6 +32,7 @@ mbt-spark = { workspace = true }
 mbt-optuna = { workspace = true }
 mbt-lightgbm = { workspace = true }
 mbt-sklearn = { workspace = true }
+mbt-evidently = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -48,6 +49,7 @@ dev = [
     "mbt-optuna",
     "mbt-lightgbm",
     "mbt-sklearn",
+    "mbt-evidently",
     "pytest>=9.0.3",  # 9.0.3 clears PYSEC-2026-1845
     "pytest-timeout>=2.3",
     "hypothesis>=6.100",
@@ -135,7 +137,7 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 show_error_codes = true
-mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-snowflake/src:packages/mbt-h2o/src:packages/mbt-spark/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src:packages/mbt-sklearn/src"
+mypy_path = "packages/mbt-core/src:packages/mbt-adapter-base/src:packages/mbt-xgboost/src:packages/mbt-mlflow/src:packages/mbt-snowflake/src:packages/mbt-h2o/src:packages/mbt-spark/src:packages/mbt-optuna/src:packages/mbt-lightgbm/src:packages/mbt-sklearn/src:packages/mbt-evidently/src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -151,6 +153,7 @@ module = [
     "pyspark.*",
     "pysparkling.*",
     "optuna.*",
+    "evidently.*",
     "sklearn.*",
     "joblib.*",
     "jsonschema.*",
@@ -200,6 +203,7 @@ source_pkgs = [
     "mbt_lightgbm",
     "mbt_mlflow",
     "mbt_optuna",
+    "mbt_evidently",
     "mbt_sklearn",
     "mbt_snowflake",
     "mbt_testing",
@@ -224,6 +228,7 @@ testpaths = [
     "packages/mbt-h2o/tests",
     "packages/mbt-spark/tests",
     "packages/mbt-optuna/tests",
+    "packages/mbt-evidently/tests",
     "packages/mbt-lightgbm/tests",
     "packages/mbt-sklearn/tests",
     "packages/mbt-testing/tests",

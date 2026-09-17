@@ -122,7 +122,43 @@ Every run carries `mbt.project`, `mbt.run_id`, and the identity tags
 (`mbt.config_hash`, `mbt.input_hash`, `mbt.manifest_hash`, `mbt.snapshot_id`,
 `mbt.git_commit`), plus two documents: `inference_config.json` and, when the
 model has one, its `hooks.py` source. Model binaries stay in the artifact
-store with a pointer tag, not in the tracker.
+store with a pointer tag; only a local `file://` store's binary is also copied
+onto the run.
+
+#### What a training run holds
+
+A training run describes its model well enough to review it and to rebuild its input at serving time without opening the project (ADR-30):
+
+```
+params     max_depth, n_estimators, ..., seed        the bare hyperparameters, as every earlier run logged them
+           model.*                                   the resolved model spec, flattened (model.features.exclude, model.evaluation.gates, ...)
+           model.resolved.feature_columns            the exact column order the model was fit on
+           dataset.*                                 the dataset spec, flattened, plus dataset.windows.<split>.start/end,
+                                                     dataset.rows.<split>, dataset.anchor and dataset.sample_fraction
+metrics    pr_auc, roc_auc, ...                      test metrics, as before
+           train.<metric>                            in-sample, for the gap to test
+           oot.window.<metric>, oot.month.<m>.<metric>
+           stability.window|month.<m>.score_psi, .max_feature_psi, .features_over_fail
+artifacts  inference_config.json, <hooks>.py
+           config/model_config.json, config/dataset_config.json   the full documents behind the params
+           logs/train.log                            the dataset's and the model's full log, debug level included
+           report/report.html                        one self-contained page of everything below
+           report/summary.json
+           report/evaluation/metrics_by_split.csv, feature_importance.csv
+           report/evaluation/binning/<strategy>.csv  quantile_10, fixed_width_0.05, custom, top_percent
+           report/evaluation/distribution/score_summary.csv, score_histogram.csv, test_features.csv
+           report/performance/by_period.csv          month, week-of-month and day-of-month cells with their reference slot
+           report/stability/scores_by_period.csv, features_by_period.csv
+           report/stability/evidently/*.html, drift_by_*.csv   with engine: evidently
+           report/predictions/<split>.parquet        opt-in: sample key, time, split, label, p0, p1
+           evaluations/<run_id>/...                  one report per pre-deploy check, same layout
+           logs/evaluate-<run_id>.log
+```
+
+A parameter value is a string of at most 6000 characters.
+A list or mapping is logged as JSON, and a longer value is cut with a visible `...[truncated from N characters]` marker; the untruncated value is in `config/*.json`.
+Values pass through the same secret redaction as the event log.
+The `report/` directory is also written next to the model in the artifact store, so it survives a tracker that could not take the upload; the version's `mbt.report_uri` tag points at it.
 
 Experiment names come from `profiles.yml`, which never enters node identity
 (ADR-5), so renaming one cannot mark a node `state:modified`.
@@ -159,9 +195,24 @@ actually trained with rather than whatever the working tree says today:
   "hooks": {"path": "models/wide_hooks.py", "hash": "sha256:..."},
   "identity": {"config_hash": "sha256:...", "manifest_hash": "sha256:...", ...},
   "artifact": {"uri": "s3://...", "format": "h2o_mojo", ...},
-  "baseline_uri": "s3://..."
+  "baseline_uri": "s3://...",
+  "dataset": {                        /* ADR-30: what the input was */
+    "unique_id": "dataset.churn_lake.churn_panel", "name": "churn_panel",
+    "config_hash": "sha256:...", "snapshot_id": "sha256:...",
+    "source": "source.churn_lake.lakehouse.churn_panel", "sample_key": ["user_id"],
+    "label": {"column": "churned_90d", "horizon": "90d"},
+    "time_column": "snapshot_date", "split_strategy": "temporal",
+    "filters": ["is_active = true"],
+    "windows": {"train": ["...", "..."], "test": ["...", "..."], "out_of_time": ["...", "..."]},
+    "test_window": null, "anchor": "2026-06-30T00:00:00Z",
+    "sample_fraction": 1.0, "row_counts": {"train": 1862, "test": 966, "out_of_time": 868}
+  },
+  "report": {"uri": "s3://.../report/report.html", "reference_rows": 966, "out_of_time_rows": 868}
 }
 ```
+
+`resolved.hyperparameters` holds the values the model was fit with, after AUTO resolution and tuning, where `spec` still holds the sentinels and search spaces.
+The `dataset` block is what `mbt evaluate --out-of-time` rebuilds the version's test window from; a version registered before it existed cannot be checked.
 
 Two things are deliberately NOT taken from the champion. **`hooks.py`** is
 arbitrary Python, so mbt keeps executing the git-tracked file from the project
@@ -214,12 +265,15 @@ datasets:
     split:
       strategy: temporal            # default; random needs explicit seed
       time_column: snapshot_date
-      train: "-180d:-28d"           # window expressions vs the anchor
-      test: "-28d:now"
-      validation: "-42d:-28d"       # optional; else carved when tuning needs it
+      train: "-12mo:-4mo"           # window expressions vs the anchor
+      test: "-4mo:-3mo"
+      validation: "-5mo:-4mo"       # optional; else carved when tuning needs it
       embargo: "7d"                 # optional (temporal): drop the train window's
                                     # tail so a row whose label horizon reaches the
                                     # eval window cannot leak (R2-7)
+      out_of_time: "-3mo:now"       # optional (temporal): the after-test window the
+                                    # training report checks for stability and
+                                    # per-period performance; never trained on (ADR-30)
     checks:                         # run at every dataset build
       # every timestamp column must stay within its split's OWN window:
       # catches train rows reaching into the test period (temporal
@@ -246,9 +300,10 @@ datasets:
       # in the referenced RAW source's field (parent pulled as DISTINCT via the
       # data adapter - size the referenced table like a dimension)
       - relationships: {column: plan_id, to: lakehouse.plans, field: id}
-      # the materialized dataset's total row count (all splits) must stay within
-      # bounds: a volume floor/ceiling that turns a silently collapsed upstream
-      # join into a loud build failure instead of a quietly smaller model
+      # the materialized dataset's total row count (every labelled split; the
+      # after-test split is not counted) must stay within bounds: a volume
+      # floor/ceiling that turns a silently collapsed upstream join into a loud
+      # build failure instead of a quietly smaller model
       - row_count: {min: 1000}
       # the newest row must be within max_lag of the anchor ("now"): an
       # upstream-is-stale guard, so a scheduled retrain fails loudly instead of
@@ -329,6 +384,27 @@ as `label.horizon`) reaches into the evaluation window cannot leak - set it to
 at least that horizon. It is applied in the compiler, so every data adapter
 gets the embargoed window; an embargo that consumes the whole train window is a
 compile error.
+
+**The after-test window (`out_of_time`, temporal only, ADR-30)** holds the rows
+between the end of the test window and the anchor - the months a model's test
+set is usually behind by the day it ships.
+Nothing in training reads them: the fit, tuning, the validation and calibration
+carves, path-adapter staging and hooks all see the dataset without this split.
+The training report scores them instead, to show whether scores and features
+stayed stable after the test window and how the model performs on labels that
+matured since (see [the training report](#the-training-report-adr-30)).
+
+- It must start at or after the end of the test window. Parse rejects an overlap
+  when both bounds are relative (or both absolute); a mixed pair is checked at
+  compile, once the anchor orders them.
+- It may be empty. A window ending at `now` often is, until newer rows land
+  upstream, so an empty `out_of_time` split logs a warning instead of failing
+  the build.
+- It may hold rows whose label is not known yet. `not_null` skips the label
+  column in this split (feature columns are still checked), and `row_count` and
+  Python data tests read only the labelled splits. With `label.horizon`
+  declared, a row counts as labelled for the report only once
+  `time + horizon <= anchor`.
 
 **Random splits:** `strategy: random` uses fractions (`train: "0.8"`),
 requires `seed`, and supports `stratify_by: <column>`. Combining a random split
@@ -457,6 +533,10 @@ models:
         # gate the walk-forward backtest MEAN instead of the single test split
         # (R2-7): needs backtest_folds; whole-split threshold gates only
         - {metric: pr_auc, threshold: 0.40, source: backtest}
+        # gate the after-test window (ADR-30): every mature month (or
+        # week_of_month / day_of_month / window) with at least min_rows labelled
+        # rows must clear the bar; needs the dataset's split.out_of_time
+        - {metric: roc_auc, threshold: 0.70, source: out_of_time, period: month, min_rows: 100}
         # champion gates pass when the paired-bootstrap lower bound of the
         # delta clears min_delta (ADR-18); confidence: null opts out
         - {metric: pr_auc, compare_to: production, min_delta: 0.005,
@@ -474,6 +554,22 @@ models:
                                     # numeric slice column (age, tenure) is
                                     # auto-binned into quartile ranges (e.g.
                                     # age=[25, 40)) instead of one slice per value
+      # after-test stability gates (ADR-30): the scoring monitors' shapes, with
+      # the TEST split as reference; each after-test month must pass
+      stability:
+        period: month               # month (default) | window
+        min_rows: 100               # smaller months are reported, not judged
+        prediction_shift: {method: psi, threshold: 0.25, warn_threshold: 0.1}
+        feature_shift: {method: psi, threshold: 0.25, warn_threshold: 0.1}
+      # what the training report shows (ADR-30); presentation only, so editing
+      # it never retrains. Every key is optional.
+      report:
+        predictions: {enabled: true, max_rows: 500000}   # row-level, opt-in
+        binning: all                # or a list of strategies, see below
+        periods: [month, week_of_month, day_of_month]
+        min_rows: 30
+        importance: {top_n: 20}
+        stability: {engine: native, feature_top_n: 20}   # or engine: evidently
     registration:
       name: churn_classifier
       stage_on_pass: staging        # canonical stages: staging|production|archived
@@ -540,6 +636,10 @@ for a temporal split the inner tuning uses only each fold's PAST). It needs
 `backtest_folds` and a `tuning` block, works on either split, and re-tunes per
 fold, so it is the most expensive option.
 
+`protocol.test_window` narrows the dataset's test window for this model: the
+test metrics, gates and training report use only the test rows inside it. It
+must resolve inside the dataset's test window.
+
 Regression (`task: regression`, all five adapters) uses `rmse`, `mae`, `r2`,
 `mape`; the target must be a numeric column (no 0/1 label check, no
 `scale_pos_weight`). Spark trains a `GBTRegressor` and H2O AutoML detects
@@ -550,6 +650,52 @@ metric engine dispatches on the metric name (ADR-24).
 forecasting) with an `rmse` ceiling gate and delayed ground-truth monitoring -
 the `task: regression` twin of `tests/fixtures/churn_demo`, and both are built
 end to end by the E2E suite on every run.
+
+### The training report (ADR-30)
+
+Every training run writes a report next to its metrics.
+`evaluation.report` decides what the report shows and nothing else, so it is left out of `config_hash`: changing a bin width never retrains a model.
+Everything that decides pass/fail - `evaluation.gates`, `evaluation.stability`, `split.out_of_time` - stays part of the model's identity (ADR-6).
+Without the block, the report uses its defaults: decile bins, the top 20 features, and no row-level predictions.
+It supports `binary_classification` and `regression`.
+
+**Binning.** Each strategy produces one table per split - train (in-sample), test, and each after-test month - with the row count, positives and positive rate (mean label, for regression), mean score, cumulative capture, lift and KS per bin.
+Edges fitted from data are fitted once, on the test scores, and reused unchanged everywhere else, so a row means the same score range on every split and in every month.
+
+| strategy | meaning |
+| --- | --- |
+| `quantile` (`bins: 10`) | equal-frequency bins on the test scores (deciles by default). Tied scores merge bins rather than splitting a tie. |
+| `fixed_width` (`width: 0.05`) | equal-width score bands. The width defaults to 0.05 on a probability; for regression, unset, the test prediction range is cut into 20 bands. |
+| `custom` (`edges: [...]`) | declared edges, e.g. risk grades `[0, 0.05, 0.1, 0.2, 0.4, 1]`; a score outside them counts in the outermost bin. Defaults to `[0, 0.05, 0.1, 0.2, 0.4, 0.6, 1]` on a probability; regression must declare edges. |
+| `top_percent` (`cutoffs: [1, 2, 5, 10, 20, 30, 50]`) | cumulative top-N% of scores with capture rate, lift and precision at each cutoff - the view a targeting campaign reads. |
+
+`binning: all` renders all four; a list renders the ones named.
+
+**Periods.** With an after-test window, the report cuts it three ways and compares each cell with the matching slot of the test window:
+
+| period | cell | reference |
+| --- | --- | --- |
+| `month` | each calendar month after the test window | the whole test window |
+| `week_of_month` | W1 (days 1-7) .. W5 (days 29-31) of each month | the same week of the test month(s) |
+| `day_of_month` | day d of each month | day d of the test month(s) |
+
+Comparing like slots keeps within-month patterns such as paydays from reading as drift.
+A grain finer than the time column is skipped (a monthly panel has no day-of-month view), and every cell shows its reference slot's row count, so a partial month is visible for what it is.
+Performance numbers use only mature cells: with `label.horizon` declared, a cell is mature once `cell_end + horizon <= anchor`; otherwise its rows need a label.
+Cells below `min_rows`, or with a single class, show as insufficient.
+Stability uses every row, labelled or not.
+
+**Stability.** Scores and features are compared with the test split, not the training baseline, because the question before a deployment is whether anything moved after the model was evaluated.
+Month and window stability cover every feature; week and day slots cover the `feature_top_n` most important ones.
+`evaluation.stability` turns the comparison into gates with exactly the scoring monitors' semantics (thresholds, warn bands, KS significance with Benjamini-Hochberg control), so "stable before deploy" and "stable in production" mean the same thing.
+`engine: evidently` adds Evidently's drift report beside mbt's tables and needs the [`mbt-evidently`](adapters.md#reporting-evidently) plugin; the gates use mbt's own statistics either way.
+Its pages cover the whole window and then the newest months, at most `max_html_reports` of them, each over the `feature_top_n` most important features and the score, and land under `stability/evidently/` with `drift_by_period.csv` and `drift_by_column.csv`.
+
+**After-test gates** (`source: out_of_time`) judge the worst mature cell at their `period` (`month` unless set; `window` judges the whole window at once).
+A gate with no mature cell to judge passes with a warning and is recorded as not applicable, so a model built before its after-test labels mature is not blocked by the calendar.
+
+**Row-level predictions** (`predictions.enabled`) put each split's keys, time, label and scores on the tracking run - `p0`/`p1` for a classifier, `prediction` for regression.
+They carry the dataset's `sample_key`, so they are off by default; `max_rows` caps each split by a deterministic hash of that key, so a re-run over the same data keeps the same rows.
 
 ### Feature treatment (ADR-27)
 
@@ -749,7 +895,10 @@ promotions:
   - model: churn_classifier      # registration name in the registry
     version: "3"                 # registry version to promote
     to: production               # target stage alias
+    require_oot_check: true      # optional: also refuse a version no after-test check passed (ADR-30)
 ```
+
+A version whose latest after-test verdict failed is refused either way; `require_oot_check` also refuses one that was never judged.
 
 An empty list (`promotions: []`) is valid and no-ops. Re-running an
 already-merged file is safe: promoting a version to a stage it already holds

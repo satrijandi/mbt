@@ -79,6 +79,19 @@ ACCEPTED: dict[str, str] = {
         "api_base. Ends when an mlflow release ships the fix and Renovate bumps "
         "us onto it; this script's staleness check will then force the entry out."
     ),
+    "PYSEC-2026-3740": (
+        "CVE-2026-81726 / GHSA-8mgp-746c-j5xp: nltk's model-artifact APIs "
+        "(TransitionParser, AveragedPerceptron/PerceptronTagger, maxent "
+        "parameter files) open caller-controlled paths with raw file calls, "
+        "bypassing nltk's opt-in pathsec roots. No fixed release exists: 3.10.3 "
+        "is the newest and is marked last_affected. nltk reaches us only through "
+        "evidently (mbt-evidently), which imports the package eagerly but uses "
+        "just WordNetLemmatizer, the words corpus and VADER, in text descriptors "
+        "the drift preset mbt runs never touches; neither mbt nor evidently "
+        "calls any of the affected APIs, and mbt passes nltk no paths at all. "
+        "Ends when nltk ships a fix (Renovate bumps the lock; the staleness "
+        "check then forces the entry out) or evidently drops nltk."
+    ),
     "PYSEC-2026-352": _SPARKLING_FLOOR,
     "PYSEC-2026-349": _SPARKLING_FLOOR,
     "PYSEC-2026-2180": _SPARKLING_FLOOR,

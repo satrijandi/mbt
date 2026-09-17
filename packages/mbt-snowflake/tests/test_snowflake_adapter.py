@@ -845,6 +845,34 @@ def test_zero_row_split_names_the_split(tmp_path: Path) -> None:
     assert (ctx.output_dir / "train.parquet").is_file()
 
 
+def test_empty_after_test_split_warns_and_is_kept(tmp_path: Path) -> None:
+    """A routine empty ``out_of_time`` window is not a failed build (ADR-30)."""
+    import dataclasses
+
+    stub = StubConnection(tables=_make_tables())
+    adapter = _adapter(stub)
+    spec = _spec(
+        split={
+            "strategy": "temporal",
+            "time_column": "snapshot_date",
+            "train": "-180d:-28d",
+            "test": "-28d:now",
+            "out_of_time": "now:30d",
+        }
+    )
+    after = ("2026-07-01T00:00:00Z", "2026-07-31T00:00:00Z")  # beyond the data: no rows
+    ctx = dataclasses.replace(
+        _ctx(tmp_path, spec, adapter), resolved_windows={**WINDOWS, "out_of_time": after}
+    )
+    handle = adapter.build_dataset(spec, ctx)
+    assert handle.splits() == {"train", "test", "out_of_time"}
+    assert handle.read("out_of_time").num_rows == 0
+    assert any(
+        "'out_of_time' materialized 0 rows [2026-07-01T00:00:00Z" in str(message)
+        for message in ctx.events.messages
+    )
+
+
 @dataclass
 class _FailingConnection:
     exc: Exception

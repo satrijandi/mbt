@@ -124,6 +124,21 @@ def test_quality_events_render() -> None:
     assert unset.human() == "gate m (threshold): PASS - expected None, got 0.5"
     champion = GateEvaluated(metric="pr_auc", kind="champion", passed=True, message="beats v2")
     assert champion.human() == "gate pr_auc (champion): PASS - beats v2"
+    after_test = GateEvaluated(
+        metric="oot_roc_auc",
+        kind="threshold",
+        expected=0.6,
+        actual=0.7123,
+        message="worst month cell 2026-06 of 3 judged",
+    )
+    assert after_test.human() == (
+        "gate oot_roc_auc (threshold): PASS - expected 0.6, got 0.7123 "
+        "(worst month cell 2026-06 of 3 judged)"
+    )
+    unjudged = GateEvaluated(
+        metric="oot_roc_auc", kind="threshold", expected=0.6, message="gate not applicable"
+    )
+    assert unjudged.human() == "gate oot_roc_auc (threshold): PASS - gate not applicable"
 
 
 def test_registry_and_promotion_events_render() -> None:

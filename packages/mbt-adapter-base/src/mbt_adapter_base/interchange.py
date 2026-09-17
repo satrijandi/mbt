@@ -162,6 +162,100 @@ class MonitorStats(_InterchangeModel):
     skipped_features: list[str] = Field(default_factory=list)
 
 
+#: The after-test grains a report cell can be cut at (ADR-30).
+CellPeriod = Literal["window", "month", "week_of_month", "day_of_month"]
+
+
+class PeriodCell(_InterchangeModel):
+    """One after-test performance cell of the training report (ADR-30).
+
+    ``metrics`` is empty when the cell has no mature labelled rows or, for a
+    classifier, only one class - the metrics are undefined there, and an
+    after-test gate treats the cell as not judgeable.
+    """
+
+    period: CellPeriod
+    #: ``window``, ``2026-06``, ``2026-06/W1`` or ``2026-06-05``.
+    key: str
+    #: The reference slot it is compared with: ``all``, ``W1`` or ``D05``.
+    slot: str
+    start: str  # ISO bounds of the cell (the window's are its first/last row)
+    end: str
+    n_rows: int
+    #: Rows whose outcome is known by the anchor (``label.horizon`` rule).
+    n_labelled: int
+    #: Every row in the cell is mature, so its metrics are final.
+    mature: bool
+    metrics: dict[str, float] = Field(default_factory=dict)
+    reference_rows: int = 0
+    reference_metrics: dict[str, float] = Field(default_factory=dict)
+    note: str = ""
+
+
+class StabilityCell(_InterchangeModel):
+    """Score and feature stability of one after-test cell vs the test split (ADR-30)."""
+
+    period: CellPeriod
+    key: str
+    slot: str
+    n_rows: int
+    reference_rows: int
+    score_psi: float | None = None
+    score_ks: float | None = None
+    max_feature_psi: float | None = None
+    max_feature: str | None = None
+    #: Features whose PSI passes the conventional 0.1 / 0.25 bands.
+    features_over_warn: int = 0
+    features_over_fail: int = 0
+    #: The declared ``evaluation.stability`` statistics, on the cells that
+    #: stability gate judges; None everywhere else.
+    gate: MonitorStats | None = None
+
+
+class DriftColumn(_InterchangeModel):
+    """One column of a report engine's drift table (ADR-30, display only)."""
+
+    column: str
+    #: The engine's own test or distance, e.g. ``K-S p_value``.
+    method: str
+    score: float
+    threshold: float
+    drifted: bool
+
+
+class DriftReport(_InterchangeModel):
+    """What a report engine found comparing one after-test cell with test."""
+
+    #: Share of compared columns the engine calls drifted.
+    drifted_share: float
+    columns: list[DriftColumn] = Field(default_factory=list)
+
+
+class ReportSummary(_InterchangeModel):
+    """What the training report hands back to the coordinator (ADR-30).
+
+    The per-feature and per-bin detail lives in the report's own files; this
+    carries what core gates on and what the run records as metrics.
+    """
+
+    anchor: str
+    reference_rows: int
+    out_of_time_rows: int
+    #: Metrics per split over its labelled rows (the after-test split: mature ones).
+    split_metrics: dict[str, dict[str, float]] = Field(default_factory=dict)
+    #: The top features by importance, in rank order.
+    importance: dict[str, float] = Field(default_factory=dict)
+    periods: list[PeriodCell] = Field(default_factory=list)
+    stability: list[StabilityCell] = Field(default_factory=list)
+    #: Grains the data cannot support, with the reason.
+    skipped_periods: dict[str, str] = Field(default_factory=dict)
+    #: Report files, relative to the report directory.
+    documents: list[str] = Field(default_factory=list)
+    #: Where ``report.html`` landed in the artifact store.
+    report_uri: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ManifestNode(_InterchangeModel):
     """One compiled DAG node (dataset, model, or scoring) as pinned in the manifest.
 
@@ -200,7 +294,7 @@ class TrainingJob(_InterchangeModel):
     the resolved metric specs so adapters compute exactly what core compares.
     """
 
-    mode: Literal["train", "evaluate", "score"] = "train"
+    mode: Literal["train", "evaluate", "score", "oot_check"] = "train"
     run_id: str
     project_dir: str
     target_name: str
@@ -245,6 +339,14 @@ class TrainingJob(_InterchangeModel):
     baseline: ArtifactRef | None = None
     model_version: str | None = None
     run_key: str | None = None
+    #: The model's dataset node (ADR-30): its spec is logged as flat params and
+    #: recorded in the inference config, and the report reads its sample key,
+    #: time column and label horizon.
+    dataset_node: ManifestNode | None = None
+    #: An existing tracking run to append to instead of opening one - the
+    #: pre-deploy check writes to the training run of the version it checks
+    #: (ADR-30).
+    tracking_run_id: str | None = None
 
 
 class TuningResult(_InterchangeModel):
@@ -289,6 +391,10 @@ class JobResult(_InterchangeModel):
     #: Score mode: computed shift statistics and the written prediction run.
     monitor_stats: MonitorStats | None = None
     predictions: PredictionRunInfo | None = None
+    #: Train and oot_check modes: the training report (ADR-30).
+    report: ReportSummary | None = None
+    #: Set on failed training jobs too, so the coordinator can still attach
+    #: the log to the run that recorded the failure.
     tracking_run_id: str | None = None
     error: str | None = None
 

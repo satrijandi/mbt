@@ -9,7 +9,14 @@ node status ``monitor_failed`` (exit code 2).
 from typing import Literal, NamedTuple
 
 from mbt.artifacts.run_results import MonitorResult
-from mbt.contracts import MetricSpec, MonitorsSpec, MonitorStats, ShiftStat
+from mbt.contracts import (
+    MetricSpec,
+    MonitorsSpec,
+    MonitorStats,
+    ReportSummary,
+    ShiftStat,
+    StabilitySpec,
+)
 from mbt.events import get_bus
 from mbt.events.models import LogMessage
 from mbt.quality.metrics import metric_direction
@@ -507,3 +514,57 @@ def evaluate_ground_truth_gates(
 
 def all_monitors_passed(results: list[MonitorResult]) -> bool:
     return all(r.passed for r in results)
+
+
+def evaluate_stability(
+    stability: StabilitySpec | None,
+    report: ReportSummary | None,
+    *,
+    resource: str,
+) -> list[MonitorResult]:
+    """After-test stability gates (ADR-30), with the scoring monitors' semantics.
+
+    Each after-test cell at the declared grain is judged by
+    :func:`evaluate_monitors` against the test-split baseline the job measured
+    it with, so a breach reads exactly as it would on a scoring run. A cell
+    below ``min_rows`` is not judged. Nothing to judge at all passes with a
+    warning, and the empty result says so to callers that record a verdict.
+    """
+    if stability is None:
+        return []
+    cells = [
+        cell
+        for cell in (report.stability if report is not None else [])
+        if cell.period == stability.period
+        and cell.gate is not None
+        and cell.n_rows >= stability.min_rows
+    ]
+    if not cells:
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                unique_id=resource,
+                message=(
+                    f"evaluation.stability: no after-test {stability.period} cell with at "
+                    f"least {stability.min_rows} rows yet; stability not judged"
+                ),
+            )
+        )
+        return []
+    results: list[MonitorResult] = []
+    for cell in cells:
+        assert cell.gate is not None  # filtered above
+        get_bus().emit(
+            LogMessage(
+                unique_id=resource,
+                message=(
+                    f"stability {cell.key}: {cell.n_rows} rows against "
+                    f"{cell.reference_rows} test rows"
+                ),
+            )
+        )
+        for result in evaluate_monitors(stability.monitors, cell.gate, resource=resource):
+            subject = f"{cell.key}: {result.subject}" if result.subject else cell.key
+            message = f"[{cell.key}] {result.message}" if result.message else None
+            results.append(result.model_copy(update={"subject": subject, "message": message}))
+    return results

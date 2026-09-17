@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-evidently"
+version = "0.1.0"
+description = "Evidently drift reports for mbt's training report"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Nugroho Satrijandi", email = "satrijandi@gmail.com" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    # Contract 1.2 introduced the reporting role this package fills.
+    "mbt-adapter-base>=0.1.0,<0.2",
+    # 0.7.20 is the release whose snapshot shape the showcase captured first
+    # and the floors job installs; 0.8 is free to move the payload again, so
+    # the ceiling holds until parse_snapshot is re-verified against it.
+    "evidently>=0.7.20,<0.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/satrijandi/mbt"
+Documentation = "https://satrijandi.github.io/mbt/"
+Repository = "https://github.com/satrijandi/mbt"
+Issues = "https://github.com/satrijandi/mbt/issues"
+
+[project.entry-points."mbt.adapters"]
+evidently = "mbt_evidently.plugin:PLUGIN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_evidently"]

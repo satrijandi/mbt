@@ -21,8 +21,10 @@ evidently_report.py output) alongside the verdict. The gate complements
 mbt's OWN enforcing feature_shift / prediction_shift monitors (PSI/KS
 against the champion's training-time baseline, ADR-21): those gate the
 scoring run itself; this one adds Evidently's per-column drift tests and
-the pre-promotion phase, and stays showcase-local by design (no mbt
-package depends on evidently; the pin lives in the runner image).
+the pre-promotion phase. The gate itself stays showcase-local by design:
+mbt never gates on Evidently (ADR-30). The evidently it imports arrives
+with mbt-evidently, which puts the same library's drift report into the
+training report for display.
 
 Exit codes: 0 stable, 2 drift breach (quality verdict, deterministic - the
 DAG routes it to AirflowFailException), 1 missing inputs or an

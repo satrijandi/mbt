@@ -22,6 +22,11 @@ snapshot ↔ model version.
 3. **Promotion** (`promote.yml`): a reviewed `promotions.yml` change (pure
    GitOps) or a manually approved `workflow_dispatch` runs
    `mbt promote`, which refuses versions without recorded gate passes.
+   It also refuses a version whose pre-deploy check failed: run
+   `mbt evaluate --model <name> --version <n> --out-of-time --gates`
+   against the newest data before the promotion PR, and set
+   `require_oot_check: true` on the entry to refuse a version that was
+   never checked (ADR-30).
 4. **Scheduled retraining** (`scheduled_retrain.yml`, `scheduled_retrain_monthly.yml`):
    CI cron + `mbt build --select tag:weekly` (Mondays) and
    `mbt build --select tag:monthly` (the 1st) - freshness arrives as new

@@ -145,6 +145,10 @@ def make_inline_runtime(
     )
     if job is None:
         job = SimpleNamespace(
+            dataset=SimpleNamespace(uri="memory://unit"),
+            dataset_node=None,
+            anchor="",
+            tracking_run_id=None,
             dataset_windows={},
             # A real node: _run_train exports an inference config from it
             # (ADR-28), so it needs the spec fields a stub cannot carry.
@@ -176,6 +180,7 @@ def make_inline_runtime(
         handle=transformed,
         transformed=transformed,
         base_handle=base,
+        materialization=base,
         base_profile=base.profile(),
         hooks=hooks,
         builtin_specs=builtin_specs or [],

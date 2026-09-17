@@ -215,6 +215,17 @@ def test_class_balance_report_never_fails() -> None:
     assert "label balance" in result["class_balance_report"].message
 
 
+def test_class_balance_report_says_why_it_has_nothing() -> None:
+    table = _handle().read("test")
+    # a pre-deploy check's dataset has no train split (ADR-30)
+    checked = InMemoryDatasetHandle({"test": table}, label_column="churned")
+    no_train = _run(["class_balance_report"], checked)["class_balance_report"]
+    assert no_train.passed and no_train.message == "label balance: no train split to report"
+    unlabeled = InMemoryDatasetHandle({"train": table.drop_columns(["churned"])})
+    missing = _run(["class_balance_report"], unlabeled)["class_balance_report"]
+    assert missing.passed and missing.message == "label balance unavailable"
+
+
 def test_freshness_passes_when_data_is_recent() -> None:
     # newest snapshot_date is 2026-01-04; the test window ends at 2026-01-05 (the
     # anchor), so a 2-day max_lag is satisfied.

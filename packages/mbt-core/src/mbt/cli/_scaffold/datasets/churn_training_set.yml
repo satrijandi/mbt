@@ -37,6 +37,15 @@ datasets:
       time_column: snapshot_date
       train: "-180d:-28d"
       test: "-28d:now"
+      # An after-test window (ADR-30) holds rows newer than the test split that
+      # no training step sees. The training report scores them month by month
+      # against the test split, after-test gates can require that they still
+      # perform, and `mbt evaluate --out-of-time` re-checks a registered version
+      # on them before a deploy. It must start where test ends, so declaring one
+      # moves the test window back:
+      #   train: "-180d:-56d"
+      #   test: "-56d:-28d"
+      #   out_of_time: "-28d:now"
     checks:
       - class_balance_report
       - no_future_columns

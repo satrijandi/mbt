@@ -152,6 +152,26 @@ def _ctx(
 # -- data plane -----------------------------------------------------------------------
 
 
+def test_empty_after_test_split_keeps_the_panel_schema(source_root: Path, tmp_path: Path) -> None:
+    """An empty ``out_of_time`` window warns instead of failing, and its file
+    carries the panel's real column types rather than all-string (ADR-30)."""
+    adapter = SparkDataAdapter({"master": "local[2]"})
+    spec = _spec()
+    ctx = _ctx(source_root, tmp_path / "oot", adapter)
+    ctx.resolved_windows = {
+        **WINDOWS,
+        "out_of_time": ("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+    }
+    handle = adapter.build_dataset(spec, ctx)
+    empty = handle.read("out_of_time")
+    assert empty.num_rows == 0
+    types = {field.name: field.type for field in empty.schema}
+    assert pa.types.is_integer(types["customer_id"])
+    assert pa.types.is_timestamp(types["snapshot_date"])
+    assert pa.types.is_floating(types["monthly_usage"])
+    assert any("'out_of_time' materialized 0 rows" in str(m) for m in ctx.events.messages)
+
+
 def test_build_dataset_joins_windows_and_reproducible_sampling(
     source_root: Path, tmp_path: Path
 ) -> None:

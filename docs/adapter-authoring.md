@@ -2,7 +2,7 @@
 
 An mbt adapter is a pip package that exposes an `AdapterPlugin` descriptor through the `mbt.adapters` entry-point group.
 It depends on **mbt-adapter-base**, the versioned contract, and not on mbt-core's internals.
-One plugin can fill any of six roles - training, data, tracking, registry, compute, tuning - and most fill one.
+One plugin can fill any of seven roles - training, data, tracking, registry, compute, tuning, reporting - and most fill one.
 
 Two training adapters were built exactly this way and are the reference implementations: `packages/mbt-lightgbm` (the original extensibility proof, one estimator) and `packages/mbt-sklearn` (which selects among several estimators in the spec, so it shows how to model per-estimator hyperparameters and how the encoding a model needs can depend on the estimator family rather than on the data).
 For the other roles, read the shipped adapters listed on the [Adapters](adapters.md) page; the [Adapter API reference](api-reference.md) is generated from the contract itself.
@@ -152,11 +152,14 @@ Hash the declared `sample_key`; with no key, refuse rather than hashing every co
 **Tracking** (`TrackingAdapter`) records training runs only: `mbt score` and `mbt monitor` never open one (ADR-28).
 Implement `start_run(node, meta)`, `log(run, params=..., metrics=..., tags=..., artifacts=...)`, `end_run(run, status)`, and `resume(run_id)`.
 The training job starts and ends the run; afterwards the coordinator resumes it by id to attach the gate verdicts and the registered version, so `resume` must work from a different process.
-Three members are optional and probed: `prepare()` to warm the backend before parallel jobs start, `log_trial(run, index, params, value)` for tuning history, and `log_document(run, path)` to upload a file mbt wrote, such as `inference_config.json`.
+Four members are optional and probed: `prepare()` to warm the backend before parallel jobs start, `log_trial(run, index, params, value)` for tuning history, `log_document(run, path)` to upload a file mbt wrote, such as `inference_config.json`, and `log_directory(run, local_dir, artifact_path)` to upload a directory under `artifact_path` with its layout kept.
+The training report, the run log, and the config documents need `log_directory` (ADR-30); without it only `report.html`, `summary.json`, and the log reach the run through `log_document`, and the report stays complete in the artifact store.
+`log` receives every flattened `model.*` and `dataset.*` parameter at once, often several hundred: batch them within your backend's limits, and cut an over-long value visibly rather than dropping it.
 Core composes the experiment name and passes it as `config["experiment"]`; use it as given.
 
 **Registry** (`RegistryAdapter`) implements `register(artifact, name, metadata)`, `get_champion(name, stage)`, `get_version(name, version)`, and `transition(version, stage)`.
 Store `metadata` as version tags and return them on read: `mbt promote` reads `mbt.gates_passed`, and scoring reads the artifact, baseline, and inference-config references from them.
+The optional `set_version_tags(name, version, tags)` merges tags into an existing version; `mbt evaluate --out-of-time` records its verdict (`mbt.oot_check.*`) with it, and without it the verdict lands on the training run only, so `mbt promote --require-oot-check` cannot see it.
 Keep stages exclusive per version, and archive a displaced production champion on promotion, so `mbt rollback` has something to roll back to.
 Return `None` only for a model, version, or stage that genuinely does not exist, and raise on anything else: a transient backend error read as "no champion" would silently pass a champion gate (F9).
 
@@ -176,7 +179,15 @@ Call `objective(params)` once per trial; the trial loop, data, and metrics belon
 When `spec.pruner` is set, call `objective(params, report=report)` instead, where your `report(step, value)` receives higher-is-better values and may raise to prune the trial.
 Seed every source of randomness from `seed`, so the same spec proposes the same trials, and read operational knobs such as sampler choice from `config`, never from the spec: they must not change a model's identity.
 
-## 8. Pass the compliance suite
+## 8. Report engines
+
+A report engine (`ReportingEngine`, contract 1.2) implements `drift_report(reference, current, out_html, *, title)` and returns a `DriftReport`: the share of columns the engine calls drifted, and a `DriftColumn` per column with its method, score, threshold, and verdict.
+The job calls it inside the training process for the whole after-test window and each month after it, with the test split as `reference`; both tables hold the model's most important features plus a `prediction` column.
+Write the page to `out_html` and give it `title`.
+Your verdicts are displayed, never gated, and an exception becomes a warning on the report, so raise rather than return a partial answer.
+Leave `fingerprint_packages` empty: a report never changes a model, so the engine's version does not belong in the environment digest.
+
+## 9. Pass the compliance suite
 
 ```python
 # tests/test_myframework_compliance.py
@@ -200,9 +211,10 @@ A data adapter that implements batch scoring also subclasses `PredictionStoreCom
 Passing the suite is the ship bar.
 Then add an end-to-end test that drives a small project through the real CLI against your adapter; the repository's `tests/test_adapter_swap.py` does this for `lightgbm` and `sklearn` by editing only the spec.
 
-## 9. Contract versioning
+## 10. Contract versioning
 
 `mbt-adapter-base` versions the contract separately from its packages.
 Pin `contract_version` to the version you built against; core loads an adapter with the same major version and a minor version no newer than its own, and refuses anything else with an upgrade hint.
 A deprecation warns for one minor version and is removed at the next major.
 Contract 1.1 added the scoring surface (`DataAdapter.build_scoring_input`, `DataAdapter.open_predictions`).
+Contract 1.2 added the reporting role (`AdapterPlugin.reporting`, `ReportingEngine`).

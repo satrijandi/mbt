@@ -303,8 +303,11 @@ def test_evaluate_exits_two_on_gate_failure(
 ) -> None:
     from mbt.execute import orchestrator
 
-    def fake_run_evaluate(opts, *, model_name, version=None, stage=None, apply_gates=False):
+    def fake_run_evaluate(
+        opts, *, model_name, version=None, stage=None, apply_gates=False, out_of_time=False
+    ):
         assert model_name == "m" and version == "2" and stage == "staging" and apply_gates
+        assert out_of_time
         return make_results("evaluate", NodeResult(unique_id="model.demo.m", status="gate_failed"))
 
     monkeypatch.setattr(orchestrator, "run_evaluate", fake_run_evaluate)
@@ -318,6 +321,7 @@ def test_evaluate_exits_two_on_gate_failure(
             "--stage",
             "staging",
             "--gates",
+            "--out-of-time",
             "--project-dir",
             str(tmp_path),
         ]

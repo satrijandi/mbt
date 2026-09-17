@@ -28,6 +28,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from mbt_adapter_base import (
+    OUT_OF_TIME_SPLIT,
     DatasetLocator,
     DatasetSpec,
     ScoringInputSpec,
@@ -38,6 +39,7 @@ from mbt_adapter_base.materialization import (
     MaterializationError,
     MaterializedDatasetHandle,
     combine_snapshots,
+    empty_out_of_time_message,
     write_materialization_metadata,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore, resolve_predictions_root
@@ -312,11 +314,16 @@ class SnowflakeDataAdapter:
         for split, sql in queries.items():
             written[split] = self._stream_query_to_parquet(sql, output_dir / f"{split}.parquet")
         for split, count in written.items():
-            if count == 0:
-                raise SnowflakeAdapterError(
-                    f"split {split!r} materialized 0 rows",
-                    hint="check the split windows/fractions and filters against the data",
-                )
+            if count != 0:
+                continue
+            if split == OUT_OF_TIME_SPLIT:
+                # A window ending at the anchor is routinely empty (ADR-30).
+                ctx.events.emit(empty_out_of_time_message(ctx.resolved_windows))
+                continue
+            raise SnowflakeAdapterError(
+                f"split {split!r} materialized 0 rows",
+                hint="check the split windows/fractions and filters against the data",
+            )
         # Positive-path row counts on the bus (a plain string the EventSink
         # wraps in a LogMessage); mirrors the local adapter.
         ctx.events.emit(

@@ -51,6 +51,9 @@ def build_inference_config(
     artifact: ArtifactRef,
     baseline: ArtifactRef | None,
     meta: dict[str, str],
+    hyperparameters: dict[str, Any] | None = None,
+    dataset: dict[str, Any] | None = None,
+    report: Any = None,
 ) -> dict[str, Any]:
     """Assemble the document exported next to the model artifact.
 
@@ -61,7 +64,7 @@ def build_inference_config(
     spec = node.config
     declared = spec.get("features")
     features: dict[str, Any] = declared if isinstance(declared, dict) else {}
-    return {
+    document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "project": project,
         "model": node.name,
@@ -102,3 +105,19 @@ def build_inference_config(
         },
         "baseline_uri": baseline.uri if baseline is not None else None,
     }
+    # Additive (ADR-30), so no schema bump: the values AUTO resolution and
+    # tuning settled on, which `spec` still holds as sentinels and search
+    # spaces; the dataset side a serving system needs to rebuild the input;
+    # and what the training report measured, which the pre-deploy check
+    # compares a rebuilt test window against.
+    if hyperparameters is not None:
+        document["resolved"]["hyperparameters"] = hyperparameters
+    if dataset is not None:
+        document["dataset"] = dataset
+    if report is not None:
+        document["report"] = {
+            "uri": report.report_uri,
+            "reference_rows": report.reference_rows,
+            "out_of_time_rows": report.out_of_time_rows,
+        }
+    return document

@@ -1,0 +1,55 @@
+models:
+  - name: churn_classifier_oot
+    description: "90-day churn, gated on the months after its test window (ADR-30)"
+    task: binary_classification
+    adapter: xgboost
+    owner: growth-ds@example.com
+    tags: [churn, monthly]
+
+    dataset: ref('churn_oot_set')
+
+    target: churned_90d
+    features:
+      include: ["*"]
+      exclude: [user_id, upgraded_90d, plan_type, account_status]
+
+    hyperparameters:
+      max_depth: 3
+      learning_rate: 0.1
+      n_estimators: 80
+
+    evaluation:
+      protocol: {split: temporal}
+      metrics: [pr_auc, roc_auc]
+      gates:
+        - metric: pr_auc
+          threshold: "{{ var('pr_auc_floor') }}"
+        # Judged on each after-test month with at least min_rows labelled
+        # rows; the worst month decides. No mature month passes with a
+        # warning and records the verdict as not_gated.
+        - metric: roc_auc
+          threshold: "{{ var('oot_roc_auc_floor') }}"
+          source: out_of_time
+          period: month
+          min_rows: 200
+      # Every after-test month's scores and features against the test month,
+      # with the same PSI rules `mbt score` monitors apply in production.
+      stability:
+        period: month
+        prediction_shift: {method: psi, threshold: 0.25, warn_threshold: 0.1}
+        feature_shift: {method: psi, threshold: 0.25, warn_threshold: 0.1}
+      # Presentation only: editing this block never retrains the model.
+      report:
+        binning: all
+        predictions: {enabled: true}
+        periods: [month, week_of_month, day_of_month]
+        min_rows: 20
+        # Evidently's own drift pages beside mbt's tables (needs mbt-evidently);
+        # shown, never gated.
+        stability: {engine: evidently, feature_top_n: 5}
+
+    registration:
+      name: churn_classifier_oot
+      stage_on_pass: staging
+
+    seed: 42

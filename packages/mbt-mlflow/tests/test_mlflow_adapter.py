@@ -154,6 +154,45 @@ def test_log_document_uploads_a_local_file(uri: str, tmp_path: Path) -> None:
     assert [a.path for a in listed] == ["inference_config.json"]
 
 
+def test_log_batches_past_the_server_limits_and_marks_clipped_values(uri: str) -> None:
+    """ADR-30 flattens the whole config into params: 100 per batch is
+    MLflow's limit, and a value past 6000 characters is cut visibly."""
+    from mlflow.tracking import MlflowClient
+
+    tracking = MlflowTracking({"uri": uri})
+    run = tracking.start_run(_node(), {})
+    params = {f"model.p{i:03d}": str(i) for i in range(250)}
+    params["model.features.transforms"] = "x" * 7000
+    tracking.log(run, params=params, metrics={f"m{i}": float(i) for i in range(5)})
+
+    stored = MlflowClient(tracking_uri=uri).get_run(run.run_id).data.params
+    assert len(stored) == 251 and stored["model.p249"] == "249"
+    clipped = stored["model.features.transforms"]
+    assert len(clipped) == 6000
+    assert clipped.endswith("...[truncated from 7000 characters]")
+
+
+def test_log_directory_keeps_the_layout_under_its_path(uri: str, tmp_path: Path) -> None:
+    from mlflow.tracking import MlflowClient
+
+    tracking = MlflowTracking({"uri": uri})
+    run = tracking.start_run(_node(), {})
+    report = tmp_path / "report"
+    (report / "evaluation").mkdir(parents=True)
+    (report / "report.html").write_text("<html></html>")
+    (report / "evaluation" / "feature_importance.csv").write_text("feature,importance\n")
+
+    tracking.log_directory(run, report, "report")
+
+    client = MlflowClient(tracking_uri=uri)
+    assert [a.path for a in client.list_artifacts(run.run_id, "report")] == [
+        "report/evaluation",
+        "report/report.html",
+    ]
+    nested = client.list_artifacts(run.run_id, "report/evaluation")
+    assert [a.path for a in nested] == ["report/evaluation/feature_importance.csv"]
+
+
 def test_a_per_node_kind_mapping_is_rejected(uri: str) -> None:
     """The ADR-26 config shape must fail loudly rather than have mbt guess
     which of its two names to honour."""
@@ -201,6 +240,19 @@ def test_registry_champion_flow_defaults_to_aliases(uri: str, tmp_path: Path) ->
     assert registry.get_champion("m", Stage.STAGING) is None
     assert registry.get_version("m", "1") is not None
     assert registry.get_version("m", "99") is None
+
+
+def test_version_tags_are_set_after_registration(uri: str, tmp_path: Path) -> None:
+    """The pre-deploy check writes its verdict onto an existing version."""
+    registry = MlflowRegistry({"uri": uri})
+    v1 = registry.register(_artifact(tmp_path), "m", {"mbt.gates_passed": "true"})
+    registry.set_version_tags(
+        "m", v1.version, {"mbt.oot_check.passed": "true", "mbt.oot_check.note": "n" * 9000}
+    )
+    tags = registry.get_version("m", "1").tags
+    assert tags["mbt.oot_check.passed"] == "true"
+    assert tags["mbt.gates_passed"] == "true"  # earlier tags stay
+    assert len(tags["mbt.oot_check.note"]) == 8000
 
 
 def test_registry_alias_exclusivity_and_stage_derivation(uri: str, tmp_path: Path) -> None:

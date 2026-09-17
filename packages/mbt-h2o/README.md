@@ -57,6 +57,8 @@ models:
   Model cards show H2O's variable importance, with a categorical's levels rolled up into one feature.
 - **Champions reload from the MOJO**, so champion gates and `mbt evaluate` need no H2O model registry beyond mbt's own.
 - **Data arrives as Parquet paths** rather than in-memory tables, and each training job starts its own local H2O cluster and shuts it down when the job exits.
+  A job never attaches to a cluster that is already running: jobs trained in parallel (`threads: 2` or more) each get their own, on the first free port from 24321.
+  Size them with the `h2o_max_mem` target var (default `4G`, per job) and `h2o_nthreads`.
 
 ## Distributed training: Sparkling Water
 

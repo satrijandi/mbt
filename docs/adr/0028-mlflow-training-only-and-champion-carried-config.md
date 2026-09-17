@@ -1,6 +1,11 @@
 # ADR-28: Tracking is training-only, runs are timestamped, and the champion carries its own inference config
 
-**Status:** accepted
+**Status:** accepted, amended by [ADR-30](0030-training-report-and-after-test-window.md)
+
+ADR-30's pre-deploy check (`mbt evaluate --out-of-time`) appends artifacts,
+metrics and tags to the training run of the version it validates. It opens no
+run and logs no parameters; decision 1 below still holds for every path that
+starts one.
 
 **Supersedes:** ADR-26. **Amends:** ADR-20 (§ champion resolution), ADR-21 (§ realized metrics).
 

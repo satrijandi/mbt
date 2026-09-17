@@ -161,6 +161,17 @@ def test_h2o_calibration_applies_in_scores_and_survives_save_load(tmp_path) -> N
     np.testing.assert_allclose(adapter._scores(loaded, data, "test"), calibrated)
 
 
+def test_h2o_max_mem_reads_as_h2o_init_read_it() -> None:
+    from mbt_h2o.adapter import _memory_bytes
+
+    assert _memory_bytes("4G") == 4 << 30
+    assert _memory_bytes("512m") == 512 << 20
+    assert _memory_bytes(2) == 2 << 30
+    assert _memory_bytes(3 << 30) == 3 << 30
+    with pytest.raises(ValueError, match="h2o_max_mem must look like"):
+        _memory_bytes("lots")
+
+
 def test_h2o_calibration_requires_a_validation_split() -> None:
     import pyarrow as pa
 

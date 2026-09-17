@@ -9,7 +9,7 @@ parser layer turns those rejections into did-you-mean suggestions.
 """
 
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -119,6 +119,13 @@ class SplitSpec(_SpecModel):
     #: positive duration like "7d"/"1mo"), embargoing the boundary so a training
     #: row whose label horizon reaches the evaluation window cannot leak.
     embargo: str | None = None
+    #: Temporal only (ADR-30): a window after the test window, usually ending
+    #: at ``now``. Its rows are never trained or tuned on; the training report
+    #: scores them to show whether scores and features stayed stable after the
+    #: test window, and how the model performs on labels that matured since.
+    #: May resolve to no rows (a warning, not an error) and may hold rows whose
+    #: label has not matured yet.
+    out_of_time: str | None = None
 
     @model_validator(mode="after")
     def _strategy_requirements(self) -> "SplitSpec":
@@ -139,6 +146,11 @@ class SplitSpec(_SpecModel):
         else:  # RANDOM
             if self.embargo is not None:
                 raise ValueError("'embargo' applies to the temporal strategy only")
+            if self.out_of_time is not None:
+                raise ValueError(
+                    "'out_of_time' applies to the temporal strategy only: it is the "
+                    "window after the test window, and a random split has no time order"
+                )
             if self.seed is None:
                 raise ValueError(
                     "random split requires an explicit 'seed' (reproducibility, FR-RES-09)"
@@ -499,6 +511,92 @@ class FeatureSelection(_SpecModel):
         return self
 
 
+def _validate_shift_significance(
+    significance: float | None, method: str, warn_threshold: float | None
+) -> None:
+    """Shared rule for the shift monitors' n-aware significance (R2-6): it
+    rides on ``method: ks`` and is a principled bar that does not combine with
+    an absolute warn band. The bar is kind-matched at evaluation time (F15):
+    numeric features get the two-sample KS critical value, categorical
+    features a two-sample (contingency) chi-square statistic judged at the
+    chi-square critical value."""
+    if significance is None:
+        return
+    if method != "ks":
+        raise ValueError("shift significance requires 'method: ks' (it is a KS critical value)")
+    if warn_threshold is not None:
+        raise ValueError("shift significance and warn_threshold are mutually exclusive")
+
+
+class FeatureShiftSpec(_SpecModel):
+    """Feature distribution-shift monitor vs the training baseline (ADR-20)."""
+
+    method: Literal["psi", "ks"] = "psi"
+    threshold: float = Field(gt=0)  # per-feature fail bar; e.g. 0.2 psi, 0.15 ks
+    #: Optional warn band: a shift in ``(warn_threshold, threshold]`` logs a
+    #: warning without failing the run - a two-tier bar like label_leakage_scan.
+    warn_threshold: float | None = Field(default=None, gt=0)
+    #: Optional n-aware significance (R2-6): with ``method: ks``, the fail bar
+    #: becomes a critical value at this p-value instead of the fixed
+    #: ``threshold``, so it tightens on large nightly batches and loosens on
+    #: small ones. Kind-matched (F15): numeric features use the two-sample KS
+    #: critical value (sup over the merged baseline-quantile + current points);
+    #: categorical features a two-sample contingency chi-square judged at the
+    #: chi-square critical value. Excludes warn_threshold.
+    significance: float | None = Field(default=None, gt=0.0, lt=1.0)
+    include: list[str] = Field(default_factory=lambda: ["*"])
+    exclude: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _warn_below_fail(self) -> "FeatureShiftSpec":
+        if self.warn_threshold is not None and self.warn_threshold >= self.threshold:
+            raise ValueError("feature_shift warn_threshold must be below threshold (the fail bar)")
+        _validate_shift_significance(self.significance, self.method, self.warn_threshold)
+        return self
+
+
+class PredictionShiftSpec(_SpecModel):
+    """Score distribution-shift monitor vs the test-split baseline (ADR-20)."""
+
+    method: Literal["psi", "ks"] = "psi"
+    threshold: float = Field(gt=0)
+    #: Optional warn band, as in FeatureShiftSpec.
+    warn_threshold: float | None = Field(default=None, gt=0)
+    #: Optional n-aware KS significance (R2-6), as in FeatureShiftSpec.
+    significance: float | None = Field(default=None, gt=0.0, lt=1.0)
+
+    @model_validator(mode="after")
+    def _warn_below_fail(self) -> "PredictionShiftSpec":
+        if self.warn_threshold is not None and self.warn_threshold >= self.threshold:
+            raise ValueError(
+                "prediction_shift warn_threshold must be below threshold (the fail bar)"
+            )
+        _validate_shift_significance(self.significance, self.method, self.warn_threshold)
+        return self
+
+
+class MonitorsSpec(_SpecModel):
+    """Distribution-shift monitors evaluated on every scoring run."""
+
+    feature_shift: FeatureShiftSpec | None = None
+    prediction_shift: PredictionShiftSpec | None = None
+
+
+#: The grains the after-test report is cut at (ADR-30). ``month`` is each
+#: calendar month after the test window, compared with the whole test window;
+#: ``week_of_month`` is W1 (days 1-7) .. W5 (days 29-31) of each month,
+#: compared with the same week of the test month(s); ``day_of_month`` is day
+#: d of each month, compared with day d of the test month(s).
+ReportPeriod = Literal["month", "week_of_month", "day_of_month"]
+
+#: What an after-test gate judges (ADR-30): the whole after-test window at
+#: once, or every mature cell at one of the report grains.
+GatePeriod = Literal["window", "month", "week_of_month", "day_of_month"]
+
+#: Default per-cell floor of labelled rows an after-test gate judges (ADR-30).
+DEFAULT_GATE_MIN_ROWS = 100
+
+
 class GateSpec(_SpecModel):
     """A promotion-blocking metric condition (TSD §5.6, FR-TEST-02)."""
 
@@ -517,10 +615,29 @@ class GateSpec(_SpecModel):
     confidence: float | None = 0.95
     bootstrap_resamples: int = 1000
     #: Metric source (R2-7): ``test`` gates the single held-out test window;
-    #: ``backtest`` gates the walk-forward mean (needs ``protocol.backtest_folds``).
+    #: ``backtest`` gates the walk-forward mean (needs ``protocol.backtest_folds``);
+    #: ``out_of_time`` gates the after-test report (ADR-30, needs the dataset's
+    #: ``split.out_of_time``).
     #: NOT named ``on`` - that is a YAML 1.1 boolean, so PyYAML would hand
     #: pydantic a ``True`` key.
-    source: Literal["test", "backtest"] = "test"
+    source: Literal["test", "backtest", "out_of_time"] = "test"
+    #: ``source: out_of_time`` only (ADR-30): the grain the gate judges. Every
+    #: mature cell at that grain must clear the threshold, so the worst month
+    #: (or week, or day) decides. Defaults to ``month``.
+    period: GatePeriod | None = None
+    #: ``source: out_of_time`` only (ADR-30): a cell with fewer mature labelled
+    #: rows than this is reported but not judged. Defaults to 100.
+    min_rows: int | None = Field(default=None, ge=1)
+
+    @property
+    def effective_period(self) -> GatePeriod:
+        """The after-test grain this gate judges (``month`` unless declared)."""
+        return self.period or "month"
+
+    @property
+    def effective_min_rows(self) -> int:
+        """The per-cell labelled-row floor this after-test gate judges above."""
+        return self.min_rows if self.min_rows is not None else DEFAULT_GATE_MIN_ROWS
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> "GateSpec":
@@ -534,6 +651,14 @@ class GateSpec(_SpecModel):
                 "a backtest gate (source: backtest) must be a whole-split threshold gate: "
                 "the walk-forward backtest reports only mean metrics, not champion deltas or slices"
             )
+        if self.source == "out_of_time" and (self.threshold is None or self.slice is not None):
+            raise ValueError(
+                "an after-test gate (source: out_of_time) must be a whole-split threshold "
+                "gate: it judges each period cell against a fixed bar, not a champion delta, "
+                "a slice, or a disparity"
+            )
+        if self.source != "out_of_time" and (self.period is not None or self.min_rows is not None):
+            raise ValueError("'period' and 'min_rows' are only meaningful with source: out_of_time")
         if self.across is not None and self.slice is not None:
             raise ValueError("a disparity gate ('across') measures a whole column, not a 'slice'")
         if self.min_delta != 0.0 and self.compare_to is None:
@@ -590,6 +715,197 @@ class EvaluationProtocol(_SpecModel):
         return self
 
 
+class StabilitySpec(_SpecModel):
+    """After-test stability gates (ADR-30): scores and features vs the test set.
+
+    The same two monitors a scoring pipeline declares (ADR-20), with the same
+    thresholds and the same Benjamini-Hochberg control, applied to the
+    after-test window with the TEST split as reference. So "stable before
+    deploy" and "stable in production" are one definition, not two.
+    """
+
+    #: ``month`` judges every after-test calendar month on its own, so one
+    #: drifting month fails the model; ``window`` judges the window as a whole.
+    period: Literal["window", "month"] = "month"
+    #: A cell with fewer rows than this is reported but not judged: PSI and KS
+    #: on a handful of rows measure noise.
+    min_rows: int = Field(default=DEFAULT_GATE_MIN_ROWS, ge=1)
+    feature_shift: FeatureShiftSpec | None = None
+    prediction_shift: PredictionShiftSpec | None = None
+
+    @property
+    def monitors(self) -> MonitorsSpec:
+        """The two thresholds in the shape the shift evaluator consumes."""
+        return MonitorsSpec(
+            feature_shift=self.feature_shift, prediction_shift=self.prediction_shift
+        )
+
+    @model_validator(mode="after")
+    def _declares_a_monitor(self) -> "StabilitySpec":
+        if self.feature_shift is None and self.prediction_shift is None:
+            raise ValueError(
+                "evaluation.stability must declare 'feature_shift', 'prediction_shift', or both"
+            )
+        return self
+
+
+class PredictionsReport(_SpecModel):
+    """Row-level train/test/after-test predictions on the tracking run (ADR-30).
+
+    Off by default: the rows carry the dataset's ``sample_key``, which is
+    exactly the data-retention concern ADR-21 declined for baselines.
+    """
+
+    enabled: bool = False
+    #: Cap per split. Rows are kept by a deterministic hash of the sample key,
+    #: so a re-run over the same data keeps the same rows.
+    max_rows: int | None = Field(default=None, gt=0)
+
+
+class QuantileBinning(_SpecModel):
+    """Equal-frequency bins on the TEST scores, frozen and reused everywhere."""
+
+    strategy: Literal["quantile"] = "quantile"
+    bins: int = Field(default=10, ge=2, le=100)
+
+
+class FixedWidthBinning(_SpecModel):
+    """Equal-width score bands.
+
+    ``width`` is in score units. Unset, it is 0.05 for a probability, and for
+    a regression prediction the range between the lowest and highest test
+    prediction is cut into 20 equal bands.
+    """
+
+    strategy: Literal["fixed_width"] = "fixed_width"
+    width: float | None = Field(default=None, gt=0)
+
+
+#: The risk bands ``custom`` binning uses on a probability when no edges are
+#: declared (ADR-30) - what ``binning: all`` renders for a classifier.
+DEFAULT_CUSTOM_EDGES = (0.0, 0.05, 0.1, 0.2, 0.4, 0.6, 1.0)
+
+
+class CustomBinning(_SpecModel):
+    """Declared score edges, e.g. risk grades ``[0, 0.05, 0.1, 0.2, 0.4, 1]``.
+
+    A score below the first edge or above the last counts in the outermost
+    bin, so no row is ever dropped from the table. Unset, a
+    probability uses ``DEFAULT_CUSTOM_EDGES``; a regression prediction has
+    no scale to default to, so it needs the edges spelled out.
+    """
+
+    strategy: Literal["custom"] = "custom"
+    edges: list[float] | None = None
+
+    @model_validator(mode="after")
+    def _increasing(self) -> "CustomBinning":
+        if self.edges is None:
+            return self
+        if len(self.edges) < 2:
+            raise ValueError("custom binning needs at least two edges")
+        if any(b <= a for a, b in zip(self.edges, self.edges[1:], strict=False)):
+            raise ValueError("custom binning edges must be strictly increasing")
+        return self
+
+
+#: The cumulative top-percent cutoffs a targeting campaign reads (ADR-30).
+DEFAULT_TOP_PERCENT_CUTOFFS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 50.0)
+
+
+class TopPercentBinning(_SpecModel):
+    """Cumulative top-N% of scores: capture rate, lift and precision at each.
+
+    The score cutoff for each percentage is taken from the test split and
+    frozen, so "top 10%" means the same score on every split and period.
+    """
+
+    strategy: Literal["top_percent"] = "top_percent"
+    cutoffs: list[float] = Field(default_factory=lambda: list(DEFAULT_TOP_PERCENT_CUTOFFS))
+
+    @model_validator(mode="after")
+    def _valid_cutoffs(self) -> "TopPercentBinning":
+        if not self.cutoffs:
+            raise ValueError("top_percent binning needs at least one cutoff")
+        if any(not 0.0 < c <= 100.0 for c in self.cutoffs):
+            raise ValueError("top_percent cutoffs are percentages in (0, 100]")
+        if any(b <= a for a, b in zip(self.cutoffs, self.cutoffs[1:], strict=False)):
+            raise ValueError("top_percent cutoffs must be strictly increasing")
+        return self
+
+
+BinningSpec = Annotated[
+    QuantileBinning | FixedWidthBinning | CustomBinning | TopPercentBinning,
+    Field(discriminator="strategy"),
+]
+
+
+class ImportanceReport(_SpecModel):
+    """How many of the final model's features the report ranks."""
+
+    top_n: int = Field(default=20, ge=1)
+
+
+class StabilityReport(_SpecModel):
+    """How the after-test stability section is rendered (never gated here)."""
+
+    #: ``native`` renders mbt's own PSI/KS tables. Any other name is a report
+    #: engine plugin that adds its drift report on top - ``evidently`` with
+    #: ``mbt-evidently`` installed. Either way the gates in
+    #: ``evaluation.stability`` use mbt's numbers.
+    engine: str = Field(default="native", pattern=r"^[a-z][a-z0-9_]*$")
+    #: Features tracked per week-of-month and day-of-month slot, taken from
+    #: the top of the importance ranking. Month and window stability always
+    #: cover every feature.
+    feature_top_n: int = Field(default=20, ge=1)
+    #: Evidently HTML reports embed their charting library and run to
+    #: megabytes each, so at most this many are rendered per run.
+    max_html_reports: int = Field(default=12, ge=1)
+
+
+def _default_binning() -> Literal["all"] | list[BinningSpec]:
+    return [QuantileBinning()]
+
+
+def _default_periods() -> list[ReportPeriod]:
+    return ["month", "week_of_month", "day_of_month"]
+
+
+class ReportSpec(_SpecModel):
+    """What the training report shows (ADR-30). Presentation only.
+
+    Nothing here decides pass/fail - after-test gates live in
+    ``evaluation.gates`` and stability gates in ``evaluation.stability`` - so
+    this block is left out of ``config_hash``: re-binning a report never
+    retrains a model.
+    """
+
+    predictions: PredictionsReport = Field(default_factory=PredictionsReport)
+    #: One strategy, several, or ``all`` (the four with their defaults).
+    binning: Literal["all"] | list[BinningSpec] = Field(default_factory=_default_binning)
+    periods: list[ReportPeriod] = Field(default_factory=_default_periods)
+    #: Period cells with fewer rows than this are shown as insufficient
+    #: rather than as a noisy number.
+    min_rows: int = Field(default=30, ge=1)
+    importance: ImportanceReport = Field(default_factory=ImportanceReport)
+    stability: StabilityReport = Field(default_factory=StabilityReport)
+
+    @property
+    def binning_strategies(self) -> list[BinningSpec]:
+        """The declared strategies, with ``all`` expanded to the four defaults."""
+        if self.binning == "all":
+            return [QuantileBinning(), FixedWidthBinning(), CustomBinning(), TopPercentBinning()]
+        return list(self.binning)
+
+    @model_validator(mode="after")
+    def _distinct(self) -> "ReportSpec":
+        if len(set(self.periods)) != len(self.periods):
+            raise ValueError("report.periods repeats a period")
+        if isinstance(self.binning, list) and not self.binning:
+            raise ValueError("report.binning must name at least one strategy, or be omitted")
+        return self
+
+
 class EvaluationSpec(_SpecModel):
     """Metrics, gates, and slices for a model (TSD §5.6)."""
 
@@ -597,6 +913,17 @@ class EvaluationSpec(_SpecModel):
     metrics: list[str]
     gates: list[GateSpec] = Field(default_factory=list)
     slices: list[str] = Field(default_factory=list)
+    #: After-test stability gates (ADR-30); needs the dataset's ``out_of_time``.
+    stability: StabilitySpec | None = None
+    #: The training report's presentation knobs (ADR-30); excluded from
+    #: ``config_hash``. Absent means the defaults: decile bins, top-20
+    #: importance, no row-level predictions.
+    report: ReportSpec | None = None
+
+    @property
+    def effective_report(self) -> ReportSpec:
+        """The report config in force: the declared block, or the defaults."""
+        return self.report if self.report is not None else ReportSpec()
 
     @model_validator(mode="after")
     def _metrics_nonempty(self) -> "EvaluationSpec":
@@ -713,6 +1040,36 @@ class ModelSpec(_SpecModel):
         return self
 
     @model_validator(mode="after")
+    def _after_test_evaluation_shape(self) -> "ModelSpec":
+        evaluation = self.evaluation
+        after_test = evaluation.stability is not None or any(
+            g.source == "out_of_time" for g in evaluation.gates
+        )
+        if after_test and evaluation.protocol.split is not SplitStrategy.TEMPORAL:
+            raise ValueError(
+                "after-test gates (source: out_of_time) and evaluation.stability need a "
+                "temporal split: 'after the test window' has no meaning for a random one"
+            )
+        report = evaluation.report
+        if report is None:
+            return self
+        if self.task not in (TaskType.BINARY_CLASSIFICATION, TaskType.REGRESSION):
+            raise ValueError(
+                f"evaluation.report supports binary_classification and regression, "
+                f"not {self.task.value}"
+            )
+        if (
+            self.task is TaskType.REGRESSION
+            and isinstance(report.binning, list)
+            and any(isinstance(b, CustomBinning) and b.edges is None for b in report.binning)
+        ):
+            raise ValueError(
+                "custom binning on a regression model needs explicit 'edges': a "
+                "prediction has no fixed scale to default to"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _gate_and_objective_metrics_declared(self) -> "ModelSpec":
         declared = set(self.evaluation.metrics)
         declared_slices = set(self.evaluation.slices)
@@ -798,77 +1155,6 @@ class ScoringInputSpec(_SpecModel):
         if self.window is not None and self.time_column is None:
             raise ValueError("'window' requires 'time_column'")
         return self
-
-
-def _validate_shift_significance(
-    significance: float | None, method: str, warn_threshold: float | None
-) -> None:
-    """Shared rule for the shift monitors' n-aware significance (R2-6): it
-    rides on ``method: ks`` and is a principled bar that does not combine with
-    an absolute warn band. The bar is kind-matched at evaluation time (F15):
-    numeric features get the two-sample KS critical value, categorical
-    features a two-sample (contingency) chi-square statistic judged at the
-    chi-square critical value."""
-    if significance is None:
-        return
-    if method != "ks":
-        raise ValueError("shift significance requires 'method: ks' (it is a KS critical value)")
-    if warn_threshold is not None:
-        raise ValueError("shift significance and warn_threshold are mutually exclusive")
-
-
-class FeatureShiftSpec(_SpecModel):
-    """Feature distribution-shift monitor vs the training baseline (ADR-20)."""
-
-    method: Literal["psi", "ks"] = "psi"
-    threshold: float = Field(gt=0)  # per-feature fail bar; e.g. 0.2 psi, 0.15 ks
-    #: Optional warn band: a shift in ``(warn_threshold, threshold]`` logs a
-    #: warning without failing the run - a two-tier bar like label_leakage_scan.
-    warn_threshold: float | None = Field(default=None, gt=0)
-    #: Optional n-aware significance (R2-6): with ``method: ks``, the fail bar
-    #: becomes a critical value at this p-value instead of the fixed
-    #: ``threshold``, so it tightens on large nightly batches and loosens on
-    #: small ones. Kind-matched (F15): numeric features use the two-sample KS
-    #: critical value (sup over the merged baseline-quantile + current points);
-    #: categorical features a two-sample contingency chi-square judged at the
-    #: chi-square critical value. Excludes warn_threshold.
-    significance: float | None = Field(default=None, gt=0.0, lt=1.0)
-    include: list[str] = Field(default_factory=lambda: ["*"])
-    exclude: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _warn_below_fail(self) -> "FeatureShiftSpec":
-        if self.warn_threshold is not None and self.warn_threshold >= self.threshold:
-            raise ValueError("feature_shift warn_threshold must be below threshold (the fail bar)")
-        _validate_shift_significance(self.significance, self.method, self.warn_threshold)
-        return self
-
-
-class PredictionShiftSpec(_SpecModel):
-    """Score distribution-shift monitor vs the test-split baseline (ADR-20)."""
-
-    method: Literal["psi", "ks"] = "psi"
-    threshold: float = Field(gt=0)
-    #: Optional warn band, as in FeatureShiftSpec.
-    warn_threshold: float | None = Field(default=None, gt=0)
-    #: Optional n-aware KS significance (R2-6), as in FeatureShiftSpec.
-    significance: float | None = Field(default=None, gt=0.0, lt=1.0)
-
-    @model_validator(mode="after")
-    def _warn_below_fail(self) -> "PredictionShiftSpec":
-        if self.warn_threshold is not None and self.warn_threshold >= self.threshold:
-            raise ValueError(
-                "prediction_shift warn_threshold must be below threshold (the fail bar)"
-            )
-        _validate_shift_significance(self.significance, self.method, self.warn_threshold)
-        return self
-
-
-class MonitorsSpec(_SpecModel):
-    """Distribution-shift monitors evaluated on every scoring run."""
-
-    feature_shift: FeatureShiftSpec | None = None
-    prediction_shift: PredictionShiftSpec | None = None
 
 
 class GroundTruthLabelSpec(_SpecModel):

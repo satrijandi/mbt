@@ -4,4 +4,8 @@
 #     - model: churn_classifier
 #       version: "3"
 #       to: production
+#       # also refuse unless `mbt evaluate --model churn_classifier --version 3
+#       # --out-of-time --gates` passed on the newest data (ADR-30); a failed
+#       # check refuses the promotion either way
+#       require_oot_check: true
 promotions: []

@@ -79,6 +79,7 @@ Values in `profiles.yml` read the environment through `{{ env_var('NAME') }}` (s
 | `target/manifest.json` | every compiling command | The pinned, hashed plan: resolved windows, snapshots, config and input hashes, environment digests |
 | `target/run_results.json` | every execution command | The most recent run's per-node status, timings, metrics, gates, monitors, and registrations |
 | `target/run_results.<command>.json` | the same commands | Identical content, kept per command, so `mbt score` does not overwrite what `mbt build` recorded |
+| `target/run_logs/<run_id>/<unique_id>.log` | every execution command and `mbt evaluate` | Everything each node logged, at every level whatever the console shows; a model's log (its dataset's section first) is also uploaded to its tracking run as `logs/train.log` (ADR-30) |
 | `target/datasets/<name>/<key>/` | dataset builds | One Parquet file per split, reused while the materialization key matches |
 | `target/docs/` | `mbt docs generate` | The static model-card and lineage site |
 | `target/json-schemas/` | `mbt parse --write-json-schema` | JSON Schemas for editor autocomplete |
@@ -259,7 +260,7 @@ mbt predictions show RUN_KEY [--output table|json]
 Re-evaluate one registered model version on freshly built data, without training.
 
 ```bash
-mbt evaluate --model NAME [--version N | --stage STAGE] [--gates]
+mbt evaluate --model NAME [--version N | --stage STAGE] [--gates] [--out-of-time]
 ```
 
 <div class="cli-options" markdown>
@@ -270,19 +271,28 @@ mbt evaluate --model NAME [--version N | --stage STAGE] [--gates]
 | `--version N` | A specific registry version |
 | `--stage STAGE` | Evaluate the version currently in this stage. With neither option, the version in the model's `stage_on_pass` stage |
 | `--gates` | Also apply the model's gates to the fresh metrics, and exit `2` if one fails |
+| `--out-of-time` | Run the pre-deploy check instead (ADR-30): the version's recorded test window against everything since, reported on its training run. With `--gates`, its after-test and stability gates are judged, and the verdict is recorded on the version |
 
 </div>
 
 `mbt evaluate --model churn_classifier --stage production --gates` is the decay check: the production champion's metrics on today's data, held to the spec's thresholds.
 Champion gates are not applicable when the version being evaluated is itself the champion, and report so instead of comparing the model with itself.
+After-test gates (`source: out_of_time`) are judged by `mbt build` and by the pre-deploy check, never by a plain re-evaluation.
+
+**The pre-deploy check.**
+A version's test window is usually months old by the day it ships.
+`mbt evaluate --model NAME --version N --out-of-time --gates` rebuilds that version's dataset with its recorded test window as the reference and an after-test window from the end of the test window to this run's anchor, then scores both with the version itself and its own spec.
+The [training report](spec-reference.md#the-training-report-adr-30) lands on the version's training run under `evaluations/<run_id>/`, with metrics prefixed `oot_check.`; no parameter is logged, because the run's parameters describe its training.
+The verdict goes on the version as `mbt.oot_check.passed` - `true`, `false`, or `not_gated` when nothing was mature enough to judge - which `mbt promote --require-oot-check` reads.
+The check refuses a version registered before mbt recorded dataset windows, a random-split model, and an anchor that is not after the recorded test window.
 
 ### `mbt promote`
 
 Move a registered version to a stage, refusing any version whose gates were not recorded as passed.
 
 ```bash
-mbt promote --model NAME --to STAGE [--version N] [--force]
-mbt promote --from-file promotions.yml
+mbt promote --model NAME --to STAGE [--version N] [--force] [--require-oot-check]
+mbt promote --from-file promotions.yml [--require-oot-check]
 ```
 
 <div class="cli-options" markdown>
@@ -293,11 +303,13 @@ mbt promote --from-file promotions.yml
 | `--to STAGE` | Target stage: `staging`, `production`, or `archived` |
 | `--version N` | The version to promote; defaults to the version currently in `staging` |
 | `--from-file PATH` | Apply every entry of a reviewed `promotions.yml` (the GitOps path; see the [spec reference](spec-reference.md#promotionsyml)) |
-| `--force` | Promote even without a recorded gate pass. The event is marked `FORCED` |
+| `--force` | Promote even without a recorded gate pass, or past a failed after-test check. The event is marked `FORCED` |
+| `--require-oot-check` | Also refuse a version whose latest after-test verdict is not a pass - never judged, or nothing mature to judge. A pass recorded by the build's own after-test gates counts. A `promotions.yml` entry can ask for the same with `require_oot_check: true` |
 
 </div>
 
 Promoting a version to a stage it already holds re-points the alias at the same version, so replaying a merged `promotions.yml` is safe.
+A version whose latest after-test check failed (`mbt.oot_check.passed: false`, from `mbt build` or the pre-deploy check) is refused even without `--require-oot-check`.
 
 ### `mbt rollback`
 
@@ -309,6 +321,7 @@ mbt rollback --model NAME [--to-version N] [--force]
 
 With no `--to-version`, mbt picks the newest version below the current champion that recorded passing gates.
 It checks that the target's artifact still exists before moving the alias, and goes through the same recorded-gate check as `mbt promote`.
+A failed after-test check on the target only warns: incident response must be able to reach the last good version.
 See the [rollback procedure](troubleshooting.md#rolling-back-a-bad-champion-incident-procedure).
 
 ## Inspect

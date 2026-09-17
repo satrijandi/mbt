@@ -14,59 +14,8 @@ import networkx as nx
 from mbt.artifacts.manifest import Manifest
 from mbt.artifacts.run_results import NodeResult, RunResults
 from mbt.contracts import AUTO
+from mbt.docsgen.html import page, sparkline
 from mbt.secrets import redact
-
-_CSS = """
-:root { --bg:#ffffff; --fg:#1f2430; --muted:#6b7280; --line:#e5e7eb;
-        --accent:#2563eb; --ok:#15803d; --bad:#b91c1c; --warn:#a16207;
-        --chip:#f3f4f6; --chip-ok:#dcfce7; --chip-bad:#fee2e2;
-        --chip-warn:#fef9c3; --chip-accent:#eef2ff; --chip-ds:#ecfdf5;
-        --chip-exp:#fef3c7; --edge:#cbd5e1; }
-/* Model cards are read on whatever the reader's OS is set to; a card that is
-   a white rectangle at night is the one part of mbt's output nobody can
-   configure. Every colour above is a variable so this override is complete -
-   the palette shifts, the markup does not.
-   Both palettes were checked against WCAG: every text/background pair clears
-   AA, and body, muted, accent, and code text clear AAA in the dark one. If you
-   retune a colour, re-check the pair it is used against rather than eyeballing
-   it - the badge foregrounds sit on tinted chips, not on --bg. */
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#0f1419; --fg:#e6e8eb; --muted:#9aa4b2; --line:#242c38;
-          --accent:#7aa2f7; --ok:#5dc98a; --bad:#f07178; --warn:#e0af68;
-          --chip:#1b2230; --chip-ok:#123524; --chip-bad:#3b1a1d;
-          --chip-warn:#3a2f14; --chip-accent:#1a2436; --chip-ds:#12301f;
-          --chip-exp:#332813; --edge:#3a4657; }
-}
-* { box-sizing: border-box; }
-body { font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
-       color: var(--fg); background: var(--bg); margin: 0; }
-main { max-width: 1080px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
-h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
-h2 { font-size: 1.15rem; margin: 2rem 0 .5rem; border-bottom: 1px solid var(--line);
-     padding-bottom: .25rem; }
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-.muted { color: var(--muted); }
-table { border-collapse: collapse; width: 100%; margin: .5rem 0 1rem; }
-th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(--line);
-         font-size: .92rem; vertical-align: top; }
-th { color: var(--muted); font-weight: 600; }
-code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-              font-size: .85em; background: var(--chip); padding: .1em .35em;
-              border-radius: 4px; }
-.badge { display: inline-block; padding: .1em .55em; border-radius: 999px;
-         font-size: .8rem; font-weight: 600; }
-.badge.ok { background: var(--chip-ok); color: var(--ok); }
-.badge.bad { background: var(--chip-bad); color: var(--bad); }
-.badge.warn { background: var(--chip-warn); color: var(--warn); }
-.badge.plain { background: var(--chip-accent); color: var(--accent); }
-svg .node rect { fill: var(--chip-accent); stroke: var(--accent); rx: 6; }
-svg .node.dataset rect { fill: var(--chip-ds); stroke: var(--ok); }
-svg .node.source rect { fill: var(--chip); stroke: var(--muted); }
-svg .node.exposure rect { fill: var(--chip-exp); stroke: var(--warn); }
-svg text { font: 12px ui-monospace, Menlo, monospace; fill: var(--fg); }
-svg .edge { stroke: var(--edge); stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
-"""
 
 
 def _lineage_svg(manifest: Manifest) -> str:
@@ -119,15 +68,6 @@ def _lineage_svg(manifest: Manifest) -> str:
         )
     parts.append("</svg>")
     return "".join(parts)
-
-
-def _page(title: str, body: str) -> str:
-    return (
-        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
-        f"<title>{html.escape(title)}</title>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        f"<style>{_CSS}</style></head><body><main>{body}</main></body></html>"
-    )
 
 
 def _treatment_row(name: str, features: dict[str, Any]) -> str:
@@ -226,10 +166,16 @@ def _metric_table(result: NodeResult | None) -> str:
     return out
 
 
+#: The card lists as many features as the training report ranks by default.
+_IMPORTANCE_ROWS = 20
+
+
 def _importance_table(result: NodeResult | None) -> str:
     if result is None or not result.feature_importance:
         return ""
-    top = sorted(result.feature_importance.items(), key=lambda kv: (-kv[1], kv[0]))[:15]
+    top = sorted(result.feature_importance.items(), key=lambda kv: (-kv[1], kv[0]))[
+        :_IMPORTANCE_ROWS
+    ]
     rows = "".join(
         f"<tr><td><code>{html.escape(name)}</code></td><td>{share:.1%}</td></tr>"
         for name, share in top
@@ -240,28 +186,12 @@ def _importance_table(result: NodeResult | None) -> str:
     )
 
 
-def _sparkline(curve: list[list[float]], width: int = 120, height: int = 24) -> str:
-    ys = [point[1] for point in curve]
-    low = min(ys)
-    span = (max(ys) - low) or 1.0
-    last = max(len(curve) - 1, 1)
-    points = " ".join(
-        f"{round(i / last * width, 1)},{round(height - (y - low) / span * height, 1)}"
-        for i, y in enumerate(ys)
-    )
-    return (
-        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
-        f'xmlns="http://www.w3.org/2000/svg"><polyline points="{points}" fill="none" '
-        'stroke="var(--accent)" stroke-width="1.5"/></svg>'
-    )
-
-
 def _partial_dependence_section(result: NodeResult | None) -> str:
     if result is None or not result.partial_dependence:
         return ""
     rows = "".join(
         f"<tr><td><code>{html.escape(feature)}</code></td>"
-        f"<td>{_sparkline(curve)}</td>"
+        f"<td>{sparkline(curve)}</td>"
         f"<td>{curve[0][1]:.3f} &rarr; {curve[-1][1]:.3f}</td></tr>"
         for feature, curve in result.partial_dependence.items()
     )
@@ -282,15 +212,46 @@ def _gate_table(result: NodeResult | None) -> str:
             if gate.kind == "threshold"
             else f"champion v{gate.champion_version or '-'} + {gate.min_delta}"
         )
+        if gate.period is not None:
+            where = f" at {gate.cell}" if gate.cell else ""
+            expected += f" (worst {gate.period}{where})"
         actual = "-" if gate.actual is None else f"{gate.actual:.4f}"
+        if not gate.applicable:
+            badge, actual = "warn", "not applicable"
         rows += (
             f"<tr><td><code>{html.escape(gate.metric)}</code></td>"
             f"<td>{html.escape(expected)}</td><td>{actual}</td>"
-            f"<td><span class='badge {badge}'>{'PASS' if gate.passed else 'FAIL'}</span></td></tr>"
+            f"<td><span class='badge {badge}'>{_gate_label(gate)}</span></td></tr>"
         )
     return (
         "<h2>Gate history (latest run)</h2>"
         f"<table><tr><th>metric</th><th>gate</th><th>actual</th><th>result</th></tr>{rows}</table>"
+    )
+
+
+def _gate_label(gate: Any) -> str:
+    if not gate.applicable:
+        return "N/A"
+    return "PASS" if gate.passed else "FAIL"
+
+
+def _stability_table(result: NodeResult | None) -> str:
+    """The after-test stability gates (ADR-30), one row per judged statistic."""
+    if result is None or not result.monitors:
+        return ""
+    rows = "".join(
+        f"<tr><td><code>{html.escape(m.monitor)}</code></td>"
+        f"<td><code>{html.escape(m.subject or '-')}</code></td>"
+        f"<td>{html.escape(m.measure)}</td>"
+        f"<td>{'-' if m.value is None else f'{m.value:.4f}'}</td><td>{m.threshold:.4f}</td>"
+        f"<td><span class='badge {'ok' if m.passed else 'bad'}'>"
+        f"{'PASS' if m.passed else 'FAIL'}</span></td></tr>"
+        for m in result.monitors
+    )
+    return (
+        "<h2>Stability after the test window (latest run)</h2>"
+        "<table><tr><th>monitor</th><th>period: subject</th><th>measure</th><th>value</th>"
+        f"<th>fail above</th><th>result</th></tr>{rows}</table>"
     )
 
 
@@ -369,8 +330,11 @@ def _model_card(manifest: Manifest, uid: str, result: NodeResult | None) -> str:
     <h2>Metrics (latest run)</h2>
     {_metric_table(result)}
     {_gate_table(result)}
+    {_stability_table(result)}
+    <p class="muted">The training report - bin tables, per-period performance, stability and
+    feature importance - is on the tracking run under <code>report/</code> (ADR-30).</p>
     """
-    return _page(f"{node.name} - mbt model card", body)
+    return page(f"{node.name} - mbt model card", body)
 
 
 def generate_docs(
@@ -436,5 +400,5 @@ def generate_docs(
     }</script>
     """
     index = output_dir / "index.html"
-    index.write_text(redact(_page(f"{meta.project_name} - mbt docs", index_body)))
+    index.write_text(redact(page(f"{meta.project_name} - mbt docs", index_body)))
     return index

@@ -112,6 +112,7 @@ That reproduces the original metrics bit for bit on the adapters with an exact d
 | [`packages/mbt-snowflake`](packages/mbt-snowflake) | Snowflake data adapter: warehouse-native datasets with push-down sampling |
 | [`packages/mbt-mlflow`](packages/mbt-mlflow) | MLflow tracking and registry adapters |
 | [`packages/mbt-optuna`](packages/mbt-optuna) | Optuna tuning engine (seeded TPE, median pruning) |
+| [`packages/mbt-evidently`](packages/mbt-evidently) | Evidently drift reports beside the training report's own stability tables |
 | [`packages/mbt-testing`](packages/mbt-testing) | Fake adapters for testing mbt projects without frameworks |
 | [`examples/showcase`](examples/showcase) | A docker-compose reference stack - S3 lake, MLflow, Spark cluster, Gitea and Woodpecker CI, Zot, Airflow, Grafana, optional k3d and ArgoCD - with an opt-in live test tier |
 | [`tests/fixtures`](tests/fixtures) | Whole mbt projects the suite drives through the real CLI: `churn_demo` (classification) and `revenue_demo` (regression) |

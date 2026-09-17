@@ -23,6 +23,7 @@ One package holds the engine; every framework integration is a separate, indepen
    ┌──────────┘   │   │   └──────────┐
 mbt-xgboost    mbt-lightgbm   mbt-sklearn   mbt-h2o      (training)
 mbt-snowflake  mbt-spark      mbt-mlflow    mbt-optuna   (data, compute, tracking, tuning)
+mbt-evidently                                            (report engine)
 mbt-testing                                              (fakes for every role)
 ```
 
@@ -40,6 +41,7 @@ The two deliberate exceptions are compute adapters that run core's own job entry
 | `mbt-snowflake` | data adapter | Warehouse-native datasets with push-down sampling and batch scoring |
 | `mbt-mlflow` | tracking + registry | Experiment tracking and the model registry |
 | `mbt-optuna` | tuning engine | Seeded TPE or random hyperparameter search, with median pruning |
+| `mbt-evidently` | report engine | Evidently's drift reports in the training report, for reading beside mbt's own stability tables |
 | `mbt-testing` | fake adapters | Framework-free adapters so a project's specs can be tested without JVMs or GPUs |
 
 `mbt-lightgbm` and `mbt-sklearn` are the extensibility proof: each is built against the public contract only, with no privileged access, so anyone can ship an adapter the same way.
@@ -208,12 +210,13 @@ A plugin (`AdapterPlugin`) bundles typed component slots, instantiated on demand
 | `registry` | Register versions, resolve champions by stage, transition stages | mlflow |
 | `compute` | Run a `TrainingJob` (subprocess, `spark-submit`, cluster) | local, spark |
 | `tuning` | Search hyperparameters against an objective | optuna |
+| `reporting` | Render a drift report for the training report; never gates (ADR-30) | evidently |
 
 Several capabilities are optional and probed rather than declared.
 Batch-scoring data adapters add `build_scoring_input`/`open_predictions` (contract 1.1, ADR-23).
 Training adapters may add `feature_importance`, `shap_importance`, `explain`, and `train_with_report`, each with a `Supports*` protocol that pins its signature, and set class flags such as `supports_calibration` that the parser reads before accepting a spec that needs them.
 A training adapter that sets `data_access = "path"` receives its splits as Parquet files rather than in-memory Arrow, so JVM and cluster frameworks ingest natively while still seeing exactly what Arrow adapters see (ADR-17).
-Tracking adapters are probed the same way for `prepare()`, `log_trial()`, and `log_document()`.
+Tracking adapters are probed the same way for `prepare()`, `log_trial()`, `log_document()`, and `log_directory()`, and registry adapters for `set_version_tags()` (ADR-30).
 
 The compliance suite in `mbt-adapter-base` (`TrainingAdapterCompliance`, `PredictionStoreCompliance`) is the ship bar: subclass it and keep it green, and the adapter meets the contract.
 

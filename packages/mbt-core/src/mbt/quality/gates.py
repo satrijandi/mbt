@@ -4,8 +4,17 @@ Adapters compute metrics; core compares them. This module has zero ML
 dependencies and is fully unit-testable (FR-TEST-02/03/06).
 """
 
+from typing import Literal
+
 from mbt.artifacts.run_results import GateResult
-from mbt.contracts import BootstrapDelta, DeterminismTier, GateSpec, MetricResults, MetricSpec
+from mbt.contracts import (
+    BootstrapDelta,
+    DeterminismTier,
+    GateSpec,
+    MetricResults,
+    MetricSpec,
+    ReportSummary,
+)
 from mbt.events import EventBus, get_bus
 from mbt.events.models import GateEvaluated, LogMessage
 from mbt.exceptions import MbtError
@@ -103,6 +112,71 @@ def _disparity_result(
     )
 
 
+def _within(actual: float, threshold: float, greater: bool, tolerance: float) -> bool:
+    """Threshold comparison; tolerance widens it in the model's favour only."""
+    if greater:
+        return actual >= threshold - tolerance
+    return actual <= threshold + tolerance
+
+
+def _out_of_time_result(
+    gate: GateSpec,
+    report: ReportSummary | None,
+    greater: bool,
+    tolerance: float,
+    resource: str,
+) -> GateResult:
+    """An after-test gate (ADR-30): the worst mature cell at the gate's grain.
+
+    A cell is judged only when every row in it has matured and at least
+    ``min_rows`` of them carry a label; anything less measures the calendar,
+    not the model. With nothing to judge the gate passes as not applicable,
+    loudly - the ADR-10 stance - so a model trained before its after-test
+    labels mature is not blocked by time alone.
+    """
+    assert gate.threshold is not None  # validator: after-test gates are threshold gates
+    period = gate.effective_period
+    label = f"oot_{gate.metric}"
+    cells = [
+        cell
+        for cell in (report.periods if report is not None else [])
+        if cell.period == period
+        and cell.mature
+        and cell.n_labelled >= gate.effective_min_rows
+        and gate.metric in cell.metrics
+    ]
+    if not cells:
+        message = (
+            f"no mature after-test {period} cell with at least {gate.effective_min_rows} "
+            "labelled rows yet; gate not applicable"
+        )
+        get_bus().emit(
+            LogMessage(level="warn", unique_id=resource, message=f"gate {label}: {message}")
+        )
+        return GateResult(
+            metric=label,
+            kind="threshold",
+            passed=True,
+            expected=gate.threshold,
+            period=period,
+            applicable=False,
+            message=message,
+        )
+    values = [cell.metrics[gate.metric] for cell in cells]
+    index = values.index(min(values) if greater else max(values))
+    worst, actual = cells[index], values[index]
+    return GateResult(
+        metric=label,
+        kind="threshold",
+        passed=_within(actual, gate.threshold, greater, tolerance),
+        expected=gate.threshold,
+        actual=actual,
+        period=period,
+        cell=worst.key,
+        message=f"worst {period} cell {worst.key} of {len(cells)} judged",
+    )
+
+
 def evaluate_gates(
     gates: list[GateSpec],
     *,
@@ -115,6 +189,8 @@ def evaluate_gates(
     champion_delta_bounds: dict[str, BootstrapDelta] | None = None,
     backtest_metrics: dict[str, float] | None = None,
     evaluated_is_champion: bool = False,
+    report: ReportSummary | None = None,
+    out_of_time: Literal["include", "only", "skip"] = "include",
 ) -> list[GateResult]:
     """Evaluate all gates for one model; emits GateEvaluated events.
 
@@ -124,11 +200,29 @@ def evaluate_gates(
     artifact would be compared with its own predictions, a delta of exactly 0
     that fails every positive ``min_delta``, which turned the documented decay
     check into a deterministic exit 2. Threshold and disparity gates still run.
+
+    ``report`` carries the after-test cells ``source: out_of_time`` gates judge
+    (ADR-30). ``out_of_time="only"`` evaluates just those gates - what the
+    pre-deploy check re-runs - and ``"skip"`` leaves them out, for the
+    re-evaluations (``mbt test``, a plain ``mbt evaluate``) that build no
+    after-test report.
     """
     bus = get_bus()
     results: list[GateResult] = []
     for gate in gates:
+        is_after_test = gate.source == "out_of_time"
+        if (out_of_time == "only" and not is_after_test) or (
+            out_of_time == "skip" and is_after_test
+        ):
+            continue
         greater = metric_direction(gate.metric, metric_specs)
+
+        if gate.source == "out_of_time":
+            tolerance = determinism.tolerance_for(gate.metric) if determinism else 0.0
+            result = _out_of_time_result(gate, report, greater, tolerance, resource)
+            results.append(result)
+            _emit_gate(bus, resource, result)
+            continue
 
         if gate.across is not None:
             result = _disparity_result(gate, challenger, greater, resource)
@@ -150,10 +244,7 @@ def evaluate_gates(
             # Tolerance widens threshold comparisons in the model's favor only
             # (FR-ADPT-07); champion deltas never get widened.
             tolerance = determinism.tolerance_for(gate.metric) if determinism else 0.0
-            if greater:
-                passed = actual >= gate.threshold - tolerance
-            else:
-                passed = actual <= gate.threshold + tolerance
+            passed = _within(actual, gate.threshold, greater, tolerance)
             result = GateResult(
                 metric=label,
                 kind="threshold",

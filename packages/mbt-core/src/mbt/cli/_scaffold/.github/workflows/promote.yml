@@ -39,6 +39,10 @@ jobs:
           python-version: "3.11"
       - name: Install project
         run: pip install -r requirements.txt
+      # `mbt promote` refuses a version whose pre-deploy check failed
+      # (`mbt evaluate --out-of-time --gates`, ADR-30); `require_oot_check`
+      # on a promotions.yml entry, or --require-oot-check, also refuses one
+      # that was never checked.
       - name: Promote (GitOps file)
         if: github.event_name == 'push'
         run: mbt promote --from-file promotions.yml

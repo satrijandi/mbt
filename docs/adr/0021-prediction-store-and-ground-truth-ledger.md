@@ -1,6 +1,11 @@
 # ADR-21: Prediction stores, training-time baselines, and the ground-truth ledger
 
-**Status:** accepted, amended by [ADR-28](0028-mlflow-training-only-and-champion-carried-config.md)
+**Status:** accepted, amended by [ADR-28](0028-mlflow-training-only-and-champion-carried-config.md) and [ADR-30](0030-training-report-and-after-test-window.md)
+
+ADR-30 lets a project opt into row-level train/test/after-test predictions on
+the tracking run (`evaluation.report.predictions`). Baselines stay quantile
+grids; the raw-rows trade-off rejected below is the project's to make, and off
+by default.
 
 One clause below no longer holds: realized metrics do NOT log to the tracking
 adapter. ADR-28 makes tracking training-only, so a ground-truth evaluation

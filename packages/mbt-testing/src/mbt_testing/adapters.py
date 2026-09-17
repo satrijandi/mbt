@@ -26,6 +26,8 @@ from mbt_adapter_base import (
     DatasetHandle,
     DatasetProfile,
     DeterminismTier,
+    DriftColumn,
+    DriftReport,
     JobResult,
     MetricResults,
     MetricSpec,
@@ -146,9 +148,11 @@ class FakeTrainingAdapter:
         is a stable integer hash shared across models: paired by construction.
         """
         table = data.read(split)
-        labels: list[float] | None = None
+        labels: list[float | None] | None = None
         if model.target is not None and model.target in table.column_names:
-            labels = [float(v) for v in table.column(model.target).to_pylist()]
+            labels = [
+                None if v is None else float(v) for v in table.column(model.target).to_pylist()
+            ]
         scores: list[float] = []
         for i in range(table.num_rows):
             if labels is None:
@@ -156,7 +160,10 @@ class FakeTrainingAdapter:
                 continue
             noise = 2.0 * (((i * 2654435761) % 4096) / 4096.0) - 1.0  # U(-1, 1), stable
             separation = max(model.value - 0.5, 0.0) * 4.0
-            latent = separation * (2.0 * labels[i] - 1.0) + 2.0 * noise
+            label = labels[i]
+            # An immature after-test row (ADR-30) has no label to separate on.
+            sign = 0.0 if label is None else 2.0 * label - 1.0
+            latent = separation * sign + 2.0 * noise
             scores.append(1.0 / (1.0 + math.exp(-latent)))
         return table.append_column("prediction", pa.array(scores, type=pa.float64()))
 
@@ -254,6 +261,22 @@ class FakeTrackingAdapter:
         """Record a document by name (ADR-28); the bytes stay where they are."""
         self._update(run.run_id, lambda p: p.setdefault("documents", []).append(Path(path).name))
 
+    def log_directory(self, run: RunHandle, local_dir: Path, artifact_path: str) -> None:
+        """Copy a directory under ``<root>/<run_id>/<artifact_path>`` (ADR-30),
+        so a test can read what a real tracker would have stored."""
+        import shutil
+
+        source = Path(local_dir)
+        target = self.root / run.run_id / artifact_path
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        files = sorted(str(f.relative_to(source)) for f in source.rglob("*") if f.is_file())
+
+        def record(payload: dict[str, Any]) -> None:
+            directories = payload.setdefault("directories", {})
+            directories[artifact_path] = sorted({*directories.get(artifact_path, []), *files})
+
+        self._update(run.run_id, record)
+
     def end_run(self, run: RunHandle, status: str) -> None:
         self._update(run.run_id, lambda p: p.__setitem__("status", status))
 
@@ -321,6 +344,18 @@ class FakeRegistryAdapter:
                 return self._to_model_version(name, entry)
         return None
 
+    def set_version_tags(self, name: str, version: str, tags: dict[str, str]) -> None:
+        """Merge tags into one registered version (ADR-30)."""
+        with self._lock:
+            versions = self._versions(name)
+            for entry in versions:
+                if str(entry["version"]) == str(version):
+                    entry.setdefault("tags", {}).update(tags)
+                    break
+            else:
+                raise LookupError(f"version {version} of {name!r} not found")
+            self._write(name, versions)
+
     def transition(self, version: ModelVersion, stage: Stage) -> None:
         with self._lock:
             versions = self._versions(version.name)
@@ -381,6 +416,50 @@ class FakeTuningEngine:
             if (maximize and value > best_value) or (not maximize and value < best_value):
                 best_params, best_value = params, value
         return TuningResult(best_params=best_params, best_value=best_value, n_trials=n_trials)
+
+
+class FakeReportingEngine:
+    """A drift report engine with no dependency (contract 1.2, ADR-30).
+
+    A numeric column's score is its mean shift in reference standard
+    deviations, a string column's the share of current values the reference
+    never had; either drifts at 0.5. The HTML is a one-line stand-in.
+    """
+
+    threshold: ClassVar[float] = 0.5
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = config or {}
+
+    def drift_report(
+        self, reference: pa.Table, current: pa.Table, out_html: Path, *, title: str
+    ) -> DriftReport:
+        columns: list[DriftColumn] = []
+        for name in reference.column_names:
+            ref = [v for v in reference.column(name).to_pylist() if v is not None]
+            cur = [v for v in current.column(name).to_pylist() if v is not None]
+            if pa.types.is_string(reference.schema.field(name).type):
+                seen = set(ref)
+                score = sum(v not in seen for v in cur) / len(cur) if cur else 0.0
+                method = "unseen share"
+            else:
+                mean = sum(ref) / len(ref) if ref else 0.0
+                spread = math.sqrt(sum((v - mean) ** 2 for v in ref) / len(ref)) if ref else 0.0
+                shift = abs((sum(cur) / len(cur) if cur else mean) - mean)
+                score = shift / spread if spread else 0.0
+                method = "mean shift"
+            columns.append(
+                DriftColumn(
+                    column=name,
+                    method=method,
+                    score=score,
+                    threshold=self.threshold,
+                    drifted=score >= self.threshold,
+                )
+            )
+        out_html.write_text(f"<html><title>{title}</title></html>", encoding="utf-8")
+        share = sum(c.drifted for c in columns) / len(columns) if columns else 0.0
+        return DriftReport(drifted_share=share, columns=columns)
 
 
 class _InlineJobHandle:

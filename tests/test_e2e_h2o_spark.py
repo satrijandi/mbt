@@ -64,6 +64,8 @@ def jvm_project(tmp_path: Path) -> Path:
         "      registry: {adapter: mlflow, config: {uri: 'sqlite:///mlflow.db'}}\n"
         "      compute: {adapter: local}\n"
         "      artifact_store: file://./target/artifacts\n"
+        # two h2o jobs at once: each must train on its own cluster
+        "      threads: 2\n"
         "      vars: {sample_fraction: 1.0, spark_master: 'local[2]'}\n"
     )
     (project / "sources.yml").write_text(
@@ -79,8 +81,11 @@ def jvm_project(tmp_path: Path) -> Path:
         "    split:\n"
         "      strategy: temporal\n"
         "      time_column: event_ts\n"
-        '      train: "-180d:-28d"\n'
-        '      test: "-28d:now"\n'
+        '      train: "-180d:-56d"\n'
+        '      test: "-56d:-28d"\n'
+        # the path adapters stage splits as files; the after-test one must
+        # reach the report and the pre-deploy check, never training (ADR-30)
+        '      out_of_time: "-28d:now"\n'
     )
 
     def model(name: str, adapter: str, hyper: str) -> str:
@@ -111,6 +116,13 @@ def jvm_project(tmp_path: Path) -> Path:
             "      max_models: 3\n      include_algos: [GLM, GBM]\n      nfolds: 0\n",
         )
     )
+    (project / "models" / "conv_glm.yml").write_text(
+        model(
+            "conv_glm",
+            "h2o_automl",
+            "      max_models: 1\n      include_algos: [GLM]\n      nfolds: 0\n",
+        )
+    )
     (project / "models" / "conv_sparkml.yml").write_text(
         model("conv_sparkml", "spark", "      max_iter: 10\n      max_depth: 3\n")
     )
@@ -130,11 +142,36 @@ def test_h2o_and_sparkml_through_the_full_loop(jvm_project: Path) -> None:
     assert automl["metrics"]["roc_auc"] > 0.7
     assert automl["artifact"]["format"] == "h2o_mojo"
     assert automl["registration"]["version"] == "1"
+    # trained beside conv_automl: h2o.init() used to put both jobs in one
+    # cluster, where they clobbered each other's frames and the first to
+    # finish shut it down under the other
+    assert results["conv_glm"]["status"] == "success", results["conv_glm"]["message"]
 
     assert sparkml["status"] == "success"
     assert sparkml["metrics"]["roc_auc"] > 0.7
     assert sparkml["artifact"]["format"] == "sparkml_zip"
     assert sparkml["registration"]["version"] == "1"
+
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=f"sqlite:///{jvm_project}/mlflow.db")
+    for result in (automl, sparkml):
+        metrics = client.get_run(result["tracking_run_id"]).data.metrics
+        assert metrics["oot.window.roc_auc"] > 0.7  # the after-test rows were scored
+        assert "stability.window.score_psi" in metrics
+
+    # the pre-deploy check stages the recorded test window and the rows since
+    run_mbt(
+        ["evaluate", "--model", "conv_sparkml", "--out-of-time", "--anchor", ANCHOR],
+        jvm_project,
+        timeout=600,
+    )
+    checked = {
+        r["unique_id"].split(".")[-1]: r
+        for r in json.loads((jvm_project / "target/run_results.json").read_text())["results"]
+    }["conv_sparkml"]
+    assert checked["status"] == "success"
+    assert checked["metrics"]["oot_roc_auc"] > 0.7
 
     # evaluate reloads the MOJO champion on fresh data - no retraining
     run_mbt(

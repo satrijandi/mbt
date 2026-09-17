@@ -6,6 +6,8 @@ stored manifest verbatim, FR-RUN-11) -> plan -> schedule -> run_results.
 
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,10 +23,11 @@ from mbt.artifacts.run_results import (
 )
 from mbt.compile.compiler import CompileOptions, compile_project
 from mbt.config.profiles import LoadedProfiles, load_profiles
-from mbt.contracts import ModelSpec, Stage
+from mbt.contracts import ModelSpec, ModelVersion, Stage
 from mbt.dag.selector import StateIndex
 from mbt.events import get_bus
 from mbt.events.models import LogMessage, RunFinished, RunStarted
+from mbt.events.node_log import NodeLogSink
 from mbt.exceptions import ConfigError, MbtError, StateError
 from mbt.execute.planner import ExecutionPlan, plan_execution
 from mbt.execute.runners import (
@@ -331,25 +334,25 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
     state_index = build_state_index(opts, manifest)
     executable = ("scoring",) if opts.command == "score" else ("dataset", "model")
     plan = plan_execution(manifest, opts.select, opts.exclude, state_index, executable=executable)
-    bus.emit(
-        RunStarted(
-            command=opts.command,
-            target=manifest.metadata.target,
-            selected=len(plan.selected),
-        )
-    )
-    if plan.auto_materialized:
+    with node_logs(opts.project_dir, prepared.run_id) as logs:
         bus.emit(
-            LogMessage(
-                message=(
-                    "auto-materializing required upstream dataset(s): "
-                    + ", ".join(sorted(plan.auto_materialized))
-                    + " (FR-RUN-12)"
-                )
+            RunStarted(
+                command=opts.command,
+                target=manifest.metadata.target,
+                selected=len(plan.selected),
             )
         )
-
-    results = _execute(opts, prepared, plan)
+        if plan.auto_materialized:
+            bus.emit(
+                LogMessage(
+                    message=(
+                        "auto-materializing required upstream dataset(s): "
+                        + ", ".join(sorted(plan.auto_materialized))
+                        + " (FR-RUN-12)"
+                    )
+                )
+            )
+        results = _execute(opts, prepared, plan, logs)
 
     ordered = [results[uid] for uid in plan.order if uid in results]
     run_results = RunResults(
@@ -372,10 +375,24 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
     return run_results
 
 
+@contextmanager
+def node_logs(project_dir: Path, run_id: str) -> Iterator[NodeLogSink]:
+    """Per-node log files for one invocation (ADR-30), attached for its duration."""
+    sink = NodeLogSink(project_dir / "target" / "run_logs" / run_id)
+    bus = get_bus()
+    bus.add_sink(sink)
+    try:
+        yield sink
+    finally:
+        bus.remove_sink(sink)
+        sink.close()
+
+
 def _execute(
     opts: InvocationOptions,
     prepared: PreparedInvocation,
     plan: ExecutionPlan,
+    logs: NodeLogSink | None = None,
 ) -> dict[str, NodeResult]:
     manifest = prepared.manifest
     ctx = ExecutionContext(
@@ -388,6 +405,7 @@ def _execute(
         cli_vars=opts.cli_vars,
         python_tests=prepared.parsed.python_tests if prepared.parsed else [],
         total_nodes=len(plan.execution_set),
+        node_logs=logs,
     )
     dataset_runner = DatasetRunner(ctx)
     model_runner = ModelRunner(ctx) if opts.command in ("run", "build") else ModelTestRunner(ctx)
@@ -439,9 +457,15 @@ def run_evaluate(
     version: str | None = None,
     stage: str | None = None,
     apply_gates: bool = False,
+    out_of_time: bool = False,
     registry: AdapterRegistry | None = None,
 ) -> RunResults:
-    """Re-evaluate a registered artifact on freshly built data, no retraining."""
+    """Re-evaluate a registered artifact on freshly built data, no retraining.
+
+    With ``out_of_time`` it is the pre-deploy check instead (ADR-30): the
+    version's recorded test window against everything since, reported on its
+    training run and, with ``apply_gates``, judged and recorded on the version.
+    """
     started_monotonic = time.monotonic()
     started_at = datetime.now(tz=UTC).isoformat()
     prepared = prepare(opts, registry=registry)
@@ -490,54 +514,22 @@ def run_evaluate(
         )
     )
 
-    # Build (or reuse) the model's dataset(s) first.
-    dataset_runner = DatasetRunner(ctx)
-    results: list[NodeResult] = []
-    for dep in dataset_deps:
-        results.append(dataset_runner.run(dep))
-    failed_datasets = [r for r in results if r.status == "error"]
-    if failed_datasets:
-        # The model still gets a row (matching the scheduler's skip semantics);
-        # the dataset row carries the error detail.
-        results.append(
-            NodeResult(
-                unique_id=model_uid,
-                status="skipped",
-                message=f"upstream {failed_datasets[0].unique_id} error",
+    with node_logs(opts.project_dir, prepared.run_id) as logs:
+        ctx.node_logs = logs
+        if out_of_time:
+            results = _run_out_of_time(
+                ctx, model_uid, spec, version=version, stage=stage, apply_gates=apply_gates
             )
-        )
-    else:
-        model_runner = ModelRunner(ctx)
-        registry_name = spec.registration.name if spec.registration else spec.name
-        resolved_version = None
-        registry_adapter = ctx.registry_adapter()
-        if version is not None:
-            resolved_version = registry_adapter.get_version(registry_name, version)
         else:
-            stage_token = (
-                Stage(stage)
-                if stage
-                else (spec.registration.stage_on_pass if spec.registration else Stage.STAGING)
-            )
-            resolved_version = registry_adapter.get_champion(registry_name, stage_token)
-        if resolved_version is None or resolved_version.artifact is None:
-            raise StateError(
-                f"no registered version of {registry_name!r} to evaluate",
-                hint="pass --version N or --stage <stage>, or train the model first",
-            )
-        job_result, gates = model_runner.evaluate_artifact(
-            node, spec, resolved_version.artifact, apply_gates=apply_gates
-        )
-        results.append(
-            evaluation_node_result(
+            results = _reevaluate(
+                ctx,
                 model_uid,
-                job_result,
-                gates,
-                pass_status="success",
-                fail_status="gate_failed",
-                gated=apply_gates and bool(spec.evaluation.gates),
+                spec,
+                dataset_deps,
+                version=version,
+                stage=stage,
+                apply_gates=apply_gates,
             )
-        )
 
     run_results = RunResults(
         metadata=RunResultsMetadata(
@@ -557,3 +549,88 @@ def run_evaluate(
 
     _emit_run_finished("evaluate", run_results)
     return run_results
+
+
+def _resolve_version(
+    ctx: ExecutionContext, spec: ModelSpec, *, version: str | None, stage: str | None
+) -> ModelVersion:
+    registry_name = spec.registration.name if spec.registration else spec.name
+    registry_adapter = ctx.registry_adapter()
+    if version is not None:
+        resolved = registry_adapter.get_version(registry_name, version)
+    else:
+        stage_token = (
+            Stage(stage)
+            if stage
+            else (spec.registration.stage_on_pass if spec.registration else Stage.STAGING)
+        )
+        resolved = registry_adapter.get_champion(registry_name, stage_token)
+    if resolved is None or resolved.artifact is None:
+        raise StateError(
+            f"no registered version of {registry_name!r} to evaluate",
+            hint="pass --version N or --stage <stage>, or train the model first",
+        )
+    return resolved  # type: ignore[no-any-return]
+
+
+def _run_out_of_time(
+    ctx: ExecutionContext,
+    model_uid: str,
+    spec: ModelSpec,
+    *,
+    version: str | None,
+    stage: str | None,
+    apply_gates: bool,
+) -> list[NodeResult]:
+    from mbt.execute.oot_check import run_oot_check
+
+    resolved = _resolve_version(ctx, spec, version=version, stage=stage)
+    return run_oot_check(ctx, model_uid, resolved, apply_gates=apply_gates)
+
+
+def _reevaluate(
+    ctx: ExecutionContext,
+    model_uid: str,
+    spec: ModelSpec,
+    dataset_deps: list[str],
+    *,
+    version: str | None,
+    stage: str | None,
+    apply_gates: bool,
+) -> list[NodeResult]:
+    # Build (or reuse) the model's dataset(s) first.
+    manifest = ctx.manifest
+    node = manifest.nodes[model_uid]
+    dataset_runner = DatasetRunner(ctx)
+    results: list[NodeResult] = []
+    for dep in dataset_deps:
+        results.append(dataset_runner.run(dep))
+    failed_datasets = [r for r in results if r.status == "error"]
+    if failed_datasets:
+        # The model still gets a row (matching the scheduler's skip semantics);
+        # the dataset row carries the error detail.
+        results.append(
+            NodeResult(
+                unique_id=model_uid,
+                status="skipped",
+                message=f"upstream {failed_datasets[0].unique_id} error",
+            )
+        )
+    else:
+        model_runner = ModelRunner(ctx)
+        resolved_version = _resolve_version(ctx, spec, version=version, stage=stage)
+        assert resolved_version.artifact is not None  # _resolve_version guarantees it
+        job_result, gates = model_runner.evaluate_artifact(
+            node, spec, resolved_version.artifact, apply_gates=apply_gates
+        )
+        results.append(
+            evaluation_node_result(
+                model_uid,
+                job_result,
+                gates,
+                pass_status="success",
+                fail_status="gate_failed",
+                gated=apply_gates and bool(spec.evaluation.gates),
+            )
+        )
+    return results

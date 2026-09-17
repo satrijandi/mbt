@@ -2,8 +2,9 @@
 # Resolve image-extras.in into the committed image-extras.txt closure.
 #
 # Why this exists: the runner image pins its base by digest and constrains
-# every mbt dependency from uv.lock, but evidently and jupyterlab are not mbt
-# dependencies, so nothing pinned THEIR transitive closure - the image build
+# every mbt dependency from uv.lock, but jupyterlab is not an mbt dependency
+# (nor was evidently, until mbt-evidently made it one), so nothing pinned its
+# transitive closure - the image build
 # resolved it fresh against PyPI on every build. On 2026-08-27 that closure
 # picked up statsmodels 0.15.0, released four hours earlier with macOS and
 # Windows wheels only (the cp311 manylinux wheel followed at 14:30 UTC; the

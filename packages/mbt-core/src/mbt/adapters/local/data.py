@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 from mbt.contracts import (
+    OUT_OF_TIME_SPLIT,
     DataBuildContext,
     DatasetLocator,
     DatasetSpec,
@@ -41,6 +42,7 @@ from mbt_adapter_base.materialization import (
     MaterializationError,
     MaterializedDatasetHandle,
     combine_snapshots,
+    empty_out_of_time_message,
     write_materialization_metadata,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore
@@ -185,12 +187,24 @@ class LocalDataAdapter:
             con.close()
 
         for split, count in written.items():
-            if count == 0:
-                raise AdapterError(
-                    f"split {split!r} materialized 0 rows",
-                    resource=ctx.node.unique_id,
-                    hint="check the split windows/fractions against the data's time range",
+            if count != 0:
+                continue
+            if split == OUT_OF_TIME_SPLIT:
+                # Common and harmless: a window ending at the anchor before any
+                # newer rows have landed. The report says so (ADR-30).
+                ctx.events.emit(
+                    LogMessage(
+                        level="warn",
+                        unique_id=ctx.node.unique_id,
+                        message=empty_out_of_time_message(ctx.resolved_windows),
+                    )
                 )
+                continue
+            raise AdapterError(
+                f"split {split!r} materialized 0 rows",
+                resource=ctx.node.unique_id,
+                hint="check the split windows/fractions against the data's time range",
+            )
 
         ctx.events.emit(
             LogMessage(

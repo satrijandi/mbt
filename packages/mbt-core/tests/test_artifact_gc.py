@@ -52,6 +52,44 @@ def test_gc_prunes_old_unreferenced_prefixes_only(tmp_path: Path) -> None:
     assert (root / "fresh" / "model.bin").is_file()  # too new to prune
 
 
+def test_gc_prunes_old_runs_of_a_model_that_has_a_champion(tmp_path: Path) -> None:
+    """Jobs write under <model>/<run_id>/: the run is the unit, not the model.
+
+    Regression: the model directory used to be the unit, so one champion kept
+    every older run of that model forever.
+    """
+    root = tmp_path / "artifacts"
+    runs = {"20260101T000000Z-old": OLD, "20260601T000000Z-champ": OLD, "20260917T000000Z": NOW}
+    for run, age in runs.items():
+        artifact = root / "churn" / run / "model.bin"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"x" * 10)
+        report = root / "churn" / run / "report" / "report.html"
+        report.parent.mkdir()
+        report.write_text("<html></html>")
+        for path in (artifact, report):
+            os.utime(path, (age, age))
+    keep = {f"file://{root / 'churn' / '20260601T000000Z-champ' / 'model.bin'}"}
+    plan = artifact_gc_plan(f"file://{root}", cutoff=_cutoff(), keep_uris=keep)
+    assert [p.name for p in plan.delete] == ["20260101T000000Z-old"]
+    assert sorted(p.name for p in plan.keep) == ["20260601T000000Z-champ", "20260917T000000Z"]
+    apply_gc_plan(plan)
+    assert not (root / "churn" / "20260101T000000Z-old").exists()
+    # the champion's report travels with it
+    assert (root / "churn" / "20260601T000000Z-champ" / "report" / "report.html").is_file()
+
+
+def test_gc_removes_a_model_directory_it_emptied_but_never_the_root(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    artifact = root / "retired" / "20260101T000000Z" / "model.bin"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"x")
+    os.utime(artifact, (OLD, OLD))
+    apply_gc_plan(artifact_gc_plan(f"file://{root}", cutoff=_cutoff(), keep_uris=set()))
+    assert not (root / "retired").exists()
+    assert root.is_dir()
+
+
 def test_gc_refuses_object_stores() -> None:
     with pytest.raises(MbtError, match="lifecycle"):
         artifact_gc_plan("s3://models/mbt", cutoff=_cutoff(), keep_uris=set())

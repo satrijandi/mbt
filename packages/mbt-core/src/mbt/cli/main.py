@@ -549,6 +549,15 @@ def evaluate(
     gates: Annotated[
         bool, typer.Option("--gates", help="Apply gate logic to the fresh metrics.")
     ] = False,
+    out_of_time: Annotated[
+        bool,
+        typer.Option(
+            "--out-of-time",
+            help="Pre-deploy check: the version's recorded test window against everything "
+            "since, reported on its training run; with --gates, judged and recorded on "
+            "the version.",
+        ),
+    ] = False,
     manifest: ManifestOpt = None,
     allow_env_mismatch: AllowEnvMismatchOpt = False,
     anchor: AnchorOpt = None,
@@ -571,6 +580,7 @@ def evaluate(
         version=version,
         stage=stage,
         apply_gates=gates,
+        out_of_time=out_of_time,
     )
     render_results_table(results, cli)
     code = results.exit_code()
@@ -734,6 +744,14 @@ def promote(
     force: Annotated[
         bool, typer.Option("--force", help="Promote even without recorded gate passes.")
     ] = False,
+    require_oot_check: Annotated[
+        bool,
+        typer.Option(
+            "--require-oot-check",
+            help="Refuse unless the version's latest after-test check passed "
+            "(mbt evaluate --out-of-time --gates, or the build's own).",
+        ),
+    ] = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -761,6 +779,7 @@ def promote(
                 to_stage=entry.to,
                 version=entry.version,
                 force=force,
+                require_oot_check=require_oot_check or entry.require_oot_check,
             )
         out_console.print(f"applied {len(entries)} promotion(s) from {from_file}")
         return
@@ -776,7 +795,12 @@ def promote(
             f"unknown stage {to!r}", hint=f"stages: {', '.join(s.value for s in Stage)}"
         ) from exc
     outcome = promote_model(
-        registry_adapter, name=model, to_stage=stage_token, version=version, force=force
+        registry_adapter,
+        name=model,
+        to_stage=stage_token,
+        version=version,
+        force=force,
+        require_oot_check=require_oot_check,
     )
     out_console.print(
         f"promoted [bold]{outcome.name}[/bold] v{outcome.version} -> {outcome.to_stage.value}"

@@ -41,6 +41,7 @@ jobs:
           packages/mbt-optuna/src packages/mbt-lightgbm/src
           packages/mbt-sklearn/src packages/mbt-testing/src
           packages/mbt-snowflake/src packages/mbt-spark/src packages/mbt-h2o/src
+          packages/mbt-evidently/src
       - name: yamllint
         run: 'uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples tests/fixtures .github'
       - name: No ML frameworks in mbt-core (NFR-04)
@@ -50,7 +51,7 @@ jobs:
           probe = (
               "import sys\n"
               "import mbt.cli.main, mbt.parsing, mbt.compile.compiler, mbt.execute.orchestrator\n"
-              "banned = [m for m in ('xgboost','lightgbm','sklearn','torch','mlflow','optuna')"
+              "banned = [m for m in ('xgboost','lightgbm','sklearn','torch','mlflow','optuna','evidently')"
               " if m in sys.modules]\n"
               "assert not banned, f'ML frameworks imported by mbt-core: {banned}'\n"
           )

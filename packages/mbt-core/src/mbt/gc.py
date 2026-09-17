@@ -22,6 +22,8 @@ class GcPlan:
     delete: list[Path]
     keep: list[Path]
     freed_bytes: int
+    #: The store root, which a prune never removes even when it empties it.
+    root: Path | None = None
 
 
 def run_results_artifact_uris(project_dir: Path) -> set[str]:
@@ -73,6 +75,23 @@ def champion_artifact_uris(parsed: Any, registry_adapter: Any) -> set[str]:
     return keep
 
 
+def _run_prefixes(root: Path) -> list[Path]:
+    """The run directories under a store root.
+
+    Training jobs write under ``<model>/<run_id>/``, so the run is the second
+    level. Treating the model directory as the unit - as this once did - kept
+    every old run of any model that had a champion, forever. A top-level
+    directory holding files directly is a run of its own (a flat store).
+    """
+    prefixes: list[Path] = []
+    for top in sorted(p for p in root.iterdir() if p.is_dir()):
+        if any(child.is_file() for child in top.iterdir()):
+            prefixes.append(top)
+        else:
+            prefixes.extend(sorted(p for p in top.iterdir() if p.is_dir()))
+    return prefixes
+
+
 def artifact_gc_plan(store_uri: str, *, cutoff: datetime, keep_uris: set[str]) -> GcPlan:
     """Plan the prune: run-prefix directories older than ``cutoff`` and not
     holding any kept artifact are deletable."""
@@ -83,7 +102,7 @@ def artifact_gc_plan(store_uri: str, *, cutoff: datetime, keep_uris: set[str]) -
         )
     root = Path(store_uri.removeprefix("file://"))
     if not root.is_dir():
-        return GcPlan(delete=[], keep=[], freed_bytes=0)
+        return GcPlan(delete=[], keep=[], freed_bytes=0, root=root)
     keep_paths = {
         Path(uri.removeprefix("file://")).resolve()
         for uri in keep_uris
@@ -92,7 +111,7 @@ def artifact_gc_plan(store_uri: str, *, cutoff: datetime, keep_uris: set[str]) -
     delete: list[Path] = []
     keep: list[Path] = []
     freed = 0
-    for prefix_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+    for prefix_dir in _run_prefixes(root):
         files = [f for f in prefix_dir.rglob("*") if f.is_file()]
         newest = max((f.stat().st_mtime for f in files), default=0.0)
         referenced = any(f.resolve() in keep_paths for f in files)
@@ -101,7 +120,7 @@ def artifact_gc_plan(store_uri: str, *, cutoff: datetime, keep_uris: set[str]) -
         else:
             delete.append(prefix_dir)
             freed += sum(f.stat().st_size for f in files)
-    return GcPlan(delete=delete, keep=keep, freed_bytes=freed)
+    return GcPlan(delete=delete, keep=keep, freed_bytes=freed, root=root)
 
 
 def apply_gc_plan(plan: GcPlan) -> None:
@@ -109,3 +128,7 @@ def apply_gc_plan(plan: GcPlan) -> None:
 
     for path in plan.delete:
         shutil.rmtree(path)
+        parent = path.parent
+        # A model directory emptied by the prune goes too; the store root stays.
+        if parent != plan.root and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()

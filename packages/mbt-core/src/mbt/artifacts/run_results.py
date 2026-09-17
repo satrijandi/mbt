@@ -48,6 +48,12 @@ class GateResult(BaseModel):
     across: str | None = None  # disparity gates: the slice column measured
     worst_slice: str | None = None  # disparity gates: "column=value" of the worst slice
     best_slice: str | None = None  # disparity gates: "column=value" of the best slice
+    #: After-test gates (ADR-30): the grain judged and the cell that decided.
+    period: str | None = None
+    cell: str | None = None
+    #: False when an after-test gate had no mature cell to judge and passed
+    #: as not applicable (ADR-10 spirit).
+    applicable: bool = True
     message: str | None = None
 
 

@@ -16,10 +16,12 @@ Spark and H2O see treated data without knowing the feature exists.
 
 from collections.abc import Callable
 from fnmatch import fnmatchcase
+from pathlib import Path
 
 import pyarrow as pa
 
 from mbt.contracts import (
+    OUT_OF_TIME_SPLIT,
     DatasetHandle,
     DatasetLocator,
     DatasetProfile,
@@ -59,6 +61,117 @@ def select_feature_columns(
             ),
         )
     return features
+
+
+class TrainingSplitView:
+    """The part of a materialization the training path is allowed to see.
+
+    Two rules, both applied once here so no consumer can forget them:
+
+    - the after-test split does not exist (ADR-30). Training, the validation
+      and calibration carves, path-adapter staging and hooks all enumerate
+      ``splits()``; none of them may touch rows reserved for judging the model
+      after its test window - the same guarantee ADR-8 gives the test split
+      against tuning;
+    - ``evaluation.protocol.test_window`` narrows the test split to its
+      resolved window. The spec always documented this; before this view the
+      window was resolved and then silently ignored.
+
+    The training report builds the same view with ``hide_out_of_time=False``:
+    it is the one reader the after-test split exists for, and it must see the
+    test split exactly as the metrics did.
+    """
+
+    def __init__(
+        self,
+        base: DatasetHandle,
+        *,
+        time_column: str | None,
+        test_window: tuple[str, str] | None = None,
+        hide_out_of_time: bool = True,
+    ) -> None:
+        self._base = base
+        self._time_column = time_column
+        self._test_window = test_window
+        self._hidden = {OUT_OF_TIME_SPLIT} if hide_out_of_time else set()
+
+    @property
+    def snapshot_id(self) -> str:
+        return self._base.snapshot_id
+
+    @property
+    def time_column(self) -> str | None:
+        return self._time_column
+
+    @property
+    def label_column(self) -> str:
+        return str(getattr(self._base, "label_column", ""))
+
+    def splits(self) -> set[str]:
+        return {s for s in self._base.splits() if s not in self._hidden}
+
+    def read(self, split: str, columns: list[str] | None = None) -> pa.Table:
+        if split in self._hidden:
+            raise ConfigError(
+                f"split {OUT_OF_TIME_SPLIT!r} is reserved for the training report "
+                "and is never read by the training path (ADR-30)"
+            )
+        if split != "test" or self._test_window is None:
+            return self._base.read(split, columns)
+        if not self._time_column:
+            raise ConfigError(
+                "evaluation.protocol.test_window needs the split time column, but the "
+                "materialization records none",
+                hint="test_window applies to temporal splits only",
+            )
+        from mbt_adapter_base.reporting import window_mask
+
+        table = self._base.read(split)
+        start, end = self._test_window
+        table = table.filter(window_mask(table.column(self._time_column), start, end))
+        return table if columns is None else table.select(columns)
+
+    def profile(self) -> DatasetProfile:
+        profile = self._base.profile()
+        n_rows = {s: n for s, n in profile.n_rows.items() if s not in self._hidden}
+        return profile.model_copy(update={"n_rows": n_rows})
+
+    def locator(self) -> DatasetLocator:
+        return self._base.locator()
+
+
+class SplitRouter:
+    """Serves each split from the handle that already holds it (ADR-30).
+
+    The report scores train and test through the handle the model was fit and
+    evaluated with - already staged to parquet for a path adapter - and only
+    the after-test split through a fresh one. ``split_path`` follows the same
+    route, staging a split whose handle has no file of its own on demand.
+    """
+
+    def __init__(self, routes: dict[str, DatasetHandle]) -> None:
+        self._routes = dict(routes)
+
+    @property
+    def snapshot_id(self) -> str:
+        return next(iter(self._routes.values())).snapshot_id
+
+    def splits(self) -> set[str]:
+        return set(self._routes)
+
+    def read(self, split: str, columns: list[str] | None = None) -> pa.Table:
+        return self._routes[split].read(split, columns)
+
+    def split_path(self, split: str) -> Path:
+        from mbt_adapter_base.training_helpers import staged_split_path
+
+        return staged_split_path(self._routes[split], split, prefix="mbt-report-split-")
+
+    def profile(self) -> DatasetProfile:
+        return next(iter(self._routes.values())).profile()
+
+    def locator(self) -> DatasetLocator:
+        return next(iter(self._routes.values())).locator()
 
 
 class TransformedDatasetHandle:

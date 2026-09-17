@@ -225,12 +225,22 @@ def test_the_extras_closure_agrees_with_uv_lock_on_shared_packages() -> None:
     )
 
 
-def test_the_closure_pins_the_transitives_uv_lock_cannot_see() -> None:
-    """The point of the file: packages nothing else in the repo pins.
-    statsmodels is the one that actually broke a nightly."""
+def test_every_package_the_image_installs_is_pinned_somewhere() -> None:
+    """The point of the two files: nothing the image installs resolves fresh.
+    statsmodels is the one that actually broke a nightly; it arrives through
+    evidently, which mbt-evidently made an mbt dependency, so uv.lock pins that
+    closure now and image-extras.txt keeps only what mbt never depends on."""
+    import tomllib
+
     extras = _requirements(EXTRAS_TXT)
-    for package in ("evidently", "jupyterlab", "statsmodels", "plotly", "nltk"):
-        assert package in extras, f"image-extras.txt does not pin {package}"
+    assert "jupyterlab" in extras, "image-extras.txt does not pin jupyterlab"
+    locked = {
+        _canon(package["name"])
+        for package in tomllib.loads((REPO_ROOT / "uv.lock").read_text())["package"]
+    }
+    for package in ("evidently", "statsmodels", "plotly", "nltk"):
+        assert package in locked, f"uv.lock does not pin {package}"
+        assert package not in extras, f"{package} is pinned twice; drop it from image-extras.in"
 
 
 # -- S3 credential defaults (three files, one truth) ---------------------------

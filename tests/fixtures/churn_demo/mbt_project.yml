@@ -5,6 +5,9 @@ vars:
   # Meaningfully above the ~0.20 random-baseline PR-AUC of a ~20% positive
   # rate: a gate below the base rate never gates.
   pr_auc_floor: 0.3
+  # churn_classifier_oot: the weakest mature month after the test window must
+  # still rank this well - well clear of the 0.5 a coin flip scores.
+  oot_roc_auc_floor: 0.6
 
 model_defaults:
   adapter: xgboost

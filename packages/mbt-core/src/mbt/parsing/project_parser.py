@@ -20,6 +20,7 @@ from mbt.config.project import ProjectConfig, load_project
 from mbt.config.tasks import get_task_schema
 from mbt.contracts import (
     AUTO,
+    OUT_OF_TIME_SPLIT,
     DatasetSpec,
     ExposureSpec,
     MetricSpec,
@@ -407,12 +408,13 @@ def _parse_datasets(
 def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
     if spec.split.strategy is not SplitStrategy.TEMPORAL:
         return
-    for split_field in ("train", "test", "validation"):
+    parsed: dict[str, Any] = {}
+    for split_field in ("train", "test", "validation", OUT_OF_TIME_SPLIT):
         expression = getattr(spec.split, split_field)
         if expression is None:
             continue
         try:
-            parse_window(expression)
+            parsed[split_field] = parse_window(expression)
         except ConfigError as exc:
             report.error(
                 exc.message,
@@ -421,6 +423,24 @@ def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: Par
                 field_path=f"/split/{split_field}",
                 hint=exc.hint,
             )
+    test, after = parsed.get("test"), parsed.get(OUT_OF_TIME_SPLIT)
+    if test is None or after is None:
+        return
+    # Anchor-independent only when both bounds are the same kind; a mixed
+    # relative/absolute pair is ordered at compile time instead (ADR-30).
+    kinds = {test.end.kind, after.start.kind}
+    if not (kinds <= {"duration", "now"} or kinds == {"absolute"}):
+        return
+    if after.start.resolve(VALIDATION_ANCHOR) < test.end.resolve(VALIDATION_ANCHOR):
+        report.error(
+            f"split.out_of_time {spec.split.out_of_time!r} starts before the test "
+            f"window {spec.split.test!r} ends",
+            file=rel,
+            resource=uid,
+            field_path="/split/out_of_time",
+            hint="the after-test window must start where the test window ends, so no "
+            "row the model was evaluated on is scored again as new",
+        )
 
 
 #: Nominal days per duration unit, for comparing two declared durations only.
@@ -998,6 +1018,7 @@ def _link_and_check(
 
         _resolve_model_metric_specs(spec, model, metrics, report)
         _check_tuning_engine(spec, model, registry, report)
+        _check_report_engine(spec, model, registry, report)
 
     for sc in scoring.values():
         sc_spec = sc.spec
@@ -1135,6 +1156,7 @@ def _check_model_vs_dataset(
             hint="the redundancy is deliberate: it keeps the model spec self-describing",
         )
         return
+    _check_after_test_needs_window(spec, model, ds_spec, report)
     test_window = spec.evaluation.protocol.test_window
     if test_window is None:
         return
@@ -1165,6 +1187,38 @@ def _check_model_vs_dataset(
             file=model.path,
             resource=model.unique_id,
             field_path="/evaluation/protocol/test_window",
+        )
+
+
+def _check_after_test_needs_window(
+    spec: ModelSpec, model: ParsedResource, ds_spec: DatasetSpec, report: ParseReport
+) -> None:
+    """After-test gates judge rows the dataset must actually produce (ADR-30).
+
+    Without ``split.out_of_time`` there is no after-test split, so such a gate
+    could never see a cell - it would pass as not-applicable on every build,
+    a control that looks enforced and never is.
+    """
+    if ds_spec.split.out_of_time is not None:
+        return
+    for i, gate in enumerate(spec.evaluation.gates):
+        if gate.source == "out_of_time":
+            report.error(
+                f"gate on {gate.metric!r} uses source: out_of_time, but dataset "
+                f"{ds_spec.name!r} declares no split.out_of_time window",
+                file=model.path,
+                resource=model.unique_id,
+                field_path=f"/evaluation/gates/{i}/source",
+                hint='add split.out_of_time to the dataset, e.g. out_of_time: "-3mo:now"',
+            )
+    if spec.evaluation.stability is not None:
+        report.error(
+            f"evaluation.stability judges the after-test window, but dataset "
+            f"{ds_spec.name!r} declares no split.out_of_time window",
+            file=model.path,
+            resource=model.unique_id,
+            field_path="/evaluation/stability",
+            hint='add split.out_of_time to the dataset, e.g. out_of_time: "-3mo:now"',
         )
 
 
@@ -1371,6 +1425,35 @@ def _check_tuning_engine(
             file=model.path,
             resource=model.unique_id,
             field_path="/tuning/engine",
+        )
+
+
+def _check_report_engine(
+    spec: ModelSpec, model: ParsedResource, registry: AdapterRegistry, report: ParseReport
+) -> None:
+    """A non-native report engine is a plugin, probed like the tuning engine."""
+    report_spec = spec.evaluation.report
+    if report_spec is None or report_spec.stability.engine == "native":
+        return
+    engine = report_spec.stability.engine
+    field_path = "/evaluation/report/stability/engine"
+    try:
+        plugin = registry.get(engine)
+    except ConfigError as exc:
+        report.error(
+            exc.message,
+            file=model.path,
+            resource=model.unique_id,
+            field_path=field_path,
+            hint=f"install mbt-{engine}, or use engine: native",
+        )
+        return
+    if getattr(plugin, "reporting", None) is None:
+        report.error(
+            f"adapter {engine!r} provides no report engine",
+            file=model.path,
+            resource=model.unique_id,
+            field_path=field_path,
         )
 
 

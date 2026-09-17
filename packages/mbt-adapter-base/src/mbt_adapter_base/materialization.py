@@ -18,6 +18,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from mbt_adapter_base.interchange import DatasetLocator, DatasetProfile
+from mbt_adapter_base.types import OUT_OF_TIME_SPLIT
 
 METADATA_FILE = "materialization.json"
 PROFILE_FILE = "profile.json"
@@ -47,6 +48,21 @@ def combine_snapshots(snapshots: Mapping[str, str | None]) -> str | None:
     for uid, snap in sorted(present.items()):
         digest.update(f"{uid}={snap}\n".encode())
     return "sha256:" + digest.hexdigest()
+
+
+def empty_out_of_time_message(windows: Mapping[str, Any]) -> str:
+    """The one warning every data adapter emits for an empty after-test split.
+
+    An empty ``out_of_time`` split is the one empty split that is not an error
+    (ADR-30): a window ending at the anchor is routinely empty until newer rows
+    land upstream. Shared so the three adapters say the same thing.
+    """
+    bounds = windows.get(OUT_OF_TIME_SPLIT)
+    where = f" [{bounds[0]}, {bounds[1]})" if bounds else ""
+    return (
+        f"split {OUT_OF_TIME_SPLIT!r} materialized 0 rows{where}: the training report "
+        "has no after-test period to show, and after-test gates have nothing to judge"
+    )
 
 
 def write_materialization_metadata(
@@ -96,6 +112,11 @@ class MaterializedDatasetHandle:
     @property
     def label_column(self) -> str:
         return str(self._metadata["label_column"])
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """A copy of ``materialization.json``: windows, sample fraction, row counts."""
+        return dict(self._metadata)
 
     @property
     def time_column(self) -> str | None:

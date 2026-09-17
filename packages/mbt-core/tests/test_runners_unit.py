@@ -28,7 +28,7 @@ from mbt.execute.runners import (
     ModelRunner,
     ModelTestRunner,
     ScoringRunner,
-    _gate_failure_summary,
+    gate_failure_summary,
 )
 
 OLD_GATE = "threshold: \"{{ var('default_threshold') }}\""
@@ -51,11 +51,11 @@ def _stub_registry_champion_without_artifact(project_dir: Path) -> None:
 # -- gate failure summaries -----------------------------------------------------------
 
 
-def test_gate_failure_summary_metric_only_and_fallback() -> None:
+def testgate_failure_summary_metric_only_and_fallback() -> None:
     bare = [GateResult(metric="pr_auc", kind="champion", passed=False)]
-    assert _gate_failure_summary(bare) == "gate breach: pr_auc"
+    assert gate_failure_summary(bare) == "gate breach: pr_auc"
     all_passed = [GateResult(metric="pr_auc", kind="threshold", passed=True)]
-    assert _gate_failure_summary(all_passed) == "one or more gates failed"
+    assert gate_failure_summary(all_passed) == "one or more gates failed"
 
 
 # -- ExecutionContext -----------------------------------------------------------------

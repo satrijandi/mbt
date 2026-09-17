@@ -90,7 +90,7 @@ grep -vE '^(pyspark|h2o|h2o-pysparkling-3-5)==' "$CACHE_DIR/constraints-full.txt
 } >> "$CACHE_DIR/constraints.txt"
 
 # image-extras.txt is committed, not derived here: it pins the closure of the
-# non-mbt image deps (evidently, jupyterlab), which uv.lock cannot cover.
+# non-mbt image deps (jupyterlab), which uv.lock cannot cover.
 # Regenerate it with lock_image_extras.sh, never by rebuilding.
 cp "$RUNNER_DIR/Dockerfile" "$RUNNER_DIR/entrypoint.sh" "$RUNNER_DIR/image-extras.txt" "$CACHE_DIR/"
 

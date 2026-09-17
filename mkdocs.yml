@@ -83,6 +83,7 @@ nav:
       - "ADR-27: Declarative feature treatment": adr/0027-declarative-feature-treatment.md
       - "ADR-28: Training-only tracking": adr/0028-mlflow-training-only-and-champion-carried-config.md
       - "ADR-29: Single-relation datasets": adr/0029-single-relation-datasets.md
+      - "ADR-30: Training report and after-test window": adr/0030-training-report-and-after-test-window.md
 
 markdown_extensions:
   - admonition

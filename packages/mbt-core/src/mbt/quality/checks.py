@@ -12,7 +12,7 @@ from typing import Any, Protocol
 import duckdb
 import pyarrow as pa
 
-from mbt.contracts import CheckSpec, DatasetSpec, ScoringSpec, TestResult
+from mbt.contracts import OUT_OF_TIME_SPLIT, CheckSpec, DatasetSpec, ScoringSpec, TestResult
 from mbt.events import get_bus
 from mbt.events.models import CheckEvaluated, LogMessage
 
@@ -134,6 +134,21 @@ def _run_named_checks(
     return results
 
 
+def labeled_splits(handle: _CheckableHandle) -> list[str]:
+    """The splits whose labels are complete by construction, sorted.
+
+    Everything but the after-test split (ADR-30), which may hold rows whose
+    outcome has not been observed yet - a null label there is the expected
+    state of an immature row, not a data defect.
+    """
+    return sorted(s for s in handle.splits() if s != OUT_OF_TIME_SPLIT)
+
+
+def _label_column(spec: Any) -> str | None:
+    label = getattr(spec, "label", None)
+    return getattr(label, "column", None)
+
+
 def _connect_splits(handle: _CheckableHandle) -> tuple["duckdb.DuckDBPyConnection", list[str]]:
     con = duckdb.connect()
     splits = sorted(handle.splits())
@@ -225,11 +240,14 @@ def _check_not_null(
     sources: "SourceAccess | None" = None,
 ) -> TestResult:
     columns = list(params.get("columns") or [spec.label.column])
+    label = _label_column(spec)
     con, splits = _connect_splits(handle)
     try:
         problems = []
         for split in splits:
             for column in columns:
+                if split == OUT_OF_TIME_SPLIT and column == label:
+                    continue  # an immature row's label is null by design (ADR-30)
                 row = con.execute(
                     f'SELECT count(*) FROM split_{split} WHERE "{column}" IS NULL'
                 ).fetchone()
@@ -384,7 +402,9 @@ def _check_row_count(
     offset grid the rows drop silently through the inner join and the only signal
     is a degraded metric (or, if all drop, a bare '0 rows' error). Declaring
     ``row_count: {min: N}`` turns a catastrophic volume drop into a loud build
-    failure. Counts every split, since they are proportional slices of one build.
+    failure. Counts every labelled split, since they are proportional slices of
+    one build; the after-test window is not (ADR-30), and its size says nothing
+    about whether the training panel dropped rows.
     """
     minimum = params.get("min")
     maximum = params.get("max")
@@ -394,7 +414,7 @@ def _check_row_count(
             passed=False,
             message="row_count check requires 'min' and/or 'max', e.g. row_count: {min: 1000}",
         )
-    total = sum(handle.read(split).num_rows for split in handle.splits())
+    total = sum(handle.read(split).num_rows for split in labeled_splits(handle))
     problems = []
     if minimum is not None and total < minimum:
         problems.append(f"{total} rows below the minimum {minimum}")
@@ -575,6 +595,10 @@ def _check_label_leakage_scan(
     warn_threshold = float(params.get("warn_abs_correlation", 0.85))
     excluded = set(params.get("exclude") or [])
     label = spec.label.column
+    if "train" not in handle.splits():
+        # A pre-deploy check materializes only the test and after-test windows
+        # (ADR-30); nothing trains on them, so there is nothing to guard.
+        return TestResult(name="label_leakage_scan", passed=True, message="no train split to scan")
     table = handle.read("train")
     con = duckdb.connect()
     try:
@@ -633,12 +657,15 @@ def _check_class_balance_report(
     balance: dict[str, float] | None = None
     if callable(profile):
         balance = profile().label_balance
-    message = (
-        "label balance (train): "
-        + ", ".join(f"{k}={v:.3%}" for k, v in sorted((balance or {}).items()))
-        if balance
-        else "label balance unavailable"
-    )
+    if balance:
+        message = "label balance (train): " + ", ".join(
+            f"{k}={v:.3%}" for k, v in sorted(balance.items())
+        )
+    elif "train" not in handle.splits():
+        # the pre-deploy check's materialization (ADR-30), as in the leakage scan
+        message = "label balance: no train split to report"
+    else:
+        message = "label balance unavailable"
     get_bus().emit(LogMessage(unique_id=resource, message=message))
     return TestResult(name="class_balance_report", passed=True, message=message)
 

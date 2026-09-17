@@ -26,7 +26,14 @@ from mbt.artifacts.manifest import (
 from mbt.compile.hashing import config_hash, env_digest, env_freeze_digest, input_hash
 from mbt.compile.windows import format_ts, parse_window, subtract_duration
 from mbt.config.profiles import LoadedProfiles
-from mbt.contracts import DatasetSpec, ManifestNode, ModelSpec, ScoringSpec, SplitStrategy
+from mbt.contracts import (
+    OUT_OF_TIME_SPLIT,
+    DatasetSpec,
+    ManifestNode,
+    ModelSpec,
+    ScoringSpec,
+    SplitStrategy,
+)
 from mbt.dag.graph import topological_order
 from mbt.events import get_bus
 from mbt.events.models import AdapterWarning, CompileCompleted, CompileStarted
@@ -264,11 +271,13 @@ def _resolve_dataset(
     resolved: dict[str, Any] = {}
     if spec.split.strategy is SplitStrategy.TEMPORAL:
         windows: dict[str, list[str]] = {}
-        for split_name in ("train", "test", "validation"):
+        for split_name in ("train", "test", "validation", OUT_OF_TIME_SPLIT):
             expression = getattr(spec.split, split_name)
             if expression is None:
                 continue
             start, end = parse_window(expression).resolve(anchor)
+            if split_name == OUT_OF_TIME_SPLIT:
+                _check_out_of_time_follows_test(spec, start, anchor, res)
             if split_name == "train" and spec.split.embargo is not None:
                 # Embargo the train window's tail (R2-7): every data adapter
                 # builds splits from these resolved windows, so this is uniform.
@@ -287,6 +296,27 @@ def _resolve_dataset(
             # boundary too, not only the outer train/test split (R2-7/F6).
             resolved["embargo"] = spec.split.embargo
     return spec, spec.model_dump(mode="json"), resolved
+
+
+def _check_out_of_time_follows_test(
+    spec: DatasetSpec, start: datetime, anchor: datetime, res: ParsedResource
+) -> None:
+    """The after-test window may not reach back into the test window (ADR-30).
+
+    Checked on resolved bounds because a relative and an absolute bound only
+    order against a concrete anchor. An overlap would score rows the model was
+    evaluated on as if they were new, and flatter every after-test number.
+    """
+    _, test_end = parse_window(spec.split.test).resolve(anchor)
+    if start < test_end:
+        raise CompilationError(
+            f"split.out_of_time starts at {format_ts(start)}, before the test window "
+            f"ends at {format_ts(test_end)}",
+            resource=res.unique_id,
+            path=res.path,
+            hint="start the out_of_time window where the test window ends, e.g. "
+            'test: "-4mo:-3mo" with out_of_time: "-3mo:now"',
+        )
 
 
 def _resolve_scoring(
@@ -474,6 +504,9 @@ def _adapter_versions(
         names.add(spec.adapter)
         if spec.tuning is not None:
             names.add(spec.tuning.engine)
+        report = spec.evaluation.report
+        if report is not None and report.stability.engine != "native":
+            names.add(report.stability.engine)
     names.add(profiles.target.data.adapter)
     out: dict[str, AdapterVersion] = {}
     for name in sorted(names):

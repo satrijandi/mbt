@@ -27,6 +27,21 @@ models:
         - metric: pr_auc
           threshold: "{{ var('pr_auc_floor') }}"
       slices: [plan_type]
+      # Every build puts a training report on the MLflow run (report/): bin
+      # tables, the test score distribution, top-20 importance and, once the
+      # dataset declares out_of_time, month/week/day performance and stability
+      # against the test split (ADR-30). This block only tunes the report and
+      # never retrains the model.
+      # report:
+      #   binning: all                   # or a list of quantile, fixed_width, custom, top_percent
+      #   predictions: {enabled: true}   # row-level p0/p1 beside the sample key
+      #   periods: [month, week_of_month]
+      # With out_of_time declared, refuse to register a model whose months after
+      # the test window stop performing (add to gates: above) or drift:
+      #   - {metric: pr_auc, threshold: 0.25, source: out_of_time, period: month}
+      # stability:
+      #   prediction_shift: {method: psi, threshold: 0.25}
+      #   feature_shift: {method: psi, threshold: 0.25}
 
     registration:
       name: churn_classifier

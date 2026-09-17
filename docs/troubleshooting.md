@@ -174,6 +174,51 @@ mbt refuses to pick one of the two names for you: silently honouring `model:` an
 **Fix:** replace the mapping with the single name you want, or delete the key and let the experiment default to the project name.
 A related error, `tracking config: experiment must be a name, got list`, means the value parsed as a YAML list - usually an unquoted string containing a comma.
 
+### `split.out_of_time '<window>' starts before the test window '<window>' ends`
+
+**Symptom (parse error, exit 1):**
+
+```text
+Error: parsing failed with 1 error(s):
+  - datasets/churn_training_set.yml  at /split/out_of_time: split.out_of_time
+'-45d:now' starts before the test window '-28d:now' ends
+    hint: the after-test window must start where the test window ends, so no row
+the model was evaluated on is scored again as new
+```
+
+When one bound is relative and the other absolute, the same check runs at compile time instead, once the anchor orders them:
+
+```text
+Error: split.out_of_time starts at 2026-06-10T00:00:00Z, before the test window
+ends at 2026-06-30T00:00:00Z
+  resource: dataset.churn_demo.churn_training_set
+  file: datasets/churn_training_set.yml
+```
+
+**Why:** the after-test window exists to show what happened after the model was evaluated (ADR-30).
+Rows inside the test window were already used to judge the model, so scoring them again as "new" would flatter every stability and per-period number.
+
+**Fix:** start `out_of_time` where `test` ends - `test: "-4mo:-3mo"` with `out_of_time: "-3mo:now"`.
+If the test window ends at `now`, there is no after-test window to declare yet: move the test window back first.
+
+### `gate on '<metric>' uses source: out_of_time, but dataset '<name>' declares no split.out_of_time window`
+
+**Symptom (parse error, exit 1):**
+
+```text
+Error: parsing failed with 1 error(s):
+  - models/churn_classifier.yml  at /evaluation/gates/1/source: gate on
+'roc_auc' uses source: out_of_time, but dataset 'churn_training_set' declares no
+split.out_of_time window
+    hint: add split.out_of_time to the dataset, e.g. out_of_time: "-3mo:now"
+```
+
+`evaluation.stability` on a model whose dataset has no after-test window fails the same way, at `/evaluation/stability`.
+
+**Why:** an after-test gate with no after-test split would never see a cell, so it would pass as not applicable on every build - a control that looks enforced and never is.
+
+**Fix:** declare `split.out_of_time` on the model's dataset, or drop the gate.
+
 ### `source table '<name>' declares both 'path' and 'identifier'` (Spark)
 
 **Symptom:**
@@ -264,6 +309,17 @@ A var referenced by many models (like the demo's `pr_auc_floor`) moves all of th
 
 **Fix:** nothing is broken - the retrain is the feature.
 The PR comment and `mbt state diff --output json` show exactly which nodes retrain and why (`components: ["config"]`); review that list before merging.
+
+### Test metrics moved after upgrading, and the model declares `test_window`
+
+**Symptom:** after upgrading mbt, a model whose spec sets `evaluation.protocol.test_window` reports different test metrics on unchanged data and code.
+
+**Why:** before ADR-30, `test_window` was resolved at compile time and then ignored: the model was evaluated on the dataset's whole test window.
+It is now applied, so the metrics are the ones the spec always described - on `churn_demo`, `test_window: "-7d:now"` moves `roc_auc` from 0.6998 (the full 28-day window) to 0.6771.
+Gates compare the new numbers too.
+
+**Fix:** nothing is broken.
+If the full test window was what you meant, delete `test_window`.
 
 ### `selector 'state:modified' requires --state`
 
@@ -423,6 +479,23 @@ diff is the reviewable record - or drop it upstream if it should not.
 The mirror case, `declared column(s) absent from the relation`, means the
 upstream model stopped producing a column the contract promises.
 
+### `WARN split 'out_of_time' materialized 0 rows`
+
+**Symptom (a warning; the build succeeds):**
+
+```text
+WARN split 'out_of_time' materialized 0 rows [2026-06-30T00:00:00Z,
+2026-07-30T00:00:00Z): the training report has no after-test period to
+show, and after-test gates have nothing to judge
+materialized 4585 rows: out_of_time=0, test=819, train=3766
+```
+
+**Why:** every other empty split fails the build, but an empty after-test window is routine: one that ends at `now` stays empty until newer rows land upstream (ADR-30).
+The model still trains and reports; its after-test section is empty and any `source: out_of_time` gate passes as not applicable.
+
+**Fix:** if newer rows should exist, check the window against the data's time range and the dataset's `filters`.
+Otherwise wait for the upstream refresh, or re-check a trained version later with `mbt evaluate --out-of-time`.
+
 ## Training and feature treatment
 
 ### `string feature(s) not declared in features.categorical`
@@ -493,6 +566,25 @@ feature 'usage_delta' has log: true but its minimum value is -120.0
 **Fix:** give the column a floor in the same entry - `{cap: {min: 0}, log: true}` - since `cap` runs before `log`.
 If the negative values are meaningful, shift the column in `hooks.py` instead of clamping them away.
 
+### `hooks changed the train split's row count ... so the training report cannot line predictions up`
+
+**Symptom (hard error, exit 1, after the model trained):**
+
+```text
+ERROR model model.churn_demo.churn_classifier_oot in 2.86s -
+hooks changed the train split's row count (1862 rows in, 1815
+predictions out), so the training report cannot line predictions up
+with their keys and dates
+  hint: transform_features must be row-stable (no filtering or
+  reordering), as scoring already requires (ADR-20)
+```
+
+**Why:** the training report reads each row's sample key and date from the dataset by position, beside the prediction the hooked features produced.
+When `report.predictions` is enabled or the dataset declares `split.out_of_time`, a hook that drops rows would pair predictions with the wrong keys and dates, so the job refuses (ADR-30).
+Without either, the report needs no keys and the same hook trains fine.
+
+**Fix:** move the filter into the dataset's `filters:` (it then applies to every split, and to scoring, before hooks run), and keep `transform_features` to one output row per input row.
+
 ### `training job timed out after 3600s and was killed`
 
 **Symptom (node errors, exit 1):**
@@ -557,6 +649,42 @@ degenerate slices are dropped from metrics
 **Fix:** check the slice value's spelling against the data, and its frequency in the *test window* specifically - a value can exist in training data yet be absent from the test period.
 If the segment is genuinely rare, widen the test window or drop the slice gate.
 
+### `gate oot_roc_auc (threshold): FAIL` from an after-test gate
+
+**Symptom (exit 2; from `mbt build`, or from `mbt evaluate --out-of-time --gates` as here):**
+
+```text
+gate oot_roc_auc (threshold): FAIL - expected 0.69, got 0.6825 (worst month cell 2026-06 of 3 judged)
+WARN pre-deploy check on churn_classifier_oot v2 FAILED; recorded as mbt.oot_check.passed=false
+[2/2] GATE_FAILED model model.churn_demo.churn_classifier_oot in 3.24s - gate breach: oot_roc_auc [2026-06]=0.6825 failed threshold 0.69
+```
+
+**Why:** a gate with `source: out_of_time` is judged on each mature cell of the after-test window at its `period` (a month by default), and the weakest cell decides (ADR-30).
+The model held up on its test month and then did not on a later one, which is the drift the gate exists to catch before a deploy.
+At build time nothing is registered; from the pre-deploy check the verdict is recorded on the version, and `mbt promote` then refuses it.
+
+**Fix:** open `report.html` on the run (the check's copy is under `evaluations/<run_id>/`) and read the failing month's row in "After the test window" and its stability line: a shifted score or feature distribution points at the data, a stable one at the label relationship.
+Retrain with a later training window if the world moved; lower the floor only as a reviewed spec change (gate edits retrain).
+
+### `gate oot_roc_auc: no mature after-test month cell with at least 200 labelled rows yet; gate not applicable`
+
+**Symptom (passes, with a warning):**
+
+```text
+WARN gate oot_roc_auc: no mature after-test month cell with at least
+     200 labelled rows yet; gate not applicable
+gate oot_roc_auc (threshold): PASS - no mature after-test month cell
+     with at least 200 labelled rows yet; gate not applicable
+WARN evaluation.stability: no after-test month cell with at least 100
+     rows yet; stability not judged
+```
+
+**Why:** the after-test window is too young to judge: its cells hold fewer rows than the gate's `min_rows` (or `evaluation.stability.min_rows`), or their labels have not matured (`cell end + label.horizon` is after the anchor).
+Blocking on that would stop every model trained soon after its test window for reasons of calendar, not quality, so the gate passes loudly and the verdict is recorded as `not_gated` (the ADR-10 stance).
+
+**Fix:** nothing at build time.
+Before deploying, run `mbt evaluate --model <name> --out-of-time --gates` once labels have arrived; `mbt promote --require-oot-check` refuses a version whose only verdict is `not_gated`.
+
 ### `artifact not found: file://.../model.ubj` during a champion build
 
 **Symptom (hard error, exit 1):**
@@ -597,6 +725,87 @@ If the mismatch is reproducible from a *clean* download, treat it as a store-int
 
 A ref with no recorded digest is *not* an error: a baseline or inference-config reference reconstructed from a champion registered by an older mbt legitimately carries none, and mbt warns (`artifact ... carries no content hash (stored by an older mbt); its bytes are used without integrity verification`) and proceeds - refusing to score with such a champion would be worse than the check it skips.
 Retrain and promote to record one.
+
+### `refusing to promote <model> vN: its after-test check at <anchor> failed`
+
+**Symptom (exit 1):**
+
+```text
+Error: refusing to promote churn_classifier_oot v2: its after-test check at
+2026-06-30T00:00:00Z failed
+  hint: run 'mbt evaluate --model <name> --version 2 --out-of-time --gates' on
+fresh data, retrain, or override with --force
+```
+
+**Why:** the version's most recent after-test verdict (`mbt.oot_check.passed=false`) says it did not hold up on data newer than its test window, and a promotion would deploy exactly that (ADR-30).
+The verdict comes from the build's own after-test gates or from the latest `mbt evaluate --out-of-time --gates`, whichever ran last.
+
+**Fix:** retrain, or re-run the check at a later `--anchor` if you believe the failing month was an anomaly - a passing check replaces the verdict.
+`--force` promotes anyway and logs `FORCED promotion of ... although its after-test check ... failed`; `mbt rollback` to such a version only warns, so incident response is never blocked.
+
+### `refusing to promote <model> vN: no after-test check has judged it`
+
+**Symptom (exit 1, only with `--require-oot-check` or `require_oot_check: true`):**
+
+```text
+Error: refusing to promote churn_classifier v1: no after-test check has judged
+it
+  hint: run 'mbt evaluate --model <name> --version 1 --out-of-time --gates' on
+fresh data, retrain, or override with --force
+```
+
+**Why:** the promotion asked for proof that the version holds up after its test window, and the version carries none: it declares no after-test gate or `evaluation.stability`, or no check has run on it.
+A verdict of `not_gated` (the check ran but nothing was mature) is refused the same way, with `had nothing mature to judge`.
+
+**Fix:** declare an after-test gate or `evaluation.stability` on the model (both need the dataset's `split.out_of_time`), retrain, and run `mbt evaluate --model <name> --out-of-time --gates` once its labels are in.
+A passing build-time verdict counts too: a version whose after-test gates passed when it was built is promotable without a separate check.
+
+### `mbt evaluate --out-of-time` refuses a version
+
+**Symptom (exit 1), one of:**
+
+```text
+Error: churn_classifier_oot v1 was registered before mbt recorded its dataset
+windows (ADR-30)
+  hint: retrain and register the model to run the pre-deploy check on it
+```
+
+```text
+Error: upsell_classifier v1 was trained on a random split; 'after the test
+window' has no meaning
+  hint: the pre-deploy check needs a temporal split
+```
+
+```text
+Error: nothing to check yet: the anchor 2026-05-15T00:00:00Z is not after the
+version's test window, which ends at 2026-05-31T00:00:00Z
+  hint: run the check later, or pass a later --anchor
+```
+
+**Why:** the check rebuilds the version's own test window, as recorded in its inference config, and everything from its end to the anchor.
+A version registered by an older mbt has no recorded windows, a random split has no "after", and an anchor inside the test window leaves nothing to read.
+
+**Fix:** retrain and register the older version; move the model to a temporal split; run the check at a later `--anchor` (the default is now).
+With absolute window bounds, an anchor before `split.out_of_time` starts fails earlier, at compile, with `window '2026-04-01:now' resolves to an empty range`.
+
+### `WARN ... has changed since the version was trained` during a pre-deploy check
+
+**Symptom:**
+
+```text
+WARN dataset.churn_demo.churn_oot_set has changed since the version
+     was trained (config hash sha256:4cbf53035f14 then, sha256:05091407db7c
+     now); the check reads the dataset as it is declared today
+WARN the version's test window now holds 893 rows, not the 915 it was
+     evaluated on; the source data or the dataset's declaration changed
+     since, so the reference is not the one the version was judged against
+```
+
+**Why:** the check rebuilds the recorded test window with the dataset as declared now.
+A changed filter, label, or source makes the reference differ from the rows the version was trained and gated against, so the comparison is no longer like for like.
+
+**Fix:** if the change was deliberate, retrain so the version and the dataset agree before trusting the verdict.
+Otherwise check out the commit the version was trained from and run the check there.
 
 ### Rolling back a bad champion (incident procedure)
 

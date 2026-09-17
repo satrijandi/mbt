@@ -64,6 +64,7 @@ The scaffold's default (`mbt init`) uses the local data and compute adapters tha
 | Data | `mbt-snowflake` | `snowflake` |
 | Tracking and registry | `mbt-mlflow` | `mlflow` |
 | Tuning | `mbt-optuna` | `optuna` |
+| Drift report engine | `mbt-evidently` | `evidently` (under `evaluation.report.stability.engine`) |
 | Testing your project | `mbt-testing` | `fake` |
 
 [Adapters](adapters.md) compares what each one supports.

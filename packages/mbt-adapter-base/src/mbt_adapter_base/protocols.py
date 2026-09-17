@@ -22,6 +22,7 @@ from mbt_adapter_base.interchange import (
     DatasetLocator,
     DatasetProfile,
     DeterminismTier,
+    DriftReport,
     JobResult,
     ManifestNode,
     MetricResults,
@@ -315,11 +316,15 @@ class TrackingAdapter(Protocol):
     prediction store and ``mbt monitor`` to the ground-truth ledger, so an
     implementation never sees a ``scoring`` node.
 
-    Three capabilities are optional and probed with ``hasattr`` rather than
+    Four capabilities are optional and probed with ``hasattr`` rather than
     declared here, so a tracker missing one still works: ``prepare()`` (warm
     the backend before parallel jobs), ``log_trial(run, index, params, value)``
-    (tuning history as nested runs), and ``log_document(run, path)`` (upload a
-    local file mbt wrote, such as the inference config).
+    (tuning history as nested runs), ``log_document(run, path)`` (upload a
+    local file mbt wrote, such as the inference config), and
+    ``log_directory(run, local_dir, artifact_path)`` (upload a directory mbt
+    wrote - the training report and the run log - under ``artifact_path``,
+    keeping its layout; ADR-30). Without ``log_directory`` the report's files
+    still land in the artifact store beside the model.
     """
 
     def start_run(self, node: ManifestNode, meta: dict[str, str]) -> RunHandle: ...
@@ -340,7 +345,14 @@ class TrackingAdapter(Protocol):
 
 
 class RegistryAdapter(Protocol):
-    """Model registry (TSD §12.2)."""
+    """Model registry (TSD §12.2).
+
+    ``set_version_tags(name, version, tags)`` is optional and probed with
+    ``hasattr``: it records facts learned after registration, such as the
+    pre-deploy check's verdict (ADR-30). Without it that verdict is kept only
+    on the tracking run and in ``run_results``, and a promotion that requires
+    it refuses.
+    """
 
     def register(
         self, artifact: ArtifactRef, name: str, metadata: dict[str, str]
@@ -374,6 +386,20 @@ class TuningEngine(Protocol):
         n_trials: int,
         seed: int,
     ) -> TuningResult: ...
+
+
+@runtime_checkable
+class ReportingEngine(Protocol):
+    """Renders a drift report beside the training report's tables (ADR-30).
+
+    Presentation only: mbt's own PSI/KS statistics decide every gate, so what
+    an engine calls drift is shown, never enforced. Runs inside the training
+    job, on tables whose columns are the model's features plus ``score``.
+    """
+
+    def drift_report(
+        self, reference: pa.Table, current: pa.Table, out_html: Path, *, title: str
+    ) -> DriftReport: ...
 
 
 class SourceTableLike(Protocol):
@@ -452,6 +478,9 @@ class AdapterPlugin:
     registry: type[Any] | None = None
     compute: type[Any] | None = None
     tuning: type[Any] | None = None
+    #: A report engine (contract 1.2, ADR-30), named by a model's
+    #: ``evaluation.report.stability.engine``.
+    reporting: type[Any] | None = None
     task_schemas: dict[TaskType, type[Any]] = field(default_factory=dict)
     fingerprint_packages: list[str] = field(default_factory=list)
 
@@ -471,6 +500,7 @@ __all__ = [
     "PredictionStore",
     "PythonDataTest",
     "RegistryAdapter",
+    "ReportingEngine",
     "SourceTableLike",
     "TaskSchema",
     "TestResult",

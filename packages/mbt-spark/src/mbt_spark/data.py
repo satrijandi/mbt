@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from mbt_adapter_base import (
+    OUT_OF_TIME_SPLIT,
     DatasetLocator,
     DatasetSpec,
     ScoringInputSpec,
@@ -37,6 +38,7 @@ from mbt_adapter_base.materialization import (
     MaterializationError,
     MaterializedDatasetHandle,
     combine_snapshots,
+    empty_out_of_time_message,
     write_materialization_metadata,
 )
 from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
@@ -291,11 +293,16 @@ class SparkDataAdapter:
 
         written = self._write_splits(base, spec, ctx, output_dir)
         for split, count in written.items():
-            if count == 0:
-                raise SparkAdapterError(
-                    f"split {split!r} materialized 0 rows",
-                    hint="check the split windows/fractions and filters",
-                )
+            if count != 0:
+                continue
+            if split == OUT_OF_TIME_SPLIT:
+                # A window ending at the anchor is routinely empty (ADR-30).
+                ctx.events.emit(empty_out_of_time_message(ctx.resolved_windows))
+                continue
+            raise SparkAdapterError(
+                f"split {split!r} materialized 0 rows",
+                hint="check the split windows/fractions and filters",
+            )
         # Positive-path row counts on the bus (a plain string the EventSink
         # wraps in a LogMessage); mirrors the local and snowflake adapters.
         ctx.events.emit(
@@ -396,11 +403,10 @@ class SparkDataAdapter:
             if not parts:  # empty result set still writes metadata-only output
                 import pyarrow.parquet as pq
 
-                spark_schema = frame.schema
-                import pyarrow as pa
-
-                empty = pa.table({f.name: pa.array([], type=pa.string()) for f in spark_schema})
-                pq.write_table(empty, out)
+                # Typed like a non-empty split, so a reader concatenating or
+                # scoring it sees the panel's real schema rather than all-string
+                # columns (an empty after-test split is routine, ADR-30).
+                pq.write_table(_empty_table(frame.schema), out)
                 return 0
             shutil.move(str(parts[0]), out)
             import pyarrow.parquet as pq
@@ -518,3 +524,23 @@ class SparkDataAdapter:
 def _iso_to_ts(iso: str) -> str:
     ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     return ts.replace(tzinfo=None).isoformat(sep=" ")
+
+
+def _empty_table(spark_schema: Any) -> Any:
+    """A zero-row arrow table carrying the Spark frame's real column types.
+
+    Falls back to string per column only for a Spark type arrow has no
+    mapping for, so the column set is always preserved.
+    """
+    import pyarrow as pa
+    from pyspark.sql.pandas.types import to_arrow_type
+
+    fields = []
+    for field in spark_schema:
+        try:
+            arrow_type = to_arrow_type(field.dataType)
+        except Exception:  # an unmappable Spark type: keep the column, as string
+            arrow_type = pa.string()
+        fields.append(pa.field(field.name, arrow_type))
+    schema = pa.schema(fields)
+    return pa.Table.from_pylist([], schema=schema)

@@ -4,23 +4,31 @@ These run the real CLI in subprocesses: real XGBoost training jobs, MLflow
 on sqlite, the local subprocess ComputeAdapter - the full production path.
 """
 
+import csv
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from e2e_utils import DEMO_ANCHOR, run_mbt
 
 pytestmark = pytest.mark.e2e
 
+OOT_MODEL = "model.churn_demo.churn_classifier_oot"
 MODELS = {
     "model.churn_demo.churn_classifier",
     "model.churn_demo.churn_classifier_deep",
     "model.churn_demo.upsell_classifier",
+    OOT_MODEL,
 }
 DATASETS = {
     "dataset.churn_demo.churn_training_set",
     "dataset.churn_demo.upsell_training_set",
+    "dataset.churn_demo.churn_oot_set",
 }
+#: churn_classifier_oot trains before its after-test labels are all in: one
+#: month (April) is held back at this anchor, three by DEMO_ANCHOR.
+TRAINED_AT = "2026-04-30T00:00:00Z"
 
 
 def _results(project: Path) -> dict[str, dict]:
@@ -265,3 +273,174 @@ def test_rollback_reverts_the_production_champion(demo_copy: Path) -> None:
     run_mbt(["rollback", "--model", "churn_classifier"], demo_copy)
     reverted = client.get_model_version_by_alias("churn_classifier", "production")
     assert str(reverted.version) == "1"
+
+
+def _artifact_paths(client: Any, run_id: str, path: str | None = None) -> set[str]:
+    found: set[str] = set()
+    for entry in client.list_artifacts(run_id, path):
+        if entry.is_dir:
+            found |= _artifact_paths(client, run_id, entry.path)
+        else:
+            found.add(entry.path)
+    return found
+
+
+def test_the_training_report_and_the_pre_deploy_check(demo_copy: Path, tmp_path: Path) -> None:
+    """ADR-30 on the real stack: train with a month held back, re-check the
+    version once two more months have labels, promote on that verdict."""
+    import pyarrow.parquet as pq
+    from mlflow.tracking import MlflowClient
+
+    run_mbt(
+        ["build", "--select", "churn_classifier_oot", "--anchor", TRAINED_AT],
+        demo_copy,
+        timeout=600,
+    )
+    built = _results(demo_copy)[OOT_MODEL]
+    assert built["status"] == "success"
+    after_test = next(g for g in built["gates"] if g["metric"] == "oot_roc_auc")
+    assert after_test["period"] == "month" and after_test["cell"] == "2026-04"
+    assert after_test["passed"] and after_test["actual"] > 0.6
+
+    client = MlflowClient(tracking_uri=f"sqlite:///{demo_copy}/mlflow.db")
+    run_id = built["tracking_run_id"]
+    run = client.get_run(run_id)
+    params = run.data.params
+    # the flat config serving rebuilds preprocessing from (plus the bare
+    # hyperparameters every earlier run logged)
+    assert params["max_depth"] == "3" and params["model.hyperparameters.max_depth"] == "3"
+    assert params["dataset.filters"] == '["is_active = true","tenure_days >= 30"]'
+    assert params["dataset.split.out_of_time"] == "2026-04-01:now"
+    assert params["dataset.windows.out_of_time.end"] == TRAINED_AT
+    assert params["model.features.exclude"] == (
+        '["user_id","upgraded_90d","plan_type","account_status"]'
+    )
+    assert json.loads(params["model.resolved.feature_columns"])[0] == "is_active"
+    metrics = run.data.metrics
+    assert {"train.roc_auc", "oot.window.roc_auc", "oot.month.2026-04.roc_auc"} <= set(metrics)
+    assert metrics["stability.month.2026-04.score_psi"] < 0.1  # the demo data is stationary
+
+    report = {
+        f"report/{name}"
+        for name in (
+            "report.html",
+            "summary.json",
+            "evaluation/binning/quantile_10.csv",
+            "evaluation/binning/fixed_width_0.05.csv",
+            "evaluation/binning/custom.csv",
+            "evaluation/binning/top_percent.csv",
+            "evaluation/distribution/score_histogram.csv",
+            "evaluation/distribution/test_features.csv",
+            "evaluation/feature_importance.csv",
+            "performance/by_period.csv",
+            "predictions/train.parquet",
+            "predictions/test.parquet",
+            "predictions/out_of_time.parquet",
+            "stability/scores_by_period.csv",
+            # mbt-evidently, discovered by entry point inside the job process
+            "stability/evidently/window.html",
+            "stability/evidently/2026-04.html",
+            "stability/evidently/drift_by_column.csv",
+        )
+    }
+    files = _artifact_paths(client, run_id)
+    assert report | {"logs/train.log", "config/model_config.json"} <= files
+
+    local = Path(client.download_artifacts(run_id, "", str(tmp_path / "run")))
+    log = (local / "logs" / "train.log").read_text()
+    # the dataset's section comes first, then the model's debug-level detail
+    assert log.index("## dataset.churn_demo.churn_oot_set") < log.index(
+        "## model.churn_demo.churn_classifier_oot"
+    )
+    assert "window out_of_time: [2026-04-01T00:00:00Z, 2026-04-30T00:00:00Z)" in log
+    assert "gate oot_roc_auc (threshold): PASS - expected 0.6, got" in log
+    # quantile edges are fitted on test once and reused for every other split
+    with (local / "report/evaluation/binning/quantile_10.csv").open() as handle:
+        rows = list(csv.DictReader(handle))
+    assert {row["split"] for row in rows} == {"train", "test", "out_of_time"}
+    edges: dict[str, set[tuple[str, str]]] = {}
+    for row in rows:
+        edges.setdefault(row["bin"], set()).add((row["lower"], row["upper"]))
+    assert len(edges) == 10 and all(len(pair) == 1 for pair in edges.values())
+    evidently_page = (local / "report/stability/evidently/2026-04.html").read_text()
+    assert "<title>churn_classifier_oot: 2026-04 against test</title>" in evidently_page
+    with (local / "report/stability/evidently/drift_by_column.csv").open() as handle:
+        compared = {row["column"] for row in csv.DictReader(handle) if row["cell"] == "window"}
+    assert len(compared) == 6 and "prediction" in compared  # top 5 features + the score
+    assert "churned_90d" not in compared
+    predictions = pq.read_table(local / "report/predictions/out_of_time.parquet")
+    assert predictions.column_names == ["user_id", "snapshot_date", "split", "label", "p0", "p1"]
+    assert predictions.num_rows == int(params["dataset.rows.out_of_time"])
+
+    # ---- two months later: re-check v1 on everything after its test month ----
+    run_mbt(
+        [
+            "evaluate",
+            "--model",
+            "churn_classifier_oot",
+            "--version",
+            "1",
+            "--out-of-time",
+            "--gates",
+            "--anchor",
+            DEMO_ANCHOR,
+        ],
+        demo_copy,
+        timeout=600,
+    )
+    payload = json.loads((demo_copy / "target" / "run_results.json").read_text())
+    check_run = payload["metadata"]["run_id"]
+    checked = _results(demo_copy)[OOT_MODEL]
+    assert checked["status"] == "success"
+    assert set(checked["metrics"]) == {"oot_pr_auc", "oot_roc_auc"}
+    judged = next(g for g in checked["gates"] if g["metric"] == "oot_roc_auc")
+    assert judged["message"].endswith("of 3 judged")  # April, May, June
+    assert all(g["period"] is not None for g in checked["gates"])  # test gates stay recorded
+
+    tags = client.get_model_version("churn_classifier_oot", "1").tags
+    assert tags["mbt.oot_check.passed"] == "true"
+    assert tags["mbt.oot_check.source"] == "evaluate"
+    assert tags["mbt.oot_check.anchor"] == DEMO_ANCHOR
+    assert tags["mbt.oot_check.run_id"] == check_run
+    files = _artifact_paths(client, run_id)
+    assert f"evaluations/{check_run}/report.html" in files
+    # the check renders the whole window plus April, May and June
+    assert {
+        f"evaluations/{check_run}/stability/evidently/{cell}.html"
+        for cell in ("window", "2026-04", "2026-05", "2026-06")
+    } <= files
+    assert f"logs/evaluate-{check_run}.log" in files
+    assert client.get_run(run_id).data.params == params  # a check never logs params
+
+    run_mbt(
+        ["promote", "--model", "churn_classifier_oot", "--to", "production", "--require-oot-check"],
+        demo_copy,
+    )
+    promoted = client.get_model_version_by_alias("churn_classifier_oot", "production")
+    assert str(promoted.version) == "1"
+
+
+def test_a_weak_month_after_the_test_window_blocks_registration(demo_copy: Path) -> None:
+    run_mbt(
+        [
+            "build",
+            "--select",
+            "churn_classifier_oot",
+            "--anchor",
+            TRAINED_AT,
+            "--vars",
+            "oot_roc_auc_floor: 0.99",
+        ],
+        demo_copy,
+        expect_exit=2,
+        timeout=600,
+    )
+    result = _results(demo_copy)[OOT_MODEL]
+    assert result["status"] == "gate_failed"
+    assert result["registration"] is None
+    assert result["message"].startswith("gate breach: oot_roc_auc [2026-04]=")
+
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=f"sqlite:///{demo_copy}/mlflow.db")
+    assert not client.search_model_versions("name = 'churn_classifier_oot'")

@@ -1,6 +1,6 @@
 # CLAUDE.md - working guide for the mbt repo
 
-mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-sklearn, mbt-mlflow, mbt-optuna, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/showcase`, repo-root `tests/` (E2E, golden, perf, live, plus `tests/fixtures/{churn_demo, revenue_demo}` - whole mbt projects the suite copies to tmp and drives through the real CLI, excluded from collection via `norecursedirs`), and `docs/` (mkdocs + ADRs).
+mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-sklearn, mbt-mlflow, mbt-optuna, mbt-evidently, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/showcase`, repo-root `tests/` (E2E, golden, perf, live, plus `tests/fixtures/{churn_demo, revenue_demo}` - whole mbt projects the suite copies to tmp and drives through the real CLI, excluded from collection via `norecursedirs`), and `docs/` (mkdocs + ADRs).
 Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anything that looks odd.
 Whole-repo review cycles live in `design-history/reviews/` once closed (newest: `feedback-v4.md`); code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`, `FEEDBACK v3 A-1`), so do not delete them.
 A cycle still in flight sits at the repo root as `FEEDBACK_v<n>.md` instead - findings plus a progress log, one appended entry per completed item (symptom, fix, verification, docs) - and moves into `reviews/` when that log closes.
@@ -16,7 +16,7 @@ uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
   packages/mbt-xgboost/src packages/mbt-mlflow/src packages/mbt-optuna/src \
   packages/mbt-lightgbm/src packages/mbt-sklearn/src packages/mbt-testing/src \
   packages/mbt-snowflake/src packages/mbt-spark/src \
-  packages/mbt-h2o/src   # strict, all 11 packages, must be clean
+  packages/mbt-h2o/src packages/mbt-evidently/src   # strict, all 12 packages, must be clean
 uv run pre-commit run --all-files
 uv run mkdocs build --strict         # docs changes; site/ is gitignored output
 uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples tests/fixtures .github
@@ -47,7 +47,7 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
   Reproduce locally with a throwaway venv, never the repo's own: `uv venv /tmp/floors && VIRTUAL_ENV=/tmp/floors uv run --no-project python scripts/install_floors.py`.
 - CI matrixes the fast suite over CPython 3.11-3.14; the JVM e2e tier stays on 3.11 deliberately.
 - Snapshots: one token scheme per pipeline. The scaffold CI workflows pass `--deep-snapshot` on every compiling step because fresh checkouts rewrite mtimes (ADR-11); a deep baseline diffed with the default mtime scheme flags everything.
-- Champion gates use a paired bootstrap lower bound (ADR-18); the seed ladder is `spec.seed` train, `+1` tuning, `+2` validation carve, `+3` bootstrap, `+4` random k-fold, `+5` calibration carve - a new seeded stage takes the next rung.
+- Champion gates use a paired bootstrap lower bound (ADR-18); the seed ladder is `spec.seed` train, `+1` tuning, `+2` validation carve, `+3` bootstrap, `+4` random k-fold, `+5` calibration carve, `+6` permutation-importance sample (ADR-30) - a new seeded stage takes the next rung.
 - Path semantics: the CLI coordinator chdirs to `--project-dir` in `make_ctx` (jobs already run with cwd=project), so config-relative paths are project-relative; paths typed on the command line are absolutized against the invocation cwd via `ctx.resolve_cli_path` BEFORE use. New CLI path options must go through `resolve_cli_path`.
 - Manifests verify `env_digest` on `--manifest` execution (ADR-19); `generated_at == anchor` keeps same-anchor compiles byte-identical.
 

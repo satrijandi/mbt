@@ -148,11 +148,15 @@ class GateEvaluated(Event):
 
     def human(self) -> str:
         status = "PASS" if self.passed else "FAIL"
-        if self.message:
-            detail = self.message
+        expected, actual = _comparable_pair(self.expected, self.actual)
+        numbers = f"expected {expected}, got {actual}"
+        if not self.message:
+            detail = numbers
+        elif self.kind == "threshold" and self.actual is not None:
+            # an after-test gate names the cell that decided (ADR-30)
+            detail = f"{numbers} ({self.message})"
         else:
-            expected, actual = _comparable_pair(self.expected, self.actual)
-            detail = f"expected {expected}, got {actual}"
+            detail = self.message
         return f"gate {self.metric} ({self.kind}): {status} - {detail}"
 
 

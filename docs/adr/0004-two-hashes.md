@@ -1,6 +1,10 @@
 # ADR-4: Two hashes per node; state:modified compares input_hash
 
-**Status:** accepted
+**Status:** accepted, amended by [ADR-30](0030-training-report-and-after-test-window.md)
+
+ADR-30 leaves a model's `evaluation.report` block out of `config_hash`, beside
+`description`, `owner` and `tags`: it decides only what the training report
+shows, and everything that decides pass/fail stays hashed.
 
 ## Decision
 `config_hash = sha256(canonical_json(rendered_spec) + hooks_bytes)`;

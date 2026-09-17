@@ -92,6 +92,9 @@ CLOSURE_PROBES = {
     "mbt_lightgbm": f"import lightgbm, numpy; {_CALIBRATOR_PROBE}",
     "mbt_mlflow": "import mlflow.tracking; from mbt_mlflow.adapter import MlflowTracking",
     "mbt_optuna": "import optuna; from mbt_optuna.engine import OptunaTuningEngine",
+    "mbt_evidently": (
+        "from evidently import Report; from mbt_evidently.engine import parse_snapshot"
+    ),
     "mbt_snowflake": (
         "import snowflake.connector, pyarrow.parquet; "
         "from mbt_snowflake.adapter import SnowflakeDataAdapter"

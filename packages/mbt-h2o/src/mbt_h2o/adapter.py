@@ -50,6 +50,28 @@ if TYPE_CHECKING:
 
 _shutdown_registered = False
 
+#: This process's own local H2O server (one per job process).
+_server: Any = None
+
+#: Where a job's server starts looking for a free port. Below every OS's
+#: ephemeral range (Linux 32768+, macOS and Windows 49152+), unlike H2O's
+#: default 54321: were the server to die, a request is refused, instead of
+#: the kernel handing the client source port 54321 and connecting the socket
+#: to itself - which h2o reports as `BadStatusLine('GET /3/... HTTP/1.1')`.
+_BASE_PORT = 24321
+
+
+def _memory_bytes(value: Any) -> int:
+    """``h2o_max_mem`` as bytes, read the way ``h2o.init()`` read it: ``"4G"``,
+    ``"512M"``, or a bare number - gigabytes below 1000, bytes from there."""
+    text = str(value).strip().upper()
+    units = {"M": 20, "G": 30, "T": 40}
+    if text.isdigit():
+        return int(text) << 30 if int(text) < 1000 else int(text)
+    if len(text) > 1 and text[:-1].isdigit() and text[-1] in units:
+        return int(text[:-1]) << units[text[-1]]
+    raise ValueError(f"h2o_max_mem must look like '4G' or '512M', got {value!r}")
+
 
 class H2OModel:
     """Opaque wrapper: the leader (or an imported MOJO) + column context."""
@@ -105,18 +127,42 @@ class H2OAutoMLAdapter:
         if backend == "sparkling":
             self._sparkling_context(vars_)
         else:
-            h2o.init(
-                nthreads=int(vars_.get("h2o_nthreads", -1)),
-                max_mem_size=str(vars_.get("h2o_max_mem", "4G")),
-                log_level="ERRR",
-                bind_to_localhost=True,
-            )
+            self._local_server(vars_)
         h2o.no_progress()
         if not _shutdown_registered:
             # the cluster is job-scoped; do not leave a JVM behind
             atexit.register(self._shutdown_quietly)
             _shutdown_registered = True
         return h2o
+
+    @staticmethod
+    def _local_server(vars_: dict[str, Any]) -> None:
+        """Start this process's own H2O server and connect to it; idempotent.
+
+        Deliberately not ``h2o.init()``: that attaches to whatever already
+        answers on its port, so two jobs of one ``threads: 2`` build trained in
+        one cluster and clobbered each other's frames
+        (``H2OKeyNotFoundArgumentException``), and the first to exit shut the
+        cluster down under the other. H2O picks the first free port from
+        ``_BASE_PORT`` itself, so concurrent jobs never share one.
+        """
+        global _server  # noqa: PLW0603 - one JVM per job process
+        import h2o
+        from h2o.backend import H2OLocalServer
+
+        if _server is not None and _server.is_running():
+            return
+        _server = H2OLocalServer.start(
+            nthreads=int(vars_.get("h2o_nthreads", -1)),
+            max_mem_size=_memory_bytes(vars_.get("h2o_max_mem", "4G")),
+            log_level="ERRR",
+            port=f"{_BASE_PORT}+",
+            bind_to_localhost=True,
+            verbose=False,
+        )
+        h2o.connect(server=_server, verbose=False)
+        # what h2o.init() sets too: timestamps parse the same on every host
+        h2o.cluster().timezone = "UTC"
 
     def _sparkling_context(self, vars_: dict[str, Any]) -> Any:
         """H2O on Spark executors via PySparkling (mbt-h2o[sparkling])."""

@@ -1,0 +1,30 @@
+datasets:
+  - name: churn_oot_set
+    description: The churn panel on fixed calendar windows, holding back everything after March.
+    source: source('lakehouse', 'subscribers')
+    label:
+      column: churned_90d
+      definition: "cancelled within 90 days of snapshot_date"
+    filters:
+      - "is_active = true"
+      - "tenure_days >= 30"
+    sample_key: user_id
+    split:
+      strategy: temporal
+      time_column: snapshot_date
+      # Absolute bounds, so only the after-test window moves with --anchor:
+      # a build anchored at 2026-04-30 holds back one month, a pre-deploy
+      # check anchored at 2026-06-30 re-reads three (ADR-30).
+      train: "2026-01-01:2026-03-01"
+      test: "2026-03-01:2026-04-01"
+      # Never trained or tuned on; the training report scores it month by
+      # month (and week and day of month) against the test month.
+      out_of_time: "2026-04-01:now"
+    checks:
+      - class_balance_report
+      - no_future_columns
+      - not_null:
+          columns: [churned_90d, snapshot_date]
+      - label_leakage_scan:
+          exclude: [account_status]   # the planted leak; see churn_training_set
+    tags: [churn]

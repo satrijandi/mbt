@@ -9,7 +9,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import pyarrow as pa
 
@@ -17,6 +17,7 @@ from mbt.adapters.registry import AdapterRegistry
 from mbt.artifacts.manifest import Manifest
 from mbt.artifacts.run_results import (
     GateResult,
+    MonitorResult,
     NodeResult,
     RegistrationResult,
     TestResultEntry,
@@ -41,11 +42,12 @@ from mbt.contracts import (
 from mbt.dag.selector import SelectableNode, evaluate_selector
 from mbt.events import get_bus
 from mbt.events.models import ArtifactRegistered, LogMessage, NodeFinished, NodeStarted
+from mbt.events.node_log import NodeLogSink, combined_log, node_scope
 from mbt.exceptions import AdapterError, ConfigError, MbtError, StateError
-from mbt.quality.checks import SourceAccess, run_checks, run_scoring_checks
+from mbt.quality.checks import SourceAccess, labeled_splits, run_checks, run_scoring_checks
 from mbt.quality.gates import all_gates_passed, evaluate_gates
 from mbt.quality.metrics import resolve_model_metrics
-from mbt.quality.monitors import all_monitors_passed, evaluate_monitors
+from mbt.quality.monitors import all_monitors_passed, evaluate_monitors, evaluate_stability
 from mbt.quality.python_tests import PythonTestFile, run_python_tests
 from mbt.runtime import (
     data_adapter as build_data_adapter,
@@ -64,7 +66,39 @@ from mbt.storage import artifact_store_for
 from mbt.utils import canonical_json
 
 
-def _gate_failure_summary(gates: list[GateResult]) -> str:
+def after_test_verdict(
+    spec: ModelSpec, gates: list[GateResult], stability: list[MonitorResult]
+) -> str | None:
+    """``true`` / ``false`` / ``not_gated`` for the after-test gates (ADR-30).
+
+    None when the model declares none. ``not_gated`` means they were declared
+    but nothing was mature enough to judge - a promotion that requires the
+    check refuses it, because a gate that judged nothing proved nothing.
+    """
+    declared = spec.evaluation.stability is not None or any(
+        gate.source == "out_of_time" for gate in spec.evaluation.gates
+    )
+    if not declared:
+        return None
+    after = [gate for gate in gates if gate.period is not None]
+    if not any(gate.applicable for gate in after) and not stability:
+        return "not_gated"
+    passed = all(gate.passed for gate in after) and all_monitors_passed(stability)
+    return "true" if passed else "false"
+
+
+def after_test_tags(verdict: str, anchor: str, source: str) -> dict[str, str]:
+    """The registry and tracking tags that record an after-test verdict."""
+    return {
+        "mbt.oot_check.passed": verdict,
+        "mbt.oot_check.anchor": anchor,
+        "mbt.oot_check.source": source,
+    }
+
+
+def gate_failure_summary(
+    gates: list[GateResult], monitors: list[MonitorResult] | None = None
+) -> str:
     """A specific, reviewer-facing summary of which gate(s) failed - feeds the
     node message shown in the results table, the JSON run_results, and the
     GitOps PR comment, consistent with the monitor path's ``gate breach: ...``.
@@ -80,9 +114,15 @@ def _gate_failure_summary(gates: list[GateResult]) -> str:
                 f"{gate.delta_lower:.4f} < required {gate.min_delta}"
             )
         elif gate.actual is not None:
-            parts.append(f"{gate.metric}{where}={gate.actual:.4f} failed threshold {gate.expected}")
+            cell = f" [{gate.cell}]" if gate.cell else ""
+            parts.append(
+                f"{gate.metric}{where}{cell}={gate.actual:.4f} failed threshold {gate.expected}"
+            )
         else:
             parts.append(f"{gate.metric}{where}")
+    for monitor in monitors or []:
+        if not monitor.passed:
+            parts.append(f"stability {monitor.message or monitor.subject}")
     return "gate breach: " + "; ".join(parts) if parts else "one or more gates failed"
 
 
@@ -122,7 +162,7 @@ def evaluation_node_result(
         ),
         backtest_metrics=dict(job_result.backtest_metrics),
         backtest_std=dict(job_result.backtest_std),
-        message=_gate_failure_summary(gates) if include_message and not passed else None,
+        message=gate_failure_summary(gates) if include_message and not passed else None,
     )
 
 
@@ -152,6 +192,9 @@ class ExecutionContext:
     #: under the GIL but genuinely racy under a free-threaded (3.13t/3.14t)
     #: build, so serialize them here (P3).
     _state_lock: Any = field(default_factory=threading.Lock)
+    #: Per-node run logs for this invocation (ADR-30); None when the caller
+    #: did not install them.
+    node_logs: NodeLogSink | None = None
 
     def __post_init__(self) -> None:
         self.data_adapter = build_data_adapter(self.profiles, self.project_dir, self.registry)
@@ -317,7 +360,8 @@ def run_with_lifecycle(
     )
     started = time.monotonic()
     try:
-        result = inner()
+        with node_scope(uid):
+            result = inner()
     except MbtError as exc:
         result = NodeResult(unique_id=uid, status="error", message=str(exc))
     result.execution_time_s = time.monotonic() - started
@@ -425,7 +469,9 @@ class DatasetRunner:
         bound = [tf for tf in self.ctx.python_tests if self._binds(tf, uid, spec)]
         if not bound:
             return []
-        table = pa.concat_tables([handle.read(split) for split in sorted(handle.splits())])
+        # Data tests are written against labelled rows; the after-test split may
+        # hold immature ones with a null label, and may be empty (ADR-30).
+        table = pa.concat_tables([handle.read(split) for split in labeled_splits(handle)])
         results = []
         for test_file in bound:
             only = set(spec.tests) & set(test_file.test_names) if spec.tests else None
@@ -510,9 +556,11 @@ class ModelRunner:
             project_dir=str(ctx.project_dir),
             target_name=meta.target,
             project=meta.project_name,
+            anchor=meta.anchor,
             node=node,
             dataset=handle.locator(),
             dataset_windows=dict(dataset_node.resolved),
+            dataset_node=dataset_node,
             data=ctx.raw_adapter_ref("data"),
             tracking=ctx.raw_adapter_ref("tracking"),
             metric_specs=metric_specs,
@@ -562,6 +610,7 @@ class ModelRunner:
         metric_specs: list[MetricSpec],
         *,
         evaluated_is_champion: bool = False,
+        out_of_time: Literal["include", "only", "skip"] = "include",
     ) -> list[GateResult]:
         adapter = self.ctx.registry.training(spec.adapter)
         return evaluate_gates(
@@ -575,6 +624,8 @@ class ModelRunner:
             champion_delta_bounds=job_result.champion_delta_bounds,
             backtest_metrics=job_result.backtest_metrics,
             evaluated_is_champion=evaluated_is_champion,
+            report=job_result.report,
+            out_of_time=out_of_time,
         )
 
     def _register(
@@ -583,6 +634,7 @@ class ModelRunner:
         node: ManifestNode,
         job_result: Any,
         gates: list[GateResult],
+        verdict: str | None = None,
     ) -> RegistrationResult | None:
         if spec.registration is None or job_result.artifact is None:
             return None
@@ -619,6 +671,12 @@ class ModelRunner:
             metadata["mbt.inference_config_size_bytes"] = str(
                 job_result.inference_config.size_bytes
             )
+        if verdict is not None:
+            # The after-test verdict at training time (ADR-30); a pre-deploy
+            # check replaces it with a fresher one.
+            metadata.update(after_test_tags(verdict, ctx.manifest.metadata.anchor, "build"))
+        if job_result.report is not None and job_result.report.report_uri:
+            metadata["mbt.report_uri"] = job_result.report.report_uri
         # Persist the champion's operating points (R2-5) so a scoring pipeline
         # can default its decision cutoff from the model (decision_threshold:
         # threshold_at_precision_0.9) instead of a hand-copied constant.
@@ -649,6 +707,8 @@ class ModelRunner:
         job_result: Any,
         gates: list[GateResult],
         registration: RegistrationResult | None,
+        stability: list[MonitorResult] | None = None,
+        verdict: str | None = None,
     ) -> None:
         if job_result.tracking_run_id is None:
             return
@@ -656,6 +716,10 @@ class ModelRunner:
             "mbt.gates_passed": str(all_gates_passed(gates)).lower(),
             "mbt.gates": canonical_json([g.model_dump(mode="json") for g in gates]),
         }
+        if stability:
+            tags["mbt.stability"] = canonical_json([m.model_dump(mode="json") for m in stability])
+        if verdict is not None:
+            tags.update(after_test_tags(verdict, self.ctx.manifest.metadata.anchor, "build"))
         if registration is not None:
             tags["mbt.registered_version"] = registration.version
             tags["mbt.registered_stage"] = registration.stage
@@ -666,6 +730,48 @@ class ModelRunner:
         except Exception as exc:
             get_bus().emit(
                 LogMessage(level="warn", message=f"could not attach tracking tags: {exc}")
+            )
+
+    def _upload_log(
+        self, node: ManifestNode, tracking_run_id: str | None, *, name: str = "train.log"
+    ) -> None:
+        """Put the node's log - its dataset's section first - on the run (ADR-30).
+
+        Everything up to registration and the gate tags is in it; the node's
+        final status line is emitted after this returns, so it is not.
+        """
+        logs = self.ctx.node_logs
+        if logs is None or tracking_run_id is None:
+            return
+        import tempfile
+
+        datasets = [dep for dep in node.depends_on if dep.startswith("dataset.")]
+        text = combined_log(
+            logs,
+            [*datasets, node.unique_id],
+            header=[
+                f"mbt {self.ctx.command} - {node.unique_id}",
+                f"run {self.ctx.run_id} on target {self.ctx.manifest.metadata.target}, "
+                f"anchor {self.ctx.manifest.metadata.anchor}",
+            ],
+        )
+        try:
+            tracking = self.ctx.tracking()
+            run = tracking.resume(tracking_run_id)
+            with tempfile.TemporaryDirectory(prefix="mbt-log-") as staging:
+                path = Path(staging) / name
+                path.write_text(text, encoding="utf-8")
+                if hasattr(tracking, "log_directory"):
+                    tracking.log_directory(run, Path(staging), "logs")
+                elif hasattr(tracking, "log_document"):
+                    tracking.log_document(run, path)
+        except Exception as exc:
+            get_bus().emit(
+                LogMessage(
+                    level="warn",
+                    unique_id=node.unique_id,
+                    message=f"could not upload the run log to the tracker: {exc}",
+                )
             )
 
     # -- main path -------------------------------------------------------------
@@ -679,6 +785,7 @@ class ModelRunner:
         job_result = self.ctx.run_job(job)
 
         if job_result.status == "error" or job_result.metrics is None:
+            self._upload_log(node, job_result.tracking_run_id)
             return NodeResult(
                 unique_id=uid,
                 status="error",
@@ -686,11 +793,14 @@ class ModelRunner:
             )
 
         gates = self._gate_results(spec, node, job_result, champion, metric_specs)
-        passed = all_gates_passed(gates)
+        stability = evaluate_stability(spec.evaluation.stability, job_result.report, resource=uid)
+        verdict = after_test_verdict(spec, gates, stability)
+        passed = all_gates_passed(gates) and all_monitors_passed(stability)
         registration = None
         if passed:
-            registration = self._register(spec, node, job_result, gates)
-        self._attach_tracking_tags(job_result, gates, registration)
+            registration = self._register(spec, node, job_result, gates, verdict)
+        self._attach_tracking_tags(job_result, gates, registration, stability, verdict)
+        self._upload_log(node, job_result.tracking_run_id)
 
         return NodeResult(
             unique_id=uid,
@@ -706,7 +816,8 @@ class ModelRunner:
             partial_dependence=dict(job_result.partial_dependence),
             backtest_metrics=dict(job_result.backtest_metrics),
             backtest_std=dict(job_result.backtest_std),
-            message=None if passed else _gate_failure_summary(gates),
+            monitors=stability,
+            message=None if passed else gate_failure_summary(gates, stability),
         )
 
     # -- re-evaluation of registered artifacts (FR-RUN-07, TSD §11.3) -----------
@@ -751,7 +862,15 @@ class ModelRunner:
             and spec.evaluation.gates
         ):
             gates = self._gate_results(
-                spec, node, job_result, champion, metric_specs, evaluated_is_champion=is_champion
+                spec,
+                node,
+                job_result,
+                champion,
+                metric_specs,
+                evaluated_is_champion=is_champion,
+                # A re-evaluation builds no after-test report; those gates are
+                # judged at build time and by `mbt evaluate --out-of-time`.
+                out_of_time="skip",
             )
         return job_result, gates
 
@@ -778,6 +897,49 @@ class _ChampionConfig(NamedTuple):
 
     spec: dict[str, Any] | None
     feature_columns: list[str] | None
+
+
+def check_hooks_parity(version: ModelVersion, model_node: ManifestNode, uid: str) -> None:
+    """A registered version must have been trained with the hooks this run
+    will apply; silent feature skew is worse than a hard stop (ADR-20)."""
+    registered = version.tags.get("mbt.hooks_hash")
+    if registered is None:
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                unique_id=uid,
+                message=(
+                    "champion predates hooks-parity registration (no "
+                    "mbt.hooks_hash tag); cannot verify that scoring applies "
+                    "the hooks the champion was trained with"
+                ),
+            )
+        )
+        return
+    if registered != (model_node.hooks_hash or ""):
+        raise StateError(
+            "the champion was trained with a different hooks.py than the "
+            "current project's (mbt.hooks_hash mismatch)",
+            resource=uid,
+            hint="retrain and promote, or check out the commit the champion was built from",
+        )
+
+
+def read_inference_config(ctx: ExecutionContext, version: ModelVersion) -> dict[str, Any]:
+    """The inference config a version was registered with (ADR-28), fetched
+    and content-verified from the artifact store. Callers check the
+    ``mbt.inference_config_uri`` tag exists first."""
+    ref = ArtifactRef(
+        uri=version.tags["mbt.inference_config_uri"],
+        format=version.tags.get("mbt.inference_config_format", "json"),
+        content_hash=version.tags.get("mbt.inference_config_content_hash", ""),
+        size_bytes=int(version.tags.get("mbt.inference_config_size_bytes", "0")),
+    )
+    store = artifact_store_for(
+        resolve_artifact_store_uri(ctx.profiles.target.artifact_store, ctx.project_dir)
+    )
+    document: dict[str, Any] = json.loads(store.fetch(ref).read_text())
+    return document
 
 
 class ScoringRunner:
@@ -824,29 +986,7 @@ class ScoringRunner:
     def _check_hooks_parity(
         self, champion: ModelVersion, model_node: ManifestNode, uid: str
     ) -> None:
-        """The champion must have been trained with the hooks the scoring run
-        will apply; silent feature skew is worse than a hard stop (ADR-20)."""
-        registered = champion.tags.get("mbt.hooks_hash")
-        if registered is None:
-            get_bus().emit(
-                LogMessage(
-                    level="warn",
-                    unique_id=uid,
-                    message=(
-                        "champion predates hooks-parity registration (no "
-                        "mbt.hooks_hash tag); cannot verify that scoring applies "
-                        "the hooks the champion was trained with"
-                    ),
-                )
-            )
-            return
-        if registered != (model_node.hooks_hash or ""):
-            raise StateError(
-                "the champion was trained with a different hooks.py than the "
-                "current project's (mbt.hooks_hash mismatch)",
-                resource=uid,
-                hint="retrain and promote, or check out the commit the champion was built from",
-            )
+        check_hooks_parity(champion, model_node, uid)
 
     def _baseline_ref(self, champion: ModelVersion) -> ArtifactRef | None:
         uri = champion.tags.get("mbt.baseline_uri")
@@ -890,18 +1030,7 @@ class ScoringRunner:
                 )
             )
             return _ChampionConfig(None, None)
-        ref = ArtifactRef(
-            uri=uri,
-            format=champion.tags.get("mbt.inference_config_format", "json"),
-            content_hash=champion.tags.get("mbt.inference_config_content_hash", ""),
-            size_bytes=int(champion.tags.get("mbt.inference_config_size_bytes", "0")),
-        )
-        store = artifact_store_for(
-            resolve_artifact_store_uri(
-                self.ctx.profiles.target.artifact_store, self.ctx.project_dir
-            )
-        )
-        document = json.loads(store.fetch(ref).read_text())
+        document = read_inference_config(self.ctx, champion)
         spec = document.get("spec")
         if not isinstance(spec, dict):
             raise StateError(

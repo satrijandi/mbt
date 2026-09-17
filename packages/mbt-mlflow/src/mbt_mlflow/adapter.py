@@ -13,7 +13,7 @@ stage API for registry servers without alias support (MLflow < 2.9).
 import functools
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
@@ -123,6 +123,33 @@ _ARTIFACT_TAGS = (
     "mbt.artifact_size_bytes",
 )
 
+#: MLflow's request limits (``mlflow/utils/validation.py``): params and tags
+#: share a per-request cap, metrics have their own, and a value past its length
+#: limit is otherwise truncated silently (``MLFLOW_TRUNCATE_LONG_VALUES``).
+_MAX_PARAMS_TAGS_PER_BATCH = 100
+_MAX_METRICS_PER_BATCH = 1000
+_MAX_PARAM_VALUE = 6000
+_MAX_TAG_VALUE = 8000
+
+
+def _clip(value: str, limit: int) -> str:
+    """``value`` cut to ``limit`` characters, saying so in the value itself.
+
+    MLflow would cut silently; a reader comparing two runs must be able to
+    tell a long value from a short one. mbt logs the whole config as a
+    document beside the parameters, so the full value always has a home.
+    """
+    if len(value) <= limit:
+        return value
+    marker = f"...[truncated from {len(value)} characters]"
+    return value[: limit - len(marker)] + marker
+
+
+def _chunks(items: Sequence[_T], size: int) -> Iterator[Sequence[_T]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
 #: The experiment used when nothing names one. Core composes the real name
 #: from the project and the user's `experiment:` key before it builds this
 #: adapter (`mbt.runtime.tracking_adapter_config`), so this fallback only
@@ -221,13 +248,33 @@ class MlflowTracking(_MlflowBase):
         tags: dict[str, str] | None = None,
         artifacts: list[ArtifactRef] | None = None,
     ) -> None:
+        from mlflow import entities
+
+        # mlflow ships py.typed but leaves the Param and RunTag constructors
+        # unannotated (3.15), which strict mypy reports at every call; bound
+        # as Any, the calls type-check whether or not upstream annotates them.
+        Param: Any = entities.Param
+        RunTag: Any = entities.RunTag
+        Metric = entities.Metric
         client = self.client()
-        for key, value in (params or {}).items():
-            client.log_param(run.run_id, key, value)
-        for key, value in (metrics or {}).items():
-            client.log_metric(run.run_id, key, float(value))
-        for key, value in (tags or {}).items():
-            client.set_tag(run.run_id, key, value)
+        # Batched: a report-bearing run carries hundreds of parameters, and one
+        # request per value against a remote server is minutes of round trips.
+        param_entities = [
+            Param(key, _clip(str(value), _MAX_PARAM_VALUE)) for key, value in (params or {}).items()
+        ]
+        for params_batch in _chunks(param_entities, _MAX_PARAMS_TAGS_PER_BATCH):
+            client.log_batch(run.run_id, params=list(params_batch))
+        now = int(time.time() * 1000)
+        metric_entities = [
+            Metric(key, float(value), now, 0) for key, value in (metrics or {}).items()
+        ]
+        for metrics_batch in _chunks(metric_entities, _MAX_METRICS_PER_BATCH):
+            client.log_batch(run.run_id, metrics=list(metrics_batch))
+        tag_entities = [
+            RunTag(key, _clip(str(value), _MAX_TAG_VALUE)) for key, value in (tags or {}).items()
+        ]
+        for tags_batch in _chunks(tag_entities, _MAX_PARAMS_TAGS_PER_BATCH):
+            client.log_batch(run.run_id, tags=list(tags_batch))
         for artifact in artifacts or []:
             client.set_tag(run.run_id, f"mbt.artifact.{artifact.format}", artifact.uri)
             if artifact.uri.startswith("file://"):
@@ -267,6 +314,12 @@ class MlflowTracking(_MlflowBase):
         so the run describes the model even when the bytes live elsewhere.
         """
         self.client().log_artifact(run.run_id, str(path))
+
+    @_retryable
+    def log_directory(self, run: RunHandle, local_dir: Path, artifact_path: str) -> None:
+        """Upload a directory mbt wrote - the training report, the run log -
+        under ``artifact_path`` on the run, keeping its layout (ADR-30)."""
+        self.client().log_artifacts(run.run_id, str(local_dir), artifact_path)
 
     @_retryable
     def end_run(self, run: RunHandle, status: str) -> None:
@@ -345,6 +398,20 @@ class MlflowRegistry(_MlflowBase):
     def get_version(self, name: str, version: str) -> ModelVersion | None:
         mv = _lookup_or_none(lambda: self.client().get_model_version(name, version))
         return self._to_model_version(mv) if mv is not None else None
+
+    def set_version_tags(self, name: str, version: str, tags: dict[str, str]) -> None:
+        """Record facts learned after registration on a version (ADR-30).
+
+        The pre-deploy check's verdict is the one mbt writes today; each tag
+        retries on its own so a lock mid-way never replays the earlier ones.
+        """
+        client = self.client()
+        for key, value in tags.items():
+            _with_retry(
+                functools.partial(
+                    client.set_model_version_tag, name, version, key, _clip(value, _MAX_TAG_VALUE)
+                )
+            )
 
     def transition(self, version: ModelVersion, stage: Stage) -> None:
         import warnings

@@ -125,6 +125,37 @@ def test_transition_of_unknown_version_is_a_lookup_error(tmp_path: Path) -> None
         registry.transition(ghost, Stage.STAGING)
 
 
+def test_version_tags_merge_and_need_a_known_version(tmp_path: Path) -> None:
+    registry = FakeRegistryAdapter({"root": str(tmp_path / "registry")})
+    registry.register(_artifact(), "m", {"k": "v"})
+    registry.set_version_tags("m", "1", {"mbt.oot_check.passed": "true"})
+    found = registry.get_version("m", "1")
+    assert found is not None and found.tags == {"k": "v", "mbt.oot_check.passed": "true"}
+    with pytest.raises(LookupError, match="version 2 of 'm' not found"):
+        registry.set_version_tags("m", "2", {"k": "w"})
+
+
+def test_fake_reporting_engine_scores_numbers_and_strings(tmp_path: Path) -> None:
+    import pyarrow as pa
+    from mbt_testing.adapters import FakeReportingEngine
+
+    engine = FakeReportingEngine({})
+    reference = pa.table({"x": [0.0, 1.0, 2.0, None], "plan": ["a", "b", "a", None]})
+    current = pa.table({"x": [5.0, 6.0, 7.0, 8.0], "plan": ["a", "c", "c", "c"]})
+    found = engine.drift_report(reference, current, tmp_path / "r.html", title="t")
+    by_column = {c.column: c for c in found.columns}
+    assert by_column["x"].drifted and by_column["x"].method == "mean shift"
+    assert by_column["plan"].score == 0.75 and by_column["plan"].method == "unseen share"
+    assert found.drifted_share == 1.0
+    assert (tmp_path / "r.html").read_text() == "<html><title>t</title></html>"
+
+    empty = pa.table({"x": pa.array([], pa.float64()), "plan": pa.array([], pa.string())})
+    flat = engine.drift_report(empty, empty, tmp_path / "e.html", title="e")
+    assert all(c.score == 0.0 and not c.drifted for c in flat.columns)
+    none = engine.drift_report(pa.table({}), pa.table({}), tmp_path / "n.html", title="n")
+    assert none.drifted_share == 0.0 and not none.columns
+
+
 # -- FakeTuningEngine ----------------------------------------------------------------
 
 

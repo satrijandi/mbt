@@ -22,6 +22,12 @@ class EventBus:
         with self._lock:
             self._sinks.append(sink)
 
+    def remove_sink(self, sink: Sink) -> None:
+        """Detach a sink added for one invocation (a missing one is a no-op)."""
+        with self._lock:
+            if sink in self._sinks:
+                self._sinks.remove(sink)
+
     def emit(self, event: object) -> None:
         if not isinstance(event, Event):  # tolerate foreign objects from hooks
             from mbt.events.models import LogMessage

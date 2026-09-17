@@ -134,6 +134,57 @@ def test_init_scaffold_is_complete_and_parses(scaffold: Path, tmp_path: Path) ->
     run_mbt(["parse"], scaffold)  # parses out of the box (S1-07)
 
 
+def _uncomment(text: str, first: str, count: int) -> str:
+    """Uncomment ``count`` lines of a scaffold example, from the ``# first`` line."""
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.lstrip("# ").rstrip() == first)
+    for i in range(start, start + count):
+        lines[i] = lines[i].replace("# ", "", 1)
+    return "".join(lines)
+
+
+def test_scaffold_after_test_examples_parse_once_uncommented(scaffold: Path) -> None:
+    """The commented ADR-30 examples in the scaffold are valid as written."""
+    dataset = scaffold / "datasets" / "churn_training_set.yml"
+    text = dataset.read_text()
+    example = [line for line in text.splitlines() if line.strip().startswith("#   ")][-3:]
+    assert [line.split(":")[0].strip("# ") for line in example] == [
+        "train",
+        "test",
+        "out_of_time",
+    ]
+    active = ['      train: "-180d:-28d"', '      test: "-28d:now"']
+    for line in active:
+        text = text.replace(line + "\n", "", 1)
+    for line in example:
+        text = text.replace(line, line.replace("#   ", "", 1))
+    dataset.write_text(text)
+
+    model = scaffold / "models" / "churn_classifier.yml"
+    text = _uncomment(_uncomment(model.read_text(), "report:", 4), "stability:", 3)
+    (gate,) = [line for line in text.splitlines() if "source: out_of_time" in line]
+    floor = "          threshold: \"{{ var('pr_auc_floor') }}\"\n"
+    text = text.replace(floor, floor + "        " + gate.split("#   ", 1)[1] + "\n")
+    model.write_text(text)
+
+    run_mbt(["compile", "--anchor", DEMO_ANCHOR], scaffold)
+    nodes = json.loads((scaffold / "target" / "manifest.json").read_text())["nodes"]
+    windows = nodes["dataset.quickstart.churn_training_set"]["resolved"]["windows"]
+    assert windows["out_of_time"] == ["2026-06-02T00:00:00Z", DEMO_ANCHOR]
+    evaluation = nodes["model.quickstart.churn_classifier"]["config"]["evaluation"]
+    assert evaluation["report"]["binning"] == "all"
+    assert evaluation["gates"][-1]["source"] == "out_of_time"
+    assert evaluation["stability"]["feature_shift"]["threshold"] == 0.25
+
+    from mbt.promote import load_promotions_file
+
+    promotions = scaffold / "promotions.yml"
+    text = _uncomment(promotions.read_text(), "promotions:", 8)
+    promotions.write_text(text.replace("promotions: []\n", ""))
+    (entry,) = load_promotions_file(promotions)
+    assert entry.require_oot_check and entry.version == "3"
+
+
 def test_scaffold_ci_installs_are_pinned(scaffold: Path) -> None:
     """Reference workflows install the pinned toolchain, never bare package
     names, so the training environment cannot float across runs (NFR-01)."""

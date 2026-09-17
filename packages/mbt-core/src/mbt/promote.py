@@ -19,6 +19,8 @@ class PromotionEntry(BaseModel):
     model: str  # registered model name
     to: Stage
     version: str | None = None  # default: latest in from_stage
+    #: Refuse unless the version's latest after-test check passed (ADR-30).
+    require_oot_check: bool = False
 
 
 class PromotionsFile(BaseModel):
@@ -70,6 +72,50 @@ def _resolve_version(
     return resolved
 
 
+#: The registry tag the after-test check records its verdict in (ADR-30).
+OOT_CHECK_TAG = "mbt.oot_check.passed"
+
+
+def _check_after_test(
+    resolved: ModelVersion, *, required: bool, force: bool, rollback: bool
+) -> None:
+    """Honour the after-test verdict recorded on a version (ADR-30).
+
+    A recorded failure refuses the promotion - the version was shown not to
+    hold after its test window - unless forced. ``required`` also refuses a
+    version that was never checked, or whose check judged nothing. A rollback
+    only warns: incident response must be able to reach the last good version.
+    """
+    verdict = resolved.tags.get(OOT_CHECK_TAG)
+    label = f"{resolved.name} v{resolved.version}"
+    anchor = resolved.tags.get("mbt.oot_check.anchor", "?")
+    if verdict == "false":
+        problem = f"its after-test check at {anchor} failed"
+    elif required and verdict != "true":
+        problem = (
+            "no after-test check has judged it"
+            if verdict is None
+            else f"its after-test check at {anchor} had nothing mature to judge"
+        )
+    else:
+        return
+    if rollback or force:
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                message=f"{'rolling back to' if rollback else 'FORCED promotion of'} {label} "
+                f"although {problem}",
+            )
+        )
+        return
+    raise StateError(
+        f"refusing to promote {label}: {problem}",
+        hint="run 'mbt evaluate --model <name> --version "
+        f"{resolved.version} --out-of-time --gates' on fresh data, retrain, or override "
+        "with --force",
+    )
+
+
 def promote_model(
     registry_adapter: Any,
     *,
@@ -78,9 +124,12 @@ def promote_model(
     version: str | None = None,
     from_stage: Stage = Stage.STAGING,
     force: bool = False,
+    require_oot_check: bool = False,
+    rollback: bool = False,
 ) -> PromotionOutcome:
     """Resolve, verify recorded gate passes, transition (TSD §14.4)."""
     resolved = _resolve_version(registry_adapter, name, version, from_stage)
+    _check_after_test(resolved, required=require_oot_check, force=force, rollback=rollback)
     gates_passed = resolved.tags.get("mbt.gates_passed") == "true"
     if not gates_passed:
         if not force:
@@ -204,7 +253,12 @@ def rollback_model(
                 )
             )
     outcome = promote_model(
-        registry_adapter, name=name, to_stage=Stage.PRODUCTION, version=str(target), force=force
+        registry_adapter,
+        name=name,
+        to_stage=Stage.PRODUCTION,
+        version=str(target),
+        force=force,
+        rollback=True,
     )
     get_bus().emit(
         LogMessage(

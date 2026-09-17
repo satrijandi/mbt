@@ -3,6 +3,7 @@
 from mbt_adapter_base import CONTRACT_VERSION, AdapterPlugin
 from mbt_testing.adapters import (
     FakeRegistryAdapter,
+    FakeReportingEngine,
     FakeTrackingAdapter,
     FakeTrainingAdapter,
     FakeTuningEngine,
@@ -16,6 +17,7 @@ PLUGIN = AdapterPlugin(
     tracking=FakeTrackingAdapter,
     registry=FakeRegistryAdapter,
     tuning=FakeTuningEngine,
+    reporting=FakeReportingEngine,
     compute=InlineComputeAdapter,
     fingerprint_packages=[],
 )
