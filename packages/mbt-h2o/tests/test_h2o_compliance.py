@@ -275,9 +275,17 @@ def test_wall_clock_budgets_warn() -> None:
     )
 
 
-def test_sparkling_backend_without_extra_is_actionable() -> None:
-    """h2o_backend=sparkling without mbt-h2o[sparkling] fails with the pip hint."""
+def test_sparkling_backend_without_extra_is_actionable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """h2o_backend=sparkling without mbt-h2o[sparkling] fails with the pip hint.
+
+    Stated as a job's FIRST H2O call, which is where it happens: ``train`` opens
+    the session, and a process that already has one reuses it rather than
+    re-reading the backend. Without pinning that, this passed or not depending
+    on whether an earlier test in the same process had left a cluster up.
+    """
     from mbt_adapter_base import RunContext
+
+    monkeypatch.setattr("mbt_h2o.adapter._session_live", lambda: False)
 
     class _Null:
         def emit(self, event: object) -> None: ...
@@ -300,3 +308,41 @@ def test_sparkling_backend_without_extra_is_actionable() -> None:
         pass
     with pytest.raises(RuntimeError, match=r"mbt-h2o\[sparkling\]"):
         adapter._h2o(ctx)
+
+
+def test_an_open_session_is_never_replaced_by_a_ctx_less_call(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Only ``train`` receives the RunContext naming the backend.
+
+    ``_scores`` and ``load`` call ``_h2o()`` with none, so they read an empty
+    ``vars_`` and select the default ``local`` branch whatever the target
+    declared. That branch starts a server of its own and connects to it, which
+    on the sparkling backend moved the process off the cluster holding the
+    model it had just trained: the next predict failed with
+    ``H2OKeyNotFoundArgumentException`` naming the model, and `make demo` died
+    on both AutoML models of its cluster build. A live session must win over
+    whatever a ctx-less call would otherwise start.
+    """
+    import h2o
+
+    opened: list[str] = []
+    monkeypatch.setattr(h2o, "no_progress", lambda: None)
+    monkeypatch.setattr(
+        H2OAutoMLAdapter, "_local_server", staticmethod(lambda vars_: opened.append("local"))
+    )
+    monkeypatch.setattr(
+        H2OAutoMLAdapter, "_sparkling_context", lambda self, vars_: opened.append("sparkling")
+    )
+
+    class _Cluster:
+        def is_running(self) -> bool:
+            return True
+
+    live = _Cluster()
+    monkeypatch.setattr(h2o, "cluster", lambda: live)
+    H2OAutoMLAdapter({})._h2o()  # exactly how _scores() and load() call it
+    assert opened == [], "a ctx-less call replaced a session that was already open"
+
+    # ...and a process that has none still opens its own, per job (ADR-30).
+    monkeypatch.setattr(h2o, "cluster", lambda: None)
+    H2OAutoMLAdapter({})._h2o()
+    assert opened == ["local"]

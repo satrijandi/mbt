@@ -73,6 +73,32 @@ def _memory_bytes(value: Any) -> int:
     raise ValueError(f"h2o_max_mem must look like '4G' or '512M', got {value!r}")
 
 
+def _session_live() -> bool:
+    """Does THIS process already have a working H2O session?
+
+    Only ``train`` is handed the RunContext that names the backend; ``_scores``
+    and ``load`` are called without one, so they read an empty ``vars_`` and
+    would pick the default ``local`` branch no matter what the target declared.
+    Under ``h2o.init()`` that was harmless by accident - sparkling's driver
+    client answers on H2O's default port, so the call re-attached to the very
+    cluster the model was trained in. Starting an own server on ``_BASE_PORT``
+    (which is the point of ``_local_server``) removed that accident: the
+    process moved onto a fresh, empty JVM and the next predict failed with
+    ``H2OKeyNotFoundArgumentException`` naming the model.
+
+    ``h2o.cluster()`` reads this process's own connection, so a job that has
+    not connected yet still starts its own server - the isolation between
+    concurrent jobs stays exactly as it was.
+    """
+    import h2o
+
+    try:
+        cluster = h2o.cluster()
+        return cluster is not None and bool(cluster.is_running())
+    except Exception:
+        return False
+
+
 class H2OModel:
     """Opaque wrapper: the leader (or an imported MOJO) + column context."""
 
@@ -122,12 +148,15 @@ class H2OAutoMLAdapter:
         global _shutdown_registered  # noqa: PLW0603 - one JVM per job process
         import h2o
 
-        vars_ = ctx.vars if ctx is not None else {}
-        backend = str(vars_.get("h2o_backend", "local"))
-        if backend == "sparkling":
-            self._sparkling_context(vars_)
-        else:
-            self._local_server(vars_)
+        # Whatever this call was (or was not) told, a process that already has
+        # a session reuses it: the backend is chosen once, by whoever opened it.
+        if not _session_live():
+            vars_ = ctx.vars if ctx is not None else {}
+            backend = str(vars_.get("h2o_backend", "local"))
+            if backend == "sparkling":
+                self._sparkling_context(vars_)
+            else:
+                self._local_server(vars_)
         h2o.no_progress()
         if not _shutdown_registered:
             # the cluster is job-scoped; do not leave a JVM behind
@@ -150,16 +179,17 @@ class H2OAutoMLAdapter:
         import h2o
         from h2o.backend import H2OLocalServer
 
-        if _server is not None and _server.is_running():
-            return
-        _server = H2OLocalServer.start(
-            nthreads=int(vars_.get("h2o_nthreads", -1)),
-            max_mem_size=_memory_bytes(vars_.get("h2o_max_mem", "4G")),
-            log_level="ERRR",
-            port=f"{_BASE_PORT}+",
-            bind_to_localhost=True,
-            verbose=False,
-        )
+        if _server is None or not _server.is_running():
+            _server = H2OLocalServer.start(
+                nthreads=int(vars_.get("h2o_nthreads", -1)),
+                max_mem_size=_memory_bytes(vars_.get("h2o_max_mem", "4G")),
+                log_level="ERRR",
+                port=f"{_BASE_PORT}+",
+                bind_to_localhost=True,
+                verbose=False,
+            )
+        # Reached only with no live session, so this also reconnects to a
+        # server of ours that outlived its connection; keys live in the JVM.
         h2o.connect(server=_server, verbose=False)
         # what h2o.init() sets too: timestamps parse the same on every host
         h2o.cluster().timezone = "UTC"
