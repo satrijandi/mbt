@@ -4,7 +4,7 @@ mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-a
 Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anything that looks odd.
 Whole-repo review cycles live in `design-history/reviews/` once closed (newest: `feedback-v4.md`); code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`, `FEEDBACK v3 A-1`), so do not delete them.
 A cycle still in flight sits at the repo root as `FEEDBACK_v<n>.md` instead - findings plus a progress log, one appended entry per completed item (symptom, fix, verification, docs) - and moves into `reviews/` when that log closes.
-None is in flight right now.
+`FEEDBACK_v5.md` is in flight right now: an architecture review (module depth, seams, testability), findings `A-1`-`C-6`, nothing swept yet.
 
 ## Verify (run all of these before calling work done)
 

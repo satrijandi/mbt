@@ -23,8 +23,9 @@ They carry the reasoning behind a large share of the current design, and several
 - `reviews/feedback-v3.md` - review 4, closed 2026-09-01. Finding IDs `A-1`-`G-2`, cited as `FEEDBACK v3 A-1`.
 - `reviews/feedback-v4.md` - review 5, closed 2026-09-09. Finding IDs `A-1`-`E-1`; code comments cite them as `FEEDBACK B-1`, `FEEDBACK D-3`.
 
-There is no review in flight right now.
-While one is, it lives at the repo root as `FEEDBACK_v<n>.md` so it is impossible to miss, and moves here once its progress log is closed.
+One review is in flight: `FEEDBACK_v5.md` at the repo root, an architecture review opened 2026-09-20 against `f1433bc`, with finding IDs `A-1`-`C-6`.
+Unlike the four cycles above it reviews module depth rather than practice, and none of its findings have been worked yet.
+A review in flight lives at the repo root as `FEEDBACK_v<n>.md` so it is impossible to miss, and moves here once its progress log is closed.
 
 ## Authoritative sources instead
 
