@@ -4,14 +4,31 @@ models:
     task: binary_classification
     adapter: xgboost
     owner: growth-ds@example.com
-    tags: [churn, weekly]
+    tags: [churn]
 
-    dataset: ref('churn_training_set')
+    dataset: ref('churn_training')
 
-    target: churned_90d
+    target: is_churn
     features:
-      include: ["*"]
-      exclude: [user_id, upgraded_90d, plan_type, account_status]
+      # Same 16 columns as churn_automl (see the note there).
+      include:
+        - age_years
+        - region
+        - income_band
+        - plan_tier
+        - contract_code
+        - household_size
+        - login_days_30d
+        - days_since_login
+        - sessions_30d
+        - avg_session_min
+        - txn_cnt_30d
+        - txn_amt_sum_30d
+        - txn_amt_avg_90d
+        - merchant_diversity
+        - top_category
+        - support_tickets_90d
+      categorical: [region, income_band, plan_tier, contract_code, top_category]
 
     hyperparameters:
       max_depth: 4

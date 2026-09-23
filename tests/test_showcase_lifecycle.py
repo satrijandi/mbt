@@ -10,9 +10,11 @@ One narrative over the compose stack, in deliberate order within this module:
 3. Gate-verified GitOps promotion via promotions.yml, pinned-version replay
    idempotency, and the unpinned-replay refusal.
 4. Run-time champion resolution + prediction-store idempotency: same anchor
-   overwrites (one run_key), a new anchor partitions.
-5. Ground-truth monitoring: evaluated exactly once, realized-metric gate
-   breach exits 2 (never 1).
+   overwrites (one run_key), a new anchor partitions. Scoring reads the newest
+   cohort of the SAME lake table the model trained on.
+5. Ground-truth monitoring from that same table: while the cohort's labels are
+   still NULL the run waits; once they land it is evaluated exactly once, and
+   a realized-metric gate breach exits 2 (never 1).
 
 Assertions read target/run_results.json from the shared workspace and the
 registry through MLflow's HTTP API - the same surfaces a user would look at.
@@ -35,9 +37,9 @@ def _mlflow_client(stack):
 
 
 def _predictions_root(stack):
-    # The prediction store roots at the DATA ADAPTER root (prod_score's local
-    # adapter root is /workspace/lake_local), not the project dir.
-    return stack.workspace / "lake_local" / "predictions" / "retention_scores"
+    # The batch target stages prediction runs under its predictions_root
+    # (/workspace/predictions), never the project dir.
+    return stack.workspace / "predictions" / "retention_scores"
 
 
 def _predictions_runs(stack) -> list:
@@ -143,17 +145,12 @@ def test_gitops_promotion_pinned_replay_and_refusal(showcase_stack) -> None:
 def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
     """SHOW-11/12: score with the run-time champion; same anchor overwrites."""
     stack = showcase_stack
-    stack.sync_lake()
-
     stack.mbt(
         "score",
         "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
+        "batch",
         "--anchor",
         ANCHOR,
-        "--deep-snapshot",
     )
     scoring = stack.result_for(SCORING)
     assert scoring["status"] == "success", scoring
@@ -175,12 +172,9 @@ def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
     stack.mbt(
         "score",
         "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
+        "batch",
         "--anchor",
         ANCHOR,
-        "--deep-snapshot",
     )
     assert _predictions_runs(stack) == runs_after_first
 
@@ -188,12 +182,9 @@ def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
     stack.mbt(
         "score",
         "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
+        "batch",
         "--anchor",
         "2026-07-01T00:00:00Z",
-        "--deep-snapshot",
     )
     runs_after_third = _predictions_runs(stack)
     assert len(runs_after_third) == 2, runs_after_third
@@ -205,64 +196,51 @@ def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
 
 
 def test_ground_truth_monitoring_exactly_once_and_exit_2(showcase_stack) -> None:
-    """SHOW-13: monitor evaluates once; a realized-gate breach exits 2, not 1."""
+    """SHOW-13: labels land in the same table; monitor evaluates once; a
+    realized-gate breach exits 2, not 1."""
     stack = showcase_stack
+    try:
+        # The scored cohort's outcome window is still open: its rows are in
+        # the table but is_churn is NULL. That is "not yet", not a verdict -
+        # nothing is evaluated and nothing is marked, so the run waits.
+        waiting = stack.mbt("monitor", "--target", "batch", "--anchor", MONITOR_ANCHOR)
+        said = waiting.stdout + waiting.stderr
+        assert "no matured labels joined" in said, said
+        assert "evaluated 0 of" in said, said
 
-    first = stack.mbt(
-        "monitor",
-        "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
-        "--anchor",
-        MONITOR_ANCHOR,
-        "--deep-snapshot",
-    )
-    scoring = stack.result_for(SCORING)
-    assert scoring["status"] == "success", scoring
-    assert "evaluated" in (scoring.get("message") or ""), scoring
-    assert first.returncode == 0
+        # A month passes: the cohort's partition is rewritten with outcomes.
+        stack.panel("land-outcomes")
+        first = stack.mbt("monitor", "--target", "batch", "--anchor", MONITOR_ANCHOR)
+        scoring = stack.result_for(SCORING)
+        assert scoring["status"] == "success", scoring
+        assert "evaluated" in (scoring.get("message") or ""), scoring
+        assert scoring["metrics"]["pr_auc"] > 0.2, scoring
+        assert scoring["metrics"]["roc_auc"] > 0.5, scoring
+        assert first.returncode == 0
 
-    # Exactly-once: the same anchor finds nothing left to evaluate.
-    second = stack.mbt(
-        "monitor",
-        "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
-        "--anchor",
-        MONITOR_ANCHOR,
-        "--deep-snapshot",
-    )
-    assert "0 matured prediction runs" in (second.stdout + second.stderr), (
-        second.stdout + second.stderr
-    )
+        # Exactly-once: the same anchor finds nothing left to evaluate.
+        second = stack.mbt("monitor", "--target", "batch", "--anchor", MONITOR_ANCHOR)
+        assert "0 matured prediction runs" in (second.stdout + second.stderr), (
+            second.stdout + second.stderr
+        )
 
-    # A fresh prediction run + an impossible realized-metric floor: the gate
-    # verdict is deterministic quality failure (exit 2), never a hard error.
-    stack.mbt(
-        "score",
-        "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
-        "--anchor",
-        "2026-07-02T00:00:00Z",
-        "--deep-snapshot",
-    )
-    breached = stack.mbt(
-        "monitor",
-        "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
-        "--anchor",
-        MONITOR_ANCHOR,
-        "--deep-snapshot",
-        "--vars",
-        "pr_auc_floor: 0.99",
-        expect_exit=2,
-    )
-    scoring = stack.result_for(SCORING)
-    assert scoring["status"] == "monitor_failed", scoring
-    assert breached.returncode == 2
+        # A fresh prediction run + an impossible realized-metric floor: the
+        # gate verdict is deterministic quality failure (exit 2), never a hard
+        # error.
+        stack.mbt("score", "--target", "batch", "--anchor", "2026-07-02T00:00:00Z")
+        breached = stack.mbt(
+            "monitor",
+            "--target",
+            "batch",
+            "--anchor",
+            MONITOR_ANCHOR,
+            "--vars",
+            "pr_auc_floor: 0.99",
+            expect_exit=2,
+        )
+        scoring = stack.result_for(SCORING)
+        assert scoring["status"] == "monitor_failed", scoring
+        assert breached.returncode == 2
+    finally:
+        # Later modules score the cohort as seeded.
+        stack.panel("reset")

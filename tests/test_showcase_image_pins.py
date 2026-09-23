@@ -243,26 +243,19 @@ def test_every_package_the_image_installs_is_pinned_somewhere() -> None:
         assert package not in extras, f"{package} is pinned twice; drop it from image-extras.in"
 
 
-# -- S3 credential defaults (three files, one truth) ---------------------------
+# -- S3 credential defaults (two files, one truth) ----------------------------
 
 COMPOSE = REPO_ROOT / "examples" / "showcase" / "compose" / "docker-compose.yml"
 S3_CONFIG = REPO_ROOT / "examples" / "showcase" / "compose" / "seaweedfs" / "s3_config.json"
-MAKEFILE = REPO_ROOT / "examples" / "showcase" / "Makefile"
-SHOWCASE_UTILS = REPO_ROOT / "tests" / "showcase_utils.py"
 
 
-def test_host_run_s3_credentials_match_the_stack() -> None:
-    """The Snowflake plane runs on the HOST, so it cannot inherit the container
-    env that every other target gets from compose - the Makefile and the test
-    harness each carry their own fallback copy of the SeaweedFS credentials.
+def test_compose_s3_credentials_match_the_seaweedfs_identity() -> None:
+    """Every container gets its AWS_* from compose's ${SHOWCASE_S3_KEY:-...}
+    defaults, and SeaweedFS accepts only the identity in s3_config.json. A
+    mismatch fails LATE and confusingly: the dataset builds, the model trains,
+    and only the artifact upload dies with `InvalidAccessKeyId`.
 
-    That is three restatements of one fact, and getting one wrong fails LATE
-    and confusingly: the dataset builds, the model trains, and only the
-    artifact upload dies with `InvalidAccessKeyId` - which reads like a
-    warehouse or network problem rather than a typo. (It happened: the
-    host-run path shipped with an invented `mbtshowcase` key.)
-
-    seaweedfs/s3_config.json is the authority; everything else must agree.
+    seaweedfs/s3_config.json is the authority; compose must agree.
     """
     import json
 
@@ -273,26 +266,10 @@ def test_host_run_s3_credentials_match_the_stack() -> None:
     assert f"${{SHOWCASE_S3_KEY:-{key}}}" in compose, f"compose default is not {key}"
     assert f"${{SHOWCASE_S3_SECRET:-{secret}}}" in compose, f"compose default is not {secret}"
 
-    makefile = MAKEFILE.read_text()
-    assert f"$(or $(SHOWCASE_S3_KEY),{key})" in makefile, (
-        f"the Makefile's host-run fallback must be {key} (see HOST_MBT)"
-    )
-    assert f"$(or $(SHOWCASE_S3_SECRET),{secret})" in makefile, (
-        f"the Makefile's host-run fallback must be {secret} (see HOST_MBT)"
-    )
-
-    utils = SHOWCASE_UTILS.read_text()
-    assert f'os.environ.get("SHOWCASE_S3_KEY", "{key}")' in utils, (
-        f"showcase_utils.host_env must fall back to {key}"
-    )
-    assert f'os.environ.get("SHOWCASE_S3_SECRET", "{secret}")' in utils, (
-        f"showcase_utils.host_env must fall back to {secret}"
-    )
-
 
 # -- SeaweedFS capacity (must not follow the host's free disk) ----------------
 
-SEED_LAKE = REPO_ROOT / "examples" / "showcase" / "bootstrap" / "seed_lake.py"
+SEED_LAKE = REPO_ROOT / "examples" / "showcase" / "bootstrap" / "churn_panel.py"
 #: Volumes SeaweedFS grows for a no-replication collection on its first write.
 SEAWEED_GROWTH_PER_COLLECTION = 7
 
@@ -319,7 +296,7 @@ def test_seaweedfs_capacity_does_not_follow_free_disk() -> None:
     assert "-volume.max" in flags, "seaweedfs volume count is left to free disk"
 
     buckets = len(re.findall(r'^[A-Z_]+_BUCKET = "', SEED_LAKE.read_text(), re.M))
-    assert buckets == 2, f"seed_lake.py creates {buckets} buckets; update this test"
+    assert buckets == 2, f"churn_panel.py creates {buckets} buckets; update this test"
     collections = buckets + 1  # plus the filer's default collection
     needed = (collections + 1) * SEAWEED_GROWTH_PER_COLLECTION
     assert int(flags["-volume.max"]) >= needed, (

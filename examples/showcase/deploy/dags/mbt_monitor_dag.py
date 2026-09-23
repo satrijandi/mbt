@@ -1,4 +1,4 @@
-"""Weekly ground-truth monitoring: evaluate matured prediction runs against
+"""Ground-truth monitoring: evaluate matured prediction runs against
 arrived labels (ADR-21, exactly-once per prediction run).
 
 Exit-code routing is the point (DESIGN.md section 5 step 7): a realized-
@@ -28,7 +28,7 @@ with DAG(
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    params={"anchor": MONITOR_ANCHOR, "vars": "", "target": "prod_score"},
+    params={"anchor": MONITOR_ANCHOR, "vars": "", "target": "batch"},
 ) as dag:
 
     @task(retries=1, retry_delay=timedelta(seconds=5))
@@ -41,7 +41,6 @@ with DAG(
             params["target"],
             "--anchor",
             params["anchor"],
-            "--deep-snapshot",
         ]
         if params["vars"]:
             args += ["--vars", params["vars"]]

@@ -1,6 +1,7 @@
-"""Daily batch scoring: sync the lake to the local scoring plane, then
-score every `tag:daily` pipeline with its run-time production champion
-(ADR-20: a promotion changes the NEXT run of this DAG, zero redeploy).
+"""Batch scoring: score the newest cohort of the lake table with the run-time
+production champion, straight off the object store on the cluster-free
+`batch` target (ADR-20: a promotion changes the NEXT run of this DAG, zero
+redeploy).
 
 Manual-trigger in the showcase (schedule=None) so the test tier and demos
 stay deterministic; wire a cron here in a real deployment. The anchor is a
@@ -21,16 +22,12 @@ from showcase_dag_utils import ANCHOR, run_in_unit
 
 with DAG(
     dag_id="mbt_score",
-    description="mbt score --select tag:daily with the run-time champion",
+    description="mbt score --target batch with the run-time champion",
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
     params={"anchor": ANCHOR},
 ) as dag:
-
-    @task(retries=1, retry_delay=timedelta(seconds=5))
-    def sync_lake() -> None:
-        run_in_unit(["python3", "/workspace/bootstrap/sync_lake.py"])
 
     @task(retries=1, retry_delay=timedelta(seconds=5))
     def score(**context) -> None:
@@ -39,13 +36,10 @@ with DAG(
                 "mbt",
                 "score",
                 "--target",
-                "prod_score",
-                "--select",
-                "tag:daily",
+                "batch",
                 "--anchor",
                 context["params"]["anchor"],
-                "--deep-snapshot",
             ]
         )
 
-    sync_lake() >> score()
+    score()

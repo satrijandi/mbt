@@ -342,9 +342,14 @@ def _evaluate_run(
         # con.sql(...).to_arrow_table() (the Relation API) works at the duckdb>=1.0
         # floor and is not deprecated; Connection.to_arrow_table only exists from a
         # later duckdb, and Connection.fetch_arrow_table warns on current duckdb.
+        # A NULL label is an outcome that has not arrived yet, not a value:
+        # a table that carries a cohort's rows before its outcomes (one panel
+        # read for input and labels alike) holds exactly that. Counting it
+        # would mark the run evaluated on outcomes nobody knows yet.
         joined = con.sql(
             f'SELECT p."prediction", l."{label_column}" FROM mbt_predictions p '
-            f"JOIN mbt_labels l USING ({using})"
+            f"JOIN mbt_labels l USING ({using}) "
+            f'WHERE l."{label_column}" IS NOT NULL'
         ).to_arrow_table()
     finally:
         con.close()

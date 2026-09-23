@@ -9,14 +9,14 @@ is metrics, not models - the champion is plumbing).
 import time
 
 import pytest
-from showcase_utils import ANCHOR, SHOWCASE_MARKS, ensure_daily_champion
+from showcase_utils import ANCHOR, SHOWCASE_MARKS, ensure_champion
 
 pytestmark = SHOWCASE_MARKS
 
 
 @pytest.fixture(scope="module", autouse=True)
-def daily_champion(showcase_stack):
-    ensure_daily_champion(showcase_stack)
+def champion(showcase_stack):
+    ensure_champion(showcase_stack)
 
 
 def _query(stack, promql: str) -> list:
@@ -47,17 +47,7 @@ def test_metrics_flow_and_alert_rules_loaded(showcase_stack) -> None:
 
     # A scored run pushed through the exporter shows up in Prometheus with
     # the documented names and group labels.
-    stack.sync_lake()
-    stack.mbt(
-        "score",
-        "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
-        "--anchor",
-        ANCHOR,
-        "--deep-snapshot",
-    )
+    stack.mbt("score", "--target", "batch", "--anchor", ANCHOR)
     push = stack.exec("python", "/workspace/project/scripts/push_metrics.py", "/workspace/project")
     assert "pushed" in push.stdout, push.stdout
 
@@ -80,19 +70,14 @@ def test_metrics_flow_and_alert_rules_loaded(showcase_stack) -> None:
 def test_injected_shift_breaches_and_alert_fires(showcase_stack) -> None:
     stack = showcase_stack
 
-    # Poison the scoring batch, score again: mbt itself enforces (exit 2)...
-    stack.exec("python", "/workspace/bootstrap/inject_drift.py")
-    stack.mbt(
-        "score",
-        "--target",
-        "prod_score",
-        "--select",
-        "tag:daily",
-        "--anchor",
-        ANCHOR,
-        "--deep-snapshot",
-        expect_exit=2,
-    )
+    # Poison the newest cohort, score again: mbt itself enforces (exit 2)...
+    stack.panel("inject-drift")
+    try:
+        stack.mbt("score", "--target", "batch", "--anchor", ANCHOR, expect_exit=2)
+    finally:
+        # Restore the table as seeded for later modules and anyone poking at
+        # the stack after the tests.
+        stack.panel("reset")
     scoring = stack.result_for("scoring.churn_lake.retention_scoring")
     assert scoring["status"] == "monitor_failed", scoring
     breached = [
@@ -107,6 +92,3 @@ def test_injected_shift_breaches_and_alert_fires(showcase_stack) -> None:
     _wait_for(stack, "mbt_shift_value >= mbt_shift_threshold")
     firing = _wait_for(stack, 'ALERTS{alertname="MbtShiftBreach"}', deadline_s=120)
     assert firing, "MbtShiftBreach never entered pending/firing"
-
-    # Restore clean data for anyone poking at the stack after the tests.
-    stack.sync_lake()

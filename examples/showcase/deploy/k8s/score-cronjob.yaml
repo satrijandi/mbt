@@ -29,8 +29,8 @@ spec:
                 - bash
                 - -c
                 - >
-                  mbt score --target prod_score --select tag:daily
-                  --anchor 2026-06-30T00:00:00Z --deep-snapshot
+                  mbt score --target batch
+                  --anchor 2026-06-30T00:00:00Z
               env:
                 - name: AWS_ACCESS_KEY_ID
                   value: mbtadmin

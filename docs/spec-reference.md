@@ -464,8 +464,7 @@ never need warehouse credentials. See `packages/mbt-snowflake/README.md`.
 #### Declaring both addresses
 
 A table may declare `path:` **and** `identifier:` - that is how one `sources.yml`
-serves a file plane and a warehouse plane, with `--target` choosing between them
-(`examples/showcase` does exactly this across its lake, DuckDB, object-store and warehouse planes).
+serves a file plane and a warehouse plane, with `--target` choosing between them.
 Each adapter reads the field it understands and ignores the other, with one
 exception: **Spark reads both**, so a target using the Spark data adapter must
 say which via `source_address: path` (or `identifier`) in its adapter config.

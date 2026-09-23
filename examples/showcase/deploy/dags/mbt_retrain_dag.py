@@ -1,4 +1,4 @@
-"""Weekly retrain: build the `tag:weekly` models on the PROD target - real
+"""Retrain: build the models on the PROD target - real
 cluster pushdown, sparkling H2O inside the executors - from a scheduled,
 pinned deployable unit.
 
@@ -25,11 +25,11 @@ from showcase_dag_utils import ANCHOR, run_in_unit
 
 with DAG(
     dag_id="mbt_retrain",
-    description="mbt build --target prod --select tag:weekly (cluster + sparkling)",
+    description="mbt build --target prod (cluster + sparkling)",
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    params={"anchor": ANCHOR, "select": "+churn_automl,tag:weekly"},
+    params={"anchor": ANCHOR, "select": "+churn_automl"},
 ) as dag:
 
     @task(retries=1, retry_delay=timedelta(seconds=5))

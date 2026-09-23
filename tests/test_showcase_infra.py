@@ -30,22 +30,24 @@ def test_services_healthy_and_s3_round_trip(showcase_stack) -> None:
 
     # Real S3 API round-trip (integration item A3's surface), from inside the
     # runner via boto3 env-chain config - exactly how mbt's S3ArtifactStore
-    # will talk to it.
+    # will talk to it. In the artifact bucket, not the lake: SeaweedFS's filer
+    # keeps the emptied probe/ directory after the delete, and the lake is
+    # meant to hold exactly one table for anyone browsing it.
     probe = stack.exec(
         "python",
         "-c",
         "import boto3, uuid\n"
         "s3 = boto3.client('s3')\n"
         "key = f'probe/{uuid.uuid4().hex}'\n"
-        "s3.put_object(Bucket='mbt-lake', Key=key, Body=b'ping')\n"
-        "assert s3.get_object(Bucket='mbt-lake', Key=key)['Body'].read() == b'ping'\n"
-        "s3.delete_object(Bucket='mbt-lake', Key=key)\n"
+        "s3.put_object(Bucket='mbt-artifacts', Key=key, Body=b'ping')\n"
+        "assert s3.get_object(Bucket='mbt-artifacts', Key=key)['Body'].read() == b'ping'\n"
+        "s3.delete_object(Bucket='mbt-artifacts', Key=key)\n"
         "print('s3-round-trip-ok')",
         workdir="/workspace",
     )
     assert "s3-round-trip-ok" in probe.stdout
 
-    # The lake was seeded.
+    # The lake was seeded: exactly one table, generated in the stack.
     listing = stack.exec(
         "python",
         "-c",
@@ -55,10 +57,8 @@ def test_services_healthy_and_s3_round_trip(showcase_stack) -> None:
         "print('\\n'.join(sorted(keys)))",
         workdir="/workspace",
     )
-    for table in ("subscribers", "scoring_batch", "churn_outcomes"):
-        assert any(line.startswith(f"{table}/") for line in listing.stdout.splitlines()), (
-            f"lake is missing {table}/: {listing.stdout}"
-        )
+    tables = {line.split("/", 1)[0] for line in listing.stdout.splitlines() if "/" in line}
+    assert tables == {"churn_panel"}, f"the lake should hold one table: {listing.stdout}"
 
 
 def test_lake_is_browsable_from_the_host(showcase_stack) -> None:
@@ -83,7 +83,7 @@ def test_lake_is_browsable_from_the_host(showcase_stack) -> None:
         f"{stack.filer_url()}/buckets/mbt-lake/", headers={"Accept": "application/json"}
     )
     table_names = {entry["FullPath"].rsplit("/", 1)[-1] for entry in tables.get("Entries") or []}
-    assert "subscribers" in table_names, f"filer UI misses seeded tables: {table_names}"
+    assert table_names == {"churn_panel"}, f"filer UI shows {table_names}, not the one table"
 
     # The S3 API port: anonymous requests are denied by s3_config.json.
     with pytest.raises(urllib.error.HTTPError) as denied:

@@ -1034,7 +1034,8 @@ If it persists, the spec edit never made it through `mbt build` and a promote: r
 WARN run 06e35b21ab994b83: no matured labels joined (join_key: user_id); will retry next monitor run
 ```
 
-**Why:** the prediction run's maturity lag has passed, but the ground-truth table contains no rows joining to its predictions (labels have not landed yet, or the join key is wrong).
+**Why:** the prediction run's maturity lag has passed, but the ground-truth table contains no labelled rows joining to its predictions: labels have not landed yet, or the join key is wrong.
+A joined row whose label is NULL counts as not landed - that is how a table that carries a cohort's rows before its outcomes (the showcase's one lake table) reports an open outcome window - and rows with a known label are evaluated on their own, with the rest reported as missing coverage.
 The run is deliberately NOT marked evaluated, so it retries on the next monitor run once labels arrive (ADR-21); the same applies when matured labels are single-class (metrics would be undefined).
 
 **Fix:** nothing, if labels are simply late - the next scheduled `mbt monitor` picks the run up.
@@ -1078,7 +1079,7 @@ If prompts persist one-per-process, ask a Snowflake admin whether `ALLOW_ID_TOKE
 ### Snowflake says a schema "does not exist or not authorized" but you can see it
 
 **Symptom:** a command that names the schema in one breath fails on it in the next.
-The showcase seeder is the clearest case - six `CREATE TABLE`s succeed, then the load dies:
+A table-loading script is the clearest case - here, one that ran six `CREATE TABLE`s successfully, then died on the load:
 
 ```text
 created ANALYTICS.SANDBOX_ME          .MBT_SHOWCASE_SUBSCRIBERS       empty (other cadence)
@@ -1104,46 +1105,11 @@ printf '%q\n' "$SNOWFLAKE_SCHEMA"
 ```
 
 Note that `set -a; source .env; set +a` is not itself the culprit - it strips a trailing `# comment` correctly.
-Nothing needs cleaning up in the warehouse: the objects that were created landed in the real schema, and the showcase seeder's `--force` replaces them on the re-run.
+Nothing needs cleaning up in the warehouse: the objects that were created landed in the real schema, and re-running with the trimmed value replaces them.
 
-`examples/showcase/scripts/seed_snowflake.py` now trims these vars itself (secrets excepted, where whitespace can be significant), so it fails up front naming the empty variable instead of halfway through.
-`profiles.yml` does not - it passes `env('SNOWFLAKE_SCHEMA')` through verbatim - so a padded value still reaches `mbt build --target snowflake`, where the interpolated path means it may appear to work.
+`profiles.yml` does not trim either - it passes `env('SNOWFLAKE_SCHEMA')` through verbatim - so a padded value still reaches `mbt build --target snowflake`, where the interpolated path means it may appear to work.
 
 ## The showcase
-
-### `BREACH: drifted share 0.88 > max 0.30` from the showcase Evidently gate
-
-**Symptom (quality verdict, exit 2):**
-
-```text
-  dem_f02                  drift score 1.5929
-  log_f09                  drift score 1.5905
-  days_since_login         drift score 1.4475
-  ...
-BREACH: drifted share 0.88 > max 0.30 (phase serving)
-```
-
-**Why:** the showcase's wide batch-monthly cadence runs `scripts/evidently_gate.py` on exactly the features `churn_wide_automl` trains on (the committed include list).
-The train phase compares the train window against the test window and blocks `mbt promote` on a breach; the serving phase compares each scored batch against the baseline the train phase exported.
-Exit 2 is the same quality-verdict semantics as mbt's own gates, so the Airflow DAG fails the task without retries and notifies the owner.
-
-**Fix:** open `drift_report.html` to see the per-feature comparison.
-A train-phase breach means the features were already unstable inside the training window: revisit the split boundaries or rerun `scripts/select_features.py` so selection sees the shifted period.
-A serving-phase breach means the incoming month shifted (as `make inject-drift` demonstrates for the daily cadence): fix the upstream data or retrain on the new distribution before promoting again.
-Raising `--max-drift-share` is a deliberate policy change, not a fix.
-
-### `error: no exported reference at /workspace/monitoring/wide_reference.parquet`
-
-**Symptom (hard error, exit 1):**
-
-```text
-error: no exported reference at /workspace/monitoring/wide_reference.parquet; run the train-phase gate first
-```
-
-**Why:** the serving-phase gate needs the baseline the train-phase gate exports on a pass.
-DAG task containers are ephemeral (`target/` dies with each one), so the baseline must live on the shared `/workspace` mount; a fresh stack that never ran the train phase has nothing there.
-
-**Fix:** run the train phase once after a wide build - `python scripts/evidently_gate.py --phase train --export-reference /workspace/monitoring/wide_reference.parquet` (or simply `make wide`, which does this between the AutoML build and promotion).
 
 ### `S3UploadFailedError ... (InternalError) when calling the PutObject operation` on every model in the showcase
 

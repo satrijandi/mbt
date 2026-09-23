@@ -136,12 +136,14 @@ def test_ambiguity_surfaces_at_pinning_time_which_is_compile_time() -> None:
 
 # -- the showcase project, which is what actually broke -------------------------
 #
-# examples/showcase declares BOTH addresses on all 12 tables so one project can
-# serve a lake plane and a warehouse plane. Nothing held the spark half of that
-# bargain: `identifier:` was added for the Snowflake target, every spark target
-# silently started resolving catalog tables that do not exist, push CI stayed
-# green, and the nightly live tier was red for a day. These are static reads of
-# the committed project, so the next time it happens the fast suite says so.
+# examples/showcase once declared BOTH addresses on every table so one project
+# could serve a lake plane and a warehouse plane. Nothing held the spark half of
+# that bargain: `identifier:` was added for the Snowflake target, every spark
+# target silently started resolving catalog tables that do not exist, push CI
+# stayed green, and the nightly live tier was red for a day. The showcase is
+# lake-only now, but these static reads of the committed project still make
+# every spark target prove it reads the lake, so a returning `identifier:` is
+# caught by the fast suite rather than the nightly.
 
 SHOWCASE = Path(__file__).resolve().parents[3] / "examples" / "showcase" / "project"
 

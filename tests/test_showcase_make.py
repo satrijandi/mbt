@@ -1,6 +1,6 @@
 """The runbook itself, exercised (SHOW-18): drive the README golden path
-through `make` exactly as a human would - up, demo, wide, seaweedfs, ci,
-monthly, score, monitor, inject-drift + recovery, down, clean.
+through `make` exactly as a human would - up, demo, ci, score, outcomes,
+monitor, inject-drift + recovery, down, clean.
 
 Every other module tests the platform through its own harness; this one
 tests that the COMMANDS THE README TELLS A HUMAN TO TYPE still work, so the
@@ -147,44 +147,15 @@ def test_runbook_golden_path(runbook) -> None:
     runner.make("up")
     assert (ws / "project" / "mbt_project.yml").exists(), "workspace was not staged"
 
-    # The narrated lifecycle: dev + prod builds, all champions promoted,
-    # every cadence scored, ground truth monitored.
+    # The narrated lifecycle on the one lake table: dev + prod builds, the
+    # champion promoted, the newest cohort scored, its outcomes landed, and
+    # ground truth monitored.
     runner.make("demo")
-    daily_runs = list((ws / "lake_local" / "predictions" / "retention_scores").glob("*/_SUCCESS"))
-    assert daily_runs, "demo left no daily prediction runs"
-    monthly_runs = list(
-        (ws / "lake_local" / "predictions" / "monthly_retention_scores").glob("*/_SUCCESS")
+    runs = list((ws / "predictions" / "retention_scores").glob("*/_SUCCESS"))
+    assert runs, "demo left no prediction runs"
+    assert list((ws / "predictions" / "retention_scores").glob("*/ground_truth.marker.json")), (
+        "demo's monitor evaluated nothing after the outcomes landed"
     )
-    assert monthly_runs, "demo left no monthly prediction runs"
-    wide_runs = list(
-        (ws / "lake_local" / "predictions" / "wide_retention_scores").glob("*/_SUCCESS")
-    )
-    assert wide_runs, "demo left no wide-cadence prediction runs"
-
-    # The wide cadence's own runbook target: probe -> ds-helper funnel as a
-    # committed selection diff -> Evidently train gate -> sparkling AutoML
-    # -> score -> Evidently serving gate.
-    runner.make("wide")
-    assert (ws / "project" / "drift_report.html").exists(), "make wide left no drift report"
-    assert (ws / "project" / "target" / "feature_selection_report.json").exists(), (
-        "make wide left no selection report"
-    )
-    assert (ws / "monitoring" / "wide_reference.parquet").exists(), (
-        "make wide exported no stability reference"
-    )
-
-    # The object-store plane (DESIGN.md 11, P8): the same wide cadence sourced
-    # straight off SeaweedFS, scoring and monitoring included, with no lake
-    # sync anywhere in the recipe. tests/test_showcase_seaweedfs.py proves the
-    # plane; what this covers is the RECIPE - its --target, its promote name,
-    # and the absence of the --deep-snapshot the other recipes pass.
-    runner.make("seaweedfs")
-    staged = list(
-        (ws / "seaweedfs_predictions" / "predictions" / "wide_retention_scores").glob(
-            "*/predictions.json"
-        )
-    )
-    assert staged, "make seaweedfs staged no prediction run off the object store"
 
     # The CI seeding target, then the two things its output tells a human
     # to do: open the repo URL and log into Woodpecker with the Gitea
@@ -220,14 +191,17 @@ def test_runbook_golden_path(runbook) -> None:
     assert login.returncode == 0, f"browser login failed:\n{login.stdout}\n{login.stderr}"
     assert json.loads(login.stdout.strip().splitlines()[-1])["woodpecker_token"]
 
-    # Standalone cadence targets rerun cleanly on the same anchors.
-    runner.make("monthly")
+    # The standalone targets rerun cleanly on the same anchors, from the
+    # seeded table: reset, score, a month passes, monitor.
+    runner.make("reset")
     runner.make("score")
+    runner.make("outcomes")
     runner.make("monitor")
 
-    # Drift injection breaches (tolerated by the target), a plain score
+    # Drift injection breaches (tolerated by the target); reset + score
     # recovers - the runbook's documented poison/recover loop.
     runner.make("inject-drift")
+    runner.make("reset")
     runner.make("score")
 
     runner.make("down")

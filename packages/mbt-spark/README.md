@@ -73,7 +73,7 @@ The error names the table and the setting, and fires during compile-time snapsho
 
 `mbt score` and `mbt monitor` run against a Spark target: the unlabeled batch is built through the same path (one relation, filters, `sample_key` sampling, the `score` window), and prediction runs are staged as Parquet under `predictions_root` joined with the scoring node's `output.path`.
 A store backed by lakehouse tables is designed in [ADR-23](https://satrijandi.github.io/mbt/adr/0023-warehouse-batch-scoring/) and not yet shipped.
-The showcase's `seaweedfs` target runs build, promote, score, and monitor straight off an S3-compatible object store end to end.
+The [showcase](https://github.com/satrijandi/mbt/tree/main/examples/showcase)'s `batch` target scores and monitors this way on every run, straight off an S3-compatible object store.
 
 ## Compute: training jobs under spark-submit
 

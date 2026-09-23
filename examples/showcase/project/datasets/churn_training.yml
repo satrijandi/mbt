@@ -1,0 +1,49 @@
+# The training set is a slice of the one lake table (sources.yml): the active
+# population, in the cohorts whose outcomes are known.
+datasets:
+  - name: churn_training
+    description: Active customers per month-start cohort, labeled with next-month churn.
+    source: source('lake', 'churn_panel')
+    # No `columns:` panel contract on purpose: the table's width is a scale
+    # knob (hundreds of noise columns at --scale huge), so an enumerated list
+    # would go stale with every reseed. The models' `features.include` lists
+    # are the reviewed statement of what trains.
+    #
+    # The population: churned customers keep their rows (is_active = false,
+    # is_churn NULL), so this filter is what makes a row a training example.
+    filters:
+      - "is_active = true"
+    # Hashing customer_id keeps or drops every cohort of a customer together,
+    # so `--vars '{sample_fraction: 0.25}'` trains on a coherent quarter.
+    sample_key: customer_id
+    label:
+      column: is_churn
+      definition: "churned during the month after inference_date"
+      # Declarative: the outcome is observed one calendar month after the
+      # prediction date. It is what lets mbt check that the embargo below and
+      # the scoring node's ground_truth.maturity are long enough.
+      horizon: "1mo"
+    split:
+      strategy: temporal
+      time_column: inference_date
+      # Explicit cohort boundaries. Both windows end before 2026-06-01, the
+      # newest cohort - the one whose label is still NULL, and the one scoring
+      # reads - so no row with an unknown outcome is ever a training example.
+      train: "2025-07-01:2026-04-01"
+      test: "2026-04-01:2026-06-01"
+      # At least the label horizon: the last training cohort's outcome is
+      # observed a month later, inside the test window, without it.
+      embargo: "1mo"
+    checks:
+      - class_balance_report
+      - no_future_columns
+      - not_null:
+          columns: [is_churn, inference_date, customer_id]
+      # One row per customer per cohort - the table's natural key. The
+      # `source:` form treats `columns` as ONE composite key and measures the
+      # table as delivered, before filters and splits.
+      - unique: {source: lake.churn_panel, columns: [customer_id, inference_date]}
+      # A volume floor: a silently truncated table becomes a loud failure
+      # instead of a quietly worse model.
+      - row_count: {min: 1000}
+    tags: [churn]

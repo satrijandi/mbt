@@ -62,12 +62,14 @@ def test_every_statement_of_the_rule_uses_the_separator_the_code_composes_with()
     )
 
 
-def test_the_showcase_names_each_planes_experiment_the_way_core_composes_it() -> None:
+def test_the_showcase_names_each_experiment_the_way_core_composes_it() -> None:
     """Derived from the showcase's own config, not hardcoded here.
 
-    The showcase documents its two named planes by experiment name in README,
-    DESIGN and the Makefile echo lines. Those are the strings a reader greps
-    MLflow for, so a stale one sends them to an experiment that does not exist.
+    Any showcase target that sets `experiment:` must be documented by its
+    composed name in README, DESIGN or the Makefile: those are the strings a
+    reader greps MLflow for, so a stale one sends them to an experiment that
+    does not exist. Targets that set none land in the bare project name, which
+    the prose must name instead.
     """
     project = yaml.safe_load((SHOWCASE / "project" / "mbt_project.yml").read_text())["name"]
     outputs = yaml.safe_load((SHOWCASE / "project" / "profiles.yml").read_text())[project][
@@ -90,4 +92,5 @@ def test_the_showcase_names_each_planes_experiment_the_way_core_composes_it() ->
         stale = f"{project}_{declared}"
         assert stale not in prose, f"showcase prose still names {stale}, the single-underscore form"
 
-    assert checked >= 2, f"expected the two named planes to set experiment:, found {checked}"
+    if not checked:
+        assert f"`{project}`" in prose, f"showcase prose never names the {project!r} experiment"

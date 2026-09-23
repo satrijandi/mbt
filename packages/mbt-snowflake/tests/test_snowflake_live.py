@@ -568,164 +568,99 @@ def test_full_local_training_loop_from_live_snowflake(live: LiveWarehouse, tmp_p
     assert reproduced["model.live_snowflake.churn_classifier"]["metrics"] == baseline
 
 
-# -- the wide cadence (examples/showcase) -------------------------------------------------
+# -- the showcase's one lake table (examples/showcase) ----------------------------------
 
-SHOWCASE = Path(__file__).resolve().parents[3] / "examples" / "showcase"
-SHOWCASE_PROJECT = SHOWCASE / "project"
+SHOWCASE_PROJECT = Path(__file__).resolve().parents[3] / "examples" / "showcase" / "project"
 #: The showcase's committed windows span a year; narrow them to the months this
-#: fixture seeds, so the split boundaries stay meaningful at 4 cohorts.
-WIDE_WINDOWS = {
+#: fixture seeds, so the split boundaries stay meaningful at 5 cohorts.
+PANEL_WINDOWS = {
     "train": ("2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z"),
     "test": ("2026-03-01T00:00:00Z", "2026-05-01T00:00:00Z"),
 }
-WIDE_TEST_WINDOW_START = date(2026, 3, 1)
+PANEL_TEST_WINDOW_START = date(2026, 3, 1)
+PANEL_NEWEST = date(2026, 5, 1)
 
 
-def _showcase_seeder() -> Any:
-    """examples/showcase/scripts/seed_snowflake.py, loaded by path (it is a
-    script, not a package), so the panel join below is the showcase's own."""
-    import importlib.util
+def _seed_panel_rows(n_customers: int = 120) -> list[dict[str, Any]]:
+    """One row per customer per month-start (Jan-May 2026), the showcase shape.
 
-    spec = importlib.util.spec_from_file_location(
-        "showcase_seed_snowflake", SHOWCASE / "scripts" / "seed_snowflake.py"
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _seed_wide_rows(n_customers: int = 120) -> list[dict[str, Any]]:
-    """One row per customer per month-start (Jan-Apr 2026) for the wide tables.
-
-    The showcase shape: the population carries the customer_id-to-safe_id
-    crosswalk, demographics/logins join by customer_id, and transactions join
-    by safe_id ALONE - so a broken crosswalk in the panel join shows up as
-    dropped rows rather than as a column error.
+    Everything is in the one table: the population flag, features, and the
+    label - which is NULL where no outcome is known, i.e. on inactive rows and
+    on the newest cohort, whose outcome window is still open.
     """
-    months = [date(2026, m, 1) for m in (1, 2, 3, 4)]
+    months = [date(2026, m, 1) for m in (1, 2, 3, 4, 5)]
     rows: list[dict[str, Any]] = []
     for c in range(n_customers):
         signal = ((c * 37) % 100) / 100.0
         for month in months:
+            active = c % 10 != 0 or month == months[0]
+            known = active and month != PANEL_NEWEST
             rows.append(
                 {
                     "customer_id": c,
-                    "safe_id": f"S{c:06d}",
                     "inference_date": month,
-                    "as_of_date": month - timedelta(days=1),
-                    "loaded_at_time": month + timedelta(days=2),
-                    "etl_loaded_at": month + timedelta(days=2),
-                    "is_churn": 1 if signal > 0.6 else 0,
+                    "is_active": active,
                     "age_years": 20 + (c % 50),
                     "contract_code": c % 4,
                     "login_days_30d": (c * 3) % 30,
                     "txn_cnt_30d": (c * 7) % 40,
+                    "is_churn": (1 if signal > 0.6 else 0) if known else None,
                 }
             )
     return rows
 
 
-#: logical name (as in examples/showcase/project/sources.yml) -> (DDL, row->values).
-#: Each FEATURE table carries the same-named ETL_LOADED_AT audit column: three
-#: of them would collide in the panel, and the showcase's panel join prunes
-#: them upstream. Seeding them is what proves that pruning on the real engine.
-_WIDE_TABLES: dict[str, tuple[str, Any]] = {
-    "monthly_population": (
-        "CUSTOMER_ID INTEGER, SAFE_ID STRING, INFERENCE_DATE DATE, "
-        "AS_OF_DATE DATE, LOADED_AT_TIME DATE",
-        lambda r: (
-            r["customer_id"],
-            r["safe_id"],
-            r["inference_date"],
-            r["as_of_date"],
-            r["loaded_at_time"],
-        ),
-    ),
-    "monthly_labels": (
-        "CUSTOMER_ID INTEGER, INFERENCE_DATE DATE, IS_CHURN INTEGER",
-        lambda r: (r["customer_id"], r["inference_date"], r["is_churn"]),
-    ),
-    "demographic_history": (
-        "CUSTOMER_ID INTEGER, INFERENCE_DATE DATE, AGE_YEARS INTEGER, "
-        "CONTRACT_CODE INTEGER, ETL_LOADED_AT DATE",
-        lambda r: (
-            r["customer_id"],
-            r["inference_date"],
-            r["age_years"],
-            r["contract_code"],
-            r["etl_loaded_at"],
-        ),
-    ),
-    "login_history": (
-        "CUSTOMER_ID INTEGER, INFERENCE_DATE DATE, LOGIN_DAYS_30D INTEGER, ETL_LOADED_AT DATE",
-        lambda r: (
-            r["customer_id"],
-            r["inference_date"],
-            r["login_days_30d"],
-            r["etl_loaded_at"],
-        ),
-    ),
-    "transaction_history": (
-        "SAFE_ID STRING, INFERENCE_DATE DATE, TXN_CNT_30D INTEGER, ETL_LOADED_AT DATE",
-        lambda r: (r["safe_id"], r["inference_date"], r["txn_cnt_30d"], r["etl_loaded_at"]),
-    ),
-}
-
-
 @pytest.fixture(scope="session")
-def wide_panel(live: LiveWarehouse) -> str:
-    """Seed the wide cadence's five gold tables, then materialize the training
-    panel over them with the showcase seeder's own join. Returns the panel's
-    table name; everything is dropped by the `live` teardown."""
-    rows = _seed_wide_rows()
-    names: dict[str, str] = {}
-    for logical, (ddl, to_values) in _WIDE_TABLES.items():
-        table = f"{live.prefix}_{logical.upper()}"
-        live.create_table(table, ddl)
-        placeholders = ", ".join(["%s"] * len(to_values(rows[0])))
-        live.execute(
-            f"INSERT INTO {live.qualified(table)} VALUES ({placeholders})",
-            [to_values(r) for r in rows],
-        )
-        names[logical] = live.qualified(table)
-
-    seeder = _showcase_seeder()
-    panel = f"{live.prefix}_MONTHLY_PANEL"
-    live.execute(
-        f"CREATE TABLE {live.qualified(panel)} AS SELECT * FROM {names['monthly_population']} "
-        f"AS pop {seeder.PANELS['monthly_panel'].format(**names)}"
-        f"{seeder.PANEL_FEATURE_JOINS.format(**names)}"
+def showcase_panel(live: LiveWarehouse) -> str:
+    """The showcase's one table, loaded into the warehouse. Dropped by the
+    `live` teardown."""
+    rows = _seed_panel_rows()
+    table = f"{live.prefix}_CHURN_PANEL"
+    columns = (
+        "customer_id",
+        "inference_date",
+        "is_active",
+        "age_years",
+        "contract_code",
+        "login_days_30d",
+        "txn_cnt_30d",
+        "is_churn",
     )
-    live.created_tables.append(panel)
-    return panel
+    live.create_table(
+        table,
+        "CUSTOMER_ID INTEGER, INFERENCE_DATE DATE, IS_ACTIVE BOOLEAN, AGE_YEARS INTEGER, "
+        "CONTRACT_CODE INTEGER, LOGIN_DAYS_30D INTEGER, TXN_CNT_30D INTEGER, IS_CHURN INTEGER",
+    )
+    live.execute(
+        f"INSERT INTO {live.qualified(table)} VALUES ({', '.join(['%s'] * len(columns))})",
+        [tuple(r[c] for c in columns) for r in rows],
+    )
+    return table
 
 
-def test_wide_cadence_panel_builds_live(
-    live: LiveWarehouse, wide_panel: str, tmp_path: Path
+def test_showcase_dataset_builds_live(
+    live: LiveWarehouse, showcase_panel: str, tmp_path: Path
 ) -> None:
-    """The showcase's committed wide dataset spec against real Snowflake.
+    """The showcase's committed dataset spec against real Snowflake.
 
-    Distinct from tests/test_showcase_snowflake.py, which proves the same
-    cadence with the docker stack up: this needs only warehouse credentials.
-    It is the laptop-only proof that the showcase's upstream panel join - the
-    heterogeneous entity keys, the crosswalk, the pruning of the colliding
-    audit columns - runs on the real engine, and that the committed
-    single-relation spec (ADR-29) builds from what it produces.
+    The spec reads one table that carries the population flag and a label that
+    is NULL for rows with no known outcome. This is the laptop-only proof that
+    its filter selects the population on the real engine and that its windows
+    keep the open (unlabelled) cohort out of both splits.
     """
-    doc = yaml.safe_load((SHOWCASE_PROJECT / "datasets" / "wide_churn_training.yml").read_text())
+    doc = yaml.safe_load((SHOWCASE_PROJECT / "datasets" / "churn_training.yml").read_text())
     spec = DatasetSpec.model_validate(doc["datasets"][0])
     logical = re.findall(r"'([^']*)'", spec.source)[1]
-    assert logical == "monthly_panel", "the committed spec no longer reads the panel"
-    sources = {spec.source: SourceTable(name=logical, identifier=wide_panel)}
+    assert logical == "churn_panel", "the committed spec no longer reads the one table"
+    sources = {spec.source: SourceTable(name=logical, identifier=showcase_panel)}
 
     adapter = SnowflakeDataAdapter(live.config)
     pinned = combine_snapshots({uid: adapter.snapshot_id(t) for uid, t in sources.items()})
     node = ManifestNode(
-        unique_id="dataset.churn_lake.wide_churn_training",
+        unique_id="dataset.churn_lake.churn_training",
         resource_type="dataset",
-        name="wide_churn_training",
-        path="datasets/wide_churn_training.yml",
+        name="churn_training",
+        path="datasets/churn_training.yml",
         config={},
         snapshot_id=pinned,
     )
@@ -733,7 +668,7 @@ def test_wide_cadence_panel_builds_live(
         node=node,
         source=sources[spec.source],
         source_tables=sources,
-        resolved_windows=WIDE_WINDOWS,
+        resolved_windows=PANEL_WINDOWS,
         sample_fraction=1.0,
         deep_snapshot=False,
         output_dir=tmp_path / "mat",
@@ -742,32 +677,15 @@ def test_wide_cadence_panel_builds_live(
 
     train = pq.read_table(ctx.output_dir / "train.parquet")
     test = pq.read_table(ctx.output_dir / "test.parquet")
-    # Population crosswalk + lineage columns, each history's payload, and the
-    # label - with the join keys once each, identifiers lowercased.
-    expected_columns = {
-        "customer_id",
-        "safe_id",
-        "inference_date",
-        "as_of_date",
-        "loaded_at_time",
-        "age_years",
-        "contract_code",
-        "login_days_30d",
-        "txn_cnt_30d",
-        "is_churn",
-    }
-    assert set(train.column_names) == expected_columns
-    assert set(test.column_names) == expected_columns
-    # Three identically named ETL_LOADED_AT columns existed in the gold tables
-    # and none reached the panel.
-    assert "etl_loaded_at" not in train.column_names
-    # transaction_history joined through safe_id alone, so a broken crosswalk
-    # would have dropped rows; the counts below would then come up short.
-    assert train.column("txn_cnt_30d").null_count == 0
-    all_rows = _seed_wide_rows()
-    expected_test = sum(1 for r in all_rows if r["inference_date"] >= WIDE_TEST_WINDOW_START)
+    for split in (train, test):
+        assert split.column("is_churn").null_count == 0
+        assert all(split.column("is_active").to_pylist())
+    active = [
+        r for r in _seed_panel_rows() if r["is_active"] and r["inference_date"] < PANEL_NEWEST
+    ]
+    expected_test = sum(1 for r in active if r["inference_date"] >= PANEL_TEST_WINDOW_START)
     assert test.num_rows == expected_test
-    assert train.num_rows == len(all_rows) - expected_test
+    assert train.num_rows == len(active) - expected_test
     assert handle.snapshot_id == ctx.node.snapshot_id
 
 
@@ -827,9 +745,8 @@ def test_snapshot_id_pins_dynamic_tables(live: LiveWarehouse) -> None:
     must pin - shallow and deep - like any other relation.
 
     Creating one needs CREATE DYNAMIC TABLE on the schema. That is not part of
-    this suite's documented privilege floor (the showcase's warehouse plane
-    moved to CTAS panels because the maintainer's own sandbox role lacks it),
-    so a role without it skips this one test and says why, instead of turning
+    this suite's documented privilege floor (the maintainer's own sandbox
+    role lacks it), so a role without it skips this one test and says why, instead of turning
     the whole tier red over a grant.
     """
     from snowflake.connector.errors import ProgrammingError

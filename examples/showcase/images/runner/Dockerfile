@@ -28,12 +28,8 @@ COPY image-extras.txt /opt/mbt/image-extras.txt
 # survives rebuilds so the ~800MB of JVM sdists download once; timeouts are
 # generous because pypi serves those sdists slowly.
 #
-# mbt-lightgbm powers the wide cadence's feature-selection probe and the
-# ds-helper funnel in scripts/select_features.py; mbt-evidently brings the
-# evidently that scripts/evidently_gate.py drives (and the training report's
-# `engine: evidently`), so uv.lock pins it and its closure. jupyterlab, for the
-# DS inner loop, is a showcase-image dep and never an mbt dep, so uv.lock says
-# nothing about it or its closure - image-extras.txt pins that
+# jupyterlab, for the DS inner loop, is a showcase-image dep and never an mbt
+# dep, so uv.lock says nothing about it or its closure - image-extras.txt pins that
 # (source of truth: image-extras.in; regenerate with scripts/lock_image_extras.sh).
 # Without it this layer resolved fresh against PyPI on every build and
 # inherited whatever upstream had published that morning, which is exactly how
@@ -44,8 +40,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --find-links /opt/mbt/dist \
     --constraint /opt/mbt/constraints.txt \
     --constraint /opt/mbt/image-extras.txt \
-    "mbt-core[s3]" "mbt-h2o[sparkling]" mbt-spark mbt-xgboost mbt-lightgbm \
-    mbt-mlflow mbt-evidently \
+    "mbt-core[s3]" "mbt-h2o[sparkling]" mbt-spark mbt-xgboost mbt-mlflow \
     jupyterlab
 
 # s3a support for the SeaweedFS lake: hadoop-aws must match the hadoop client

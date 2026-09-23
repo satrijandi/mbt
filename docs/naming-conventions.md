@@ -2,7 +2,7 @@
 
 mbt never hardcodes column names: `split.time_column`, `sample_key`, `ground_truth.join_key`, and friends are all declared per project.
 That freedom is exactly why a project needs one written convention, because a wrong or ambiguous date column is how temporal leakage happens.
-This page is the convention mbt projects follow; the [showcase](showcase.md)'s batch-monthly wide cadence is its reference implementation.
+This page is the convention mbt projects follow; the [showcase](showcase.md)'s lake table is keyed by it.
 
 ## The glossary
 
@@ -32,7 +32,7 @@ The feature producer aligns each row to the `inference_date` it serves.
 The balances a row describes are as of the previous day, but that is metadata, recorded once in the population's informational `as_of_date` column rather than as a second join key every consumer has to reason about.
 The population table carries the entity crosswalk (`customer_id` to `safe_id`) plus the `as_of_date` and `loaded_at_time` lineage and audit columns.
 
-Since ADR-29 that join happens upstream - in a dbt model, a warehouse table, or the showcase's generator - and mbt reads the panel it produces.
+Since ADR-29 that join happens upstream - in a dbt model or a warehouse table - and mbt reads the panel it produces.
 The rules below still matter to mbt, because the panel's columns are what `split.time_column`, `sample_key`, and `features.exclude` point at.
 
 ## Rules that keep the convention leakage-safe
@@ -46,12 +46,12 @@ The rules below still matter to mbt, because the panel's columns are what `split
   `no_future_columns` backstops any timestamp that leaks past its split window.
 - **Joined gold tables need disjoint non-key column names.**
   The panel's join merges the key columns and passes everything else through, so two feature tables both carrying `loaded_at_time` would collide.
-  Keep shared-name audit columns out of tables that get joined together, or drop them inside the join; the showcase's panel drops each feature table's `etl_loaded_at` in its own subquery and carries `loaded_at_time` from the population only.
+  Keep shared-name audit columns out of tables that get joined together, or drop them inside the join: select each feature table's own audit column away in its subquery and carry `loaded_at_time` from the population only.
 - **The orchestrator hands mbt its logical date.**
   A scheduled DAG passes `execution_date` as `mbt build --anchor` or `mbt score --anchor`; every window (`train:`, `test:`, a scoring `window:`) resolves against that anchor, which is what makes backfills and reruns reproducible.
 
 ## Adoption status
 
-- The wide batch-monthly cadence (`examples/showcase`, SHOW-19/SHOW-20) implements the convention in full: one uniform `inference_date` join key across all five gold tables, the entity crosswalk plus the `as_of_date`/`loaded_at_time` lineage columns on the population, matured labels on `inference_date`, and DAGs that pass the logical date as the anchor.
-- The showcase's monthly DuckDB cadence (SHOW-17) uses `inference_date` as its time column.
-- The showcase's daily cadence reuses `tests/fixtures/churn_demo`'s tables, a fixture project that predates this convention and is pinned by golden-manifest tests; its `snapshot_date` is an `inference_date` in this vocabulary.
+- The showcase's one lake table (`examples/showcase`) uses `customer_id` and `inference_date` as its natural key and `split.time_column`, keys its label by the cohort's own `inference_date`, and its DAGs pass the logical date as the anchor.
+  Being one table that arrives already assembled, it has no joins, so the crosswalk and audit-column rules do not arise there.
+- `tests/fixtures/churn_demo` predates this convention and is pinned by golden-manifest tests; its `snapshot_date` is an `inference_date` in this vocabulary.

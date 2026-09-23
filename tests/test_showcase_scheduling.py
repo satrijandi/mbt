@@ -15,14 +15,7 @@ unit pinned by digest in images.env. This module proves:
 - SHOW-13 at the scheduler: a realized-gate breach (exit 2) fails the task
   on try 1 with NO retry (quality verdicts are deterministic; the owner is
   notified, not on-call), while a hard error (exit 1) consumes a retry
-  before failing;
-- SHOW-17's scheduled path: the monthly cadence's score DAG runs the
-  tag:monthly batch on the DuckDB plane from Airflow, inside the same
-  pinned unit;
-- SHOW-20's scheduled path: the batch-monthly wide DAG scores the
-  tag:wide cohort and runs the Evidently serving gate against the
-  persisted reference (task containers are ephemeral, so the score task
-  copies the batch out to /workspace/monitoring in the same container).
+  before failing.
 """
 
 import pytest
@@ -30,7 +23,7 @@ from showcase_utils import ANCHOR, SHOWCASE_MARKS
 
 pytestmark = SHOWCASE_MARKS
 
-DAGS = ("mbt_retrain", "mbt_score", "mbt_score_monthly", "mbt_monitor", "mbt_score_wide")
+DAGS = ("mbt_retrain", "mbt_score", "mbt_monitor")
 _state: dict = {}
 
 
@@ -41,7 +34,7 @@ def _client(stack):
 
 
 def _predictions_root(stack):
-    return stack.workspace / "lake_local" / "predictions" / "retention_scores"
+    return stack.workspace / "predictions" / "retention_scores"
 
 
 def _sidecars(stack) -> list[dict]:
@@ -69,20 +62,19 @@ def sched(showcase_ci):
     for dag_id in DAGS:
         ci.wait_dag(dag_id)
 
-    # Production champions must exist (they do after the lifecycle and
-    # monthly modules; standalone runs promote the freshest gate-stamped
-    # staging versions - the CI bootstrap registered both models).
+    # The production champion must exist (it does after the lifecycle
+    # module; a standalone run promotes the freshest gate-stamped staging
+    # version - the CI bootstrap registered it).
     client = _client(ci.stack)
-    for model in ("churn_automl", "churn_monthly_xgb"):
-        try:
-            client.get_model_version_by_alias(model, "production")
-        except Exception:
-            ci.stack.mbt("promote", "--model", model, "--to", "production", timeout=300)
+    try:
+        client.get_model_version_by_alias("churn_automl", "production")
+    except Exception:
+        ci.stack.mbt("promote", "--model", "churn_automl", "--to", "production", timeout=300)
     return ci
 
 
 def test_retrain_dag_builds_on_cluster_from_pinned_unit(sched) -> None:
-    """The weekly retrain path: scheduler -> pinned unit -> prod target."""
+    """The retrain path: scheduler -> pinned unit -> prod target."""
     ci = sched
     client = _client(ci.stack)
     before = len(client.search_model_versions("name='churn_baseline_xgb'"))
@@ -166,44 +158,19 @@ def test_score_dags_straddling_promotion_flip_champion_zero_redeploy(sched) -> N
     _state["scored_versions"] = (served_before, promoted)
 
 
-def test_score_monthly_dag_runs_duckdb_plane_from_scheduler(sched) -> None:
-    """SHOW-17's scheduled path: the monthly cadence runs from Airflow too,
-    entirely on the DuckDB plane inside the pinned unit (no cluster)."""
-    import json
-
-    ci = sched
-    client = _client(ci.stack)
-    champion = client.get_model_version_by_alias("churn_monthly_xgb", "production").version
-
-    def _spark_apps() -> int:
-        master = ci.stack.http_json(
-            f"http://localhost:{ci.stack.ports['SHOWCASE_SPARK_UI_PORT']}/json/"
-        )
-        return len(master.get("completedapps", [])) + len(master.get("activeapps", []))
-
-    apps_before = _spark_apps()
-    run_id = ci.trigger_dag("mbt_score_monthly")
-    assert ci.wait_dag_run("mbt_score_monthly", run_id) == "success"
-
-    # The DuckDB-plane claim, asserted: the cluster saw no new applications.
-    assert _spark_apps() == apps_before
-
-    # The month-start batch scored with the run-time champion (same-anchor
-    # re-scores overwrite the same run_key, so >= 1 run exists either way).
-    root = ci.stack.workspace / "lake_local" / "predictions" / "monthly_retention_scores"
-    sidecars = [
-        json.loads(path.read_text())
-        for path in sorted(root.glob("*/predictions.json"), key=lambda p: p.stat().st_mtime)
-    ]
-    assert sidecars, "no monthly prediction runs after the DAG"
-    assert str(sidecars[-1]["model_version"]) == str(champion), sidecars[-1]
-    assert sidecars[-1]["row_count"] > 0, sidecars[-1]
-
-
 def test_monitor_dag_routes_exit_codes(sched) -> None:
     """SHOW-13 at the scheduler: 2 = fail fast to the owner; 1 = retry."""
     ci = sched
+    # The scored cohort's outcomes land in the lake table, so the monitor has
+    # something to grade; put the table back as seeded afterwards.
+    ci.stack.panel("land-outcomes")
+    try:
+        _monitor_dag_routes_exit_codes(ci)
+    finally:
+        ci.stack.panel("reset")
 
+
+def _monitor_dag_routes_exit_codes(ci) -> None:
     # Quality verdict: an impossible realized floor breaches the gate on
     # the freshly scored (unevaluated) runs -> mbt exits 2 -> the task
     # fails on try 1, retries NOT consumed (AirflowFailException).
@@ -230,54 +197,3 @@ def test_monitor_dag_routes_exit_codes(sched) -> None:
     monitored = {str(v) for v in _state.get("scored_versions", ())}
     sidecar_versions = {str(doc["model_version"]) for doc in _sidecars(ci.stack)}
     assert monitored <= sidecar_versions
-
-
-def test_score_wide_dag_gates_monthly_batch(sched) -> None:
-    """SHOW-20's scheduled path: the 1st-of-month wide cadence scores from
-    Airflow and the Evidently serving gate passes against the persisted
-    reference. Kept last: its prediction run stays unevaluated, out of the
-    monitor DAG assertions above. Dev (h2o local) bootstrap only, per the
-    flake-isolation rule: sparkling-on-cluster stays out of scheduled paths."""
-    import json
-
-    ci = sched
-    client = _client(ci.stack)
-    try:
-        client.get_model_version_by_alias("churn_wide_automl", "production")
-    except Exception:
-        ci.stack.mbt(
-            "build",
-            "--target",
-            "dev",
-            "--select",
-            "churn_wide_automl",
-            "--anchor",
-            ANCHOR,
-            timeout=1800,
-        )
-        ci.stack.mbt("promote", "--model", "churn_wide_automl", "--to", "production", timeout=300)
-
-    reference = ci.stack.workspace / "monitoring" / "wide_reference.parquet"
-    if not reference.is_file():
-        ci.stack.exec(
-            "python",
-            "scripts/evidently_gate.py",
-            "--phase",
-            "train",
-            "--export-reference",
-            "/workspace/monitoring/wide_reference.parquet",
-        )
-
-    run_id = ci.trigger_dag("mbt_score_wide")
-    assert ci.wait_dag_run("mbt_score_wide", run_id) == "success"
-
-    root = ci.stack.workspace / "lake_local" / "predictions" / "wide_retention_scores"
-    sidecars = [
-        json.loads(path.read_text())
-        for path in sorted(root.glob("*/predictions.json"), key=lambda p: p.stat().st_mtime)
-    ]
-    assert sidecars, "no wide prediction runs after the DAG"
-    assert sidecars[-1]["row_count"] > 0, sidecars[-1]
-    # the gate ran inside the unit and left its artifacts on the mount
-    assert (ci.stack.workspace / "monitoring" / "wide_current.parquet").is_file()
-    assert (ci.stack.workspace / "monitoring" / "wide_drift_report.html").is_file()

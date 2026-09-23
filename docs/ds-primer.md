@@ -1,7 +1,7 @@
 # The training pipeline, explained for data scientists
 
 This page explains how model training works here, aimed at a data scientist joining the team.
-It uses the [showcase](showcase.md)'s batch-monthly churn model as the running example; the [tutorial](tutorial.md) is the full two-persona walkthrough, and the [naming conventions](naming-conventions.md) page defines the date columns used below.
+It uses a batch-monthly churn model as the running example (the [showcase](showcase.md) runs a simpler version of it end to end); the [tutorial](tutorial.md) is the full two-persona walkthrough, and the [naming conventions](naming-conventions.md) page defines the date columns used below.
 
 ## The big idea: your model is a config file, not a notebook
 
@@ -72,7 +72,6 @@ While iterating, you can train on a slice: `sample_fraction: 0.1` keeps a random
 ## Step 4: The model has to pass gates before it counts
 
 After training, the model is scored on the held-out test months and checked against **gates**: the PR-AUC has to clear a floor that is meaningfully above the base churn rate (a gate below the base rate would pass a coin flip), and if a model is already in production, the challenger must beat it by a statistically defensible margin - not just a lucky decimal.
-The showcase adds a stability check: the selected features' distributions are compared between the train and test windows, and if they shifted too much, promotion is blocked.
 Exit codes tell you what happened: 0 means trained and passed, 2 means a quality bar said no (that is feedback for you, not a system error), 1 means something actually broke.
 
 ## Step 5: Ship by merging, not by exporting
@@ -85,6 +84,6 @@ You never hand anyone a pickle file.
 
 ## What this means for your day
 
-Explore freely in Jupyter - the showcase ships a worked notebook, `project/notebooks/ds_inner_loop.ipynb`, that walks this whole loop cell by cell - but make every real decision land in YAML.
+Explore freely in Jupyter - the showcase ships a worked notebook, `project/notebooks/ds_inner_loop.ipynb`, that walks the build-analyze-iterate loop cell by cell - but make every real decision land in YAML.
 When something fails with exit 2, read it as the system protecting you: a leaky feature, an unstable distribution, a model that is not actually better.
 The pipeline is opinionated precisely so that your good ideas survive contact with production, and so the you-of-six-months-from-now can reproduce what the you-of-today did.

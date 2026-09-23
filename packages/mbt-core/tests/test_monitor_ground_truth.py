@@ -195,6 +195,52 @@ def test_no_labels_yet_retries_later(
     assert node.message and "evaluated 1 of 1" in node.message
 
 
+def _write_outcomes_with_nulls(project_dir: Path, *, labelled: int) -> None:
+    """Every scored row has a label ROW, but only the first ``labelled`` carry a
+    value: the one-table shape, where a cohort's rows exist before its outcomes."""
+    table = pa.table(
+        {
+            "user_id": list(range(120)),
+            "churned": pa.array(
+                [(1 if i % 4 == 0 else 0) if i < labelled else None for i in range(120)],
+                type=pa.int64(),
+            ),
+        }
+    )
+    pq.write_table(table, project_dir / "data" / "churn_outcomes" / "part-000.parquet")
+
+
+def test_null_labels_have_not_arrived_so_the_run_retries(
+    monitored_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    _write_outcomes_with_nulls(monitored_project, labelled=0)
+    _build_and_promote(monitored_project, fake_registry)
+    _score(monitored_project, fake_registry)
+    with recording_bus() as sink:
+        results = monitor(monitored_project, fake_registry)
+    assert results.exit_code() == 0
+    node = next(r for r in results.results if r.unique_id == SCORING)
+    assert node.message and "evaluated 0 of 1" in node.message
+    said = sink.messages()
+    assert [m for m in said if "no matured labels joined" in m], said
+    assert not [m for m in said if "single-class" in m], said
+    assert not list(_prediction_runs(monitored_project)[0].glob("*.marker.json"))
+
+
+def test_partially_arrived_labels_evaluate_only_the_known_outcomes(
+    monitored_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    _write_outcomes_with_nulls(monitored_project, labelled=80)
+    _build_and_promote(monitored_project, fake_registry)
+    _score(monitored_project, fake_registry)
+    results = monitor(monitored_project, fake_registry)
+    assert results.exit_code() == 0
+    run_dir = _prediction_runs(monitored_project)[0]
+    marker = json.loads((run_dir / "ground_truth.marker.json").read_text())
+    assert marker["matched_rows"] == 80
+    assert marker["coverage"] == round(80 / 120, 4)
+
+
 def test_scoring_without_ground_truth_is_skipped(
     monitored_project: Path, fake_registry: AdapterRegistry
 ) -> None:

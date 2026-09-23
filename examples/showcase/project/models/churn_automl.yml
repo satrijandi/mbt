@@ -1,17 +1,40 @@
 models:
   - name: churn_automl
-    description: "H2O AutoML churn challenger; sparkling (in-executor) training on the prod target"
+    description: "H2O AutoML churn model; sparkling (in-executor) training on the prod target, the served champion"
     task: binary_classification
     adapter: h2o_automl
     owner: growth-ds@example.com
-    tags: [churn, weekly]
+    tags: [churn]
 
-    dataset: ref('churn_training_set')
+    dataset: ref('churn_training')
 
-    target: churned_90d
+    target: is_churn
     features:
-      include: ["*"]
-      exclude: [user_id, upgraded_90d, plan_type, account_status]   # id, sibling label, post-outcome status
+      # The lake table is hundreds of columns wide; the model reads these 16.
+      # Naming them is the reviewed decision - a column arriving upstream can
+      # never start training silently, and editing this list marks the model
+      # state:modified, so slim CI retrains exactly it.
+      include:
+        - age_years
+        - region
+        - income_band
+        - plan_tier
+        - contract_code
+        - household_size
+        - login_days_30d
+        - days_since_login
+        - sessions_30d
+        - avg_session_min
+        - txn_cnt_30d
+        - txn_amt_sum_30d
+        - txn_amt_avg_90d
+        - merchant_diversity
+        - top_category
+        - support_tickets_90d
+      # Every string feature, plus contract_code: int8-coded (0 =
+      # month-to-month ... 3 = two-year) with a deliberately non-monotone churn
+      # effect, so read as a magnitude it costs real signal (ADR-27).
+      categorical: [region, income_band, plan_tier, contract_code, top_category]
 
     # The known-deterministic spec shape (no time budgets, no CV): H2O's
     # documented determinism tier is 0.02 tolerance on all metrics.

@@ -10,10 +10,10 @@ and run in collection (alphabetical) order. Exactly ONE ordering constraint
 is load-bearing: test_showcase_ci must be the first forge consumer (its
 bootstrap test asserts a virgin Woodpecker). Every other module is
 standalone-safe by construction - it provisions or promotes whatever it
-needs (ensure_seeded, ensure_daily_champion, the scheduling fixture's
-promote-if-missing loop) - and every score/monitor invocation is
-cadence-scoped (--select tag:...) so adding a cadence never breaks a
-neighbor.
+needs (ensure_seeded, ensure_champion, the scheduling fixture's
+promote-if-missing loop) - and every module that changes the lake table
+(land-outcomes, inject-drift) puts it back with `panel("reset")`, so the
+next module sees the table exactly as seeded.
 
 Everything the stack writes lives under the pytest tmp workspace or in
 compose-project-scoped docker volumes; teardown is `down -v` in a finally.
@@ -32,7 +32,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHOWCASE_DIR = REPO_ROOT / "examples" / "showcase"
-CHURN_DEMO_DATA = REPO_ROOT / "tests" / "fixtures" / "churn_demo" / "data"
 
 SKIP_REASON = (
     "showcase stack tests are opt-in: set MBT_LIVE_SHOWCASE=1 with docker running "
@@ -48,55 +47,6 @@ SHOWCASE_MARKS = [
 ANCHOR = "2026-06-30T00:00:00Z"
 MONITOR_ANCHOR = "2026-07-20T00:00:00Z"
 RUNNER_IMAGE = os.environ.get("MBT_SHOWCASE_RUNNER_IMAGE", "mbt-showcase-runner:dev")
-
-# -- the Snowflake data plane (DESIGN.md section 11) ---------------------------
-# TRIPLE gated: the stack gate above, plus the live-Snowflake opt-in, plus
-# complete credentials. Warehouse traffic must never follow from docker alone,
-# and the showcase tier's own guarantee (docker and nothing else) must survive -
-# so this tier is additive, never a precondition.
-SNOWFLAKE_SKIP_REASON = (
-    "the showcase Snowflake plane is opt-in on TOP of the stack: set "
-    "MBT_LIVE_SHOWCASE=1 MBT_LIVE_SNOWFLAKE=1 plus SNOWFLAKE_* "
-    "(examples/showcase/README.md)"
-)
-SNOWFLAKE_MARKS = [
-    *SHOWCASE_MARKS,
-    pytest.mark.live_snowflake,
-    pytest.mark.skipif(os.environ.get("MBT_LIVE_SNOWFLAKE") != "1", reason=SNOWFLAKE_SKIP_REASON),
-]
-
-SNOWFLAKE_REQUIRED_ENV = (
-    "SNOWFLAKE_ACCOUNT",
-    "SNOWFLAKE_USER",
-    "SNOWFLAKE_WAREHOUSE",
-    "SNOWFLAKE_DATABASE",
-    "SNOWFLAKE_SCHEMA",
-)
-SNOWFLAKE_AUTH_ENV = (
-    "SNOWFLAKE_PASSWORD",
-    "SNOWFLAKE_AUTHENTICATOR",
-    "SNOWFLAKE_PRIVATE_KEY_FILE",
-)
-
-
-def require_snowflake() -> None:
-    """Gate 3: opted in but misconfigured must FAIL loudly, never skip.
-
-    Mirrors packages/mbt-snowflake/tests/test_snowflake_live.py, so one .env
-    satisfies both suites.
-    """
-    missing = [name for name in SNOWFLAKE_REQUIRED_ENV if not os.environ.get(name)]
-    if missing:
-        pytest.fail(
-            "MBT_LIVE_SNOWFLAKE=1 but these are unset: "
-            + ", ".join(missing)
-            + " (see packages/mbt-snowflake/.env.example)"
-        )
-    if not any(os.environ.get(name) for name in SNOWFLAKE_AUTH_ENV):
-        pytest.fail(
-            "MBT_LIVE_SNOWFLAKE=1 but no auth is configured: set one of "
-            + ", ".join(SNOWFLAKE_AUTH_ENV)
-        )
 
 
 def require_docker() -> None:
@@ -229,22 +179,18 @@ class ComposeStack:
     def _stage_workspace(self) -> None:
         # tmp/ and monitoring/ are created here, by the host, on purpose: every
         # container runs as root, so whichever one reached the directory first
-        # would own it and the host could no longer write into it. monitoring/
-        # holds the persisted serving baseline (the DAG's unit containers are
-        # ephemeral) and the poisoned batch the serving-gate test writes.
+        # would own it and the host could no longer write into it.
         for shared in ("tmp", "monitoring"):
             (self.workspace / shared).mkdir(parents=True, exist_ok=True)
+        # No data is staged: the lake table is generated in the stack
+        # (seed_lake below), exactly as `make seed` does it.
         for src, dest in (
             (SHOWCASE_DIR / "project", self.workspace / "project"),
-            (CHURN_DEMO_DATA, self.workspace / "seed"),
             (SHOWCASE_DIR / "bootstrap", self.workspace / "bootstrap"),
         ):
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(src, dest)
-        # The monthly tables live beside the showcase (SHOW-17); merge them
-        # into the same seed dir the churn_demo tables come from.
-        shutil.copytree(SHOWCASE_DIR / "data", self.workspace / "seed", dirs_exist_ok=True)
 
     # -- in-container execution ----------------------------------------------
     def exec(
@@ -268,70 +214,14 @@ class ComposeStack:
     ) -> subprocess.CompletedProcess[str]:
         return self.exec("mbt", *args, expect_exit=expect_exit, timeout=timeout)
 
-    # -- host execution (the Snowflake plane) ---------------------------------
-    def host_env(self) -> dict[str, str]:
-        """Env for a HOST-run mbt against this stack.
-
-        The `snowflake` target reaches MLflow and the S3 artifact store over
-        published ports rather than compose service names (see the target's
-        comment in project/profiles.yml), and the stack allocates those ports
-        at random, so they must be passed through rather than defaulted.
-        AWS_* are needed unconditionally: profiles.yml renders whole, and its
-        s3a anchor calls env_var('AWS_ACCESS_KEY_ID') with no default.
-        """
-        env = os.environ.copy()
-        env.update(
-            {
-                # A whole URI, not a bare port: env_var() taints its value and
-                # redact() censors every tainted string out of serialized
-                # output, so a 4-digit port corrupts floats in the job-result
-                # JSON. See the target's comment in project/profiles.yml.
-                "SHOWCASE_MLFLOW_URI": self.mlflow_url(),
-                "SHOWCASE_S3_PORT": str(self.ports["SHOWCASE_S3_PORT"]),
-                # Must match compose's ${SHOWCASE_S3_KEY:-...} defaults and the
-                # identity in compose/seaweedfs/s3_config.json; a wrong key
-                # here fails late, as InvalidAccessKeyId when a trained model
-                # uploads. test_showcase_image_pins.py holds the three in sync.
-                "AWS_ACCESS_KEY_ID": os.environ.get("SHOWCASE_S3_KEY", "mbtadmin"),
-                "AWS_SECRET_ACCESS_KEY": os.environ.get("SHOWCASE_S3_SECRET", "mbtsecret"),
-                "AWS_ENDPOINT_URL_S3": self.s3_url(),
-                "AWS_DEFAULT_REGION": "us-east-1",
-                # Keep prediction runs inside the pytest workspace (F20: never
-                # the checkout), so teardown removes them with everything else.
-                "SHOWCASE_SNOWFLAKE_PREDICTIONS": str(self.workspace / "snowflake_predictions"),
-            }
+    def panel(self, command: str, *args: str) -> subprocess.CompletedProcess[str]:
+        """Drive the one lake table (bootstrap/churn_panel.py), as make does."""
+        return self.exec(
+            "python", "/workspace/bootstrap/churn_panel.py", command, *args, workdir="/workspace"
         )
-        return env
-
-    def host_mbt(
-        self, *args: str, expect_exit: int = 0, timeout: int = 1800
-    ) -> subprocess.CompletedProcess[str]:
-        """`mbt` on the host against the workspace copy of the project.
-
-        Used only by the Snowflake plane: warehouse credentials live in the
-        developer's shell (and SSO needs a real browser), and the runner image
-        does not ship mbt-snowflake.
-        """
-        proc = subprocess.run(
-            [sys.executable, "-m", "mbt.cli.main", *args],
-            cwd=self.workspace / "project",
-            env=self.host_env(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        assert proc.returncode == expect_exit, (
-            f"host mbt {args} exited {proc.returncode} (wanted {expect_exit})\n"
-            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
-        )
-        return proc
 
     def seed_lake(self) -> None:
-        self.exec("python", "/workspace/bootstrap/seed_lake.py", workdir="/workspace")
-
-    def sync_lake(self) -> None:
-        self.exec("python", "/workspace/bootstrap/sync_lake.py", workdir="/workspace")
+        self.panel("seed")
 
     # -- assertions helpers ----------------------------------------------------
     def run_results(self) -> dict:
@@ -377,8 +267,8 @@ class ComposeStack:
             return json.loads(resp.read().decode())
 
 
-def ensure_daily_champion(stack: ComposeStack) -> None:
-    """Standalone-safety: modules that score `tag:daily` need a production
+def ensure_champion(stack: ComposeStack) -> None:
+    """Standalone-safety: modules that score need a production
     churn_automl champion. A full session inherits the lifecycle module's;
     a solo module run trains and promotes one here instead (dev target,
     spark snapshot scheme - no --deep-snapshot)."""
@@ -390,7 +280,6 @@ def ensure_daily_champion(stack: ComposeStack) -> None:
         return
     except Exception:
         pass
-    stack.sync_lake()
     stack.mbt(
         "build", "--target", "dev", "--select", "churn_automl", "--anchor", ANCHOR, timeout=1800
     )

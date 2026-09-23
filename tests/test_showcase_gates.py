@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 import showcase_utils
-from showcase_utils import SKIP_REASON, SNOWFLAKE_SKIP_REASON
+from showcase_utils import SKIP_REASON
 
 TESTS_DIR = Path(__file__).resolve().parent
 
@@ -27,19 +27,17 @@ HERMETIC = frozenset(
     {
         "test_showcase_gates",
         "test_showcase_image_pins",
-        "test_showcase_seaweedfs_plane",
-        "test_showcase_wide_scripts",
+        "test_showcase_panel",
     }
 )
 
 #: Gated modules that carry a second opt-in on top of MBT_LIVE_SHOWCASE=1,
 #: and the variable their skip reason must name. Dropping one of these would
-#: put the k3d tier on the nightly path (no k3d there), boot a second full
-#: stack beside the session one, or send warehouse traffic from docker alone.
+#: put the k3d tier on the nightly path (no k3d there), or boot a second full
+#: stack beside the session one.
 EXTRA_GATES = {
     "test_showcase_k3d": "MBT_LIVE_SHOWCASE_K3D=1",
     "test_showcase_make": "MBT_LIVE_SHOWCASE_MAKE=1",
-    "test_showcase_snowflake": "MBT_LIVE_SNOWFLAKE=1",
 }
 
 
@@ -110,17 +108,3 @@ def test_opting_in_with_an_unreachable_daemon_fails(monkeypatch) -> None:
     )
     with pytest.raises(pytest.fail.Exception, match="daemon is not reachable"):
         showcase_utils.require_docker()
-
-
-def test_the_snowflake_gate_fails_on_incomplete_credentials(monkeypatch) -> None:
-    """Gate 3 of the warehouse plane: opted in but misconfigured must FAIL."""
-    assert "MBT_LIVE_SNOWFLAKE=1" in SNOWFLAKE_SKIP_REASON
-    for name in (*showcase_utils.SNOWFLAKE_REQUIRED_ENV, *showcase_utils.SNOWFLAKE_AUTH_ENV):
-        monkeypatch.delenv(name, raising=False)
-    with pytest.raises(pytest.fail.Exception, match="SNOWFLAKE_ACCOUNT"):
-        showcase_utils.require_snowflake()
-
-    for name in showcase_utils.SNOWFLAKE_REQUIRED_ENV:
-        monkeypatch.setenv(name, "set")
-    with pytest.raises(pytest.fail.Exception, match="no auth is configured"):
-        showcase_utils.require_snowflake()

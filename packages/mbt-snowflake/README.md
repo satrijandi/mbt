@@ -134,15 +134,11 @@ config:
 
 Verified against `snowflake-connector-python` 4.7.1.
 
-## A full walkthrough
-
-The [showcase](https://github.com/satrijandi/mbt/tree/main/examples/showcase) runs its wide monthly churn cadence straight out of Snowflake - seeding, building the panels in the warehouse, training, promotion, scoring, and monitoring - with `make snowflake-seed && make snowflake`, and ships a data-scientist notebook for the same plane.
-
 ## Tests
 
 The unit tests execute the adapter's generated SQL in DuckDB, with shim macros for Snowflake-only functions, and need no account.
 
-`tests/test_snowflake_live.py` additionally proves on a real account what a stand-in cannot: the `MD5_NUMBER_LOWER64` digest, snapshot tokens on tables, views, and dynamic tables, Arrow streaming, identifier case rules, the showcase's upstream panel join, and a full `mbt build` then `mbt run --manifest` loop from a laptop.
+`tests/test_snowflake_live.py` additionally proves on a real account what a stand-in cannot: the `MD5_NUMBER_LOWER64` digest, snapshot tokens on tables, views, and dynamic tables, Arrow streaming, identifier case rules, the [showcase](https://github.com/satrijandi/mbt/tree/main/examples/showcase)'s committed dataset spec building from a warehouse copy of its lake table, and a full `mbt build` then `mbt run --manifest` loop from a laptop.
 It is double-gated: every test skips unless `MBT_LIVE_SNOWFLAKE=1`, and once opted in, incomplete configuration fails loudly instead of skipping.
 
 Credentials live in environment variables, never in `profiles.yml`.

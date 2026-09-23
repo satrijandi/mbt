@@ -34,40 +34,26 @@ WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 
-.PHONY: help image workspace up seed down clean urls demo score monthly wide monitor ci \
-  inject-drift seaweedfs snowflake-seed snowflake snowflake-drop
+.PHONY: help image workspace up seed down clean urls demo score monitor outcomes \
+  inject-drift reset ci
 .DEFAULT_GOAL := help
 
-# The warehouse plane (DESIGN.md section 11). Unlike every other recipe here
-# these run mbt on the HOST, not through $(EXEC): warehouse credentials live
-# in your shell, externalbrowser SSO needs a real browser, and the runner
-# image does not ship mbt-snowflake. The host reaches the stack over its
-# published ports, which the `snowflake` target reads from these same vars.
-HOST_MBT := SHOWCASE_MLFLOW_URI=http://localhost:$(or $(SHOWCASE_MLFLOW_PORT),5501) \
-  SHOWCASE_S3_PORT=$(or $(SHOWCASE_S3_PORT),8333) \
-  AWS_ACCESS_KEY_ID=$(or $(SHOWCASE_S3_KEY),mbtadmin) \
-  AWS_SECRET_ACCESS_KEY=$(or $(SHOWCASE_S3_SECRET),mbtsecret) \
-  AWS_ENDPOINT_URL_S3=http://localhost:$(or $(SHOWCASE_S3_PORT),8333) \
-  AWS_DEFAULT_REGION=us-east-1 \
-  uv run --project $(REPO_ROOT) mbt
-# --project-dir is a per-command option, not a global one, so it goes after
-# the subcommand in each recipe below.
-SF_PROJECT := --project-dir $(SHOWCASE_DIR)/project
+# The one lake table's size (bootstrap/churn_panel.py): `default` keeps every
+# recipe quick; `make seed SCALE=huge` reseeds ~1.6M rows x 320 columns (2.9GB).
+SCALE ?= default
+PANEL := $(EXEC) python /workspace/bootstrap/churn_panel.py
 
 help:
 	@echo "mbt showcase (see README.md for the full runbook):"
-	@echo "  make up            build the runner image, boot the stack, seed the lake"
+	@echo "  make up            build the runner image, boot the stack, seed the lake table"
+	@echo "  make seed          (re)write the lake table; SCALE=huge for ~1.6M rows x 320 columns"
 	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
 	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
-	@echo "  make monthly       the cluster-free monthly cadence on the DuckDB plane"
-	@echo "  make wide          the batch-monthly wide cadence (selection funnel + evidently gates + sparkling AutoML)"
-	@echo "  make score         rerun daily scoring (lake sync, mbt score, metric push)"
-	@echo "  make monitor       rerun ground-truth monitoring at the pinned anchor"
-	@echo "  make inject-drift  poison the scoring batch and watch MbtShiftBreach fire"
-	@echo "  make seaweedfs     the same wide cadence sourced straight off SeaweedFS - build, score, and monitor with no synced copy"
-	@echo "  make snowflake-seed  load the wide cadence's tables into Snowflake (needs SNOWFLAKE_*)"
-	@echo "  make snowflake       the same wide cadence, reading Snowflake instead of the lake"
-	@echo "  make snowflake-drop  remove the MBT_SHOWCASE_* tables from Snowflake"
+	@echo "  make score         score the newest cohort with the production champion, push metrics"
+	@echo "  make outcomes      a month passes: the newest cohort's labels land in the table"
+	@echo "  make monitor       ground-truth monitoring at the pinned anchor"
+	@echo "  make inject-drift  poison the newest cohort and watch MbtShiftBreach fire"
+	@echo "  make reset         put the newest cohort back as seeded (undoes outcomes and drift)"
 	@echo "  make urls          print every UI URL and its login"
 	@echo "  make down          stop and remove containers, volumes, and the network"
 	@echo "  make clean         down, then also remove the workspace"
@@ -93,16 +79,16 @@ workspace:
 	  docker run --rm -v $(SHOWCASE_WORKSPACE):/workspace $(SHOWCASE_RUNNER_IMAGE) \
 	    rm -rf /workspace/project
 	rsync -a $(SHOWCASE_DIR)/project/ $(SHOWCASE_WORKSPACE)/project/
-	rsync -a --delete $(REPO_ROOT)/tests/fixtures/churn_demo/data/ $(SHOWCASE_WORKSPACE)/seed/
-	rsync -a $(SHOWCASE_DIR)/data/ $(SHOWCASE_WORKSPACE)/seed/
 	rsync -a $(SHOWCASE_DIR)/bootstrap/ $(SHOWCASE_WORKSPACE)/bootstrap/
 
 up: image workspace
 	$(COMPOSE) up -d --wait
 	$(MAKE) seed urls
 
+# The lake table is generated, never committed: deterministic at any SCALE,
+# written straight into s3://mbt-lake/churn_panel/ (bootstrap/churn_panel.py).
 seed:
-	$(COMPOSE) exec -T jupyterlab python /workspace/bootstrap/seed_lake.py
+	$(PANEL) seed --scale $(SCALE)
 
 urls:
 	@echo ""
@@ -159,126 +145,48 @@ clean: down
 	  rm -rf $(SHOWCASE_WORKSPACE); \
 	}
 
-# The whole lifecycle, narrated. Anchors are pinned to the seeded data range
-# (2026-01..06); MONITOR_ANCHOR sits past the 14d ground-truth maturity.
+# The whole lifecycle, narrated, on the one lake table. Anchors are pinned to
+# the seeded cohorts (2025-07..2026-06): ANCHOR makes 2026-06-01 the scoring
+# cohort, and MONITOR_ANCHOR sits past the 14d ground-truth maturity.
 demo:
-	@echo "==> [1/6] DS inner loop: mbt build --target dev (Spark local[2] over the s3a lake, H2O local)"
+	@echo "==> [1/7] DS inner loop: mbt build --target dev (Spark local[2] over the s3a lake, H2O local)"
 	$(EXEC) mbt build --target dev --anchor $(ANCHOR)
-	@echo "==> [2/6] Cluster training: mbt build --target prod (sparkling H2O inside Spark executors)"
+	@echo "==> [2/7] Cluster training: mbt build --target prod (sparkling H2O inside Spark executors)"
 	$(EXEC) mbt build --target prod --anchor $(ANCHOR)
-	@echo "==> [3/6] Gate-verified promotion of the freshest staging champions to production"
-	$(EXEC) bash -c 'mbt promote --model churn_automl --to production'
-	$(EXEC) bash -c 'mbt promote --model churn_monthly_xgb --to production'
-	$(EXEC) bash -c 'mbt promote --model churn_wide_automl --to production'
-	@echo "==> [4/6] Sync the lake to the scoring plane"
-	$(EXEC) python /workspace/bootstrap/sync_lake.py
-	@echo "==> [5/6] Batch scoring with the production champion (run-time resolution)"
-	$(EXEC) mbt score --target prod_score --anchor $(ANCHOR) --deep-snapshot
-	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
-	@echo "==> [6/6] Ground-truth monitoring at maturity"
-	$(EXEC) mbt monitor --target prod_score --anchor $(MONITOR_ANCHOR) --deep-snapshot
-	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
+	@echo "==> [3/7] Gate-verified promotion of the freshest staging champion to production"
+	$(EXEC) mbt promote --model churn_automl --to production
+	@echo "==> [4/7] Batch scoring of the newest cohort with the production champion"
+	$(EXEC) mbt score --target batch --anchor $(ANCHOR)
+	$(EXEC) python scripts/push_metrics.py /workspace/project
+	@echo "==> [5/7] Monitoring before the outcomes land: the labels are still NULL, so it waits"
+	$(EXEC) mbt monitor --target batch --anchor $(MONITOR_ANCHOR)
+	@echo "==> [6/7] A month passes: the newest cohort's outcomes land in the same table"
+	$(PANEL) land-outcomes
+	@echo "==> [7/7] Ground-truth monitoring: realized metrics and gates"
+	$(EXEC) mbt monitor --target batch --anchor $(MONITOR_ANCHOR)
+	$(EXEC) python scripts/push_metrics.py /workspace/project
 	@echo ""
-	@echo "Predictions (one dir per cadence): $(SHOWCASE_WORKSPACE)/lake_local/predictions/"
+	@echo "Predictions: $(SHOWCASE_WORKSPACE)/predictions/retention_scores/"
 	@$(MAKE) urls
 
 score:
-	$(EXEC) python /workspace/bootstrap/sync_lake.py
-	$(EXEC) mbt score --target prod_score --select tag:daily --anchor $(ANCHOR) --deep-snapshot
-	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
+	$(EXEC) mbt score --target batch --anchor $(ANCHOR)
+	$(EXEC) python scripts/push_metrics.py /workspace/project
 
-# The monthly cadence (SHOW-17), entirely on the DuckDB batch plane: retrain
-# from the synced lake, gate-verified promote, score the month-start batch.
-# `make monitor` evaluates its 30-day labels once they mature.
-monthly:
-	$(EXEC) python /workspace/bootstrap/sync_lake.py
-	$(EXEC) mbt build --target prod_score --select tag:monthly --anchor $(ANCHOR) --deep-snapshot
-	$(EXEC) bash -c 'mbt promote --model churn_monthly_xgb --to production'
-	$(EXEC) mbt score --target prod_score --select tag:monthly --anchor $(ANCHOR) --deep-snapshot
-	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
+outcomes:
+	$(PANEL) land-outcomes
 
 monitor:
-	$(EXEC) mbt monitor --target prod_score --anchor $(MONITOR_ANCHOR) --deep-snapshot
-	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
-
-# The wide batch-monthly cadence (SHOW-19/SHOW-20, ADR-29): one panel joined
-# upstream from a population spine and three feature histories keyed
-# differently, the ds-helper selection funnel as a committed diff, sparkling
-# AutoML on the selected columns, an Evidently stability gate before
-# promotion (train vs test on the selected features; a breach exits 2 and
-# stops this recipe before promote), scoring from the panel's label-free
-# twin, and a second Evidently gate on the scored batch. `make monitor`
-# evaluates the one-month-later outcomes once they mature.
-wide:
-	$(EXEC) python /workspace/bootstrap/sync_lake.py
-	$(EXEC) mbt build --target dev --select churn_wide_probe --anchor $(ANCHOR)
-	$(EXEC) python scripts/select_features.py
-	$(EXEC) git -C /workspace/project diff --stat -- models/churn_wide_automl.yml || true
-	$(EXEC) mbt build --target prod --select churn_wide_automl --anchor $(ANCHOR)
-	$(EXEC) python scripts/evidently_gate.py --phase train --export-reference /workspace/monitoring/wide_reference.parquet
-	$(EXEC) bash -c 'mbt promote --model churn_wide_automl --to production'
-	$(EXEC) mbt score --target prod_score --select tag:wide --anchor $(ANCHOR) --deep-snapshot
-	$(EXEC) python scripts/evidently_gate.py --phase serving --reference /workspace/monitoring/wide_reference.parquet
-	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
-	@echo "drift report: $(SHOWCASE_WORKSPACE)/project/drift_report.html"
-	@echo "selection report: $(SHOWCASE_WORKSPACE)/project/target/feature_selection_report.json"
-
-# The SAME wide cadence as `make wide`, sourced STRAIGHT off SeaweedFS - for
-# scoring and monitoring too, not just training (DESIGN.md section 11, P8).
-# `make wide` runs its batch legs on prod_score, the DuckDB copy sync_lake.py
-# mirrors out of the bucket, so nothing there ever reads a live object store at
-# score time. This recipe does, through mbt-spark's contract-1.1 methods, and
-# never calls sync_lake at all.
-#
-# Needs only `make up` - no credentials, no account, no browser, and it runs in
-# the stack like every other recipe here.
-#
-# No --deep-snapshot anywhere: for a URI source the spark adapter hashes the
-# table's input-file listing, which is already mtime-independent, so the deep
-# and shallow tokens agree. Passing one would be a second token scheme on one
-# pipeline (ADR-11's fresh-checkout problem is a local-path problem).
-seaweedfs:
-	$(EXEC) mbt build --target seaweedfs --select tag:wide --anchor $(ANCHOR)
-	# --target matters on promote: the registered name only exists because of
-	# this target's plane_suffix.
-	$(EXEC) mbt promote --target seaweedfs --model churn_wide_automl_seaweedfs --to production
-	$(EXEC) mbt score --target seaweedfs --select tag:wide --anchor $(ANCHOR)
-	$(EXEC) mbt monitor --target seaweedfs --select tag:wide --anchor $(MONITOR_ANCHOR)
-	@echo "object-store plane done: versions are registered as churn_wide_automl_seaweedfs"
-	@echo "predictions staged under: $(SHOWCASE_WORKSPACE)/seaweedfs_predictions/predictions/wide_retention_scores/"
-	@echo "MLflow: this plane's training runs land in the churn_lake__seaweedfs experiment"
-
-# The SAME wide cadence as `make wide`, reading Snowflake instead of the lake
-# (DESIGN.md section 11). The dataset, model, and scoring specs are unedited -
-# every source table declares an identifier: alongside its path:, so the plane
-# really is just --target. Needs SNOWFLAKE_* in your shell (see
-# packages/mbt-snowflake/.env.example) and `make up` already running, because
-# tracking, the registry, and the artifact store are the stack's.
-#
-# Key-pair auth is worth setting up for this: browser SSO re-prompts once per
-# mbt process unless your account has ALLOW_ID_TOKEN enabled, and this recipe
-# runs four of them (docs/troubleshooting.md).
-snowflake-seed:
-	uv run --project $(REPO_ROOT) python $(SHOWCASE_DIR)/scripts/seed_snowflake.py --force
-
-snowflake:
-	$(HOST_MBT) build $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(ANCHOR)
-	# --target matters here: without it promote falls back to dev, whose
-	# registry URI is the in-network http://mlflow:5000 the host cannot reach.
-	$(HOST_MBT) promote $(SF_PROJECT) --target snowflake --model churn_wide_automl_snowflake --to production
-	$(HOST_MBT) score $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(ANCHOR)
-	$(HOST_MBT) monitor $(SF_PROJECT) --target snowflake --select tag:wide --anchor $(MONITOR_ANCHOR)
-	@echo "warehouse plane done: versions are registered as churn_wide_automl_snowflake"
-	@echo "predictions staged under: $(SHOWCASE_DIR)/project/target/snowflake_predictions"
-	@echo "MLflow: 2 training runs in the churn_lake__snowflake experiment, named <run_id>-<model>; score/monitor log nothing"
-
-snowflake-drop:
-	uv run --project $(REPO_ROOT) python $(SHOWCASE_DIR)/scripts/seed_snowflake.py --drop
+	$(EXEC) mbt monitor --target batch --anchor $(MONITOR_ANCHOR)
+	$(EXEC) python scripts/push_metrics.py /workspace/project
 
 # Break the model in production on purpose, then watch the alert fire:
-# shift the scoring batch, score (exit 2 tolerated), push, check Grafana.
+# shift the newest cohort, score (exit 2 tolerated), push, check Grafana.
 inject-drift:
-	$(EXEC) python /workspace/bootstrap/inject_drift.py
-	-$(EXEC) mbt score --target prod_score --select tag:daily --anchor $(ANCHOR) --deep-snapshot
-	$(EXEC) python /workspace/project/scripts/push_metrics.py /workspace/project
-	@echo "shift injected: watch MbtShiftBreach fire in Prometheus/Grafana; make score to recover"
+	$(PANEL) inject-drift
+	-$(EXEC) mbt score --target batch --anchor $(ANCHOR)
+	$(EXEC) python scripts/push_metrics.py /workspace/project
+	@echo "shift injected: watch MbtShiftBreach fire in Prometheus/Grafana; make reset score to recover"
+
+reset:
+	$(PANEL) reset
