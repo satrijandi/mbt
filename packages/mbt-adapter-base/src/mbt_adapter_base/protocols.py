@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import pyarrow as pa
 from pydantic import BaseModel
 
+from mbt_adapter_base.capabilities import Capability
+from mbt_adapter_base.events import Event
 from mbt_adapter_base.interchange import (
     ArtifactRef,
     DatasetLocator,
@@ -50,10 +52,22 @@ if TYPE_CHECKING:
 
 
 class EventSink(Protocol):
-    """Minimal event outlet available to adapters and hooks."""
+    """Minimal event outlet available to adapters and hooks.
 
-    def emit(self, event: object) -> None:
-        """Emit a typed event or a plain message object."""
+    Typed (B-4): the parameter used to be ``object``, and the bus wrapped
+    anything that was not an ``Event`` in a bare ``LogMessage`` at the DEFAULT
+    level - so an adapter emitting a string could not say "this is a warning",
+    and the same condition was a WARN from one adapter and an info line from
+    another (v5 live defect 1). Severity is a property of the event.
+
+    ``mbt_adapter_base.events`` holds the shared vocabulary; an adapter with
+    something to say that has no type yet emits ``AdapterMessage``. The one
+    place a foreign object is still tolerated is the hook boundary, via
+    ``as_event``.
+    """
+
+    def emit(self, event: Event) -> None:
+        """Emit a typed event."""
         ...
 
 
@@ -186,15 +200,38 @@ class TrainingAdapter(Protocol):
         """Known nondeterminism sources in this spec (FR-RUN-06)."""
         ...
 
+    def capabilities(self, spec: "ModelSpec | None" = None) -> frozenset[Capability]:
+        """Which optional capabilities this adapter has, for ``spec`` (B-1).
 
-# The optional-capability protocols below describe methods core probes with
-# ``hasattr`` (never ``isinstance`` on the hot path). ``@runtime_checkable`` lets
-# a test assert an adapter *has* the method - but only verifies the NAME, never
-# the signature. The signature teeth are static: each adapter that implements a
+        Core calls this instead of probing for methods, so a capability is
+        something an adapter SAYS it has rather than something core infers from
+        a method name. Taking the spec lets an adapter answer accurately when
+        the answer depends on it - scikit-learn's monotone support is a property
+        of the estimator, not of the library.
+
+        ``ArrowTrainingAdapter`` implements this from the methods the subclass
+        defines plus ``extra_capabilities``, so most adapters only list the
+        capabilities that have no method of their own.
+        """
+        ...
+
+
+# The optional-capability protocols below describe the SIGNATURE of each
+# optional method. They no longer describe how core decides whether to call one:
+# that is ``capabilities()``, declared on ``TrainingAdapter`` below (B-1).
+#
+# Until v5 nothing dispatched on these at all - 16 ``hasattr`` probes across
+# ``execute/`` did, so deleting all four protocol declarations changed nothing
+# at runtime and a renamed method silently disabled a capability. They earn
+# their place now as the signature contract: each adapter that implements a
 # capability adds a ``_: SupportsX = TheAdapter(...)`` conformance variable that
 # this repo's strict mypy checks (the opaque ``model`` is typed ``Any`` so an
 # adapter may narrow it to its own concrete model type). ``model`` is opaque to
 # core, so ``Any`` here is the honest type, not a widening.
+#
+# ``DECLARING`` a capability is the other half, and ``DataAdapterCompliance``'s
+# sibling ``test_declared_capabilities_match_what_the_adapter_can_do`` asserts
+# the two agree in both directions.
 @runtime_checkable
 class SupportsTrainWithReport(Protocol):
     """OPTIONAL TrainingAdapter capability: per-round tuning progress.
@@ -256,6 +293,25 @@ class SupportsExplain(Protocol):
     def explain(self, model: Any, data: DatasetHandle, split: str, top_k: int) -> list[str]: ...
 
 
+@runtime_checkable
+class SupportsBestIteration(Protocol):
+    """OPTIONAL TrainingAdapter capability: how many rounds a fit used (D-2).
+
+    Boosting adapters that honour ``early_stopping_rounds`` know how many
+    rounds the fit actually kept. Core uses it during tuning: when the dataset
+    declares no ``validation`` split, the final fit REABSORBS the carve the
+    trials stopped on (ADR-8, deliberately - those rows are training data), so
+    the final model would otherwise train every round while the hyperparameters
+    were selected under early stopping. Carrying the trials' median best
+    iteration into the final ``n_estimators`` ships the complexity the search
+    actually chose, without losing any training rows.
+
+    Return None when the fit did not stop early.
+    """
+
+    def best_iteration(self, model: Any) -> int | None: ...
+
+
 class PredictionStore(Protocol):
     """One scoring pipeline's prediction sink (contract 1.1, ADR-21).
 
@@ -289,6 +345,12 @@ class DataAdapter(Protocol):
     ``build_scoring_input`` and ``open_predictions`` are contract 1.1
     additions (ADR-20/21); core probes for them with ``hasattr`` and fails
     with a clear error before any job runs when an adapter predates them.
+
+    The build itself is NOT per-adapter policy: ``build_dataset`` and
+    ``build_scoring_input`` should delegate to
+    ``materialization.build_dataset_materialization`` /
+    ``build_scoring_materialization`` and implement ``DatasetBuildEngine``'s
+    four methods instead (A-1). ``DataAdapterCompliance`` is the ship bar.
     """
 
     @property
@@ -307,6 +369,27 @@ class DataAdapter(Protocol):
         ...
 
     def open_predictions(self, output: "ScoringOutputSpec") -> PredictionStore: ...
+
+    # Source-level checks (F2/F21). DECLARED here since v5: all three data
+    # adapters implemented them and no protocol mentioned them, so core reached
+    # them by ``getattr`` and an adapter author reading this file could not
+    # learn that a DataAdapter needs them (A-1).
+
+    def count_source_duplicates(self, source: "SourceTableLike", columns: list[str]) -> int:
+        """Distinct COMPOSITE keys appearing more than once in the RAW source.
+
+        The 1:1 cardinality contract behind the ``unique`` check's ``source:``
+        mode. Null keys are ignored, as in dbt.
+        """
+        ...
+
+    def read_source_distinct(self, source: "SourceTableLike", column: str) -> pa.Table:
+        """DISTINCT non-null values of one raw source column.
+
+        A single-column table named ``value`` - the parent side of the
+        ``relationships`` check.
+        """
+        ...
 
 
 class TrackingAdapter(Protocol):
@@ -481,7 +564,6 @@ class AdapterPlugin:
     #: A report engine (contract 1.2, ADR-30), named by a model's
     #: ``evaluation.report.stability.engine``.
     reporting: type[Any] | None = None
-    task_schemas: dict[TaskType, type[Any]] = field(default_factory=dict)
     fingerprint_packages: list[str] = field(default_factory=list)
 
 
@@ -491,10 +573,12 @@ PythonDataTest = Any  # def test_*(dataset: pa.Table, spec: DatasetSpec) -> Test
 __all__ = [
     "AdapterPlugin",
     "ArtifactStore",
+    "Capability",
     "ComputeAdapter",
     "DataAdapter",
     "DataBuildContext",
     "DatasetHandle",
+    "Event",
     "EventSink",
     "JobHandle",
     "PredictionStore",
@@ -502,6 +586,7 @@ __all__ = [
     "RegistryAdapter",
     "ReportingEngine",
     "SourceTableLike",
+    "SupportsBestIteration",
     "TaskSchema",
     "TestResult",
     "TrackingAdapter",

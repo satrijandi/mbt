@@ -17,7 +17,6 @@ from typing import Annotated, Any
 
 import click
 import typer
-import yaml
 from rich.table import Table
 
 from mbt.cli.common import (
@@ -29,9 +28,8 @@ from mbt.cli.common import (
     parse_vars,
     print_warnings,
     render_results_table,
-    setup_bus,
 )
-from mbt.exceptions import ConfigError, MbtError
+from mbt.exceptions import MbtError
 
 
 def _control_flow_exceptions(name: str) -> tuple[type[BaseException], ...]:
@@ -177,50 +175,6 @@ DeepSnapshotOpt = Annotated[
 OutputOpt = Annotated[str, typer.Option("--output", "-o", help="Output format.")]
 
 
-def make_ctx(
-    project_dir: Path,
-    profiles_dir: Path | None,
-    target: str | None,
-    vars_: str | None,
-    log_format: str,
-    quiet: bool,
-    verbose: bool = False,
-    chdir: bool = True,
-) -> CLIContext:
-    """Build the per-command context and enter the project directory.
-
-    The coordinator chdirs to the project dir so config-relative paths
-    (file:// artifact stores, sqlite URIs, adapter roots) resolve against
-    the project no matter where mbt was invoked - job subprocesses already
-    run with cwd=project_dir, this makes the coordinator match. Paths the
-    user typed on the command line are absolutized against the invocation
-    cwd via ctx.resolve_cli_path BEFORE they are used.
-    """
-    invocation_cwd = Path.cwd()
-    project_dir = (invocation_cwd / project_dir).resolve()
-    if profiles_dir is not None:
-        profiles_dir = (invocation_cwd / profiles_dir).resolve()
-    if chdir:
-        if not project_dir.is_dir():
-            raise ConfigError(
-                f"--project-dir {project_dir} is not a directory",
-                hint="run mbt from a project or point --project-dir at one",
-            )
-        os.chdir(project_dir)
-    ctx = CLIContext(
-        project_dir=project_dir,
-        invocation_cwd=invocation_cwd,
-        profiles_dir=profiles_dir,
-        target=target,
-        cli_vars=parse_vars(vars_),
-        log_format=log_format,
-        quiet=quiet,
-        verbose=verbose,
-    )
-    setup_bus(ctx)
-    return ctx
-
-
 def guard(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Uniform MbtError -> message + exit code handling (TSD §17)."""
 
@@ -255,7 +209,9 @@ def init(
     from mbt.cli.scaffold import scaffold_project
 
     # chdir=False: project_dir is the parent to scaffold into, not a project
-    cli = make_ctx(project_dir, None, None, None, log_format, quiet, verbose, chdir=False)
+    cli = CLIContext.enter(
+        project_dir, log_format=log_format, quiet=quiet, verbose=verbose, chdir=False
+    )
     destination = scaffold_project(name, cli.project_dir)
     # soft_wrap: a path is the thing a user copies out of this line, and a
     # hard-inserted newline would split it (FEEDBACK v3 E-5, as in ConsoleSink)
@@ -277,7 +233,7 @@ def deps(
     """Install the adapter packages pinned in packages.yml."""
     from mbt.deps import install_packages, load_packages
 
-    cli = make_ctx(project_dir, None, None, None, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, log_format=log_format, quiet=quiet, verbose=verbose)
     pinned = cli.project_dir / "requirements.txt"
     requirements = install_packages(
         load_packages(cli.project_dir),
@@ -308,24 +264,21 @@ def clean(
     ] = False,
 ) -> None:
     """Delete target/ (default), or prune the artifact store (--artifacts-older-than)."""
-    import shutil
+
+    # BOTH branches go through the composition root (A-2). The default branch
+    # used to call shutil.rmtree on the raw, unresolved typer path with no
+    # context and no event bus, so `mbt clean --project-dir ../other` deleted
+    # relative to the invocation cwd, and a --project-dir that is not a
+    # directory printed "nothing to clean" instead of the ConfigError every
+    # other command raises. All four clean tests passed an absolute
+    # --project-dir, so the divergence was untested.
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, "text", False)
 
     if artifacts_older_than is None:
-        target_dir = project_dir / "target"
-        if target_dir.is_dir():
-            shutil.rmtree(target_dir)
-            out_console.print(f"removed {target_dir}")
-        else:
-            out_console.print(f"nothing to clean at {target_dir}")
-        # Age out leaked error-payload dirs (kept for debugging, never
-        # self-cleaned); recent ones survive for an in-progress reproduction.
-        from datetime import UTC, datetime, timedelta
+        from mbt.cli.inspect import clean_target_cmd
 
-        from mbt.adapters.local.compute import sweep_stale_job_payloads
-
-        swept = sweep_stale_job_payloads(datetime.now(tz=UTC) - timedelta(days=7))
-        if swept:
-            out_console.print(f"aged out {len(swept)} stale job payload dir(s) (>7d old)")
+        for note in clean_target_cmd(cli):
+            out_console.print(note)
         return
 
     from datetime import UTC, datetime
@@ -351,7 +304,6 @@ def clean(
         )
     cutoff = window.start.resolve(datetime.now(tz=UTC))  # a past duration is negative
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, "text", False)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     store_uri = resolve_artifact_store_uri(
@@ -397,7 +349,7 @@ def parse(
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     bus = get_bus()
     # The banner names the PROJECT, read from mbt_project.yml, not the directory
     # it happens to sit in. profiles.yml is keyed by the project name, so when
@@ -448,23 +400,9 @@ def compile(
     verbose: VerboseOpt = False,
 ) -> None:
     """Resolve Jinja + profiles + snapshots into target/manifest.json."""
-    from mbt.compile.compiler import CompileOptions, compile_project
-    from mbt.parsing import parse_project
-
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
-    parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
-    print_warnings(parsed)
-    profiles = cli.profiles(parsed)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     path = cli.project_dir / "target" / "manifest.json"
-    manifest = compile_project(
-        parsed,
-        profiles,
-        options=CompileOptions(
-            anchor=parse_anchor(anchor), deep_snapshot=deep_snapshot, manifest_path=path
-        ),
-        cli_vars=cli.cli_vars,
-    )
-    manifest.write(path)
+    cli.compile(anchor=anchor, deep_snapshot=deep_snapshot, write_to=path)
     out_console.print(f"wrote {path}", soft_wrap=True)
 
 
@@ -497,7 +435,7 @@ def _register_execution_command(command: str, help_text: str) -> None:
     ) -> None:
         from mbt.execute.orchestrator import run_command
 
-        cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+        cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
         results = run_command(
             cli.invocation(
                 command,
@@ -568,7 +506,7 @@ def evaluate(
     """Re-evaluate a registered artifact on freshly built data; never trains."""
     from mbt.execute.orchestrator import run_evaluate
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     results = run_evaluate(
         cli.invocation(
             "evaluate",
@@ -612,7 +550,7 @@ def monitor(
     """Evaluate matured predictions against arrived labels; never trains (ADR-21)."""
     from mbt.execute.monitor import run_monitor
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     results = run_monitor(
         cli.invocation(
             "monitor",
@@ -654,7 +592,7 @@ def predictions_ls(
 
     from mbt.execute.predictions_view import list_prediction_runs
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     runs = list_prediction_runs(
         cli.invocation("predictions", manifest_path=cli.resolve_cli_path(manifest))
     )
@@ -700,7 +638,7 @@ def predictions_show(
     from mbt.exceptions import StateError
     from mbt.execute.predictions_view import show_prediction_run
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     run = show_prediction_run(
         cli.invocation("predictions", manifest_path=cli.resolve_cli_path(manifest)), run_key
     )
@@ -758,13 +696,15 @@ def promote(
 ) -> None:
     """Transition a registered version, verifying recorded gate passes."""
     from mbt.adapters.registry import get_registry
-    from mbt.contracts import Stage
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
     from mbt.promote import load_promotions_file, promote_model
     from mbt.runtime import registry_adapter as build_registry_adapter
+    from mbt_adapter_base import (
+        Stage,
+    )
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
@@ -841,7 +781,7 @@ def rollback(
             "rollback needs --model",
             hint="e.g. mbt rollback --model churn_classifier",
         )
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
@@ -863,61 +803,64 @@ def ls(
     vars_: VarsOpt = None,
     select: SelectOpt = None,
     exclude: ExcludeOpt = None,
+    state: StateOpt = None,
+    state_include_env: StateIncludeEnvOpt = False,
     output: OutputOpt = "table",
+    anchor: AnchorOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """List resources, with the same selectors --select accepts."""
-    from mbt.dag.selector import SelectableNode, select_nodes
-    from mbt.parsing import parse_project
+    """List resources, with the same selectors --select accepts.
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
-    parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
-    nodes: dict[str, SelectableNode] = {}
-    paths: dict[str, str] = {}
-    for pool in (parsed.datasets, parsed.models, parsed.scoring, parsed.exposures):
-        for uid, res in pool.items():
-            nodes[uid] = SelectableNode(
-                unique_id=uid,
-                name=res.name,
-                resource_type=res.resource_type,
-                tags=tuple(res.tags),
-            )
-            paths[uid] = res.path
-    for uid, entry in parsed.sources.items():
-        nodes[uid] = SelectableNode(
-            unique_id=uid, name=entry.table.name, resource_type="source", tags=()
-        )
-        paths[uid] = entry.path
+    "The same selectors" was not true until v5: this hand-rolled its own node
+    view off the PARSED project and never passed ``state`` to the selector, so
+    ``mbt ls --select state:modified`` failed with "requires --state", and
+    ``mbt ls --state foo.json`` failed with "No such option" - while its own
+    docstring and ``docs/cli-reference.md`` both promised the full grammar
+    (v5 live defect 3).
+    """
+    from mbt.cli.inspect import ls_cmd
 
-    selected = sorted(select_nodes(parsed.graph, nodes, select, exclude))
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    listed = ls_cmd(
+        cli,
+        select=select,
+        exclude=exclude,
+        state=state,
+        state_include_env=state_include_env,
+        anchor=anchor,
+    )
     if output == "name":
-        for uid in selected:
-            typer.echo(nodes[uid].name)
+        for row in listed:
+            typer.echo(row.name)
     elif output == "path":
-        for uid in selected:
-            typer.echo(paths[uid])
+        for row in listed:
+            typer.echo(row.path)
     elif output == "json":
-        payload = [
-            {
-                "unique_id": uid,
-                "name": nodes[uid].name,
-                "resource_type": nodes[uid].resource_type,
-                "tags": list(nodes[uid].tags),
-                "path": paths[uid],
-            }
-            for uid in selected
-        ]
-        typer.echo(json.dumps(payload, indent=2))
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "unique_id": row.unique_id,
+                        "name": row.name,
+                        "resource_type": row.resource_type,
+                        "tags": list(row.tags),
+                        "path": row.path,
+                    }
+                    for row in listed
+                ],
+                indent=2,
+            )
+        )
     else:
         table = Table()
         table.add_column("unique_id")
         table.add_column("type")
         table.add_column("tags")
         table.add_column("path")
-        for uid in selected:
-            table.add_row(uid, nodes[uid].resource_type, ", ".join(nodes[uid].tags), paths[uid])
+        for row in listed:
+            table.add_row(row.unique_id, row.resource_type, ", ".join(row.tags), row.path)
         out_console.print(table)
 
 
@@ -930,45 +873,22 @@ def show(
     target: TargetOpt = None,
     vars_: VarsOpt = None,
     output: OutputOpt = "yaml",
+    anchor: AnchorOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Print one resource's compile-rendered config."""
-    from mbt.compile.compiler import compile_project
-    from mbt.exceptions import ConfigError
-    from mbt.parsing import parse_project
-    from mbt.utils import did_you_mean
+    """Print one resource's compile-rendered config.
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
-    parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
-    profiles = cli.profiles(parsed)
-    manifest = compile_project(parsed, profiles, cli_vars=cli.cli_vars)
+    Takes ``--anchor`` for the same reason every compiling command does: without
+    it this re-anchored to ``now()`` on each invocation, so the resolved windows
+    it printed drifted from ``target/manifest.json`` with wall-clock time - the
+    exact drift ADR-12 exists to pin (A-2).
+    """
+    from mbt.cli.inspect import show_cmd
 
-    found: dict[str, Any] | None = None
-    pools: list[dict[str, Any]] = [manifest.nodes, manifest.sources, manifest.exposures]
-    for pool in pools:
-        for uid, resource in pool.items():
-            if name in (uid, resource.name):
-                found = resource.model_dump(mode="json")
-                break
-        if found:
-            break
-    if found is None:
-        suggestion = did_you_mean(name, parsed.all_names())
-        raise ConfigError(
-            f"unknown resource {name!r}",
-            hint=f"did you mean {suggestion!r}?" if suggestion else "run 'mbt ls'",
-        )
-    # Redact tainted secrets: a spec field may render an env_var() value
-    # (jinja resolve context taints it), so this echoes rendered config the
-    # same way the manifest file does - through redact (NFR-07).
-    from mbt.secrets import redact
-
-    if output == "json":
-        typer.echo(redact(json.dumps(found, indent=2)))
-    else:
-        typer.echo(redact(yaml.safe_dump(found, sort_keys=False, default_flow_style=False)))
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    typer.echo(show_cmd(cli, name, output=output, anchor=anchor))
 
 
 @state_app.command("diff")
@@ -989,26 +909,17 @@ def state_diff(
 ) -> None:
     """What changed vs a previous manifest, and which component changed."""
     from mbt.artifacts.manifest import read_manifest
-    from mbt.compile.compiler import CompileOptions, compile_project
     from mbt.events import get_bus
     from mbt.events.models import StateDiffed
-    from mbt.parsing import parse_project
     from mbt.state.diff import diff_manifests, load_state
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     manifest = cli.resolve_cli_path(manifest)
     state = cli.resolve_cli_path(state) or state
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
     else:
-        parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
-        profiles = cli.profiles(parsed)
-        current = compile_project(
-            parsed,
-            profiles,
-            options=CompileOptions(anchor=parse_anchor(anchor), deep_snapshot=deep_snapshot),
-            cli_vars=cli.cli_vars,
-        )
+        _, current = cli.compile(anchor=anchor, deep_snapshot=deep_snapshot)
     reference = load_state(state)
     diff = diff_manifests(current, reference)
     # Surface the diff on the event stream (independent of the --output data
@@ -1052,24 +963,27 @@ def docs_generate(
     target: TargetOpt = None,
     vars_: VarsOpt = None,
     manifest: ManifestOpt = None,
+    anchor: AnchorOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Render model cards + lineage into target/docs."""
+    """Render model cards + lineage into target/docs.
+
+    Takes ``--anchor`` like every other compiling command (A-2); without it the
+    compile re-anchored to ``now()``, so a card's resolved windows disagreed
+    with the manifest the run actually used.
+    """
     from mbt.artifacts.manifest import read_manifest
     from mbt.artifacts.run_results import read_latest_results
-    from mbt.compile.compiler import compile_project
     from mbt.docsgen import generate_docs
-    from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     manifest = cli.resolve_cli_path(manifest)
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
     else:
-        parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
-        current = compile_project(parsed, cli.profiles(parsed), cli_vars=cli.cli_vars)
+        _, current = cli.compile(anchor=anchor)
     # Model cards want the metrics a TRAINING command produced, which is not
     # necessarily the last command that ran: `mbt score`/`mbt monitor` rewrite
     # the shared run_results.json with only their own nodes (A-2).
@@ -1124,7 +1038,7 @@ def run_operation(
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 
-    cli = make_ctx(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
     parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
     profiles = cli.profiles(parsed)
     if macro not in parsed.renderer.macro_names:

@@ -41,7 +41,7 @@ def test_read_with_explicit_columns() -> None:
     handle = TransformedDatasetHandle(base, spec, None, _hook_ctx_factory(spec), None)
     selected = handle.read("train", columns=["a"])
     assert selected.column_names == ["a"]
-    assert handle.feature_columns == ["a", "b"]
+    assert handle.feature_columns() == ["a", "b"]
 
 
 def test_hooks_transform_applies_per_split() -> None:
@@ -206,7 +206,7 @@ def test_pinned_features_drop_extra_columns_with_one_warning() -> None:
     bus = get_bus()
     before = len(getattr(bus, "messages", []))
     assert handle.read("score").column_names == ["a", "b"]
-    assert handle.feature_columns == ["a", "b"]
+    assert handle.feature_columns() == ["a", "b"]
     handle.read("extra")  # a second split must not re-warn
     warnings = [m for m in getattr(bus, "messages", [])[before:] if "was not trained on" in str(m)]
     assert len(warnings) <= 1
@@ -238,3 +238,54 @@ def test_no_pin_leaves_glob_selection_untouched() -> None:
         base, spec, None, _hook_ctx_factory(spec), None, require_target=False
     )
     assert handle.read("score").column_names == ["a", "b", "surprise"]
+
+
+# -- C-2: feature_columns is a return value, not smuggled state --------------
+
+
+def test_feature_columns_resolves_without_a_prior_read() -> None:
+    """It was populated as a SIDE EFFECT of the first ``read()``, so seven
+    readers relied on someone having read first and all fell back to ``or []``
+    - and ``job.py`` carried ``read("train")  # resolves the feature columns``,
+    an obligation held in a comment (C-2).
+    """
+    spec = minimal_model_spec()
+    base = _LocatableHandle({"train": _table()}, label_column="y")
+    handle = TransformedDatasetHandle(base, spec, None, _hook_ctx_factory(spec), None)
+    assert handle.feature_columns() == ["a", "b"]  # nothing was read first
+
+
+def test_feature_columns_resolves_from_whatever_split_exists() -> None:
+    """A scoring view has no ``train`` split; asking must still work."""
+    spec = minimal_model_spec()
+    base = _LocatableHandle({"score": _table()}, label_column="y")
+    handle = TransformedDatasetHandle(
+        base, spec, None, _hook_ctx_factory(spec), None, require_target=False
+    )
+    assert handle.feature_columns() == ["a", "b"]
+
+
+def test_an_empty_recorded_pin_is_a_missing_pin_not_a_pin_of_zero_features() -> None:
+    """The write side and the read side disagreed about what empty meant, and
+    ``_apply_pin`` treats any non-None pin as authoritative - so an empty list
+    would have projected every batch onto no columns at all (C-2)."""
+    spec = minimal_model_spec()
+    base = _LocatableHandle({"train": _table()}, label_column="y")
+    handle = TransformedDatasetHandle(
+        base, spec, None, _hook_ctx_factory(spec), None, pinned_features=[]
+    )
+    assert handle.feature_columns() == ["a", "b"]  # the globs, not zero features
+
+
+def test_base_is_reachable_without_touching_a_private() -> None:
+    spec = minimal_model_spec()
+    base = _LocatableHandle({"train": _table()}, label_column="y")
+    handle = TransformedDatasetHandle(base, spec, None, _hook_ctx_factory(spec), None)
+    assert handle.base is base
+
+
+def test_a_view_over_no_splits_has_no_feature_columns() -> None:
+    spec = minimal_model_spec()
+    base = _LocatableHandle({}, label_column="y")
+    handle = TransformedDatasetHandle(base, spec, None, _hook_ctx_factory(spec), None)
+    assert handle.feature_columns() == []

@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -27,7 +29,9 @@ from mbt_adapter_base import (
     RunContext,
     TaskType,
 )
+from mbt_adapter_base.capabilities import Capability, capabilities_of, supports
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
+from mbt_adapter_base.types import OUT_OF_TIME_SPLIT
 
 
 class _NullSink:
@@ -450,8 +454,8 @@ class TrainingAdapterCompliance:
         import pytest
 
         adapter = self.adapter()
-        if not hasattr(adapter, "feature_importance"):
-            pytest.skip("adapter does not expose feature_importance (optional)")
+        if not supports(adapter, Capability.FEATURE_IMPORTANCE):
+            pytest.skip("adapter does not declare Capability.FEATURE_IMPORTANCE (optional)")
         data = self.dataset()
         model = adapter.train(
             self.model_spec(TaskType.BINARY_CLASSIFICATION), data, self.run_context()
@@ -474,8 +478,8 @@ class TrainingAdapterCompliance:
         import pytest
 
         adapter = self.adapter()
-        if not hasattr(adapter, "shap_importance"):
-            pytest.skip("adapter does not expose shap_importance (optional)")
+        if not supports(adapter, Capability.SHAP_IMPORTANCE):
+            pytest.skip("adapter does not declare Capability.SHAP_IMPORTANCE (optional)")
         data = self.dataset()
         model = adapter.train(
             self.model_spec(TaskType.BINARY_CLASSIFICATION), data, self.run_context()
@@ -498,8 +502,8 @@ class TrainingAdapterCompliance:
         import pytest
 
         adapter = self.adapter()
-        if not hasattr(adapter, "explain"):
-            pytest.skip("adapter does not expose explain (optional)")
+        if not supports(adapter, Capability.EXPLAIN):
+            pytest.skip("adapter does not declare Capability.EXPLAIN (optional)")
         data = self.dataset()
         model = adapter.train(
             self.model_spec(TaskType.BINARY_CLASSIFICATION), data, self.run_context()
@@ -513,8 +517,38 @@ class TrainingAdapterCompliance:
             magnitudes = [abs(float(contribution)) for _, contribution in pairs]
             assert magnitudes == sorted(magnitudes, reverse=True)  # descending |contribution|
 
+    def test_declared_capabilities_match_what_the_adapter_can_do(self) -> None:
+        """Capability is a declaration now, so it can be checked (B-1).
+
+        Two directions, and both used to be unenforceable:
+
+        - every capability the adapter DECLARES must have a callable method, so
+          a declared-but-missing capability fails here instead of at train time;
+        - every optional method the adapter DEFINES must be declared, so adding
+          ``explain`` without declaring it cannot leave the capability dark.
+
+        The old shape could express neither: the compliance suite gated on
+        ``getattr(adapter, "supports_calibration", False)``, so a typo in the
+        class-variable name silently SKIPPED the test rather than failing it.
+        """
+        from mbt_adapter_base.capabilities import _CAPABILITY_METHODS
+
+        adapter = self.adapter()
+        declared = capabilities_of(adapter)
+        for capability, method in _CAPABILITY_METHODS.items():
+            present = callable(getattr(adapter, method, None))
+            if capability in declared:
+                assert present, (
+                    f"{type(adapter).__name__} declares {capability} but has no callable {method!r}"
+                )
+            else:
+                assert not present, (
+                    f"{type(adapter).__name__} defines {method!r} but does not declare "
+                    f"{capability}, so core will never call it"
+                )
+
     def test_calibration_round_trips_through_export_when_supported(self) -> None:
-        """OPTIONAL capability (``supports_calibration``): a model trained with
+        """OPTIONAL capability (``Capability.CALIBRATION``): a model trained with
         post-hoc calibration must carry its calibrator through export -> load, so
         the calibration-sensitive metrics are unchanged afterward. A calibrator
         dropped on export silently un-calibrates a promoted model while its
@@ -525,8 +559,8 @@ class TrainingAdapterCompliance:
         import pytest
 
         adapter = self.adapter()
-        if not getattr(adapter, "supports_calibration", False):
-            pytest.skip("adapter does not support calibration (optional)")
+        if not supports(adapter, Capability.CALIBRATION):
+            pytest.skip("adapter does not declare Capability.CALIBRATION (optional)")
         metrics = [
             MetricSpec(name="brier", kind="builtin", greater_is_better=False),
             MetricSpec(name="ece", kind="builtin", greater_is_better=False),
@@ -547,7 +581,7 @@ class TrainingAdapterCompliance:
             )
 
     def test_calibration_falls_back_to_the_validation_split_when_supported(self) -> None:
-        """OPTIONAL capability (``supports_calibration``): a direct caller (this
+        """OPTIONAL capability (``Capability.CALIBRATION``): a direct caller (this
         suite, a notebook) that passes a handle with a held-out ``validation``
         split and no ``calibration`` slice still gets a calibrated model - the
         documented fallback (F17). Probes that training succeeds and predictions
@@ -555,8 +589,8 @@ class TrainingAdapterCompliance:
         import pytest
 
         adapter = self.adapter()
-        if not getattr(adapter, "supports_calibration", False):
-            pytest.skip("adapter does not support calibration (optional)")
+        if not supports(adapter, Capability.CALIBRATION):
+            pytest.skip("adapter does not declare Capability.CALIBRATION (optional)")
         data = self.dataset_with_validation()
         spec = self.model_spec(TaskType.BINARY_CLASSIFICATION, calibration="isotonic")
         model = adapter.train(spec, data, self.run_context())
@@ -564,7 +598,7 @@ class TrainingAdapterCompliance:
         assert scores and all(0.0 <= s <= 1.0 for s in scores)
 
     def test_train_with_report_streams_validation_progress_when_supported(self) -> None:
-        """OPTIONAL tuning contract (``SupportsReportingTrainer``): reports a
+        """OPTIONAL tuning contract (``Capability.TRAIN_WITH_REPORT``): reports a
         higher-is-better validation value per round to the callback the Optuna
         pruner consumes, and still returns a usable model. A silent or drifted
         report path breaks pruning without failing training - caught here. It
@@ -572,8 +606,8 @@ class TrainingAdapterCompliance:
         import pytest
 
         adapter = self.adapter()
-        if not hasattr(adapter, "train_with_report"):
-            pytest.skip("adapter does not expose train_with_report (optional)")
+        if not supports(adapter, Capability.TRAIN_WITH_REPORT):
+            pytest.skip("adapter does not declare Capability.TRAIN_WITH_REPORT (optional)")
         data = self.dataset_with_validation()
         spec = self.model_spec(TaskType.BINARY_CLASSIFICATION)
         reports: list[tuple[Any, Any]] = []
@@ -653,3 +687,510 @@ class PredictionStoreCompliance:
             # A rewrite of the run clears its markers (fresh run, fresh ledger).
             store.write_run(_tiny_predictions(2), _run_info("k1", "2026-01-03T00:00:00Z"))
             assert store.read_marker("k1", "ground_truth") is None
+
+
+# -- data adapters (A-1) ----------------------------------------------------
+
+
+@dataclass
+class ComplianceBuildContext:
+    """A ``DataBuildContext`` for compliance runs, with plain fields."""
+
+    node: Any
+    source: Any
+    source_tables: dict[str, Any]
+    resolved_windows: dict[str, tuple[str, str]]
+    sample_fraction: float
+    deep_snapshot: bool
+    output_dir: Path
+    events: Any
+    build_parallelism: int = 1
+
+
+class RecordingEvents:
+    """Collects emitted events so a compliance case can assert on their type."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def emit(self, event: Any) -> None:
+        self.events.append(event)
+
+    def of_type(self, kind: type) -> list[Any]:
+        return [e for e in self.events if isinstance(e, kind)]
+
+
+#: The compliance dataset's key column and the split it is bucketed into.
+COMPLIANCE_SAMPLE_KEY = "row_id"
+COMPLIANCE_SPLIT_SEED = 7
+COMPLIANCE_FRACTIONS = {"train": 0.6, "validation": 0.2, "test": 0.2}
+
+
+def tiny_source_rows(n_rows: int = 200) -> pa.Table:
+    """The one relation a data-adapter compliance run reads (ADR-29).
+
+    ``row_id`` is the sample key, ``ts`` the split time column, ``label`` the
+    target. Deterministic, so every engine buckets identical rows.
+    """
+    import datetime as _dt
+
+    start = _dt.datetime(2026, 1, 1)
+    return pa.table(
+        {
+            COMPLIANCE_SAMPLE_KEY: list(range(n_rows)),
+            "ts": [start + _dt.timedelta(days=i % 60) for i in range(n_rows)],
+            "feature": [float(i % 17) for i in range(n_rows)],
+            "label": [i % 2 for i in range(n_rows)],
+        }
+    )
+
+
+class DataAdapterCompliance:
+    """Subclass per DataAdapter (A-1). The data seam's ship bar.
+
+    The seam had no compliance suite at all: ``compliance/suite.py`` shipped
+    base classes for training adapters and prediction stores only, and
+    ``mbt-testing`` shipped fakes for six seams and none for this one - so
+    every dataset test ran real DuckDB, and the three adapters agreed on the
+    build recipe only by each copying it.
+
+    The load-bearing case is ``test_random_split_membership_matches_the_reference``:
+    bucket membership against ``materialization.reference_bucket``, which is the
+    arithmetic that decides which rows train. It used to be re-derived in three
+    separate test files, one per adapter.
+
+    Override ``make_adapter``: persist ``rows`` where the adapter reads them and
+    return ``(adapter, source_table)``.
+    """
+
+    #: Engines whose zero-row split cannot be provoked through a window (e.g. a
+    #: stub that answers every query) may set this False.
+    supports_empty_split_error: ClassVar[bool] = True
+
+    def make_adapter(self, root: Path, rows: pa.Table) -> tuple[Any, Any]:
+        """Return ``(adapter, source_table)`` reading ``rows`` as one relation."""
+        raise NotImplementedError
+
+    # -- helpers -----------------------------------------------------------
+
+    def _build(
+        self,
+        root: Path,
+        *,
+        windows: dict[str, tuple[str, str]] | None = None,
+        sample_fraction: float = 1.0,
+        n_rows: int = 200,
+        events: Any = None,
+    ) -> tuple[Any, Any, RecordingEvents]:
+        from mbt_adapter_base.specs import DatasetSpec
+
+        adapter, source = self.make_adapter(root, tiny_source_rows(n_rows))
+        uid = f"source.compliance.{source.name}"
+        sink = events or RecordingEvents()
+        temporal = windows is not None
+        spec = DatasetSpec.model_validate(
+            {
+                "name": "compliance_ds",
+                "source": uid,
+                "sample_key": [COMPLIANCE_SAMPLE_KEY],
+                "label": {"column": "label"},
+                "split": (
+                    {"strategy": "temporal", "time_column": "ts", **_window_exprs(windows or {})}
+                    if temporal
+                    else {
+                        "strategy": "random",
+                        "train": str(COMPLIANCE_FRACTIONS["train"]),
+                        "validation": str(COMPLIANCE_FRACTIONS["validation"]),
+                        "test": str(COMPLIANCE_FRACTIONS["test"]),
+                        "seed": COMPLIANCE_SPLIT_SEED,
+                    }
+                ),
+            }
+        )
+        ctx = ComplianceBuildContext(
+            node=_compliance_node("dataset.compliance.compliance_ds", "dataset"),
+            source=source,
+            source_tables={uid: source},
+            resolved_windows=dict(windows or {}),
+            sample_fraction=sample_fraction,
+            deep_snapshot=False,
+            output_dir=root / "materialization",
+            events=sink,
+        )
+        return adapter, (spec, ctx), sink
+
+    # -- cases -------------------------------------------------------------
+
+    def test_random_split_membership_matches_the_reference(self) -> None:
+        """The arithmetic that decides which rows train, pinned to one source.
+
+        Every engine expresses the bucket in its own dialect; all of them must
+        reproduce ``reference_bucket`` exactly, or a model validated on one
+        backend trains on different rows on another (F19).
+        """
+        from mbt_adapter_base.materialization import reference_split
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, (spec, ctx), _ = self._build(Path(tmp))
+            handle = adapter.build_dataset(spec, ctx)
+            assert handle.splits() == {"train", "validation", "test"}
+            seen = 0
+            for split in sorted(handle.splits()):
+                for key in handle.read(split).column(COMPLIANCE_SAMPLE_KEY).to_pylist():
+                    expected = reference_split(
+                        [str(key)], COMPLIANCE_FRACTIONS, COMPLIANCE_SPLIT_SEED
+                    )
+                    assert expected == split, f"{COMPLIANCE_SAMPLE_KEY}={key}"
+                    seen += 1
+            assert seen == 200  # every row landed somewhere; no bucket gap
+
+    def test_a_successful_build_reports_its_row_counts_once(self) -> None:
+        from mbt_adapter_base.events import DatasetMaterialized
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, (spec, ctx), sink = self._build(Path(tmp))
+            handle = adapter.build_dataset(spec, ctx)
+            reported = sink.of_type(DatasetMaterialized)
+            assert len(reported) == 1
+            assert reported[0].level == "info"
+            assert reported[0].row_counts == {
+                split: handle.read(split).num_rows for split in handle.splits()
+            }
+
+    def test_an_empty_after_test_split_warns_and_is_kept(self) -> None:
+        """ADR-30's one exempt empty split, at one severity for every engine.
+
+        This is v5 live defect 1: the local adapter emitted a typed WARN and
+        the two warehouse adapters emitted a bare string the bus logged at
+        INFO, so the same condition had two severities depending only on which
+        adapter ran. No per-adapter test could see it, because each asserted
+        against its own adapter.
+        """
+        from mbt_adapter_base.events import EmptyAfterTestSplit
+        from mbt_adapter_base.types import OUT_OF_TIME_SPLIT
+
+        windows = {
+            "train": ("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+            "test": ("2026-02-01T00:00:00Z", "2026-03-05T00:00:00Z"),
+            OUT_OF_TIME_SPLIT: ("2027-01-01T00:00:00Z", "2027-02-01T00:00:00Z"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, (spec, ctx), sink = self._build(Path(tmp), windows=windows)
+            handle = adapter.build_dataset(spec, ctx)
+            assert handle.read(OUT_OF_TIME_SPLIT).num_rows == 0
+            warned = sink.of_type(EmptyAfterTestSplit)
+            assert [e.level for e in warned] == ["warn"]
+            assert warned[0].window == windows[OUT_OF_TIME_SPLIT]
+
+    def test_an_empty_ordinary_split_is_an_error(self) -> None:
+        """Only ``out_of_time`` is exempt; anything else empty is a build failure."""
+        if not self.supports_empty_split_error:  # pragma: no cover - opt-out
+            return
+        windows = {
+            "train": ("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+            "test": ("2027-01-01T00:00:00Z", "2027-02-01T00:00:00Z"),  # no rows
+        }
+        import pytest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, (spec, ctx), _ = self._build(Path(tmp), windows=windows)
+            # the engine's own error type, whatever it is
+            with pytest.raises(Exception, match="materialized 0 rows"):
+                adapter.build_dataset(spec, ctx)
+
+    def test_sample_fraction_outside_the_unit_interval_is_rejected(self) -> None:
+        import pytest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, (spec, ctx), _ = self._build(Path(tmp), sample_fraction=1.5)
+            with pytest.raises(Exception, match="sample_fraction"):
+                adapter.build_dataset(spec, ctx)
+
+    def test_sampling_keeps_a_stable_subset(self) -> None:
+        """Smaller fractions are subsets of larger ones, on every backend (F19)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            keys: dict[float, set[int]] = {}
+            for index, fraction in enumerate((1.0, 0.5)):
+                adapter, (spec, ctx), _ = self._build(root / f"f{index}", sample_fraction=fraction)
+                handle = adapter.build_dataset(spec, ctx)
+                keys[fraction] = {
+                    key
+                    for split in handle.splits()
+                    for key in handle.read(split).column(COMPLIANCE_SAMPLE_KEY).to_pylist()
+                }
+            assert keys[0.5] < keys[1.0]
+            assert keys[0.5]
+
+    def test_source_level_checks_are_available(self) -> None:
+        """``count_source_duplicates`` and ``read_source_distinct`` are part of
+        the DataAdapter protocol, not undeclared methods core finds by
+        ``getattr`` (A-1)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, source = self.make_adapter(Path(tmp), tiny_source_rows(50))
+            assert adapter.count_source_duplicates(source, [COMPLIANCE_SAMPLE_KEY]) == 0
+            distinct = adapter.read_source_distinct(source, "label")
+            assert distinct.column_names == ["value"]
+            assert set(distinct.column("value").to_pylist()) == {0, 1}
+
+
+def _window_exprs(windows: Mapping[str, tuple[str, str]]) -> dict[str, Any]:
+    """Temporal split expressions; the resolved windows drive the actual build."""
+    exprs = {split: "-1y:now" for split in windows if split in ("train", "test")}
+    if OUT_OF_TIME_SPLIT in windows:
+        exprs[OUT_OF_TIME_SPLIT] = "now:+1y"
+    return exprs
+
+
+def _compliance_node(unique_id: str, resource_type: str) -> Any:
+    from mbt_adapter_base.interchange import ManifestNode
+
+    return ManifestNode(
+        unique_id=unique_id,
+        resource_type=resource_type,  # type: ignore[arg-type]
+        name=unique_id.rsplit(".", 1)[-1],
+        path=f"{unique_id}.yml",
+        config={},
+    )
+
+
+# -- native categorical support (A-4) ---------------------------------------
+
+
+def categorical_dataset(levels: list[str] | None = None) -> InMemoryDatasetHandle:
+    """A dataset whose signal lives almost entirely in a categorical column."""
+    n = 400
+    plan_levels = levels or ["basic", "pro", "enterprise"]
+    plan = [plan_levels[i % len(plan_levels)] for i in range(n)]
+    noise = [((i * 37) % 100) / 100.0 for i in range(n)]
+    label = [1 if (p == "enterprise") != (noise[i] > 0.9) else 0 for i, p in enumerate(plan)]
+    table = pa.table({"noise": noise, "plan": plan, "label": label})
+    return InMemoryDatasetHandle({"train": table, "test": table}, label_column="label")
+
+
+class CategoricalAdapterCompliance:
+    """Native categorical handling, for adapters that have it (FR-ADPT-03).
+
+    This suite existed twice, once per package: after normalising the framework
+    name, ``test_xgboost_categorical.py`` and ``test_lightgbm_categorical.py``
+    differed by SIX lines and their four test function names were identical
+    (A-4). The shape of the duplication matched the adapters' own.
+
+    Override ``adapter_factory`` and ``hyperparameters``; what genuinely differs
+    per framework is the tuning of a tiny model, not what the test asserts.
+    """
+
+    adapter_factory: ClassVar[Any]
+    #: Enough rounds to learn a 3-level signal on 400 rows, per framework.
+    hyperparameters: ClassVar[dict[str, Any]] = {}
+    #: Where the level map is persisted, for the export/load assertion message.
+    categories_home: ClassVar[str] = "the artifact"
+
+    def adapter(self) -> Any:
+        return self.adapter_factory({})
+
+    def spec(self) -> ModelSpec:
+        return ModelSpec.model_validate(
+            {
+                "name": "m",
+                "task": TaskType.BINARY_CLASSIFICATION,
+                "adapter": self.adapter().name,
+                "owner": "t@example.com",
+                "dataset": "ref('d')",
+                "target": "label",
+                "hyperparameters": dict(self.hyperparameters),
+                "evaluation": EvaluationSpec(
+                    protocol=EvaluationProtocol(), metrics=["roc_auc", "pr_auc", "logloss"]
+                ),
+                "seed": 5,
+            }
+        )
+
+    def run_ctx(self) -> RunContext:
+        return RunContext(
+            run_id="t",
+            unique_id="m",
+            seed=5,
+            target_name="dev",
+            project_dir=".",
+            vars={},
+            events=_NullSink(),
+        )
+
+    def _trained(self) -> tuple[Any, Any, Any]:
+        adapter = self.adapter()
+        data = categorical_dataset()
+        return adapter, data, adapter.train(self.spec(), data, self.run_ctx())
+
+    def test_categorical_feature_carries_the_signal(self) -> None:
+        import pytest
+
+        adapter, data, model = self._trained()
+        assert model.categories == {"plan": ["basic", "enterprise", "pro"]}  # sorted levels
+        results = adapter.evaluate(
+            model, data, "test", [MetricSpec(name="roc_auc", kind="builtin")], slices=None
+        )
+        assert results.metrics["roc_auc"] > 0.85  # only the categorical explains this
+
+        importance = adapter.feature_importance(model)
+        assert set(importance) == {"noise", "plan"}
+        assert sum(importance.values()) == pytest.approx(1.0, abs=1e-3)
+        assert importance["plan"] > 0.5  # the categorical dominates, as constructed
+
+    def test_shap_importance_is_normalized_and_signal_dominant(self) -> None:
+        """The model card prefers mean-|SHAP| (additive, not cardinality-biased)
+        over split-gain when eval data is available."""
+        import pytest
+
+        adapter, data, model = self._trained()
+        shap = adapter.shap_importance(model, data, "test")
+        assert set(shap) == {"noise", "plan"}
+        assert all(value >= 0 for value in shap.values())  # mean |SHAP| is non-negative
+        assert sum(shap.values()) == pytest.approx(1.0, abs=1e-3)  # normalized to fractions
+        assert shap["plan"] > 0.5  # SHAP agrees the categorical carries the signal
+
+    def test_explain_gives_per_row_top_k_contributors(self) -> None:
+        """Local attribution: each row's top_k features by |SHAP|, ordered, as JSON."""
+        import json
+
+        adapter, data, model = self._trained()
+        rows = adapter.explain(model, data, "test", top_k=2)
+        assert len(rows) == data.read("test").num_rows
+        top = json.loads(rows[0])
+        assert len(top) == 2 and all(feature in model.features for feature, _ in top)
+        assert abs(top[0][1]) >= abs(top[1][1])  # ordered by descending |contribution|
+
+    def test_categories_survive_export_load_and_unseen_levels_predict(self) -> None:
+        adapter, data, model = self._trained()
+        scores = adapter.predict(model, data, "test").column("prediction").to_pylist()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TempArtifactStore(Path(tmp))
+            ref = adapter.export(model, "native", store)
+            loaded = adapter.load(ref, store)
+        assert loaded.categories == model.categories, (
+            f"the level map did not survive export -> load ({self.categories_home})"
+        )
+        reloaded = adapter.predict(loaded, data, "test").column("prediction").to_pylist()
+        assert reloaded == scores  # champion path scores identically
+
+        # a level unseen at train time maps to missing, never crashes
+        unseen = categorical_dataset(["basic", "pro", "enterprise", "trial"])
+        assert adapter.predict(loaded, unseen, "test").num_rows == 400
+
+
+# -- registries (A-5) -------------------------------------------------------
+
+
+class RegistryAdapterCompliance:
+    """Subclass per RegistryAdapter. The champion contract's ship bar.
+
+    There was no such suite: ``mbt-mlflow/tests/`` was the de facto contract,
+    so a second registry adapter had nothing to build against - while 53
+    ``mbt.*`` keys across 11 files in 2 packages conveyed which artifact, which
+    hooks hash, whether gates passed and where the baseline lives, entirely by
+    key spelling (A-5).
+
+    The load-bearing case is ``test_champion_record_round_trips``: what
+    ``promote.py``, ``oot_check.py`` and ``runners.py`` each separately assumed,
+    asserted in one place.
+
+    Override ``make_registry`` to return a fresh, empty registry rooted under
+    ``root``.
+    """
+
+    def make_registry(self, root: Path) -> Any:
+        raise NotImplementedError
+
+    def _record(self) -> Any:
+        from mbt_adapter_base.champion import AfterTestVerdict, ChampionRecord
+
+        ref = ArtifactRef(
+            uri="file:///tmp/model.json",
+            format="native",
+            content_hash="sha256:" + "ab" * 32,
+            size_bytes=1234,
+        )
+        return ChampionRecord(
+            artifact=ref,
+            config_hash="sha256:cfg",
+            input_hash="sha256:inp",
+            manifest_hash="sha256:man",
+            snapshot_id="sha256:snap",
+            git_commit="deadbeef",
+            tracking_run_id="run-1",
+            hooks_hash="sha256:hooks",
+            gates_passed=True,
+            baseline=ArtifactRef(
+                uri="file:///tmp/baseline.json", format="json", content_hash="", size_bytes=7
+            ),
+            inference_config=ArtifactRef(
+                uri="file:///tmp/inference.json", format="json", content_hash="", size_bytes=9
+            ),
+            report_uri="file:///tmp/report/index.html",
+            after_test=AfterTestVerdict(
+                passed="true", anchor="2026-07-01T00:00:00Z", source="build"
+            ),
+            operating_points={"threshold_at_precision_0.35": "0.61"},
+        )
+
+    def test_champion_record_round_trips(self) -> None:
+        """``get_version(register(record)).record == record``.
+
+        Every load-bearing fact a promotion decision reads must survive the
+        registry unchanged. A typo on the write side used to be caught only by
+        whichever e2e run happened to read that key back.
+        """
+        from mbt_adapter_base.champion import ChampionRecord
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.make_registry(Path(tmp))
+            record = self._record()
+            version = registry.register(record.artifact, "compliance_model", record.pack())
+            fetched = registry.get_version("compliance_model", version.version)
+            assert fetched is not None
+            assert ChampionRecord.unpack(fetched.tags) == record
+
+    def test_registered_version_carries_a_loadable_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.make_registry(Path(tmp))
+            record = self._record()
+            version = registry.register(record.artifact, "compliance_model", record.pack())
+            assert version.artifact is not None
+            assert version.artifact.uri == record.artifact.uri
+            assert version.artifact.size_bytes == record.artifact.size_bytes
+
+    def test_transition_makes_the_version_the_stage_champion(self) -> None:
+        from mbt_adapter_base.types import Stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.make_registry(Path(tmp))
+            record = self._record()
+            version = registry.register(record.artifact, "compliance_model", record.pack())
+            assert registry.get_champion("compliance_model", Stage.PRODUCTION) is None
+            registry.transition(version, Stage.PRODUCTION)
+            champion = registry.get_champion("compliance_model", Stage.PRODUCTION)
+            assert champion is not None and champion.version == version.version
+
+    def test_a_second_registration_does_not_disturb_the_first(self) -> None:
+        """Versions are independent records, so promoting one never rewrites
+        another's tags - which is what makes a rollback target intact."""
+        from mbt_adapter_base.champion import ChampionRecord
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.make_registry(Path(tmp))
+            first = self._record()
+            v1 = registry.register(first.artifact, "compliance_model", first.pack())
+            from dataclasses import replace
+
+            second = replace(first, gates_passed=False, git_commit="cafebabe")
+            v2 = registry.register(second.artifact, "compliance_model", second.pack())
+            assert v1.version != v2.version
+            back = registry.get_version("compliance_model", v1.version)
+            assert back is not None
+            assert ChampionRecord.unpack(back.tags) == first
+
+    def test_get_version_of_an_unknown_version_is_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.make_registry(Path(tmp))
+            assert registry.get_version("compliance_model", "999") is None

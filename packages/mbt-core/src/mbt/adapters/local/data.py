@@ -25,27 +25,26 @@ import duckdb
 if TYPE_CHECKING:
     import pyarrow as pa
 
-from mbt.contracts import (
-    OUT_OF_TIME_SPLIT,
-    DataBuildContext,
+from mbt.exceptions import AdapterError
+from mbt_adapter_base import (
     DatasetLocator,
     DatasetSpec,
     ScoringInputSpec,
     ScoringOutputSpec,
-    SourceTableLike,
     SplitStrategy,
 )
-from mbt.events.models import LogMessage
-from mbt.exceptions import AdapterError
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
     MaterializationError,
     MaterializedDatasetHandle,
+    bucket_ranges,
+    build_dataset_materialization,
+    build_scoring_materialization,
     combine_snapshots,
-    empty_out_of_time_message,
-    write_materialization_metadata,
+    split_fractions,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore
+from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
 
 
 def _uri_to_path(uri: str) -> Path:
@@ -139,7 +138,14 @@ class LocalDataAdapter:
                 digest.update(f"{rel}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
         return "sha256:" + digest.hexdigest()
 
-    def _verify_snapshot(self, ctx: DataBuildContext) -> None:
+    # -- DatasetBuildEngine (A-1) -------------------------------------------
+
+    def build_failure(
+        self, message: str, *, ctx: DataBuildContext, hint: str | None = None
+    ) -> Exception:
+        return AdapterError(message, resource=ctx.node.unique_id, hint=hint)
+
+    def verify_snapshot(self, ctx: DataBuildContext) -> None:
         """The data must still match the manifest pin: a drifted source under
         a pinned manifest is an error, not a silent rebuild (TSD §10.4)."""
         if ctx.node.snapshot_id is None:
@@ -160,20 +166,19 @@ class LocalDataAdapter:
 
     # -- materialization (TSD §13.2, §10.4) ----------------------------------
 
-    def build_dataset(self, spec: DatasetSpec, ctx: DataBuildContext) -> LocalDatasetHandle:
-        self._verify_snapshot(ctx)
-        output_dir = ctx.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for stale in output_dir.glob("*"):
-            stale.unlink()
+    def build_dataset(self, spec: DatasetSpec, ctx: DataBuildContext) -> MaterializedDatasetHandle:
+        return build_dataset_materialization(self, spec, ctx)
 
+    def write_dataset_splits(
+        self, spec: DatasetSpec, ctx: DataBuildContext, output_dir: Path
+    ) -> dict[str, int]:
+        """One DuckDB query per split over the dataset's single relation."""
         con = _connect_duckdb(output_dir, ctx.build_parallelism)
         try:
             self._create_base_view(con, spec.source, ctx, spec.filters, spec.sample_key_columns)
             if spec.split.strategy is SplitStrategy.TEMPORAL:
-                written = self._write_temporal_splits(con, spec, ctx, output_dir)
-            else:
-                written = self._write_random_splits(con, spec, ctx, output_dir)
+                return self._write_temporal_splits(con, spec, ctx, output_dir)
+            return self._write_random_splits(con, spec, ctx, output_dir)
         except duckdb.Error as exc:
             raise AdapterError(
                 f"dataset build failed in DuckDB: {exc}",
@@ -185,48 +190,6 @@ class LocalDataAdapter:
             ) from exc
         finally:
             con.close()
-
-        for split, count in written.items():
-            if count != 0:
-                continue
-            if split == OUT_OF_TIME_SPLIT:
-                # Common and harmless: a window ending at the anchor before any
-                # newer rows have landed. The report says so (ADR-30).
-                ctx.events.emit(
-                    LogMessage(
-                        level="warn",
-                        unique_id=ctx.node.unique_id,
-                        message=empty_out_of_time_message(ctx.resolved_windows),
-                    )
-                )
-                continue
-            raise AdapterError(
-                f"split {split!r} materialized 0 rows",
-                resource=ctx.node.unique_id,
-                hint="check the split windows/fractions against the data's time range",
-            )
-
-        ctx.events.emit(
-            LogMessage(
-                unique_id=ctx.node.unique_id,
-                message=(
-                    f"materialized {sum(written.values())} rows: "
-                    + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
-                ),
-            )
-        )
-
-        write_materialization_metadata(
-            output_dir,
-            snapshot_id=ctx.node.snapshot_id,
-            dataset=spec.name,
-            label_column=spec.label.column,
-            time_column=spec.split.time_column,
-            windows=ctx.resolved_windows,
-            sample_fraction=ctx.sample_fraction,
-            row_counts=written,
-        )
-        return LocalDatasetHandle(output_dir)
 
     # -- SQL assembly ---------------------------------------------------------
 
@@ -350,12 +313,9 @@ class LocalDataAdapter:
     ) -> None:
         relation = self._table_relation(ctx, source_uid)
         where: list[str] = [f"({f})" for f in filters]
+        # The shared recipe validates the fraction before any engine call
+        # (materialization.check_sample_fraction), so this only branches (A-1).
         sample_fraction = ctx.sample_fraction
-        if not 0.0 < sample_fraction <= 1.0:
-            raise AdapterError(
-                f"sample_fraction must be in (0, 1], got {sample_fraction}",
-                hint="set the 'sample_fraction' var in the target's vars",
-            )
         if sample_fraction < 1.0:
             digest = self._digest_sql(
                 self._digest_columns(con, sample_keys, relation, ctx=ctx, purpose="sampling")
@@ -399,11 +359,7 @@ class LocalDataAdapter:
         so it neither shifts as the dataset grows nor differs across backends.
         ``stratify_by`` is the one exception - exact per-stratum fractions need
         ranking, which stays size-dependent (documented in spec-reference)."""
-        fractions: dict[str, float] = {"train": float(spec.split.train)}
-        if spec.split.validation is not None:
-            fractions["validation"] = float(spec.split.validation)
-        fractions["test"] = float(spec.split.test)
-
+        fractions = split_fractions(spec.split)
         seed = spec.split.seed or 0
         columns = self._digest_columns(
             con, spec.sample_key_columns, "mbt_base", ctx=ctx, purpose="the random split"
@@ -433,20 +389,11 @@ class LocalDataAdapter:
                 written[split] = int(row[0]) if row else 0
             return written
 
-        # The boundary arithmetic mirrors snowflake's split_queries verbatim so
-        # the two backends compute identical bucket edges; the final split's
-        # upper bound is pinned to the modulus so no bucket can fall through a
-        # float-accumulation gap.
+        # The bucket edges come from the shared arithmetic (A-1), so all three
+        # backends split on identical boundaries by construction rather than by
+        # three implementations agreeing.
         bucket = f"({self._digest_sql(columns, salt=str(seed))} % {SAMPLE_MODULUS})"
-        low = 0.0
-        entries = list(fractions.items())
-        for index, (split, fraction) in enumerate(entries):
-            lo = int(low * SAMPLE_MODULUS)
-            hi = (
-                SAMPLE_MODULUS
-                if index == len(entries) - 1
-                else int((low + fraction) * SAMPLE_MODULUS)
-            )
+        for split, lo, hi in bucket_ranges(fractions):
             out = output_dir / f"{split}.parquet"
             con.execute(
                 f"COPY (SELECT * FROM mbt_base WHERE {bucket} >= {lo} AND {bucket} < {hi}) "
@@ -454,31 +401,18 @@ class LocalDataAdapter:
             )
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
             written[split] = int(row[0]) if row else 0
-            low += fraction
         return written
 
     # -- scoring (contract 1.1, ADR-20/21) -------------------------------------
 
     def build_scoring_input(
         self, spec: ScoringInputSpec, ctx: DataBuildContext
-    ) -> LocalDatasetHandle:
-        """Materialize one unlabeled batch as a single ``score`` split.
+    ) -> MaterializedDatasetHandle:
+        return build_scoring_materialization(self, spec, ctx)
 
-        Zero rows is a warning, not an error: an empty nightly batch is
-        legitimate (unlike an empty training split).
-
-        No snapshot verification: a scoring input (and the arriving labels
-        ``mbt monitor`` reads through this same path) is expected to change
-        every run, so a pinned manifest must score the live data, not hard-fail
-        on drift the way a dataset does (R2-10). The node's ``snapshot_id`` is
-        still recorded in the materialization metadata for provenance.
-        """
-        output_dir = ctx.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for stale in output_dir.glob("*"):
-            stale.unlink()
-
-        con = _connect_duckdb(output_dir, ctx.build_parallelism)
+    def write_scoring_batch(self, spec: ScoringInputSpec, ctx: DataBuildContext, out: Path) -> int:
+        """One DuckDB query over the unlabeled batch's single relation."""
+        con = _connect_duckdb(out.parent, ctx.build_parallelism)
         try:
             self._create_base_view(con, spec.source, ctx, spec.filters, spec.sample_key_columns)
             where = ""
@@ -489,10 +423,9 @@ class LocalDataAdapter:
                     f" WHERE {time_sql} >= TIMESTAMP '{_iso_to_sql_ts(start)}' "
                     f"AND {time_sql} < TIMESTAMP '{_iso_to_sql_ts(end)}'"
                 )
-            out = output_dir / "score.parquet"
             con.execute(f"COPY (SELECT * FROM mbt_base{where}) TO '{out}' (FORMAT PARQUET)")
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
-            count = int(row[0]) if row else 0
+            return int(row[0]) if row else 0
         except duckdb.Error as exc:
             raise AdapterError(
                 f"scoring input build failed in DuckDB: {exc}",
@@ -501,33 +434,6 @@ class LocalDataAdapter:
             ) from exc
         finally:
             con.close()
-
-        if count == 0:
-            ctx.events.emit(
-                LogMessage(
-                    level="warn",
-                    unique_id=ctx.node.unique_id,
-                    message="scoring input materialized 0 rows; nothing to score",
-                )
-            )
-        else:
-            ctx.events.emit(
-                LogMessage(
-                    unique_id=ctx.node.unique_id,
-                    message=f"scoring input materialized {count} rows to score",
-                )
-            )
-        write_materialization_metadata(
-            output_dir,
-            snapshot_id=ctx.node.snapshot_id,
-            dataset=ctx.node.name,
-            label_column="",  # unlabeled by design (ADR-20)
-            time_column=spec.time_column,
-            windows=ctx.resolved_windows,
-            sample_fraction=ctx.sample_fraction,
-            row_counts={"score": count},
-        )
-        return LocalDatasetHandle(output_dir)
 
     def open_predictions(self, output: ScoringOutputSpec) -> LocalPredictionStore:
         return LocalPredictionStore(self.root / output.path)

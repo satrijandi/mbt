@@ -24,7 +24,7 @@ from mbt.contracts import (
     DatasetSpec,
     SourceTable,
 )
-from mbt.events.models import LogMessage
+from mbt.events.models import EmptyAfterTestSplit
 from mbt.exceptions import CompilationError, ConfigError
 from mbt.execute.handles import TrainingSplitView
 from mbt.execute.job import _materialize_for_path_adapter, _prepare, run_job
@@ -267,9 +267,15 @@ def test_an_empty_after_test_split_warns_instead_of_failing(tmp_path: Path) -> N
     sink = RecordingSink()
     counts = _local_build(tmp_path, windows, sink)
     assert counts[OUT_OF_TIME_SPLIT] == 0
-    warnings = [e for e in sink.events if isinstance(e, LogMessage) and e.level == "warn"]
-    assert len(warnings) == 1
-    assert "'out_of_time' materialized 0 rows [2026-07-01T00:00:00Z" in warnings[0].message
+    empty = [e for e in sink.events if isinstance(e, EmptyAfterTestSplit)]
+    assert len(empty) == 1
+    # The severity is the EVENT's, not the adapter's. It used to be the
+    # adapter's, which is how the same condition was a WARN on local and an
+    # info line on Spark and Snowflake (v5 live defect 1); a test that asserted
+    # only `level == "warn"` on the local adapter could not see that.
+    assert empty[0].level == "warn"
+    assert empty[0].window == windows[OUT_OF_TIME_SPLIT]
+    assert "'out_of_time' materialized 0 rows [2026-07-01T00:00:00Z" in empty[0].human()
 
 
 # -- the training view ------------------------------------------------------------------

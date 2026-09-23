@@ -12,12 +12,13 @@ measured against a baseline built from it.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import pyarrow as pa
 
-from mbt.contracts import (
+from mbt_adapter_base import (
     OUT_OF_TIME_SPLIT,
     FeatureShiftSpec,
     MetricSpec,
@@ -99,6 +100,39 @@ class ReportInputs:
     after_window: tuple[str, str] | None = None
 
 
+class TableKey(StrEnum):
+    """Every table the builder may hand the writer (C-4).
+
+    The builder-to-writer contract used to be eight magic strings, plus
+    ``f"binning_{bins.name}"``, plus two keys a third module injected AFTER
+    ``build_report`` had returned - and any key that was none of those landed
+    in ``evaluation/binning/<key>.csv``, a misroute that never errored.
+    """
+
+    SPLIT_METRICS = "split_metrics"
+    FEATURE_IMPORTANCE = "feature_importance"
+    SCORE_SUMMARY = "score_summary"
+    SCORE_HISTOGRAM = "score_histogram"
+    TEST_FEATURES = "test_features"
+    PERFORMANCE_BY_PERIOD = "performance_by_period"
+    STABILITY_SCORES = "stability_scores"
+    STABILITY_FEATURES = "stability_features"
+    #: Injected by ``training_report`` after ``build_report`` returns, when a
+    #: reporting engine rendered a drift report (ADR-30).
+    ENGINE_DRIFT = "engine_drift"
+    ENGINE_DRIFT_SUMMARY = "engine_drift_summary"
+
+
+#: Prefix of a per-feature binning table; the suffix is the feature name, so
+#: these keys are open-ended by design and cannot be enum members.
+BINNING_PREFIX = "binning_"
+
+
+def binning_key(feature: str) -> str:
+    """The table key holding one feature's binning rows."""
+    return f"{BINNING_PREFIX}{feature}"
+
+
 @dataclass
 class ReportData:
     """The computed report: the summary core gates on, plus every table."""
@@ -138,13 +172,13 @@ def build_report(inputs: ReportInputs, splits: dict[str, ScoredSplit]) -> Report
         for name, split in splits.items()
         if split.n_rows
     }
-    data.tables["split_metrics"] = [
+    data.tables[TableKey.SPLIT_METRICS] = [
         {"split": name, **metrics} for name, metrics in data.summary.split_metrics.items()
     ]
     data.bins = _fit_all_bins(inputs, test, warnings)
     data.tables.update(_binning_tables(inputs, data.bins, splits))
     data.tables.update(_distribution_tables(inputs, splits, test))
-    data.tables["feature_importance"] = _importance_table(inputs)
+    data.tables[TableKey.FEATURE_IMPORTANCE] = _importance_table(inputs)
     data.summary.importance = dict(_ranked_importance(inputs)[: inputs.report.importance.top_n])
 
     if after is not None and test.times is not None and after.times is not None:
@@ -156,11 +190,11 @@ def build_report(inputs: ReportInputs, splits: dict[str, ScoredSplit]) -> Report
         active = [grain for grain in grains if grain not in skipped]
         cells, rows = _period_cells(inputs, test, after, active)
         data.summary.periods = cells
-        data.tables["performance_by_period"] = rows
+        data.tables[TableKey.PERFORMANCE_BY_PERIOD] = rows
         stability, score_rows, feature_rows = _stability(inputs, test, after, active)
         data.summary.stability = stability
-        data.tables["stability_scores"] = score_rows
-        data.tables["stability_features"] = feature_rows
+        data.tables[TableKey.STABILITY_SCORES] = score_rows
+        data.tables[TableKey.STABILITY_FEATURES] = feature_rows
     elif OUT_OF_TIME_SPLIT in splits:
         warnings.append("the after-test window holds no rows; nothing to compare yet")
     data.summary.warnings = warnings
@@ -299,7 +333,7 @@ def _binning_tables(
                     binary=inputs.binary,
                 ):
                     rows.append({"split": name, "cell": cell_label(int(code), "month"), **row})
-        tables[f"binning_{bins.name}"] = rows
+        tables[binning_key(bins.name)] = rows
     return tables
 
 
@@ -325,17 +359,17 @@ def _distribution_tables(
     inputs: ReportInputs, splits: dict[str, ScoredSplit], test: ScoredSplit
 ) -> dict[str, Table]:
     tables: dict[str, Table] = {
-        "score_summary": [
+        TableKey.SCORE_SUMMARY: [
             {"split": name, **score_summary(split.scores)} for name, split in splits.items()
         ]
     }
     bands = fit_bins(FixedWidthBinning(), test.scores, probability=inputs.binary)
     assert bands is not None  # fixed_width always fits
     if inputs.binary:
-        tables["score_histogram"] = histogram_rows(
+        tables[TableKey.SCORE_HISTOGRAM] = histogram_rows(
             test.scores, test.labels, _labelled_mask(inputs, test), bins=bands
         )
-    tables["test_features"] = _feature_profile(inputs, splits, test)
+    tables[TableKey.TEST_FEATURES] = _feature_profile(inputs, splits, test)
     return tables
 
 

@@ -15,9 +15,11 @@ import jinja2
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mbt.contracts import AdapterRef
 from mbt.exceptions import ConfigError
 from mbt.secrets import taint
+from mbt_adapter_base import (
+    AdapterRef,
+)
 
 PROFILES_FILE = "profiles.yml"
 

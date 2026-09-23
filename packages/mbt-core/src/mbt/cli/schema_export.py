@@ -6,7 +6,7 @@ from typing import Any
 
 from mbt.config.profiles import ProfilesConfig
 from mbt.config.project import ProjectConfig
-from mbt.contracts import (
+from mbt_adapter_base import (
     DatasetSpec,
     ExposureSpec,
     MetricSpec,

@@ -1,7 +1,9 @@
 # mbt: select=churn_training_set
 """Python data tests run against the materialized dataset (FR-RES-05)."""
 
-from mbt.contracts import TestResult
+from mbt_adapter_base import (
+    TestResult,
+)
 
 
 def test_label_is_binary(dataset, spec):  # type: ignore[no-untyped-def]

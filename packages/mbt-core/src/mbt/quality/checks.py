@@ -12,9 +12,15 @@ from typing import Any, Protocol
 import duckdb
 import pyarrow as pa
 
-from mbt.contracts import OUT_OF_TIME_SPLIT, CheckSpec, DatasetSpec, ScoringSpec, TestResult
 from mbt.events import get_bus
 from mbt.events.models import CheckEvaluated, LogMessage
+from mbt_adapter_base import (
+    OUT_OF_TIME_SPLIT,
+    CheckSpec,
+    DatasetSpec,
+    ScoringSpec,
+    TestResult,
+)
 
 _TIMESTAMP_TYPES = ("timestamp", "date")
 
@@ -259,6 +265,32 @@ def _check_not_null(
         con.close()
 
 
+def _source_check(adapter: Any, method: str) -> Any | None:
+    """A source-check method, or None if this adapter predates the contract.
+
+    ``count_source_duplicates`` and ``read_source_distinct`` are DECLARED on
+    the ``DataAdapter`` protocol since v5 and asserted by
+    ``DataAdapterCompliance`` (A-1), so every adapter in this repo has them and
+    an adapter author can learn they are needed by reading ``protocols.py``.
+    This stays as a backstop for a third-party adapter built against an older
+    contract - and it is one probe rather than the same ten lines written at
+    each of the two call sites.
+    """
+    return getattr(adapter, method, None)
+
+
+def _predates_source_checks(check: str, adapter: Any, method: str) -> TestResult:
+    """The one message for an adapter that cannot answer a source-level check."""
+    return TestResult(
+        name=check,
+        passed=False,
+        message=(
+            f"data adapter {getattr(adapter, 'name', '?')!r} does not "
+            f"support source-level checks ({method})"
+        ),
+    )
+
+
 def _check_unique(
     spec: Any,
     handle: _CheckableHandle,
@@ -303,16 +335,9 @@ def _check_unique(
                 message="source-level unique needs source access; run it via mbt build/test",
             )
         table, label = sources.resolve(str(source_name), "unique")
-        counter = getattr(sources.adapter, "count_source_duplicates", None)
+        counter = _source_check(sources.adapter, "count_source_duplicates")
         if counter is None:
-            return TestResult(
-                name="unique",
-                passed=False,
-                message=(
-                    f"data adapter {getattr(sources.adapter, 'name', '?')!r} does not "
-                    "support source-level checks (count_source_duplicates)"
-                ),
-            )
+            return _predates_source_checks("unique", sources.adapter, "count_source_duplicates")
         duplicates = int(counter(table, columns))
         key = ", ".join(columns)
         if duplicates:
@@ -542,6 +567,52 @@ def _check_no_future_columns(
     return TestResult(name="no_future_columns", passed=not problems, message="; ".join(problems))
 
 
+def _numeric_association(con: Any, column: str, label: str) -> tuple[float | None, str]:
+    """How strongly a numeric column tracks the label, on a 0-1 scale.
+
+    ``max(|pearson|, |spearman|)`` rather than Pearson alone (D-5). Pearson
+    catches LINEAR leakage. A monotone but nonlinear leak - the common shape
+    when a leaked column is a transformed or bucketed version of the label
+    horizon - can sit well under the 0.95 bar while being perfectly
+    predictive, because the scan's whole job is to notice a column that
+    determines the label.
+
+    Spearman is Pearson over ranks, so it is the same duckdb call over
+    ``rank()`` and both thresholds keep meaning what they say. The categorical
+    path never had this weakness: Cramér's V is association, not correlation.
+    """
+    row = con.execute(
+        f'SELECT corr(CAST("{column}" AS DOUBLE), CAST("{label}" AS DOUBLE)), '
+        f"corr(r_col, r_label) FROM ("
+        f'  SELECT "{column}", "{label}",'
+        f'    rank() OVER (ORDER BY CAST("{column}" AS DOUBLE)) AS r_col,'
+        f'    rank() OVER (ORDER BY CAST("{label}" AS DOUBLE)) AS r_label'
+        f"  FROM t"
+        f") t"
+    ).fetchone()
+    if not row:  # pragma: no cover - an aggregate SELECT always yields a row
+        return None, "|corr|"
+
+    def usable(value: Any) -> float | None:
+        # A constant column makes Pearson NULL but the rank correlation NaN
+        # (zero variance over ranks), so both have to be screened out - "no
+        # variance" is not "perfectly associated".
+        if value is None or not math.isfinite(float(value)):
+            return None
+        return abs(float(value))
+
+    pearson, spearman = usable(row[0]), usable(row[1])
+    values = [v for v in (pearson, spearman) if v is not None]
+    if not values:
+        return None, "|corr|"
+    best = max(values)
+    # Name which one decided, so a reader can tell a nonlinear leak from a
+    # linear one without re-running the query. A tie reports the linear screen,
+    # since the rank one adds nothing there.
+    stat = "|pearson|" if pearson is not None and pearson == best else "|spearman|"
+    return best, stat
+
+
 def _cramers_v(con: "duckdb.DuckDBPyConnection", column: str, label: str) -> float | None:
     """Cramér's V of a categorical column against the label, from the
     contingency table (pure arithmetic; mbt-core carries no scipy).
@@ -584,9 +655,9 @@ def _check_label_leakage_scan(
 ) -> TestResult:
     """Flag features suspiciously associated with the label.
 
-    Numeric columns are screened with ``|corr|``, categorical (string)
-    columns with Cramér's V - the same 0-1 scale, so one two-tier bar covers
-    both: ``>= max_abs_correlation`` (default 0.95) fails the build; the
+    Numeric columns are screened with ``max(|pearson|, |spearman|)``,
+    categorical (string) columns with Cramér's V - the same 0-1 scale, so one
+    two-tier bar covers both: ``>= max_abs_correlation`` (default 0.95) fails the build; the
     warn band ``[warn_abs_correlation, max)`` (default 0.85) logs a warning
     and is recorded without failing. ``exclude`` skips reviewed columns.
     Runs on every dataset build unless opted out (``enabled``).
@@ -613,12 +684,7 @@ def _check_label_leakage_scan(
             if type_name.startswith(("int", "uint", "float", "double", "decimal")) or (
                 type_name == "bool"
             ):
-                row = con.execute(
-                    f'SELECT corr(CAST("{field.name}" AS DOUBLE), CAST("{label}" AS DOUBLE)) FROM t'
-                ).fetchone()
-                corr = row[0] if row else None
-                association = None if corr is None else abs(corr)
-                stat = "|corr|"
+                association, stat = _numeric_association(con, field.name, label)
             elif type_name in ("string", "large_string") or type_name.startswith("dictionary"):
                 association = _cramers_v(con, field.name, label)
                 stat = "V"
@@ -709,16 +775,9 @@ def _check_relationships(
             message="relationships needs source access; run it via mbt build/test",
         )
     table, label = sources.resolve(str(to), "relationships")
-    reader = getattr(sources.adapter, "read_source_distinct", None)
+    reader = _source_check(sources.adapter, "read_source_distinct")
     if reader is None:
-        return TestResult(
-            name="relationships",
-            passed=False,
-            message=(
-                f"data adapter {getattr(sources.adapter, 'name', '?')!r} does not "
-                "support source-level checks (read_source_distinct)"
-            ),
-        )
+        return _predates_source_checks("relationships", sources.adapter, "read_source_distinct")
     parent = set(reader(table, str(field_name)).column(0).to_pylist())
     con, splits = _connect_splits(handle)
     try:

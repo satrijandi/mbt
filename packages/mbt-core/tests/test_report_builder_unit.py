@@ -415,3 +415,34 @@ def test_all_zero_columns_and_gaps_still_draw_an_axis() -> None:
     svg = render.column_chart("c", ["a", "b", "c"], [0.0, None, 0.0], render.fmt_share)
     assert "<title>a: 0.0%</title>" in svg and "<title>b:" not in svg
     assert "100.0%" in svg  # a flat zero series gets a unit axis, not a divide by zero
+
+
+# -- C-4: the builder-to-writer contract is typed, and total ----------------
+
+
+def test_an_unknown_table_key_is_an_error_not_a_misroute() -> None:
+    """Any key that was none of the known ones landed in
+    ``evaluation/binning/<key>.csv`` - a real file in a real directory, and
+    nothing ever said so (C-4)."""
+    import pytest
+
+    from mbt.reporting.writer import table_path
+
+    with pytest.raises(ValueError, match="unknown report table"):
+        table_path("stabilty_scores", None)  # a typo, not a binning table
+
+
+def test_every_table_key_routes_somewhere_specific() -> None:
+    from mbt.reporting.builder import TableKey
+    from mbt.reporting.writer import table_path
+
+    paths = {key: table_path(key, "evidently") for key in TableKey}
+    assert len(set(paths.values())) == len(TableKey)  # no two tables collide
+    assert all(p.endswith(".csv") for p in paths.values())
+
+
+def test_binning_keys_stay_open_ended() -> None:
+    from mbt.reporting.builder import binning_key
+    from mbt.reporting.writer import table_path
+
+    assert table_path(binning_key("tenure"), None) == "evaluation/binning/tenure.csv"

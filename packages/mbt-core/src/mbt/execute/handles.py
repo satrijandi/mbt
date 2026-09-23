@@ -17,10 +17,16 @@ Spark and H2O see treated data without knowing the feature exists.
 from collections.abc import Callable
 from fnmatch import fnmatchcase
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 
-from mbt.contracts import (
+from mbt.events import get_bus
+from mbt.events.models import LogMessage
+from mbt.exceptions import ConfigError
+from mbt.execute.feature_treatment import apply_treatment
+from mbt.quality.hooks import ModelHooks
+from mbt_adapter_base import (
     OUT_OF_TIME_SPLIT,
     DatasetHandle,
     DatasetLocator,
@@ -28,11 +34,6 @@ from mbt.contracts import (
     HookContext,
     ModelSpec,
 )
-from mbt.events import get_bus
-from mbt.events.models import LogMessage
-from mbt.exceptions import ConfigError
-from mbt.execute.feature_treatment import apply_treatment
-from mbt.quality.hooks import ModelHooks
 
 
 def select_feature_columns(
@@ -201,14 +202,49 @@ class TransformedDatasetHandle:
         #: in exactly this order. ``None`` at train time and for a champion
         #: registered before mbt exported an inference config, which restores
         #: the glob-only behaviour exactly.
-        self._pinned_features = pinned_features
+        #: Normalised: an EMPTY recorded list is a MISSING pin, not a pin of
+        #: zero features (C-2). The write side and the read side used to
+        #: disagree about what empty meant - ``_apply_pin`` treats any non-None
+        #: pin as authoritative, so an empty list would project every batch
+        #: onto no columns at all.
+        self._pinned_features = pinned_features or None
         self._pin_warned = False
         self._cache: dict[str, pa.Table] = {}
-        self.feature_columns: list[str] | None = None
+        self._feature_columns: list[str] | None = None
 
     @property
     def snapshot_id(self) -> str:
         return self._base.snapshot_id
+
+    @property
+    def base(self) -> Any:
+        """The untransformed view underneath (it carries the time column).
+
+        Public because ``job.py`` reached into ``_base`` eight times, once just
+        to format a log line (C-2). A caller that needs the raw rows - the
+        carves, the backtest folds - is not doing anything illegitimate.
+        """
+        return self._base
+
+    def feature_columns(self, split: str | None = None) -> list[str]:
+        """The feature columns this view exposes, resolving them if needed.
+
+        This was a public ATTRIBUTE initialised to ``None`` and populated as a
+        side effect of the first ``read()``, so seven readers relied on someone
+        having read first and every one fell back to ``or []`` - and ``job.py``
+        carried the line ``runtime.transformed.read("train")  # resolves the
+        feature columns``, an obligation held in a comment (C-2).
+
+        Transformation is cached, so asking costs at most one read of one split.
+        Returns ``[]`` only when the view genuinely has no features.
+        """
+        if self._feature_columns is None:
+            available = self.splits()
+            chosen = split or ("train" if "train" in available else min(available, default=""))
+            if not chosen:
+                return []
+            self._transformed(chosen)
+        return list(self._feature_columns or [])
 
     def splits(self) -> set[str]:
         return self._base.splits()
@@ -229,8 +265,8 @@ class TransformedDatasetHandle:
         features = select_feature_columns(table.column_names, self._spec, self._time_column)
         if self._pinned_features is not None:
             features = self._apply_pin(features, table.column_names, split)
-        if self.feature_columns is None:
-            self.feature_columns = features
+        if self._feature_columns is None:
+            self._feature_columns = features
         keep = list(features)
         for extra in (self._spec.target, *self._spec.evaluation.slices):
             if extra in table.column_names and extra not in keep:

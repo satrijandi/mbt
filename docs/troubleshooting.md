@@ -496,6 +496,31 @@ The model still trains and reports; its after-test section is empty and any `sou
 **Fix:** if newer rows should exist, check the window against the data's time range and the dataset's `filters`.
 Otherwise wait for the upstream refresh, or re-check a trained version later with `mbt evaluate --out-of-time`.
 
+### `operating point ... rests on only N test row(s)`
+
+**Symptom (a warning; the build succeeds):**
+
+```text
+WARN operating point threshold_at_precision_0.7=0.945718 rests on only 37
+test row(s) (under 100): the cutoff is fitted on the same rows that report
+its precision, so on fresh data the realized precision will typically be
+materially lower than the number shown - do not deploy this as a decision
+rule without a larger test window or a lower target
+```
+
+**Why:** `threshold_at_precision_<p>` is a *fitted parameter*. It is chosen by scanning the test split's own PR curve for the smallest cutoff meeting the target, and the precision reported for that cutoff is then measured on the same rows - so it is an estimate selected on the data that reports it.
+
+How much that matters is decided by how many rows sit at or above the cutoff, not by how large the test window is.
+Measured against mbt's own `compute_metric` (400 replications, cutoff chosen on one draw and precision measured on an independent one), the bias is under 0.01 wherever the cutoff rests on roughly a hundred rows or more, and serious below that: the reproduction above reports 0.703 on test and realizes 0.606 on fresh rows at 37 supporting rows.
+
+This is the rare-positive, high-precision corner - a low base rate with an ambitious precision target - which is exactly the retention-campaign shape operating points were built for.
+
+**Fix:** widen the test window so the cutoff rests on more rows, or lower the precision target until it does.
+If neither is possible, treat the number as a rough estimate and do not wire it into a decision rule: `decision_threshold` on a scoring pipeline will resolve to this cutoff.
+
+Note that even a well-supported threshold lands under its target on fresh rows about half the time, because it is a point estimate of a *minimum* (`docs/spec-reference.md` says so).
+That is a property of the estimator, not a defect; the warning is about the cases where the gap is large rather than the cases where it exists.
+
 ## Training and feature treatment
 
 ### `string feature(s) not declared in features.categorical`
@@ -1159,10 +1184,10 @@ They report progress on paths that would otherwise be silent; an operator greppi
 | `state diff: 1 added, 0 removed, 2 modified` | `mbt state diff` (appends `; env digest CHANGED` when the environment digest moved) |
 | `evaluate: 2 node(s) selected on target 'dev'` / `evaluate finished [success]: 2 ok, 0 failed, 0 skipped in 1.2s` | `mbt evaluate` run brackets, matching the other commands |
 | `check schema: PASS` / `test test_row_count: PASS` | each built-in check and Python data test (the `FAIL` variant is a symptom - see its entry above) |
-| `materialized 1000 rows: test=200, train=800` | a dataset build's per-split row counts (local, snowflake, and spark data adapters; the warehouse adapters prefix the node id) |
+| `materialized 1000 rows: test=200, train=800` | a dataset build's per-split row counts, identical from every data adapter (the shared build recipe emits it, so the wording is not each adapter's to choose) |
 | `scoring input materialized 340 rows to score` | a scoring-input build (an empty batch warns `scoring input materialized 0 rows; nothing to score` instead) |
 | `ground-truth labels: read 500 row(s) from source.rb.lakehouse.churn_outcomes` | `mbt monitor` reading a scoring pipeline's outcome table, once per run, before it joins the matured prediction runs |
-| `xgboost: early_stopping_rounds=30 has no validation split to stop on, so every boosting round trains; declare split.validation on the dataset to stop early` | an XGBoost or LightGBM model sets `early_stopping_rounds` but its dataset declares no `split.validation`, so there is nothing to stop on. Tuning trials get a carved validation split; the final fit does not |
+| `WARN xgboost: early_stopping_rounds=30 has no validation split on the final fit, so it trains every round while the tuning trials that chose these hyperparameters stopped early - the registered model is regularized differently from the one the search scored; declare split.validation on the dataset to hold a slice out of the final fit too` | an XGBoost or LightGBM model sets `early_stopping_rounds` but its dataset declares no `split.validation`. Tuning trials get a carved validation split and stop early on it; the final fit reabsorbs that carve (ADR-8) and so has nothing to stop on |
 | `gate pr_auc (champion): PASS - the evaluated version is the 'production' champion itself - no challenger to compare, gate not applicable` | `mbt evaluate --stage production --gates` (the decay check) on a model with a champion gate: the version being evaluated is the champion, so comparing it with itself would prove nothing. Its threshold gates still apply |
 | `tuning complete: 10 trial(s), 2 pruned, best pr_auc=0.8300` | a tuning search summary; per-trial `tuning trial 0: pr_auc=0.8300` lines are debug-level, shown only under `--verbose` or `--log-format json` |
 | `feature_shift warn: tenure: psi=0.1800 in the shift warn band [0.15, 0.25]` | a shift in a monitor's optional `warn_threshold` band - elevated but below the fail bar, so the run stays green (exit 0); tune the thresholds or investigate the feature |

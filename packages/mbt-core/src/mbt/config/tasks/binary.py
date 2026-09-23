@@ -1,6 +1,6 @@
 """The binary_classification task schema (TSD §5.6)."""
 
-from mbt.contracts import (
+from mbt_adapter_base import (
     DatasetProfile,
     ModelSpec,
     TaskType,

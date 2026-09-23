@@ -22,6 +22,7 @@ The training run logs the source to the tracker as a readable record.
 from typing import Any
 
 from mbt_adapter_base import ArtifactRef, ManifestNode
+from mbt_adapter_base.champion import GIT_COMMIT, MANIFEST_HASH, SNAPSHOT_ID
 
 #: Bumped when a consumer would read an older document wrongly. Additive keys
 #: do not bump it; a rename or a changed meaning does.
@@ -93,9 +94,9 @@ def build_inference_config(
         "identity": {
             "config_hash": node.config_hash,
             "input_hash": node.input_hash,
-            "manifest_hash": meta.get("mbt.manifest_hash", ""),
-            "snapshot_id": meta.get("mbt.snapshot_id", ""),
-            "git_commit": meta.get("mbt.git_commit", ""),
+            "manifest_hash": meta.get(MANIFEST_HASH, ""),
+            "snapshot_id": meta.get(SNAPSHOT_ID, ""),
+            "git_commit": meta.get(GIT_COMMIT, ""),
         },
         "artifact": {
             "uri": artifact.uri,

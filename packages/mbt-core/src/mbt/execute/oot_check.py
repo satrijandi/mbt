@@ -13,7 +13,6 @@ from datetime import datetime
 from typing import Any
 
 from mbt.artifacts.run_results import NodeResult
-from mbt.contracts import OUT_OF_TIME_SPLIT, ManifestNode, ModelSpec, ModelVersion
 from mbt.events import get_bus
 from mbt.events.models import LogMessage
 from mbt.exceptions import StateError
@@ -21,15 +20,23 @@ from mbt.execute.runners import (
     DatasetRunner,
     ExecutionContext,
     ModelRunner,
-    after_test_tags,
-    after_test_verdict,
     check_hooks_parity,
-    gate_failure_summary,
     read_inference_config,
     run_with_lifecycle,
 )
-from mbt.quality.gates import all_gates_passed
-from mbt.quality.monitors import all_monitors_passed, evaluate_stability
+from mbt.quality.judgement import Judgement, after_test_tags, judge
+from mbt_adapter_base import (
+    OUT_OF_TIME_SPLIT,
+    ManifestNode,
+    ModelSpec,
+    ModelVersion,
+)
+from mbt_adapter_base.champion import (
+    OOT_CHECK_REPORT_URI,
+    OOT_CHECK_RUN_ID,
+    TRACKING_RUN_ID,
+    has_inference_config,
+)
 
 
 def _instant(iso: str) -> datetime:
@@ -41,7 +48,7 @@ def _instant(iso: str) -> datetime:
 def recorded_training(ctx: ExecutionContext, version: ModelVersion, uid: str) -> dict[str, Any]:
     """The version's inference config, refusing what the check cannot use."""
     name = f"{version.name} v{version.version}"
-    if not version.tags.get("mbt.inference_config_uri"):
+    if not has_inference_config(version.tags):
         raise StateError(
             f"{name} predates inference-config export, so its training windows are unknown",
             resource=uid,
@@ -64,7 +71,7 @@ def recorded_training(ctx: ExecutionContext, version: ModelVersion, uid: str) ->
     return document
 
 
-def _pin_windows(
+def pin_check_windows(
     ctx: ExecutionContext, model_uid: str, record: dict[str, Any]
 ) -> tuple[str, list[str]]:
     """Point this invocation's dataset and model nodes at the recorded windows.
@@ -72,6 +79,14 @@ def _pin_windows(
     Only the in-memory manifest changes - ``target/manifest.json`` keeps what
     compile wrote - and the pinned windows give the materialization its own
     cache key, so nothing trained elsewhere reads these rows.
+
+    **Ordering.** This MUST run before ``DatasetRunner.run(dataset_uid)``,
+    because the value it writes is read back four frames later by
+    ``DatasetRunner._materialize``. Nothing enforced that and nothing named it
+    (C-3); it is public and named now, it returns the uid the caller must build,
+    and ``test_oot_check_unit.py`` asserts what it pins - which is the seam at
+    which "given a version and a manifest, what windows get pinned" can be
+    asked at all.
     """
     dataset_uid = str(record["unique_id"])
     if dataset_uid not in ctx.manifest.nodes:
@@ -146,7 +161,8 @@ def run_oot_check(
     """Build the pinned dataset, run the check job, judge, record."""
     document = recorded_training(ctx, version, model_uid)
     record = document["dataset"]
-    dataset_uid, _ = _pin_windows(ctx, model_uid, record)
+    # Pin BEFORE the dataset build: the build reads what this writes.
+    dataset_uid, _ = pin_check_windows(ctx, model_uid, record)
 
     results = [DatasetRunner(ctx).run(dataset_uid)]
     if results[0].status == "error":
@@ -179,23 +195,34 @@ def _check(
     apply_gates: bool,
 ) -> NodeResult:
     node: ManifestNode = ctx.manifest.nodes[model_uid]
+    if version.artifact is None:
+        # Surfaced by C-3's typed seam: the old path patched ``artifact`` onto
+        # the job through a ``model_copy`` with an untyped dict, so a version
+        # with no loadable artifact produced a job with ``artifact=None`` and
+        # failed later, somewhere else. Same stance as the scoring path: a
+        # version that exists but cannot load is an error (ADR-10).
+        raise StateError(
+            f"{version.name} v{version.version} has no loadable artifact reference to check",
+            resource=model_uid,
+            hint="re-register the version; the check has to load the model it judges",
+        )
     record = document["dataset"]
     _check_reference(ctx, str(record["unique_id"]), record, model_uid)
     check_hooks_parity(version, node, model_uid)
     spec = ModelSpec.model_validate(document["spec"])
     resolved = document.get("resolved") or {}
     runner = ModelRunner(ctx)
-    metric_specs = runner._metric_specs(spec, node)
-    job = runner._assemble_job(node, spec, metric_specs, None, mode="oot_check").model_copy(
-        update={
-            "artifact": version.artifact,
-            "champion_spec": document["spec"],
-            "champion_feature_columns": resolved.get("feature_columns"),
-            "tracking_run_id": version.tags.get("mbt.tracking_run_id") or None,
-        }
+    # Public seams, not four private methods and a patch of the returned job (C-3).
+    job, metric_specs = runner.check_job(
+        node,
+        spec,
+        artifact=version.artifact,
+        champion_spec=document["spec"],
+        champion_feature_columns=resolved.get("feature_columns"),
+        tracking_run_id=version.tags.get(TRACKING_RUN_ID) or None,
     )
     job_result = ctx.run_job(job)
-    runner._upload_log(node, job.tracking_run_id, name=f"evaluate-{ctx.run_id}.log")
+    runner.upload_run_log(node, job.tracking_run_id, name=f"evaluate-{ctx.run_id}.log")
     if job_result.status == "error" or job_result.report is None:
         return NodeResult(
             unique_id=model_uid,
@@ -203,24 +230,29 @@ def _check(
             message=job_result.error or "the check returned no report",
         )
     summary = job_result.report
-    gates = []
-    stability = []
-    passed = True
+    outcome: Judgement | None = None
     if apply_gates:
-        gates = runner._gate_results(spec, node, job_result, None, metric_specs, out_of_time="only")
-        stability = evaluate_stability(spec.evaluation.stability, summary, resource=model_uid)
-        passed = all_gates_passed(gates) and all_monitors_passed(stability)
-        verdict = after_test_verdict(spec, gates, stability) or "not_gated"
-        _record(ctx, version, job.tracking_run_id, verdict, summary.report_uri, model_uid)
+        gates = runner.after_test_gates(spec, node, job_result, metric_specs)
+        # The same judgement the training path makes (C-1), over the after-test
+        # gates only - which is the one thing that genuinely differs here.
+        outcome = judge(spec, gates, summary, resource=model_uid)
+        _record(
+            ctx,
+            version,
+            job.tracking_run_id,
+            outcome.verdict or "not_gated",
+            summary.report_uri,
+            model_uid,
+        )
     return NodeResult(
         unique_id=model_uid,
-        status="success" if passed else "gate_failed",
+        status="success" if (outcome is None or outcome.passed) else "gate_failed",
         metrics=dict(job_result.metrics.metrics) if job_result.metrics else {},
-        gates=gates,
-        monitors=stability,
+        gates=outcome.gates if outcome else [],
+        monitors=outcome.stability.results if outcome else [],
         artifact=version.artifact,
         tracking_run_id=job.tracking_run_id,
-        message=None if passed else gate_failure_summary(gates, stability),
+        message=outcome.failure_summary if outcome else None,
     )
 
 
@@ -234,9 +266,9 @@ def _record(
 ) -> None:
     """The verdict on the version (what ``mbt promote`` reads) and its run."""
     tags = after_test_tags(verdict, ctx.manifest.metadata.anchor, "evaluate")
-    tags["mbt.oot_check.run_id"] = ctx.run_id
+    tags[OOT_CHECK_RUN_ID] = ctx.run_id
     if report_uri:
-        tags["mbt.oot_check.report_uri"] = report_uri
+        tags[OOT_CHECK_REPORT_URI] = report_uri
     registry = ctx.registry_adapter()
     if hasattr(registry, "set_version_tags"):
         registry.set_version_tags(version.name, version.version, tags)

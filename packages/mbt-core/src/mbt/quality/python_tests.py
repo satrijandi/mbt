@@ -15,10 +15,13 @@ from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
-from mbt.contracts import DatasetSpec, TestResult
 from mbt.events import get_bus
 from mbt.events.models import TestEvaluated
 from mbt.exceptions import MbtError
+from mbt_adapter_base import (
+    DatasetSpec,
+    TestResult,
+)
 
 if TYPE_CHECKING:
     from mbt.parsing.errors import ParseReport

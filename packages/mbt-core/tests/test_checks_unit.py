@@ -338,13 +338,17 @@ def test_check_names_match_dispatch_table() -> None:
 
 
 def test_parser_validates_against_shared_check_names() -> None:
-    """The parser derives its valid-check sets from the authoritative module
-    rather than re-listing them (the drift the shared source removes)."""
-    from mbt.parsing import project_parser
+    """The check rules derive their valid-check sets from the authoritative
+    module rather than re-listing them (the drift the shared source removes).
+
+    They live in ``parsing/rules.py`` since v5, with the rest of the parser's
+    invariants (A-3).
+    """
+    from mbt.parsing import rules
     from mbt.quality.check_names import BUILTIN_CHECK_NAMES, SCORING_CHECK_NAMES
 
-    assert project_parser._BUILTIN_CHECKS is BUILTIN_CHECK_NAMES
-    assert project_parser._SCORING_CHECKS is SCORING_CHECK_NAMES
+    assert rules._BUILTIN_CHECKS is BUILTIN_CHECK_NAMES
+    assert rules._SCORING_CHECKS is SCORING_CHECK_NAMES
 
 
 def _panel_spec(columns: list[str] | None, checks: list | None = None) -> DatasetSpec:
@@ -410,3 +414,80 @@ def test_panel_columns_is_not_double_appended_when_declared() -> None:
     spec = _panel_spec(["x", "t", "y"], checks=["panel_columns"])
     names = [r.name for r in run_checks(spec, _panel_handle(), {}, resource="dataset.unit")]
     assert names.count("panel_columns") == 1
+
+
+# -- D-5: the leakage scan's numeric screen ---------------------------------
+
+
+def test_a_monotone_nonlinear_leak_is_caught_by_the_rank_screen() -> None:
+    """D-5: Pearson catches LINEAR leakage only.
+
+    A monotone but nonlinear leak - the common shape when a leaked column is a
+    transformed or bucketed version of the label horizon - sits under the 0.95
+    bar on Pearson while being perfectly predictive.
+    """
+    import duckdb
+    import pyarrow as pa
+
+    from mbt.quality.checks import _numeric_association
+
+    # y is a strictly increasing but sharply convex function of x: rank
+    # correlation is exactly 1, Pearson is not.
+    x = list(range(60))
+    y = [float(v) ** 6 for v in x]
+    con = duckdb.connect()
+    try:
+        con.register("t", pa.table({"x": [float(v) for v in x], "y": y}))
+        association, stat = _numeric_association(con, "x", "y")
+    finally:
+        con.close()
+    assert association is not None
+    assert association > 0.99  # the leak is caught
+    assert stat == "|spearman|"  # and the report says which screen found it
+
+
+def test_a_linear_association_still_reports_as_pearson() -> None:
+    import duckdb
+    import pyarrow as pa
+
+    from mbt.quality.checks import _numeric_association
+
+    con = duckdb.connect()
+    try:
+        con.register("t", pa.table({"x": [1.0, 2.0, 3.0, 4.0], "y": [2.0, 4.0, 6.0, 8.0]}))
+        association, stat = _numeric_association(con, "x", "y")
+    finally:
+        con.close()
+    assert association is not None and abs(association - 1.0) < 1e-9
+    assert stat == "|pearson|"  # a tie reports the linear screen
+
+
+def test_a_constant_column_has_no_association() -> None:
+    import duckdb
+    import pyarrow as pa
+
+    from mbt.quality.checks import _numeric_association
+
+    con = duckdb.connect()
+    try:
+        con.register("t", pa.table({"x": [1.0, 1.0, 1.0], "y": [1.0, 2.0, 3.0]}))
+        assert _numeric_association(con, "x", "y")[0] is None
+    finally:
+        con.close()
+
+
+def test_numeric_association_of_an_empty_relation_is_absent() -> None:
+    import duckdb
+    import pyarrow as pa
+
+    from mbt.quality.checks import _numeric_association
+
+    con = duckdb.connect()
+    try:
+        con.register(
+            "t",
+            pa.table({"x": pa.array([], type=pa.float64()), "y": pa.array([], type=pa.float64())}),
+        )
+        assert _numeric_association(con, "x", "y")[0] is None
+    finally:
+        con.close()

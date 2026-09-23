@@ -12,7 +12,7 @@ from mbt.adapters.registry import AdapterRegistry
 from mbt.contracts import ManifestNode, ModelSpec, ScoringSpec, TrainingJob
 from mbt.events import EventBus, get_bus, set_bus
 from mbt.execute.handles import TransformedDatasetHandle
-from mbt.execute.job import _JobRuntime
+from mbt.execute.job_runtime import JobRuntime
 from mbt.execute.orchestrator import InvocationOptions, prepare
 from mbt.execute.runners import DatasetRunner, ExecutionContext, ModelRunner, ScoringRunner
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
@@ -137,8 +137,8 @@ def make_inline_runtime(
     adapter: Any = None,
     builtin_specs: list[Any] | None = None,
     hook_specs: list[Any] | None = None,
-) -> _JobRuntime:
-    """A _JobRuntime over in-memory tables for direct job-function tests."""
+) -> JobRuntime:
+    """A JobRuntime over in-memory tables for direct job-function tests."""
     base = InMemoryDatasetHandle(tables, label_column=spec.target, time_column=time_column)
     transformed = TransformedDatasetHandle(
         base, spec, hooks, lambda split: SimpleNamespace(split=split), time_column
@@ -173,7 +173,7 @@ def make_inline_runtime(
             vars={},
             metric_specs=builtin_specs or [],
         )
-    return _JobRuntime(
+    return JobRuntime(
         job=job,
         spec=spec,
         adapter=adapter,

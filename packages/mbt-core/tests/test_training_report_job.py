@@ -270,9 +270,12 @@ def test_path_adapters_score_the_after_test_split_from_a_staged_file(
 def test_an_adapter_without_importance_gets_permutation_importance(
     demo_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from mbt.execute import job as job_module
+    from mbt.execute import training_report as report_module
 
-    monkeypatch.setattr(job_module, "_feature_importance", lambda runtime, model: {})
+    # The adapter declares NO importance capability, which is the condition the
+    # permutation fallback exists for (B-1: capability is declared, so the test
+    # says so rather than patching out the function that asks).
+    monkeypatch.setattr(report_module, "capabilities_of", lambda adapter, spec=None: frozenset())
     _, job = make_training_job(demo_project, fake_registry)
     with recording_bus() as sink:
         result = run_job(job)
@@ -387,7 +390,7 @@ def test_a_tracker_without_directories_gets_the_page_and_summary(tmp_path: Path)
     runtime = _publishing_runtime(tmp_path)
     data, meta = _tiny_report()
     tracker = _DocumentOnlyTracker()
-    summary = report_step.publish_report(
+    summary = report_step._publish_report(
         runtime, data, meta, tracking=tracker, run_handle=RunHandle(run_id="x"), prefix="report"
     )
     assert tracker.documents == ["report.html", "summary.json"]
@@ -400,7 +403,7 @@ def test_a_tracker_outage_does_not_fail_publishing(tmp_path: Path) -> None:
     runtime = _publishing_runtime(tmp_path)
     data, meta = _tiny_report()
     with recording_bus() as sink:
-        report_step.publish_report(
+        report_step._publish_report(
             runtime,
             data,
             meta,

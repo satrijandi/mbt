@@ -23,16 +23,14 @@ from mbt.artifacts.run_results import (
     RunResultsMetadata,
 )
 from mbt.compile.windows import parse_window
-from mbt.contracts import (
-    ManifestNode,
-    MetricSpec,
-    ModelSpec,
-    PredictionRunInfo,
-    ScoringInputSpec,
-    ScoringSpec,
-)
 from mbt.events import get_bus
-from mbt.events.models import LogMessage, RunFinished, RunStarted
+from mbt.events.models import (
+    Event,
+    LogMessage,
+    RunFinished,
+    RunStarted,
+    ScoringInputMaterialized,
+)
 from mbt.exceptions import ConfigError
 from mbt.execute.orchestrator import (
     InvocationOptions,
@@ -49,6 +47,14 @@ from mbt.execute.runners import (
 from mbt.execute.scheduler import execute_plan
 from mbt.quality.metrics import resolve_metric
 from mbt.quality.monitors import all_monitors_passed, evaluate_ground_truth_gates
+from mbt_adapter_base import (
+    ManifestNode,
+    MetricSpec,
+    ModelSpec,
+    PredictionRunInfo,
+    ScoringInputSpec,
+    ScoringSpec,
+)
 
 #: Ledger marker name in the prediction store (ADR-21).
 GROUND_TRUTH_MARKER = "ground_truth"
@@ -237,18 +243,21 @@ class _LabelReadEvents:
     """The event bus as a label read sees it: everything but the row count.
 
     Labels are read through ``build_scoring_input`` (no new contract), so every
-    data adapter announces the table as "N rows to score" - or, when empty, as
-    "nothing to score". On an ``mbt monitor`` run nothing is being scored, and
-    that line sent operators looking for a scoring pass that never happened.
-    The row count is re-emitted in the monitor's own words instead.
+    data adapter announces the table as a ``ScoringInputMaterialized``. On an
+    ``mbt monitor`` run nothing is being scored, and that line sent operators
+    looking for a scoring pass that never happened. The row count is re-emitted
+    in the monitor's own words instead.
+
+    The suppression matches on the event's TYPE. It used to test ``"to score"
+    in message``, so rewording any data adapter's log line silently switched
+    off the suppression that ADR-20's monitor path depends on (B-4).
     """
 
     def __init__(self, bus: Any) -> None:
         self._bus = bus
 
-    def emit(self, event: object) -> None:
-        message = getattr(event, "message", None)
-        if isinstance(message, str) and "to score" in message:
+    def emit(self, event: Event) -> None:
+        if isinstance(event, ScoringInputMaterialized):
             return
         self._bus.emit(event)
 

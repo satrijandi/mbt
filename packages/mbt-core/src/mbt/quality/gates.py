@@ -7,7 +7,11 @@ dependencies and is fully unit-testable (FR-TEST-02/03/06).
 from typing import Literal
 
 from mbt.artifacts.run_results import GateResult
-from mbt.contracts import (
+from mbt.events import EventBus, get_bus
+from mbt.events.models import GateEvaluated, LogMessage
+from mbt.exceptions import MbtError
+from mbt.quality.metrics import metric_direction
+from mbt_adapter_base import (
     BootstrapDelta,
     DeterminismTier,
     GateSpec,
@@ -15,10 +19,6 @@ from mbt.contracts import (
     MetricSpec,
     ReportSummary,
 )
-from mbt.events import EventBus, get_bus
-from mbt.events.models import GateEvaluated, LogMessage
-from mbt.exceptions import MbtError
-from mbt.quality.metrics import metric_direction
 
 
 def _backtest_value(
@@ -209,6 +209,20 @@ def evaluate_gates(
     """
     bus = get_bus()
     results: list[GateResult] = []
+
+    def record(gate: GateSpec, result: GateResult) -> GateResult:
+        """Stamp the gate's own ``source`` onto its result, then emit it.
+
+        Done here rather than at each of the eight construction sites so a new
+        gate kind cannot forget it - and so ``after_test_verdict`` can ask the
+        question it means ("was this an after-test gate?") instead of inferring
+        it from ``period is not None`` (C-1).
+        """
+        stamped = result.model_copy(update={"source": gate.source})
+        results.append(stamped)
+        _emit_gate(bus, resource, stamped)
+        return stamped
+
     for gate in gates:
         is_after_test = gate.source == "out_of_time"
         if (out_of_time == "only" and not is_after_test) or (
@@ -219,15 +233,11 @@ def evaluate_gates(
 
         if gate.source == "out_of_time":
             tolerance = determinism.tolerance_for(gate.metric) if determinism else 0.0
-            result = _out_of_time_result(gate, report, greater, tolerance, resource)
-            results.append(result)
-            _emit_gate(bus, resource, result)
+            record(gate, _out_of_time_result(gate, report, greater, tolerance, resource))
             continue
 
         if gate.across is not None:
-            result = _disparity_result(gate, challenger, greater, resource)
-            results.append(result)
-            _emit_gate(bus, resource, result)
+            record(gate, _disparity_result(gate, challenger, greater, resource))
             continue
 
         if gate.source == "backtest":
@@ -333,8 +343,7 @@ def evaluate_gates(
                     min_delta=gate.min_delta,
                     actual_delta=round(delta, 12),
                 )
-        results.append(result)
-        _emit_gate(bus, resource, result)
+        record(gate, result)
     return results
 
 

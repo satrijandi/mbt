@@ -35,10 +35,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from mbt.contracts import JobResult, TrainingJob
 from mbt.events import get_bus
 from mbt.events.models import Event, JobLine
 from mbt.exceptions import ConfigError
+from mbt_adapter_base import (
+    JobResult,
+    TrainingJob,
+)
 
 #: Prefix for per-job payload dirs under the system temp dir. Successful jobs
 #: clean theirs up; error payloads stay for debugging (``mbt clean`` ages them).

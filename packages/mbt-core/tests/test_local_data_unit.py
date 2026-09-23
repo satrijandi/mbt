@@ -10,6 +10,7 @@ from misc_unit_helpers import RecordingSink, make_node
 
 from mbt.adapters.local.data import LocalDataAdapter, _connect_duckdb, _uri_to_path
 from mbt.contracts import DatasetLocator, DatasetSpec, ManifestNode, ScoringInputSpec, SourceTable
+from mbt.events.models import DatasetMaterialized
 from mbt.exceptions import AdapterError
 from mbt.execute.runners import BuildContext
 
@@ -118,17 +119,21 @@ def test_random_split_build_partitions_all_rows(tmp_path: Path) -> None:
 
 def test_build_emits_materialized_row_counts(tmp_path: Path) -> None:
     """A successful dataset build reports per-split row counts on the bus, so
-    the positive path is no longer silent (only 0-row raised before)."""
+    the positive path is no longer silent (only 0-row raised before).
+
+    The counts are FIELDS on a typed event, not text: the shared build recipe
+    emits it for every engine, so a sink reads them without parsing English
+    (A-1/B-4).
+    """
     _write_rows(tmp_path)
     adapter = LocalDataAdapter({"root": str(tmp_path)})
     sink = RecordingSink()
     output_dir = tmp_path / "target" / "datasets" / "churn_random" / "k1"
     adapter.build_dataset(_random_spec(), _ctx(adapter, _tables(), output_dir, events=sink))
-    materialized = [
-        m for e in sink.events if (m := getattr(e, "message", "")).startswith("materialized ")
-    ]
+    materialized = [e for e in sink.events if isinstance(e, DatasetMaterialized)]
     assert len(materialized) == 1
-    assert "train=" in materialized[0] and "test=" in materialized[0]
+    assert set(materialized[0].row_counts) == {"train", "validation", "test"}
+    assert materialized[0].level == "info"
 
 
 def test_random_split_is_deterministic_for_a_seed(tmp_path: Path) -> None:

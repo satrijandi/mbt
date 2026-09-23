@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mbt_adapter_base.events import EarlyStoppingWithoutValidation
 from mbt_adapter_base.interchange import DatasetProfile, MetricResults
 from mbt_adapter_base.specs import MetricSpec, ModelSpec
 
@@ -104,7 +105,7 @@ def calibration_split(data: Any) -> str:
 
 
 def note_early_stopping_without_validation(
-    data: Any, rounds: int | None, events: Any, *, adapter: str
+    data: Any, rounds: int | None, events: Any, *, adapter: str, unique_id: str | None = None
 ) -> bool:
     """Say so when ``early_stopping_rounds`` has nothing to stop on.
 
@@ -116,11 +117,7 @@ def note_early_stopping_without_validation(
     """
     if rounds is None or "validation" in data.splits():
         return False
-    events.emit(
-        f"{adapter}: early_stopping_rounds={rounds} has no validation split to stop on, "
-        "so every boosting round trains; declare split.validation on the dataset to "
-        "stop early"
-    )
+    events.emit(EarlyStoppingWithoutValidation(adapter=adapter, rounds=rounds, unique_id=unique_id))
     return True
 
 

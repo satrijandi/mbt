@@ -24,6 +24,11 @@ from mbt_adapter_base import (
     TaskType,
 )
 from mbt_adapter_base.compliance import TrainingAdapterCompliance
+from mbt_adapter_base.events import (
+    DatasetMaterialized,
+    EmptyAfterTestSplit,
+    ScoringInputMaterialized,
+)
 from mbt_adapter_base.materialization import combine_snapshots
 
 pytestmark = [
@@ -169,7 +174,12 @@ def test_empty_after_test_split_keeps_the_panel_schema(source_root: Path, tmp_pa
     assert pa.types.is_integer(types["customer_id"])
     assert pa.types.is_timestamp(types["snapshot_date"])
     assert pa.types.is_floating(types["monthly_usage"])
-    assert any("'out_of_time' materialized 0 rows" in str(m) for m in ctx.events.messages)
+    # The severity is the shared event's, not this adapter's: Spark used to emit
+    # a bare string the bus logged at INFO while the local adapter warned, and a
+    # substring assertion on str(m) could not see the level (v5 live defect 1).
+    empty = [m for m in ctx.events.messages if isinstance(m, EmptyAfterTestSplit)]
+    assert [e.level for e in empty] == ["warn"]
+    assert "'out_of_time' materialized 0 rows" in empty[0].human()
 
 
 def test_build_dataset_joins_windows_and_reproducible_sampling(
@@ -181,8 +191,8 @@ def test_build_dataset_joins_windows_and_reproducible_sampling(
     handle = adapter.build_dataset(spec, ctx)
     assert handle.splits() == {"train", "test"}
     # the successful build reports its per-split row counts on the bus
-    row_logs = [str(m) for m in ctx.events.messages if "materialized" in str(m)]
-    assert len(row_logs) == 1 and "train=" in row_logs[0] and "test=" in row_logs[0]
+    row_logs = [m for m in ctx.events.messages if isinstance(m, DatasetMaterialized)]
+    assert len(row_logs) == 1 and set(row_logs[0].row_counts) == {"train", "test"}
     train = handle.read("train")
     assert {
         "customer_id",
@@ -307,8 +317,8 @@ def test_build_scoring_input_windows_and_samples(tmp_path: Path) -> None:
     scored = handle.read("score")
     assert {"customer_id", "snapshot_date", "monthly_usage"} <= set(scored.column_names)
     assert 0 < scored.num_rows < 200  # the score window trims 180d of history
-    logs = [str(m) for m in ctx.events.messages if "materialized" in str(m)]
-    assert len(logs) == 1 and "rows to score" in logs[0]
+    logs = [m for m in ctx.events.messages if isinstance(m, ScoringInputMaterialized)]
+    assert len(logs) == 1 and logs[0].rows > 0 and logs[0].level == "info"
 
     # reproducible sampling: same fraction -> same rows, a subset of the batch
     def ids(out: str, fraction: float) -> set[int]:
@@ -335,7 +345,8 @@ def test_build_scoring_input_empty_batch_is_a_warning_not_an_error(tmp_path: Pat
     empty = _scoring_spec().model_copy(update={"filters": ["customer_id < 0"]})
     handle = adapter.build_scoring_input(empty, ctx)
     assert handle.read("score").num_rows == 0
-    assert any("nothing to score" in str(m) for m in ctx.events.messages)
+    empty = [m for m in ctx.events.messages if isinstance(m, ScoringInputMaterialized)]
+    assert [(m.rows, m.level) for m in empty] == [(0, "warn")]
 
 
 def test_open_predictions_roots_under_predictions_root(tmp_path: Path) -> None:

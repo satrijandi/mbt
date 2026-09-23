@@ -22,8 +22,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from mbt.artifacts.atomic import atomic_write_text
-from mbt.contracts import ArtifactRef
 from mbt.secrets import redact
+from mbt_adapter_base import (
+    ArtifactRef,
+)
 
 RUN_RESULTS_SCHEMA_VERSION = 1
 
@@ -48,6 +50,14 @@ class GateResult(BaseModel):
     across: str | None = None  # disparity gates: the slice column measured
     worst_slice: str | None = None  # disparity gates: "column=value" of the worst slice
     best_slice: str | None = None  # disparity gates: "column=value" of the best slice
+    #: Which rows the gate judged, straight from ``GateSpec.source`` (ADR-30).
+    #: THE discriminator for an after-test gate: ``after_test_verdict`` used to
+    #: identify them by ``period is not None``, which is an internal detail of
+    #: how ``_out_of_time_result`` happens to be built, so any future gate kind
+    #: that populated ``period`` would silently have changed every recorded
+    #: verdict - and both the leaf test and ``_out_of_time_result`` would still
+    #: have passed (C-1).
+    source: str | None = None
     #: After-test gates (ADR-30): the grain judged and the cell that decided.
     period: str | None = None
     cell: str | None = None

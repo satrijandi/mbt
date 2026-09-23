@@ -15,7 +15,6 @@ import os
 import sys
 import traceback
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +22,31 @@ import jinja2
 import pyarrow as pa
 
 from mbt.adapters.registry import get_registry
-from mbt.contracts import (
+from mbt.events import EventBus, JsonLinesSink, get_bus, set_bus
+from mbt.events.bus import HookEventSink
+from mbt.events.models import AutoResolved, LogMessage
+from mbt.exceptions import AdapterError, ConfigError, MbtError
+from mbt.execute import training_report as report_step
+from mbt.execute.handles import TrainingSplitView, TransformedDatasetHandle
+from mbt.execute.job_runtime import JobRuntime
+from mbt.execute.seeds import (
+    calibration_carve_seed,
+    champion_bootstrap_seed,
+    random_kfold_seed,
+    train_seed,
+    tuning_objective_bootstrap_seed,
+    tuning_seed,
+    validation_carve_seed,
+)
+from mbt.quality.hooks import ModelHooks, load_hooks
+from mbt.runtime import normalized_adapter_config, tracking_adapter_config
+from mbt.secrets import taint
+from mbt.storage import artifact_store_for
+from mbt.utils import canonical_json
+from mbt_adapter_base import (
     AUTO,
     AdapterRef,
     BootstrapDelta,
-    DatasetProfile,
     HookContext,
     JobResult,
     MetricResults,
@@ -41,15 +60,7 @@ from mbt.contracts import (
     TrainingJob,
     TuningResult,
 )
-from mbt.events import EventBus, JsonLinesSink, get_bus, set_bus
-from mbt.events.models import AutoResolved, LogMessage
-from mbt.exceptions import AdapterError, ConfigError, MbtError
-from mbt.execute.handles import TrainingSplitView, TransformedDatasetHandle
-from mbt.quality.hooks import ModelHooks, load_hooks
-from mbt.runtime import normalized_adapter_config, tracking_adapter_config
-from mbt.secrets import taint
-from mbt.storage import artifact_store_for
-from mbt.utils import canonical_json
+from mbt_adapter_base.capabilities import Capability, supports
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
 
 #: Fraction of the train window carved as implicit validation (TSD §13.5).
@@ -103,25 +114,6 @@ def _render_adapter_ref(ref: AdapterRef, job_vars: dict[str, Any]) -> AdapterRef
         return value
 
     return AdapterRef(adapter=ref.adapter, config=render(ref.config))
-
-
-@dataclass
-class _JobRuntime:
-    job: TrainingJob
-    spec: ModelSpec
-    adapter: Any
-    handle: Any  # what the adapter reads (transformed, or a path materialization)
-    transformed: TransformedDatasetHandle  # always the lazy transformed view
-    base_handle: Any  # pre-transform training view (carries the time_column)
-    #: The whole materialization, after-test split included (ADR-30). Only the
-    #: training report reads it; everything else goes through ``base_handle``.
-    materialization: Any
-    base_profile: DatasetProfile
-    hooks: ModelHooks | None
-    builtin_specs: list[MetricSpec]
-    hook_specs: list[MetricSpec]
-    ctx: RunContext
-    store: Any
 
 
 def run_job(job: TrainingJob) -> JobResult:
@@ -211,7 +203,7 @@ def _materialize_for_path_adapter(handle: Any, spec: ModelSpec) -> Any:
     return MaterializedDatasetHandle(directory)
 
 
-def _prepare(job: TrainingJob) -> _JobRuntime:
+def _prepare(job: TrainingJob) -> JobRuntime:
     registry = get_registry()
     checking = job.mode == "oot_check"
     # The pre-deploy check runs the version's own spec, like scoring (ADR-28).
@@ -261,7 +253,7 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
     ctx = RunContext(
         run_id=job.run_id,
         unique_id=job.node.unique_id,
-        seed=spec.seed,
+        seed=train_seed(spec.seed),
         target_name=job.target_name,
         project_dir=job.project_dir,
         vars=_job_vars(job),
@@ -269,7 +261,9 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
     )
 
     def hook_ctx(split: str) -> HookContext:
-        return HookContext(spec=spec, profile=base_profile, split=split, logger=get_bus())
+        return HookContext(
+            spec=spec, profile=base_profile, split=split, logger=HookEventSink(get_bus())
+        )
 
     time_column = getattr(base_handle, "time_column", None)
     transformed = TransformedDatasetHandle(
@@ -284,7 +278,7 @@ def _prepare(job: TrainingJob) -> _JobRuntime:
     if getattr(adapter, "data_access", "arrow") == "path":
         handle = _materialize_for_path_adapter(transformed, spec)
 
-    return _JobRuntime(
+    return JobRuntime(
         job=job,
         spec=spec,
         adapter=adapter,
@@ -309,7 +303,7 @@ def _store_prefix(job: TrainingJob) -> str:
 
 
 def _metrics_for(
-    runtime: _JobRuntime, model: Any, split: str, *, with_slices: bool
+    runtime: JobRuntime, model: Any, split: str, *, with_slices: bool
 ) -> MetricResults:
     """Builtin metrics via the adapter, hook metrics via predict + hooks."""
     slices = runtime.spec.evaluation.slices if with_slices else []
@@ -324,7 +318,10 @@ def _metrics_for(
             )
         predictions: pa.Table = runtime.adapter.predict(model, runtime.handle, split)
         hook_ctx = HookContext(
-            spec=runtime.spec, profile=runtime.base_profile, split=split, logger=get_bus()
+            spec=runtime.spec,
+            profile=runtime.base_profile,
+            split=split,
+            logger=HookEventSink(get_bus()),
         )
         computed = runtime.hooks.custom_metrics(predictions, hook_ctx)
         missing = [m.name for m in runtime.hook_specs if m.name not in computed]
@@ -339,7 +336,52 @@ def _metrics_for(
     return results
 
 
-def _export_baseline(runtime: _JobRuntime, test_scores: Any) -> Any:
+def _check_operating_point_support(
+    runtime: JobRuntime, metrics: dict[str, float], test: Any
+) -> dict[str, int]:
+    """Say how many rows each deployable cutoff rests on, loudly when few (D-1).
+
+    A ``threshold_at_precision_<p>`` value is a FITTED parameter selected by
+    scanning the test split's own PR curve, and the precision reported for it
+    is then measured on the same rows. The point bias is negligible while the
+    cutoff is supported by roughly a hundred rows and serious when it is not -
+    at 7 rows a reported 0.78 is a realized 0.65 on fresh data.
+
+    That is the rare-positive, high-precision corner, which is exactly the
+    retention-campaign shape the feature was built for. ``churn_demo`` runs
+    ``threshold_at_precision_0.35`` at a ~20% base rate, comfortably outside
+    the danger zone, which is why no test ever caught this.
+
+    Returns the support per metric so the caller can record it.
+    """
+    from mbt_adapter_base.metrics import MIN_OPERATING_POINT_SUPPORT, operating_point_support
+
+    support: dict[str, int] = {}
+    for name, cutoff in metrics.items():
+        if not name.startswith(("threshold_at_precision_", "threshold_at_recall_")):
+            continue
+        rows = operating_point_support(test.scores, cutoff)
+        support[name] = rows
+        if rows >= MIN_OPERATING_POINT_SUPPORT:
+            _detail(runtime, f"operating point {name}={cutoff:.6g} rests on {rows} test row(s)")
+            continue
+        get_bus().emit(
+            LogMessage(
+                level="warn",
+                unique_id=runtime.job.node.unique_id,
+                message=(
+                    f"operating point {name}={cutoff:.6g} rests on only {rows} test row(s) "
+                    f"(under {MIN_OPERATING_POINT_SUPPORT}): the cutoff is fitted on the same "
+                    "rows that report its precision, so on fresh data the realized precision "
+                    "will typically be materially lower than the number shown - do not deploy "
+                    "this as a decision rule without a larger test window or a lower target"
+                ),
+            )
+        )
+    return support
+
+
+def _export_baseline(runtime: JobRuntime, test_scores: Any) -> Any:
     """Build + export the monitoring baseline next to the model artifact (ADR-21).
 
     Post-hook train-split feature distributions plus the test-split score
@@ -353,7 +395,7 @@ def _export_baseline(runtime: _JobRuntime, test_scores: Any) -> Any:
     from mbt_adapter_base.monitoring import build_baseline, write_baseline
 
     train = runtime.transformed.read("train")
-    feature_columns = runtime.transformed.feature_columns or []
+    feature_columns = runtime.transformed.feature_columns()
     baseline = build_baseline(train, feature_columns, test_scores, model_name=runtime.spec.name)
     with tempfile.TemporaryDirectory(prefix="mbt-baseline-") as staging:
         path = Path(staging) / "baseline.json"
@@ -362,7 +404,7 @@ def _export_baseline(runtime: _JobRuntime, test_scores: Any) -> Any:
 
 
 def _export_inference_config(
-    runtime: _JobRuntime,
+    runtime: JobRuntime,
     artifact: Any,
     baseline: Any,
     metrics: dict[str, float],
@@ -387,7 +429,7 @@ def _export_inference_config(
         node=runtime.job.node,
         project=runtime.job.project,
         run_id=runtime.job.run_id,
-        feature_columns=runtime.transformed.feature_columns or [],
+        feature_columns=runtime.transformed.feature_columns(),
         metrics=metrics,
         artifact=artifact,
         baseline=baseline,
@@ -403,7 +445,7 @@ def _export_inference_config(
 
 
 def _log_run_documents(
-    runtime: _JobRuntime, tracking: Any, run_handle: Any, inference_config: Any
+    runtime: JobRuntime, tracking: Any, run_handle: Any, inference_config: Any
 ) -> None:
     """Attach the readable record of what this run trained (ADR-28).
 
@@ -436,24 +478,8 @@ def _log_run_documents(
                     tracking.log_document(run_handle, staged)
 
 
-def _feature_importance(runtime: _JobRuntime, model: Any) -> dict[str, float]:
-    """Per-feature importance for the model card (FR-DOCS-02).
-
-    Prefers a data-grounded SHAP importance when the adapter exposes it (the
-    tree adapters), since split-gain is cardinality-biased; falls back to the
-    adapter's model-intrinsic ``feature_importance``. Optional per adapter, like
-    ``log_trial`` on trackers: absence simply leaves cards without the table.
-    """
-    adapter = runtime.adapter
-    if hasattr(adapter, "shap_importance"):
-        return dict(adapter.shap_importance(model, runtime.handle, "test"))
-    if hasattr(adapter, "feature_importance"):
-        return dict(adapter.feature_importance(model))
-    return {}
-
-
 def _partial_dependence(
-    runtime: _JobRuntime, model: Any, importance: dict[str, float], *, top_n: int = 3
+    runtime: JobRuntime, model: Any, importance: dict[str, float], *, top_n: int = 3
 ) -> dict[str, list[list[float]]]:
     """Partial dependence for the ``top_n`` most-important NUMERIC features: how
     the average prediction moves as each feature sweeps its range while the rest
@@ -492,7 +518,7 @@ def _partial_dependence(
 
 
 def _champion_delta_bounds(
-    runtime: _JobRuntime, challenger: Any, champion: Any
+    runtime: JobRuntime, challenger: Any, champion: Any
 ) -> dict[str, BootstrapDelta]:
     """Paired-bootstrap lower bounds for champion-gate deltas (ADR-18).
 
@@ -533,9 +559,7 @@ def _champion_delta_bounds(
             greater_is_better=metric_direction(gate.metric, runtime.job.metric_specs),
             confidence=confidence,
             n_resamples=gate.bootstrap_resamples,
-            seed=spec.seed + 3,  # seed ladder: train, +1 tuning, +2 validation
-            # carve, +3 bootstrap, +4 random k-fold, +5 calibration carve,
-            # +6 permutation-importance sample (training_report)
+            seed=champion_bootstrap_seed(spec.seed),  # the ladder: execute/seeds.py
         )
     return bounds
 
@@ -554,9 +578,9 @@ def _tail_carve_indices(
 ) -> tuple[list[int], list[int]]:
     """``(fit_idx, held_idx)`` slicing the train rows for a carve: the tail
     ``fraction`` of the train time span when the split is temporal, else a
-    seeded random ``fraction``. Shared by the implicit-validation carve
-    (``seed+2``) and the calibration carve (``seed+5``) so the two slice train
-    by identical rules and differ only in seed and destination split."""
+    seeded random ``fraction``. Shared by the implicit-validation carve and the
+    calibration carve so the two slice train by identical rules and differ only
+    in seed (their rungs in ``execute/seeds.py``) and destination split."""
     if time_column and (time_range is not None or "train" in windows):
         from datetime import datetime
 
@@ -588,7 +612,7 @@ def _tail_carve_indices(
 
 
 def _carve_validation(
-    runtime: _JobRuntime, *, time_range: tuple[Any, Any] | None = None
+    runtime: JobRuntime, *, time_range: tuple[Any, Any] | None = None
 ) -> TransformedDatasetHandle | None:
     """A handle whose train/validation splits tuning may see; test never (ADR-8).
 
@@ -603,8 +627,8 @@ def _carve_validation(
 
     job = runtime.job
     spec = runtime.spec
-    raw_train = base._base.read("train")
-    time_column = getattr(base._base, "time_column", None)
+    raw_train = base.base.read("train")
+    time_column = getattr(base.base, "time_column", None)
     windows = job.dataset_windows.get("windows", job.dataset_windows)
 
     fit_idx, val_idx = _tail_carve_indices(
@@ -612,7 +636,7 @@ def _carve_validation(
         time_column=time_column,
         windows=windows,
         time_range=time_range,
-        seed=spec.seed + 2,
+        seed=validation_carve_seed(spec.seed),
         fraction=_IMPLICIT_VALIDATION_FRACTION,
     )
     if not fit_idx or not val_idx:
@@ -632,13 +656,15 @@ def _carve_validation(
     )
 
     def hook_ctx(split: str) -> HookContext:
-        return HookContext(spec=spec, profile=runtime.base_profile, split=split, logger=get_bus())
+        return HookContext(
+            spec=spec, profile=runtime.base_profile, split=split, logger=HookEventSink(get_bus())
+        )
 
     return TransformedDatasetHandle(carved, spec, runtime.hooks, hook_ctx, time_column)
 
 
 def _carve_calibration(
-    runtime: _JobRuntime,
+    runtime: JobRuntime,
     spec: ModelSpec,
     base: TransformedDatasetHandle,
     *,
@@ -651,13 +677,13 @@ def _carve_calibration(
     that early stopping and tuning select on makes the reported ``ece``/``brier``
     optimistic and overfits the deployed calibrator. So a spec that sets
     ``calibration`` always gets its own slice carved from train (temporal tail
-    or seeded random ``seed+5``, mirroring the validation carve rules); every
+    or its own seeded random draw, mirroring the validation carve rules); every
     other split (test, a declared validation) passes through untouched.
     ``time_range`` makes the carve fold-aware inside the backtest (F5).
     """
     job = runtime.job
-    raw_train = base._base.read("train")
-    time_column = getattr(base._base, "time_column", None)
+    raw_train = base.base.read("train")
+    time_column = getattr(base.base, "time_column", None)
     windows = job.dataset_windows.get("windows", job.dataset_windows)
 
     fit_idx, cal_idx = _tail_carve_indices(
@@ -665,7 +691,7 @@ def _carve_calibration(
         time_column=time_column,
         windows=windows,
         time_range=time_range,
-        seed=spec.seed + 5,
+        seed=calibration_carve_seed(spec.seed),
         fraction=_CALIBRATION_FRACTION,
     )
     if not fit_idx or not cal_idx:
@@ -679,9 +705,9 @@ def _carve_calibration(
         "train": raw_train.take(fit_idx),
         "calibration": raw_train.take(cal_idx),
     }
-    for split in base._base.splits():
+    for split in base.base.splits():
         if split not in ("train", "calibration"):
-            tables[split] = base._base.read(split)
+            tables[split] = base.base.read(split)
     carved = InMemoryDatasetHandle(
         tables,
         snapshot_id=base.snapshot_id,
@@ -690,13 +716,15 @@ def _carve_calibration(
     )
 
     def hook_ctx(split: str) -> HookContext:
-        return HookContext(spec=spec, profile=runtime.base_profile, split=split, logger=get_bus())
+        return HookContext(
+            spec=spec, profile=runtime.base_profile, split=split, logger=HookEventSink(get_bus())
+        )
 
     return TransformedDatasetHandle(carved, spec, runtime.hooks, hook_ctx, time_column)
 
 
 def _robust_objective_value(
-    runtime: _JobRuntime, model: Any, spec: ModelSpec, objective_spec: MetricSpec
+    runtime: JobRuntime, model: Any, spec: ModelSpec, objective_spec: MetricSpec
 ) -> float:
     """Bootstrap lower bound of the validation objective metric (R2-7): the
     tuning selection is then defended against validation-window luck, not made
@@ -718,12 +746,12 @@ def _robust_objective_value(
         y_score,
         confidence=_TUNING_BOOTSTRAP_CONFIDENCE,
         n_resamples=_TUNING_BOOTSTRAP_RESAMPLES,
-        seed=spec.seed + 3,
+        seed=tuning_objective_bootstrap_seed(spec.seed),
     )
 
 
 def _run_tuning(
-    runtime: _JobRuntime,
+    runtime: JobRuntime,
     spec: ModelSpec,
     tracking: Any = None,
     run_handle: Any = None,
@@ -747,6 +775,14 @@ def _run_tuning(
     if carved is not None and getattr(runtime.adapter, "data_access", "arrow") == "path":
         tune_handle = _materialize_for_path_adapter(carved, spec)
     explicit_validation = "validation" in runtime.transformed.splits()
+    # D-2: with no declared validation split the final fit reabsorbs the carve
+    # (ADR-8), so it early-stops on nothing while every trial that voted on the
+    # hyperparameters DID stop early. Collect what the trials actually used.
+    collect_rounds = (
+        not explicit_validation
+        and spec.hyperparameters.get("early_stopping_rounds") is not None
+        and supports(runtime.adapter, Capability.BEST_ITERATION, spec)
+    )
 
     objective_spec = next(
         (
@@ -768,10 +804,14 @@ def _run_tuning(
             resource=job.node.unique_id,
         )
 
-    tune_runtime = _JobRuntime(**{**runtime.__dict__, "handle": tune_handle})
+    tune_runtime = JobRuntime(**{**runtime.__dict__, "handle": tune_handle})
     trial_counter = {"index": 0}
+    #: Rounds each trial's fit actually kept (D-2). Collected only when the
+    #: final fit will REABSORB the tuning carve, because that is the case where
+    #: the final fit has nothing to stop on.
+    trial_rounds: list[int] = []
 
-    adapter_reports = hasattr(runtime.adapter, "train_with_report")
+    adapter_reports = supports(runtime.adapter, Capability.TRAIN_WITH_REPORT, spec)
     if tuning.pruner is not None and not adapter_reports:
         get_bus().emit(
             LogMessage(
@@ -802,6 +842,10 @@ def _run_tuning(
             model = runtime.adapter.train_with_report(trial_spec, tune_handle, runtime.ctx, report)
         else:
             model = runtime.adapter.train(trial_spec, tune_handle, runtime.ctx)
+        if collect_rounds:
+            rounds = runtime.adapter.best_iteration(model)
+            if rounds:
+                trial_rounds.append(int(rounds))
         if tuning.objective.robust:
             value = _robust_objective_value(tune_runtime, model, spec, objective_spec)
         else:
@@ -837,22 +881,67 @@ def _run_tuning(
                     ),
                 )
             )
-    result = engine.tune(tuning, objective, n_trials=n_trials, seed=spec.seed + 1)
+    result = engine.tune(tuning, objective, n_trials=n_trials, seed=tuning_seed(spec.seed))
 
     # Final fit reabsorbs an *implicit* carve; an explicit validation split
     # stays held out because the user declared it (TSD §10.5 step 6).
-    _ = explicit_validation
-    tuned = spec.model_copy(
-        update={"hyperparameters": {**spec.hyperparameters, **result.best_params}}
-    )
+    hyperparameters = {**spec.hyperparameters, **result.best_params}
+    hyperparameters = _carry_trial_rounds(runtime, hyperparameters, trial_rounds)
+    tuned = spec.model_copy(update={"hyperparameters": hyperparameters})
     return tuned, result
 
 
 # -- main paths -------------------------------------------------------------------
 
 
+def _carry_trial_rounds(
+    runtime: JobRuntime, hyperparameters: dict[str, Any], trial_rounds: list[int]
+) -> dict[str, Any]:
+    """Ship the complexity the search chose, not the one the spec declared (D-2).
+
+    When the dataset declares no ``validation`` split, core carves one for the
+    tuning trials and the final fit REABSORBS it (ADR-8, deliberately - those
+    rows are training data). So every trial that voted on the hyperparameters
+    stopped early, and the model that ships would otherwise train all
+    ``n_estimators`` rounds: a search that converged on an aggressive learning
+    rate BECAUSE early stopping was protecting it produces a final model with
+    no such protection.
+
+    Nothing downstream can see that. The gates evaluate the shipped model
+    honestly, so it fails only when it is genuinely worse and silently ships a
+    differently-regularized model when it is not.
+
+    The median of the trials' best iterations keeps every training row and
+    ships the depth the search actually selected. ``early_stopping_rounds`` is
+    dropped alongside it, because with no validation split it is inert and
+    leaving it in the recorded spec reads as if the final fit stopped early.
+    """
+    from statistics import median
+
+    if not trial_rounds:
+        return hyperparameters
+    rounds = max(1, int(median(trial_rounds)))
+    declared = hyperparameters.get("n_estimators")
+    carried = {**hyperparameters, "n_estimators": rounds}
+    carried.pop("early_stopping_rounds", None)
+    get_bus().emit(
+        LogMessage(
+            unique_id=runtime.job.node.unique_id,
+            message=(
+                f"final fit uses n_estimators={rounds} (median of {len(trial_rounds)} "
+                f"tuning trial(s), which early-stopped between {min(trial_rounds)} and "
+                f"{max(trial_rounds)} rounds) instead of the declared {declared}: the "
+                "final fit reabsorbs the validation carve, so it has nothing to stop "
+                "on and would otherwise ship a less-regularized model than the search "
+                "scored"
+            ),
+        )
+    )
+    return carried
+
+
 def _backtest_folds(
-    runtime: _JobRuntime, spec: ModelSpec, base_train: pa.Table, n_folds: int
+    runtime: JobRuntime, spec: ModelSpec, base_train: pa.Table, n_folds: int
 ) -> list[tuple[pa.Table, pa.Table]]:
     """(train_rows, test_rows) fold pairs for the backtest, by split strategy:
     time-ordered expanding prefixes for a temporal split (train on the past,
@@ -918,7 +1007,7 @@ def _backtest_folds(
         return folds
     # random split: k-fold cross-validation (each fold is held out as the test set)
     n = base_train.num_rows
-    perm = np.random.default_rng(spec.seed + 4).permutation(n)
+    perm = np.random.default_rng(random_kfold_seed(spec.seed)).permutation(n)
     edges = [round(i * n / n_folds) for i in range(n_folds + 1)]
     return [
         (
@@ -930,7 +1019,7 @@ def _backtest_folds(
 
 
 def _walk_forward_backtest(
-    runtime: _JobRuntime, spec: ModelSpec, n_folds: int, *, nested: bool = False
+    runtime: JobRuntime, spec: ModelSpec, n_folds: int, *, nested: bool = False
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Fold-based cross-validated evaluation over the training window (R2-7):
     time-ordered walk-forward for a temporal split, random k-fold for a random
@@ -956,7 +1045,9 @@ def _walk_forward_backtest(
     time_column = getattr(runtime.base_handle, "time_column", None)
 
     def hook_ctx(split: str) -> HookContext:
-        return HookContext(spec=spec, profile=runtime.base_profile, split=split, logger=get_bus())
+        return HookContext(
+            spec=spec, profile=runtime.base_profile, split=split, logger=HookEventSink(get_bus())
+        )
 
     per_fold: dict[str, list[float]] = {}
     for train_rows, test_rows in folds:
@@ -983,7 +1074,7 @@ def _walk_forward_backtest(
         if nested:
             # Nested CV: re-tune on this fold's train only, so the outer-test fold
             # never informs the selection (an unbiased estimate of the tuning).
-            fold_runtime = _JobRuntime(
+            fold_runtime = JobRuntime(
                 **{
                     **runtime.__dict__,
                     "handle": handle,
@@ -1017,14 +1108,14 @@ def _walk_forward_backtest(
     return means, stds
 
 
-def _detail(runtime: _JobRuntime, message: str) -> None:
+def _detail(runtime: JobRuntime, message: str) -> None:
     """A debug-level account of what the job did: hidden on the console
     unless ``--verbose``, always in the node's run log (ADR-30)."""
     get_bus().emit(LogMessage(level="debug", unique_id=runtime.job.node.unique_id, message=message))
 
 
 @contextlib.contextmanager
-def _phase(runtime: _JobRuntime, name: str) -> Iterator[None]:
+def _phase(runtime: JobRuntime, name: str) -> Iterator[None]:
     import time
 
     started = time.monotonic()
@@ -1032,7 +1123,7 @@ def _phase(runtime: _JobRuntime, name: str) -> Iterator[None]:
     _detail(runtime, f"{name} took {time.monotonic() - started:.2f}s")
 
 
-def _describe_inputs(runtime: _JobRuntime) -> None:
+def _describe_inputs(runtime: JobRuntime) -> None:
     """Split sizes, label balance, time span and feature set, for the log."""
     profile = runtime.materialization.profile()
     rows = ", ".join(f"{split}={n}" for split, n in sorted(profile.n_rows.items()))
@@ -1048,15 +1139,14 @@ def _describe_inputs(runtime: _JobRuntime) -> None:
     test_window = runtime.job.node.resolved.get("test_window")
     if test_window:
         _detail(runtime, f"test narrowed by test_window to [{test_window[0]}, {test_window[1]})")
-    runtime.transformed.read("train")  # resolves the feature columns
-    features = runtime.transformed.feature_columns or []
+    features = runtime.transformed.feature_columns()
     shown = ", ".join(features[:30]) + (
         f", ... ({len(features) - 30} more)" if len(features) > 30 else ""
     )
     _detail(runtime, f"{len(features)} feature(s): {shown}")
 
 
-def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResult:
+def _run_train(runtime: JobRuntime, tracking: Any, run_handle: Any) -> JobResult:
     job = runtime.job
     bus = get_bus()
     _describe_inputs(runtime)
@@ -1105,8 +1195,8 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         carved = _carve_calibration(runtime, spec, runtime.transformed)
         _detail(
             runtime,
-            f"calibration ({spec.calibration}) carve: fit on {carved._base.read('train').num_rows} "
-            f"rows, calibrate on {carved._base.read('calibration').num_rows}",
+            f"calibration ({spec.calibration}) carve: fit on {carved.base.read('train').num_rows} "
+            f"rows, calibrate on {carved.base.read('calibration').num_rows}",
         )
         fit_handle = carved
         if getattr(runtime.adapter, "data_access", "arrow") == "path":
@@ -1133,17 +1223,21 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
 
     # 5. export the artifact and the monitoring baseline (ADR-21); score every
     #    report split once (ADR-30) and reuse the test scores for the baseline
-    from mbt.execute import training_report as report_step
-
     artifact = runtime.adapter.export(model, "native", runtime.store)
     _detail(runtime, f"artifact {artifact.uri} ({artifact.size_bytes} bytes, {artifact.format})")
-    with _phase(runtime, "scoring the report splits"):
-        scored = report_step.scored_splits(runtime, model, stage=_materialize_for_path_adapter)
-    baseline = _export_baseline(runtime, scored["test"].scores)
-    importance = _feature_importance(runtime, model)
-    if not importance:
-        importance = report_step.permutation_importance(runtime, model, scored["test"])
-    partial_dependence = _partial_dependence(runtime, model, importance)
+    with _phase(runtime, "scoring the report splits and building the training report"):
+        report_run = report_step.produce_report(
+            runtime,
+            spec,
+            model,
+            kind="training",
+            stage=_materialize_for_path_adapter,
+            tracking=tracking,
+            run_handle=run_handle,
+        )
+    _check_operating_point_support(runtime, challenger.metrics, report_run.scored["test"])
+    baseline = _export_baseline(runtime, report_run.scored["test"].scores)
+    partial_dependence = _partial_dependence(runtime, model, report_run.importance)
     backtest_folds = spec.evaluation.protocol.backtest_folds
     nested = spec.evaluation.protocol.nested_cv
     backtest_metrics, backtest_std = (
@@ -1154,18 +1248,8 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         else ({}, {})
     )
 
-    # 6. the training report (ADR-30), then the inference config a later
-    #    scoring run reads its spec from (ADR-28), which records it
-    with _phase(runtime, "building the training report"):
-        report_data = report_step.build_report_data(runtime, spec, importance, scored)
-    summary = report_step.publish_report(
-        runtime,
-        report_data,
-        report_step.report_meta(runtime, spec, scored, kind="training"),
-        tracking=tracking,
-        run_handle=run_handle,
-        prefix="report",
-    )
+    # 6. the inference config a later scoring run reads its spec from (ADR-28)
+    summary = report_run.summary
     _detail(
         runtime,
         f"training report: {len(summary.documents)} file(s) at {summary.report_uri}; "
@@ -1209,7 +1293,7 @@ def _run_train(runtime: _JobRuntime, tracking: Any, run_handle: Any) -> JobResul
         metrics=challenger,
         champion_metrics=champion_metrics,
         champion_delta_bounds=delta_bounds,
-        feature_importance=importance,
+        feature_importance=report_run.importance,
         partial_dependence=partial_dependence,
         backtest_metrics=backtest_metrics,
         backtest_std=backtest_std,
@@ -1227,7 +1311,7 @@ def _metric_line(metrics: dict[str, float]) -> str:
     return ", ".join(f"{name}={value:.4f}" for name, value in sorted(metrics.items()))
 
 
-def _tracking_params(runtime: _JobRuntime, spec: ModelSpec) -> dict[str, str]:
+def _tracking_params(runtime: JobRuntime, spec: ModelSpec) -> dict[str, str]:
     """Bare hyperparameters and ``seed`` - what runs have always carried, kept
     so history stays comparable - plus the flat model and dataset configs
     (ADR-30)."""
@@ -1236,9 +1320,7 @@ def _tracking_params(runtime: _JobRuntime, spec: ModelSpec) -> dict[str, str]:
 
     params = {k: str(v) for k, v in spec.hyperparameters.items()}
     params["seed"] = str(spec.seed)
-    params.update(
-        model_params(spec.model_dump(mode="json"), runtime.transformed.feature_columns or [])
-    )
+    params.update(model_params(spec.model_dump(mode="json"), runtime.transformed.feature_columns()))
     node = runtime.job.dataset_node
     record = dataset_record(runtime)
     if node is not None and record is not None:
@@ -1298,7 +1380,9 @@ def _run_score(job: TrainingJob) -> JobResult:
         hooks = load_hooks(Path(job.project_dir), job.model_node.hooks_path)
 
     def hook_ctx(split: str) -> HookContext:
-        return HookContext(spec=model_spec, profile=base_profile, split=split, logger=get_bus())
+        return HookContext(
+            spec=model_spec, profile=base_profile, split=split, logger=HookEventSink(get_bus())
+        )
 
     time_column = getattr(base_handle, "time_column", None)
     transformed = TransformedDatasetHandle(
@@ -1346,7 +1430,7 @@ def _run_score(job: TrainingJob) -> JobResult:
         # Per-prediction local attribution (explainability): the top-k features
         # by |SHAP| for each row, as a JSON string, so a consumer can answer
         # "why did THIS row score this way".
-        if not hasattr(adapter, "explain"):
+        if not supports(adapter, Capability.EXPLAIN, model_spec):
             raise ConfigError(
                 f"output.explain_top_k is set but the {model_spec.adapter!r} adapter does not "
                 "support per-prediction SHAP explanations",
@@ -1411,7 +1495,7 @@ def _run_score(job: TrainingJob) -> JobResult:
     return JobResult(status="success", predictions=persisted, monitor_stats=stats)
 
 
-def _run_evaluate(runtime: _JobRuntime) -> JobResult:
+def _run_evaluate(runtime: JobRuntime) -> JobResult:
     job = runtime.job
     if job.artifact is None:
         raise ConfigError(
@@ -1430,12 +1514,12 @@ def _run_evaluate(runtime: _JobRuntime) -> JobResult:
         metrics=results,
         champion_metrics=champion_metrics,
         champion_delta_bounds=delta_bounds,
-        feature_importance=_feature_importance(runtime, model),
+        feature_importance=report_step.feature_importance(runtime, model),
         artifact=job.artifact,
     )
 
 
-def _run_oot_check(runtime: _JobRuntime) -> JobResult:
+def _run_oot_check(runtime: JobRuntime) -> JobResult:
     """The pre-deploy check (mode="oot_check", ADR-30).
 
     Loads a registered version, scores its recorded test window and the rows
@@ -1443,8 +1527,6 @@ def _run_oot_check(runtime: _JobRuntime) -> JobResult:
     ``evaluations/<run_id>/``. It opens no run and logs no parameters: those
     are immutable, and this run's windows are not the training run's.
     """
-    from mbt.execute import training_report as report_step
-
     job = runtime.job
     if job.artifact is None:
         raise ConfigError(
@@ -1452,27 +1534,22 @@ def _run_oot_check(runtime: _JobRuntime) -> JobResult:
             resource=job.node.unique_id,
         )
     model = runtime.adapter.load(job.artifact, runtime.store)
-    scored = report_step.scored_splits(
-        runtime, model, stage=_materialize_for_path_adapter, include_train=False
-    )
-    importance = _feature_importance(runtime, model)
-    if not importance:
-        importance = report_step.permutation_importance(runtime, model, scored["test"])
-    data = report_step.build_report_data(runtime, runtime.spec, importance, scored)
     tracking = None
     run_handle = None
     if job.tracking is not None and job.tracking_run_id:
         tracking = _tracking_adapter(job)
         run_handle = tracking.resume(job.tracking_run_id)
-    summary = report_step.publish_report(
+    summary = report_step.produce_report(
         runtime,
-        data,
-        report_step.report_meta(runtime, runtime.spec, scored, kind="check"),
+        runtime.spec,
+        model,
+        kind="check",
+        stage=_materialize_for_path_adapter,
+        include_train=False,
         tracking=tracking,
         run_handle=run_handle,
-        prefix="report",
         artifact_path=f"evaluations/{job.run_id}",
-    )
+    ).summary
     if tracking is not None and run_handle is not None:
         metrics = report_step.report_metrics(summary)
         with contextlib.suppress(Exception):  # the verdict does not hang on the tracker

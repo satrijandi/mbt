@@ -81,22 +81,6 @@ def test_older_contract_major_points_at_the_adapter_package(
         fake_registry.register(_plugin(contract_version="0.0"))
 
 
-def test_lazy_load_registers_task_schemas_once(
-    fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from mbt.config import tasks as tasks_module
-
-    # register into a scratch copy so the process-wide schema registry survives
-    monkeypatch.setattr(tasks_module, "_REGISTRY", dict(tasks_module._REGISTRY))
-    plugin = _plugin(task_schemas={TaskType.SURVIVAL: _StubTaskSchema})
-    fake_registry._entries["nulladapter"] = _Entry(name="nulladapter", load=lambda: plugin)
-
-    assert fake_registry.get("nulladapter") is plugin
-    assert TaskType.SURVIVAL in tasks_module._REGISTRY
-    # a second registration attempt is a no-op (would raise "already registered")
-    fake_registry._register_task_schemas(plugin)
-
-
 def test_training_helper_requires_a_training_adapter(fake_registry: AdapterRegistry) -> None:
     fake_registry.register(_plugin(name="dataonly", training=None))
     with pytest.raises(ConfigError, match="provides no training adapter"):

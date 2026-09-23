@@ -13,7 +13,6 @@ from typing import Any
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.compile.windows import parse_window
-from mbt.contracts import ScoringSpec
 from mbt.execute.monitor import GROUND_TRUTH_MARKER
 from mbt.execute.orchestrator import (
     InvocationOptions,
@@ -22,6 +21,9 @@ from mbt.execute.orchestrator import (
     require_scoring_capability,
 )
 from mbt.execute.runners import ExecutionContext
+from mbt_adapter_base import (
+    ScoringSpec,
+)
 
 
 @dataclass

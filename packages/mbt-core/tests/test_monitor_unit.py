@@ -212,22 +212,28 @@ def test_overlapping_monitor_does_not_re_evaluate_a_recorded_run(
 
 
 def test_label_read_events_drop_only_the_scoring_row_count() -> None:
-    """Every adapter's scoring-input row count ("N rows to score", "nothing to
-    score") is filtered from a label read; anything else an adapter says - a
-    warning, a snapshot note - still reaches the operator."""
+    """Every adapter's scoring-input row count is filtered from a label read;
+    anything else an adapter says - a warning, a snapshot note - still reaches
+    the operator.
+
+    The suppression is by event TYPE. It used to be ``"to score" in message``,
+    so rewording any data adapter's log line silently disabled it (B-4); this
+    test proves a LogMessage whose text says exactly that is NOT suppressed,
+    which is the half a substring match could never express.
+    """
     from misc_unit_helpers import RecordingSink
 
-    from mbt.events.models import LogMessage
+    from mbt.events.models import LogMessage, ScoringInputMaterialized
     from mbt.execute.monitor import _LabelReadEvents
 
     sink = RecordingSink()
     events = _LabelReadEvents(sink)
-    events.emit(LogMessage(message="scoring input materialized 120 rows to score"))
-    events.emit(
-        LogMessage(level="warn", message="scoring input materialized 0 rows; nothing to score")
-    )
-    events.emit(LogMessage(message="scoring input source.x: materialized 9 rows to score"))
+    events.emit(ScoringInputMaterialized(rows=120))
+    events.emit(ScoringInputMaterialized(rows=0))
     kept = LogMessage(level="warn", message="snapshot token moved under a pinned manifest")
     events.emit(kept)
-    events.emit("a foreign object from a hook")
-    assert sink.events == [kept, "a foreign object from a hook"]
+    # identity, not wording: a free-form line that happens to say "to score"
+    # is somebody else's event and must survive
+    also_kept = LogMessage(message="no champion in stage 'production' to score with")
+    events.emit(also_kept)
+    assert sink.events == [kept, also_kept]

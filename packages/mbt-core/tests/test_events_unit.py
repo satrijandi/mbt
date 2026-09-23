@@ -6,7 +6,7 @@ import json
 from misc_unit_helpers import RecordingSink
 from rich.console import Console
 
-from mbt.events.bus import EventBus, get_bus, set_bus
+from mbt.events.bus import EventBus, HookEventSink, get_bus, set_bus
 from mbt.events.models import (
     AdapterWarning,
     ArtifactRegistered,
@@ -196,12 +196,25 @@ def test_bus_preserves_existing_run_id() -> None:
     assert sink.events[0].run_id == "job-7"
 
 
-def test_bus_wraps_foreign_objects_in_log_messages() -> None:
+def test_the_hook_boundary_wraps_foreign_objects_in_log_messages() -> None:
+    """Coercion lives at the hook boundary, not on the bus (B-4).
+
+    ``EventSink.emit`` is typed, so an adapter cannot accidentally emit a bare
+    string and have the bus log it at the default level - which is how the same
+    condition became a WARN from one data adapter and an info line from two
+    others (v5 live defect 1). A user's ``hooks.py`` is the one place a foreign
+    object genuinely arrives, so it gets a sink that tolerates one.
+    """
     sink = RecordingSink()
     bus = EventBus([sink])
-    bus.emit("plain string from a hook")
+    hooks = HookEventSink(bus)
+    hooks.emit("plain string from a hook")
     assert isinstance(sink.events[0], LogMessage)
     assert sink.events[0].message == "plain string from a hook"
+    # an Event passes through untouched
+    original = LogMessage(level="warn", message="typed")
+    hooks.emit(original)
+    assert sink.events[1] is original
 
 
 def test_add_sink_receives_subsequent_events() -> None:

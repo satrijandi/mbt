@@ -6,6 +6,7 @@ nor environment (capture-phase Jinja, TSD §6).
 
 import re
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,23 +16,8 @@ import networkx as nx
 from pydantic import BaseModel
 
 from mbt.adapters.registry import AdapterRegistry, get_registry
-from mbt.compile.windows import VALIDATION_ANCHOR, is_subrange, parse_window
 from mbt.config.project import ProjectConfig, load_project
 from mbt.config.tasks import get_task_schema
-from mbt.contracts import (
-    AUTO,
-    OUT_OF_TIME_SPLIT,
-    DatasetSpec,
-    ExposureSpec,
-    MetricSpec,
-    ModelSpec,
-    ScoringSpec,
-    SourceGroup,
-    SourceTable,
-    SplitStrategy,
-    TaskType,
-    parse_time_offset,
-)
 from mbt.dag.graph import build_graph, find_cycle
 from mbt.exceptions import ConfigError
 from mbt.ids import source_unique_id, unique_id
@@ -43,13 +29,21 @@ from mbt.parsing.loader import (
     load_yaml_mapping,
     validate_resource,
 )
-from mbt.quality.check_names import BUILTIN_CHECK_NAMES, SCORING_CHECK_NAMES
+from mbt.parsing.rules import Phase, RuleContext, RuleTarget, run_rules
 from mbt.quality.metrics import resolve_metric, resolve_model_metrics
 from mbt.quality.python_tests import PythonTestFile, discover_python_tests
 from mbt.utils import did_you_mean
+from mbt_adapter_base import (
+    DatasetSpec,
+    ExposureSpec,
+    MetricSpec,
+    ModelSpec,
+    ScoringSpec,
+    SourceGroup,
+    SourceTable,
+)
 
 _REF_RE = re.compile(r"^\s*ref\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\)\s*$")
-_SOURCE_RE = re.compile(r"^\s*source\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][^'\"]+['\"]\s*\)\s*$")
 
 #: Root-level resource files picked up by convention (plus configured paths).
 _ROOT_FILES = (
@@ -60,16 +54,6 @@ _ROOT_FILES = (
     "exposures.yml",
     "exposures.yaml",
 )
-
-#: Built-in checks a user may declare, from the single authoritative source
-#: (mbt.quality.check_names). Importing the names - not the implementations -
-#: keeps duckdb/pyarrow off the parse path (ADR-14) while making the parser and
-#: the check registry impossible to drift apart.
-_BUILTIN_CHECKS = BUILTIN_CHECK_NAMES
-
-#: Checks valid on a scoring input: no label exists, so label-dependent
-#: checks are rejected (ADR-20).
-_SCORING_CHECKS = SCORING_CHECK_NAMES
 
 
 @dataclass(frozen=True)
@@ -201,7 +185,7 @@ def parse_project(
     )
     exposures = _parse_exposures(raw_resources.get("exposure", []), project, renderer, report)
 
-    _link_and_check(
+    _link(
         project=project,
         sources=sources,
         datasets=datasets,
@@ -212,6 +196,12 @@ def parse_project(
         registry=registry,
         report=report,
     )
+
+    # Every cross-resource invariant, from one list (A-3). The SAME list runs
+    # again at compile time over the target-rendered specs, which is what keeps
+    # a target var from moving spec.target or a gate's source past every check
+    # (compile/compiler.py).
+    run_rules(rule_context(project.name, datasets, models, scoring, registry), report)
 
     graph = _build_project_graph(sources, datasets, models, scoring, exposures, report)
     python_tests = discover_python_tests(project_dir, project.test_paths, report)
@@ -388,10 +378,6 @@ def _parse_datasets(
             report.error(f"duplicate dataset {spec.name!r}", file=rel, resource=uid)
             continue
 
-        _validate_dataset_windows(spec, rel, uid, report)
-        _validate_checks(spec, rel, uid, report)
-        _validate_split_protocol(spec, rel, uid, report)
-
         datasets[uid] = ParsedResource(
             unique_id=uid,
             resource_type="dataset",
@@ -403,147 +389,6 @@ def _parse_datasets(
             sources=captured.sources,
         )
     return datasets
-
-
-def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
-    if spec.split.strategy is not SplitStrategy.TEMPORAL:
-        return
-    parsed: dict[str, Any] = {}
-    for split_field in ("train", "test", "validation", OUT_OF_TIME_SPLIT):
-        expression = getattr(spec.split, split_field)
-        if expression is None:
-            continue
-        try:
-            parsed[split_field] = parse_window(expression)
-        except ConfigError as exc:
-            report.error(
-                exc.message,
-                file=rel,
-                resource=uid,
-                field_path=f"/split/{split_field}",
-                hint=exc.hint,
-            )
-    test, after = parsed.get("test"), parsed.get(OUT_OF_TIME_SPLIT)
-    if test is None or after is None:
-        return
-    # Anchor-independent only when both bounds are the same kind; a mixed
-    # relative/absolute pair is ordered at compile time instead (ADR-30).
-    kinds = {test.end.kind, after.start.kind}
-    if not (kinds <= {"duration", "now"} or kinds == {"absolute"}):
-        return
-    if after.start.resolve(VALIDATION_ANCHOR) < test.end.resolve(VALIDATION_ANCHOR):
-        report.error(
-            f"split.out_of_time {spec.split.out_of_time!r} starts before the test "
-            f"window {spec.split.test!r} ends",
-            file=rel,
-            resource=uid,
-            field_path="/split/out_of_time",
-            hint="the after-test window must start where the test window ends, so no "
-            "row the model was evaluated on is scored again as new",
-        )
-
-
-#: Nominal days per duration unit, for comparing two declared durations only.
-#: Calendar months are not 30 days, but this never resolves a window - it only
-#: answers "is this embargo shorter than that horizon", where being approximate
-#: at the boundary is fine and being absent is not.
-_NOMINAL_DAYS = {"h": 1 / 24, "d": 1.0, "w": 7.0, "mo": 30.0}
-
-
-def _duration_days(duration: str) -> float:
-    value, unit = parse_time_offset(duration)
-    return abs(value) * _NOMINAL_DAYS[unit]
-
-
-def _newest_row_age_days(window: str | None) -> float:
-    """How old the freshest row in a scoring batch is, at minimum, when scored.
-
-    Read off the window's END bound: ``"-31d:-28d"`` cannot contain anything
-    newer than 28 days, while an end of ``now`` (or no window at all) admits a
-    row scored on its own inference date. An absolute end is anchor-relative
-    and unknowable here, so it counts as zero - the conservative direction.
-    """
-    if window is None:
-        return 0.0
-    try:
-        end = parse_window(window).end
-    except ConfigError:
-        return 0.0  # reported by _validate_scoring_windows in the same pass
-    if end.kind != "duration" or end.delta is None:
-        return 0.0
-    return max(0.0, -(end.delta.total_seconds() / 86400.0) - end.months * _NOMINAL_DAYS["mo"])
-
-
-def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
-    """Warn on split configurations that invite leakage (FR-RES-09).
-
-    Warnings, not errors: a random split over truly exchangeable rows is
-    legitimate, and these flag the configurations that usually are not.
-    """
-    # Temporal split + a label horizon but no embargo (R2-7): rows near the
-    # train boundary have their labels observed inside the evaluation window and
-    # leak. The embargo mechanism exists; guide the user to actually set it.
-    # The alignment itself happens upstream (ADR-29), so `label.horizon` is the
-    # only place the project states the outcome window - which is exactly why
-    # it exists: without it, moving the alignment out of mbt would have
-    # silently switched this warning off.
-    horizon = spec.label.horizon
-    if (
-        spec.split.strategy is SplitStrategy.TEMPORAL
-        and horizon is not None
-        and spec.split.embargo is None
-    ):
-        report.warning(
-            "temporal split with a declared label horizon but no "
-            "'split.embargo': training rows near the boundary have labels "
-            "observed inside the evaluation window and can leak into it",
-            file=rel,
-            resource=uid,
-            field_path="/split/embargo",
-            hint=f"set split.embargo to at least the label horizon ({horizon})",
-        )
-    if (
-        spec.split.strategy is SplitStrategy.TEMPORAL
-        and horizon is not None
-        and spec.split.embargo is not None
-        and _duration_days(spec.split.embargo) < _duration_days(horizon)
-    ):
-        report.warning(
-            f"split.embargo ({spec.split.embargo}) is shorter than the label "
-            f"horizon ({horizon}), so the gap does not cover the window in "
-            "which the label is observed",
-            file=rel,
-            resource=uid,
-            field_path="/split/embargo",
-            hint=f"set split.embargo to at least {horizon}",
-        )
-    if spec.split.strategy is not SplitStrategy.RANDOM:
-        return
-    if spec.split.time_column is not None:
-        report.warning(
-            "random split on a dataset with a time column invites temporal "
-            "leakage: rows from after the test period can train the model",
-            file=rel,
-            resource=uid,
-            field_path="/split/strategy",
-            hint="use 'strategy: temporal', or drop 'time_column' if it is not event time",
-        )
-
-
-def _validate_checks(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:
-    for i, check in enumerate(spec.checks):
-        check_name = check if isinstance(check, str) else next(iter(check), "")
-        if check_name not in _BUILTIN_CHECKS:
-            suggestion = did_you_mean(str(check_name), sorted(_BUILTIN_CHECKS))
-            report.error(
-                f"unknown dataset check {check_name!r}",
-                file=rel,
-                resource=uid,
-                field_path=f"/checks/{i}",
-                hint=f"did you mean {suggestion!r}?"
-                if suggestion
-                else f"built-in checks: {', '.join(sorted(_BUILTIN_CHECKS))}",
-            )
 
 
 def _valid_name(name: str) -> bool:
@@ -591,7 +436,6 @@ def _parse_models(
             continue
 
         hooks_path = _detect_hooks(spec, rel, uid, project_dir, report)
-        _check_adapter(spec, uid, rel, registry, report)
 
         models[uid] = ParsedResource(
             unique_id=uid,
@@ -626,170 +470,6 @@ def _detect_hooks(
     if sibling.is_file():
         return str(sibling.relative_to(project_dir))
     return None
-
-
-def _check_adapter(
-    spec: ModelSpec, uid: str, rel: str, registry: AdapterRegistry, report: ParseReport
-) -> None:
-    """Adapter installed, task supported, static hyperparameters valid (TSD §7)."""
-    try:
-        plugin = registry.get(spec.adapter)
-    except ConfigError as exc:
-        report.error(exc.message, file=rel, resource=uid, field_path="/adapter", hint=exc.hint)
-        return
-    if plugin.training is None:
-        report.error(
-            f"adapter {spec.adapter!r} provides no training adapter",
-            file=rel,
-            resource=uid,
-            field_path="/adapter",
-        )
-        return
-    adapter = plugin.training({})
-    if spec.task not in adapter.supported_tasks:
-        supported = ", ".join(sorted(t.value for t in adapter.supported_tasks))
-        report.error(
-            f"adapter {spec.adapter!r} does not support task {spec.task.value!r}",
-            file=rel,
-            resource=uid,
-            field_path="/task",
-            hint=f"supported tasks: {supported}",
-        )
-        return
-    if spec.calibration is not None and not getattr(adapter, "supports_calibration", False):
-        report.error(
-            f"adapter {spec.adapter!r} does not support calibration",
-            file=rel,
-            resource=uid,
-            field_path="/calibration",
-            hint="drop 'calibration', or use a built-in adapter (all support it)",
-        )
-        return
-    if not _check_feature_capabilities(spec, adapter, uid, rel, report):
-        return
-    validate_hyperparameters(
-        adapter,
-        spec.task,
-        spec.hyperparameters,
-        resource=uid,
-        rel=rel,
-        report=report,
-        phase="parse",
-    )
-    for issue in adapter.validate(spec):
-        add = report.error if issue.severity == "error" else report.warning
-        add(issue.message, file=rel, resource=uid, field_path=issue.field_path, hint=issue.hint)
-
-    try:
-        task_schema = get_task_schema(spec.task)
-    except ConfigError as exc:
-        report.error(exc.message, file=rel, resource=uid, field_path="/task", hint=exc.hint)
-        return
-    for issue in task_schema.validate_spec(spec):
-        add = report.error if issue.severity == "error" else report.warning
-        add(issue.message, file=rel, resource=uid, field_path=issue.field_path, hint=issue.hint)
-
-
-#: Feature-treatment capabilities probed on the adapter class (ADR-27), as
-#: (what the spec asks for, the ClassVar, the field, what to say). A
-#: declaration the adapter cannot honour fails at parse rather than being
-#: dropped at train time: a constraint the DS believes is protecting them but
-#: that silently does not exist is worse than no constraint at all.
-_FEATURE_CAPABILITIES = (
-    (
-        "monotonic_constraints",
-        "supports_monotonic_constraints",
-        "/features/monotonic",
-        "enforce monotone constraints",
-        "use the xgboost or lightgbm adapter, or drop features.monotonic",
-    ),
-    (
-        "pooled_categoricals",
-        "supports_categorical_pooling",
-        "/features/categorical",
-        "pool rare categorical levels (min_frequency)",
-        "pin the level set with 'levels' instead, which needs no fitted level map, "
-        "or use the xgboost, lightgbm, or sklearn adapter",
-    ),
-)
-
-
-def _requested_feature_capability(spec: ModelSpec, name: str) -> bool:
-    if name == "monotonic_constraints":
-        return bool(spec.features.monotonic_constraints)
-    return any(p.min_frequency is not None for p in spec.features.categorical_policies.values())
-
-
-def _check_feature_capabilities(
-    spec: ModelSpec, adapter: Any, uid: str, rel: str, report: ParseReport
-) -> bool:
-    """False when a declaration the adapter cannot honour was reported."""
-    for name, attribute, field_path, capability, hint in _FEATURE_CAPABILITIES:
-        if not _requested_feature_capability(spec, name):
-            continue
-        if getattr(adapter, attribute, False):
-            continue
-        report.error(
-            f"adapter {spec.adapter!r} cannot {capability}",
-            file=rel,
-            resource=uid,
-            field_path=field_path,
-            hint=hint,
-        )
-        return False
-    return True
-
-
-def _is_deferred_value(value: Any) -> bool:
-    """Values not statically checkable: AUTO sentinels or unresolved Jinja."""
-    if value is None:
-        return True
-    return isinstance(value, str) and (value == AUTO or "{{" in value or "{%" in value)
-
-
-def validate_hyperparameters(
-    adapter: Any,
-    task: TaskType,
-    hyperparameters: dict[str, Any],
-    *,
-    resource: str,
-    rel: str,
-    report: ParseReport,
-    phase: str,
-) -> None:
-    """Two-step param validation: unknown keys always; values when static.
-
-    At parse time, values still holding Jinja or AUTO sentinels are skipped;
-    at compile time only AUTO survives (resolved later by the adapter).
-    """
-    param_model = adapter.param_model(task)
-    known = set(param_model.model_fields)
-    static: dict[str, Any] = {}
-    for key, value in hyperparameters.items():
-        if key not in known:
-            suggestion = did_you_mean(key, sorted(known))
-            report.error(
-                f"unknown hyperparameter {key!r} for adapter "
-                f"{adapter.name!r} / task {task.value!r}",
-                file=rel,
-                resource=resource,
-                field_path=f"/hyperparameters/{key}",
-                hint=f"did you mean {suggestion!r}?"
-                if suggestion
-                else f"valid: {', '.join(sorted(known))}",
-            )
-        elif not _is_deferred_value(value):
-            static[key] = value
-    if not static:
-        return
-    validate_resource(
-        param_model,
-        static,
-        rel=rel,
-        resource_name=resource,
-        base_pointer="/hyperparameters",
-        report=report,
-    )
 
 
 def _parse_exposures(
@@ -877,9 +557,6 @@ def _parse_scoring(
             report.error(f"duplicate scoring pipeline {spec.name!r}", file=rel, resource=uid)
             continue
 
-        _validate_scoring_windows(spec, rel, uid, report)
-        _validate_scoring_checks(spec, rel, uid, report)
-
         scoring[uid] = ParsedResource(
             unique_id=uid,
             resource_type="scoring",
@@ -893,72 +570,43 @@ def _parse_scoring(
     return scoring
 
 
-def _validate_scoring_windows(spec: ScoringSpec, rel: str, uid: str, report: ParseReport) -> None:
-    if spec.input.window is not None:
-        try:
-            parse_window(spec.input.window)
-        except ConfigError as exc:
-            report.error(
-                exc.message, file=rel, resource=uid, field_path="/input/window", hint=exc.hint
-            )
-    if spec.ground_truth is None:
-        return
-    maturity = spec.ground_truth.maturity
-    problem: str | None = None
-    if ":" in maturity:
-        problem = f"ground_truth.maturity must be a bare duration, got {maturity!r}"
-    else:
-        try:
-            window = parse_window(maturity)
-            if window.start.kind != "duration" or window.start.delta is None:
-                problem = (  # pragma: no cover - bare parse_window output is always a duration
-                    f"ground_truth.maturity must be a duration, got {maturity!r}"
-                )
-        except ConfigError as exc:
-            problem = exc.message
-    if problem is not None:
-        report.error(
-            problem,
-            file=rel,
-            resource=uid,
-            field_path="/ground_truth/maturity",
-            hint="examples: 14d, 2w, 72h",
-        )
-
-
-def _validate_scoring_checks(spec: ScoringSpec, rel: str, uid: str, report: ParseReport) -> None:
-    """Scoring inputs are unlabeled: only label-free checks apply (ADR-20)."""
-    for i, check in enumerate(spec.checks):
-        check_name = check if isinstance(check, str) else next(iter(check), "")
-        if check_name not in _SCORING_CHECKS:
-            suggestion = did_you_mean(str(check_name), sorted(_SCORING_CHECKS))
-            report.error(
-                f"check {check_name!r} is not available on scoring inputs",
-                file=rel,
-                resource=uid,
-                field_path=f"/checks/{i}",
-                hint=f"did you mean {suggestion!r}?"
-                if suggestion
-                else f"scoring checks: {', '.join(sorted(_SCORING_CHECKS))}",
-            )
-            continue
-        if check_name == "not_null":
-            params = check.get("not_null", {}) if isinstance(check, dict) else {}
-            if not params.get("columns"):
-                report.error(
-                    "not_null on a scoring input requires explicit 'columns' "
-                    "(there is no label column to default to)",
-                    file=rel,
-                    resource=uid,
-                    field_path=f"/checks/{i}",
-                    hint="e.g. not_null: {columns: [user_id]}",
-                )
-
-
 # -- cross-resource checks -----------------------------------------------------
 
 
-def _link_and_check(
+def rule_context(
+    project_name: str,
+    datasets: Mapping[str, RuleTarget],
+    models: Mapping[str, RuleTarget],
+    scoring: Mapping[str, RuleTarget],
+    registry: AdapterRegistry,
+    *,
+    phase: Phase = "parse",
+    depends_on: dict[str, list[str]] | None = None,
+) -> RuleContext:
+    """A RuleContext over linked resources.
+
+    At parse time a ``ParsedResource`` IS a ``RuleTarget`` and carries its own
+    ``depends_on``; at compile time the targets hold target-rendered specs and
+    the links come from the parsed project, so ``depends_on`` is explicit.
+    """
+    if depends_on is None:
+        depends_on = {
+            res.unique_id: list(getattr(res, "depends_on", ()))
+            for pool in (datasets, models, scoring)
+            for res in pool.values()
+        }
+    return RuleContext(
+        project_name=project_name,
+        datasets=dict(datasets),
+        models=dict(models),
+        scoring=dict(scoring),
+        depends_on=depends_on,
+        registry=registry,
+        phase=phase,
+    )
+
+
+def _link(
     *,
     project: ProjectConfig,
     sources: dict[str, SourceEntry],
@@ -996,7 +644,6 @@ def _link_and_check(
                 resource=dataset.unique_id,
                 hint="datasets read from source() tables in v0",
             )
-        _check_dataset_source_syntax(dataset, report)
         dataset.depends_on = sorted(set(deps))
 
     for model in models.values():
@@ -1006,7 +653,6 @@ def _link_and_check(
         dataset_res = _check_model_dataset_edge(spec, model, dataset_by_name, model_by_name, report)
         if dataset_res is not None:
             deps.append(dataset_res.unique_id)
-            _check_model_vs_dataset(spec, model, dataset_res, report)
         for group, table in model.sources:
             report.error(
                 f"models cannot use source() directly, got ('{group}', '{table}')",
@@ -1017,8 +663,6 @@ def _link_and_check(
         model.depends_on = sorted(set(deps))
 
         _resolve_model_metric_specs(spec, model, metrics, report)
-        _check_tuning_engine(spec, model, registry, report)
-        _check_report_engine(spec, model, registry, report)
 
     for sc in scoring.values():
         sc_spec = sc.spec
@@ -1030,7 +674,6 @@ def _link_and_check(
         if model_res is not None:
             deps.append(model_res.unique_id)
             _resolve_scoring_metric_specs(sc_spec, sc, model_res, metrics, report)
-            _check_maturity_vs_horizon(sc_spec, sc, model_res, dataset_by_name, report)
         for group, table in sc.sources:
             source_uid = source_unique_id(project.name, group, table)
             if source_uid not in sources:
@@ -1043,7 +686,6 @@ def _link_and_check(
                 )
             else:
                 deps.append(source_uid)
-        _check_scoring_source_syntax(sc, report)
         sc.depends_on = sorted(set(deps))
 
     for exposure in exposures.values():
@@ -1064,22 +706,6 @@ def _link_and_check(
             else:
                 deps.append(resource.unique_id)
         exposure.depends_on = sorted(set(deps))
-
-
-def _check_dataset_source_syntax(dataset: ParsedResource, report: ParseReport) -> None:
-    """Dataset table references must be source() calls, not bare names."""
-    spec = dataset.spec
-    assert isinstance(spec, DatasetSpec)
-    entries: list[tuple[str, str]] = [("/source", spec.source)]
-    for field_path, value in entries:
-        if not _SOURCE_RE.match(value):
-            report.error(
-                f"expected a source() reference, got {value!r}",
-                file=dataset.path,
-                resource=dataset.unique_id,
-                field_path=field_path,
-                hint="e.g. source('lakehouse', 'subscribers')",
-            )
 
 
 def _check_model_dataset_edge(
@@ -1130,153 +756,6 @@ def _check_model_dataset_edge(
                 hint="v0 models may only ref() their dataset",
             )
     return dataset_res
-
-
-def _check_model_vs_dataset(
-    spec: ModelSpec, model: ParsedResource, dataset_res: ParsedResource, report: ParseReport
-) -> None:
-    ds_spec = dataset_res.spec
-    assert isinstance(ds_spec, DatasetSpec)
-    if spec.target != ds_spec.label.column:
-        report.error(
-            f"model target {spec.target!r} must equal the dataset's label column "
-            f"{ds_spec.label.column!r}",
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/target",
-            hint="mismatches are an error, not a silent override (TSD §5.6)",
-        )
-    if spec.evaluation.protocol.split is not ds_spec.split.strategy:
-        report.error(
-            f"evaluation.protocol.split ({spec.evaluation.protocol.split.value}) must match "
-            f"the dataset's split.strategy ({ds_spec.split.strategy.value}) (FR-RES-09)",
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/evaluation/protocol/split",
-            hint="the redundancy is deliberate: it keeps the model spec self-describing",
-        )
-        return
-    _check_after_test_needs_window(spec, model, ds_spec, report)
-    test_window = spec.evaluation.protocol.test_window
-    if test_window is None:
-        return
-    if ds_spec.split.strategy is not SplitStrategy.TEMPORAL:
-        report.error(
-            "evaluation.protocol.test_window requires a temporal split",
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/evaluation/protocol/test_window",
-        )
-        return
-    try:
-        inner = parse_window(test_window)
-        outer = parse_window(ds_spec.split.test)
-    except ConfigError as exc:
-        report.error(
-            exc.message,
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/evaluation/protocol/test_window",
-            hint=exc.hint,
-        )
-        return
-    if not is_subrange(inner, outer, VALIDATION_ANCHOR):
-        report.error(
-            f"test_window {test_window!r} must resolve to a sub-range of the dataset's "
-            f"test window {ds_spec.split.test!r}",
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/evaluation/protocol/test_window",
-        )
-
-
-def _check_after_test_needs_window(
-    spec: ModelSpec, model: ParsedResource, ds_spec: DatasetSpec, report: ParseReport
-) -> None:
-    """After-test gates judge rows the dataset must actually produce (ADR-30).
-
-    Without ``split.out_of_time`` there is no after-test split, so such a gate
-    could never see a cell - it would pass as not-applicable on every build,
-    a control that looks enforced and never is.
-    """
-    if ds_spec.split.out_of_time is not None:
-        return
-    for i, gate in enumerate(spec.evaluation.gates):
-        if gate.source == "out_of_time":
-            report.error(
-                f"gate on {gate.metric!r} uses source: out_of_time, but dataset "
-                f"{ds_spec.name!r} declares no split.out_of_time window",
-                file=model.path,
-                resource=model.unique_id,
-                field_path=f"/evaluation/gates/{i}/source",
-                hint='add split.out_of_time to the dataset, e.g. out_of_time: "-3mo:now"',
-            )
-    if spec.evaluation.stability is not None:
-        report.error(
-            f"evaluation.stability judges the after-test window, but dataset "
-            f"{ds_spec.name!r} declares no split.out_of_time window",
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/evaluation/stability",
-            hint='add split.out_of_time to the dataset, e.g. out_of_time: "-3mo:now"',
-        )
-
-
-def _check_maturity_vs_horizon(
-    spec: ScoringSpec,
-    scoring: ParsedResource,
-    model_res: ParsedResource,
-    dataset_by_name: dict[str, ParsedResource],
-    report: ParseReport,
-) -> None:
-    """`ground_truth.maturity` must reach the label horizon (ADR-29).
-
-    A prediction run is evaluated once ``scored_at + maturity`` has passed; the
-    outcome of a scored row is observed at ``inference_date + horizon``. Those
-    are anchored to different instants, and the scoring window is what bridges
-    them: a batch selected with ``window: "-31d:-28d"`` holds rows that are
-    already at least 28 days old when they are scored, so it needs 28 days less
-    maturity than one whose window ends at ``now``.
-
-    So the bar is ``maturity + (minimum age of the newest scored row) >=
-    horizon``, and the newest row's age comes from the window's END bound. Below
-    it, the monitor grades predictions against outcomes that have not been
-    observed, and the realized metrics are quietly wrong rather than missing.
-    """
-    if spec.ground_truth is None:
-        return
-    model_spec = model_res.spec
-    assert isinstance(model_spec, ModelSpec)
-    match = _REF_RE.match(model_spec.dataset)
-    dataset_res = dataset_by_name.get(match.group("name")) if match else None
-    if dataset_res is None:
-        return
-    ds_spec = dataset_res.spec
-    assert isinstance(ds_spec, DatasetSpec)
-    horizon = ds_spec.label.horizon
-    if horizon is None:
-        return
-    try:
-        reach = _duration_days(spec.ground_truth.maturity) + _newest_row_age_days(spec.input.window)
-        too_short = reach < _duration_days(horizon)
-    except ValueError:
-        # A malformed maturity is already reported by _validate_scoring_windows,
-        # and parsing collects every error in one pass rather than stopping, so
-        # this runs anyway. Units cannot KeyError: parse_time_offset accepts
-        # only the four _NOMINAL_DAYS knows.
-        return
-    if too_short:
-        report.warning(
-            f"ground_truth.maturity ({spec.ground_truth.maturity}) does not "
-            f"reach the label horizon ({horizon}) declared by dataset "
-            f"{ds_spec.name!r}: predictions would be evaluated against outcomes "
-            "that have not been observed yet",
-            file=scoring.path,
-            resource=scoring.unique_id,
-            field_path="/ground_truth/maturity",
-            hint="raise ground_truth.maturity, or end the input window earlier "
-            "than 'now' so the batch is already partly matured when it is scored",
-        )
 
 
 def _check_scoring_model_edge(
@@ -1368,24 +847,6 @@ def _resolve_scoring_metric_specs(
     sc.metric_specs = resolved
 
 
-def _check_scoring_source_syntax(sc: ParsedResource, report: ParseReport) -> None:
-    """Scoring table references must be source() calls, not bare names."""
-    spec = sc.spec
-    assert isinstance(spec, ScoringSpec)
-    entries: list[tuple[str, str]] = [("/input/source", spec.input.source)]
-    if spec.ground_truth is not None:
-        entries.append(("/ground_truth/label/source", spec.ground_truth.label.source))
-    for field_path, value in entries:
-        if not _SOURCE_RE.match(value):
-            report.error(
-                f"expected a source() reference, got {value!r}",
-                file=sc.path,
-                resource=sc.unique_id,
-                field_path=field_path,
-                hint="e.g. source('lakehouse', 'scoring_batch')",
-            )
-
-
 def _resolve_model_metric_specs(
     spec: ModelSpec, model: ParsedResource, metrics: dict[str, MetricSpec], report: ParseReport
 ) -> None:
@@ -1400,60 +861,6 @@ def _resolve_model_metric_specs(
     for message in errors:
         report.error(
             message, file=model.path, resource=model.unique_id, field_path="/evaluation/metrics"
-        )
-
-
-def _check_tuning_engine(
-    spec: ModelSpec, model: ParsedResource, registry: AdapterRegistry, report: ParseReport
-) -> None:
-    if spec.tuning is None:
-        return
-    try:
-        plugin = registry.get(spec.tuning.engine)
-    except ConfigError as exc:
-        report.error(
-            exc.message,
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/tuning/engine",
-            hint=exc.hint,
-        )
-        return
-    if plugin.tuning is None:
-        report.error(
-            f"adapter {spec.tuning.engine!r} provides no tuning engine",
-            file=model.path,
-            resource=model.unique_id,
-            field_path="/tuning/engine",
-        )
-
-
-def _check_report_engine(
-    spec: ModelSpec, model: ParsedResource, registry: AdapterRegistry, report: ParseReport
-) -> None:
-    """A non-native report engine is a plugin, probed like the tuning engine."""
-    report_spec = spec.evaluation.report
-    if report_spec is None or report_spec.stability.engine == "native":
-        return
-    engine = report_spec.stability.engine
-    field_path = "/evaluation/report/stability/engine"
-    try:
-        plugin = registry.get(engine)
-    except ConfigError as exc:
-        report.error(
-            exc.message,
-            file=model.path,
-            resource=model.unique_id,
-            field_path=field_path,
-            hint=f"install mbt-{engine}, or use engine: native",
-        )
-        return
-    if getattr(plugin, "reporting", None) is None:
-        report.error(
-            f"adapter {engine!r} provides no report engine",
-            file=model.path,
-            resource=model.unique_id,
-            field_path=field_path,
         )
 
 

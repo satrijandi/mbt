@@ -27,6 +27,7 @@ from mbt_adapter_base import (
 from mbt_adapter_base.compliance import tiny_binary_dataset
 from mbt_adapter_base.compliance.suite import TempArtifactStore
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
+from mbt_adapter_base.events import EarlyStoppingWithoutValidation
 
 
 def _ctx() -> RunContext:
@@ -297,7 +298,8 @@ def test_early_stopping_without_validation_is_announced_not_silent() -> None:
     sink = _Recording()
     ctx = RunContext(**{**ctx.__dict__, "events": sink})
     LightGBMTrainingAdapter({}).train(_spec(hyperparameters=hp), base, ctx)
-    assert any("has no validation split to stop on" in str(m) for m in sink.messages)
+    warned = [m for m in sink.messages if isinstance(m, EarlyStoppingWithoutValidation)]
+    assert [(m.adapter, m.level) for m in warned] == [("lightgbm", "warn")]
 
     with_validation = InMemoryDatasetHandle(
         {"train": base.read("train"), "validation": base.read("test"), "test": base.read("test")},
@@ -307,3 +309,17 @@ def test_early_stopping_without_validation_is_announced_not_silent() -> None:
     ctx = RunContext(**{**_ctx().__dict__, "events": quiet})
     LightGBMTrainingAdapter({}).train(_spec(hyperparameters=hp), with_validation, ctx)
     assert not any("has no validation split" in str(m) for m in quiet.messages)
+
+
+def test_best_iteration_reports_the_round_count_or_none() -> None:
+    """D-2: lightgbm's best_iteration is 1-based and 0 when it never stopped."""
+    from types import SimpleNamespace
+
+    adapter = LightGBMTrainingAdapter({})
+
+    def model(**booster: int) -> SimpleNamespace:
+        return SimpleNamespace(booster=SimpleNamespace(**booster))
+
+    assert adapter.best_iteration(model(best_iteration=7)) == 7
+    assert adapter.best_iteration(model(best_iteration=0)) is None
+    assert adapter.best_iteration(model()) is None

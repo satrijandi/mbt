@@ -164,5 +164,7 @@ All seeds derive from the model's mandatory `seed`: the adapter trains with `see
 tuning samples with `seed + 1`, the implicit validation carve uses `seed + 2`,
 champion-gate bootstrap resampling `seed + 3` (ADR-18), random k-fold backtests
 `seed + 4`, and the calibration carve `seed + 5`.
+The whole ladder lives in `mbt/execute/seeds.py`, which is the executable copy -
+this list is a summary of it, and a test asserts no two stages share an offset.
 Each adapter documents a determinism tier - exact (XGBoost, LightGBM, and
 scikit-learn on CPU, single-threaded) or tolerance bands.

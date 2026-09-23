@@ -1,13 +1,17 @@
 """Task schema registry (TSD §5.6, FR-RES-08).
 
 Core registers builtin task schemas; adapter plugins may register more via
-``AdapterPlugin.task_schemas`` (v1: survival, ranking) without core changes.
+a plugin-side hook (v1: survival, ranking), designed against the first
+adapter that needs one.
 """
 
 from mbt.config.tasks.binary import BinaryClassificationSchema
 from mbt.config.tasks.regression import RegressionSchema
-from mbt.contracts import TaskSchema, TaskType
 from mbt.exceptions import ConfigError
+from mbt_adapter_base import (
+    TaskSchema,
+    TaskType,
+)
 
 _REGISTRY: dict[TaskType, TaskSchema] = {
     TaskType.BINARY_CLASSIFICATION: BinaryClassificationSchema(),

@@ -15,10 +15,13 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from mbt.artifacts.atomic import atomic_write_text
 from mbt.compile.hashing import manifest_hash
-from mbt.contracts import ManifestNode, SourceTable
 from mbt.dag.selector import SelectableNode
 from mbt.exceptions import StateError
 from mbt.secrets import redact
+from mbt_adapter_base import (
+    ManifestNode,
+    SourceTable,
+)
 
 #: v2 added the ``scoring`` node resource_type (ADR-20).
 MANIFEST_SCHEMA_VERSION = 2

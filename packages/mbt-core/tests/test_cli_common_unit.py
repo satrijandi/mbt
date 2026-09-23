@@ -25,6 +25,7 @@ from mbt.cli.common import (
     setup_bus,
 )
 from mbt.events import get_bus
+from mbt.events.models import LogMessage
 from mbt.events.otel import OTelSpanSink
 from mbt.events.sinks import ConsoleSink, JsonLinesSink, NullSink
 from mbt.exceptions import ConfigError
@@ -119,7 +120,7 @@ def test_setup_bus_appends_durable_json_log_when_env_set(
     assert isinstance(bus._sinks[0], ConsoleSink)
     assert isinstance(bus._sinks[1], JsonLinesSink)
 
-    bus.emit("hello timeline")
+    bus.emit(LogMessage(message="hello timeline"))
     lines = (tmp_path / "logs" / "events.jsonl").read_text().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["message"] == "hello timeline"
@@ -136,7 +137,7 @@ def test_setup_bus_log_file_captures_even_when_console_is_quiet(
     bus = get_bus()
     assert isinstance(bus._sinks[0], NullSink)  # console suppressed...
     assert isinstance(bus._sinks[1], JsonLinesSink)  # ...file still captures
-    bus.emit("still logged")
+    bus.emit(LogMessage(message="still logged"))
     assert "still logged" in log.read_text()
 
 
@@ -149,7 +150,7 @@ def test_setup_bus_log_file_appends_across_runs(
     monkeypatch.setenv("MBT_LOG_FILE", str(log))
     for msg in ("run one", "run two"):
         setup_bus(CLIContext(invocation_cwd=tmp_path))
-        get_bus().emit(msg)
+        get_bus().emit(LogMessage(message=msg))
     body = log.read_text()
     assert "run one" in body and "run two" in body
 

@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 import pyarrow.parquet as pq
 
-from mbt.reporting.builder import ReportData, Table
+from mbt.reporting.builder import BINNING_PREFIX, ReportData, Table, TableKey, binning_key
 from mbt.reporting.render import (
     Column,
     LineChart,
@@ -46,15 +46,38 @@ from mbt_adapter_base.types import OUT_OF_TIME_SPLIT
 
 #: Table name -> file, relative to the report directory.
 _TABLE_FILES = {
-    "split_metrics": "evaluation/metrics_by_split.csv",
-    "feature_importance": "evaluation/feature_importance.csv",
-    "score_summary": "evaluation/distribution/score_summary.csv",
-    "score_histogram": "evaluation/distribution/score_histogram.csv",
-    "test_features": "evaluation/distribution/test_features.csv",
-    "performance_by_period": "performance/by_period.csv",
-    "stability_scores": "stability/scores_by_period.csv",
-    "stability_features": "stability/features_by_period.csv",
+    TableKey.SPLIT_METRICS: "evaluation/metrics_by_split.csv",
+    TableKey.FEATURE_IMPORTANCE: "evaluation/feature_importance.csv",
+    TableKey.SCORE_SUMMARY: "evaluation/distribution/score_summary.csv",
+    TableKey.SCORE_HISTOGRAM: "evaluation/distribution/score_histogram.csv",
+    TableKey.TEST_FEATURES: "evaluation/distribution/test_features.csv",
+    TableKey.PERFORMANCE_BY_PERIOD: "performance/by_period.csv",
+    TableKey.STABILITY_SCORES: "stability/scores_by_period.csv",
+    TableKey.STABILITY_FEATURES: "stability/features_by_period.csv",
 }
+
+
+def table_path(name: str, engine: str | None) -> str:
+    """Where a table's rows are written, or an error naming the bad key.
+
+    Total and explicit: an unknown key used to fall through to
+    ``evaluation/binning/<key>.csv``, so a typo produced a real file in a real
+    directory and nothing ever said so (C-4).
+    """
+    known = _TABLE_FILES.get(TableKey(name)) if name in set(TableKey) else None
+    if known is not None:
+        return known
+    if name == TableKey.ENGINE_DRIFT:
+        return f"stability/{engine}/drift_by_column.csv"
+    if name == TableKey.ENGINE_DRIFT_SUMMARY:
+        return f"stability/{engine}/drift_by_period.csv"
+    if name.startswith(BINNING_PREFIX):
+        return f"evaluation/binning/{name.removeprefix(BINNING_PREFIX)}.csv"
+    raise ValueError(
+        f"unknown report table {name!r}: add it to TableKey, or name it "
+        f"{BINNING_PREFIX}<feature> if it is a binning table"
+    )
+
 
 #: Splits in their fixed chart order and colour slot.
 _SPLIT_SLOTS = {"train": 0, "test": 1, "out_of_time": 2}
@@ -83,16 +106,8 @@ def write_report(data: ReportData, meta: ReportMeta, out_dir: Path) -> list[str]
     """Write every file; returns their paths relative to ``out_dir``, sorted."""
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
-    engine_files = {
-        "engine_drift": f"stability/{data.engine}/drift_by_column.csv",
-        "engine_drift_summary": f"stability/{data.engine}/drift_by_period.csv",
-    }
     for name, rows in data.tables.items():
-        relative = (
-            _TABLE_FILES.get(name)
-            or engine_files.get(name)
-            or f"evaluation/binning/{name.removeprefix('binning_')}.csv"
-        )
+        relative = table_path(name, data.engine)
         if rows:
             _write_csv(out_dir / relative, rows)
             written.append(relative)
@@ -106,12 +121,19 @@ def write_report(data: ReportData, meta: ReportMeta, out_dir: Path) -> list[str]
         pq.write_table(predictions, out_dir / relative)
         written.append(relative)
     written.extend(["report.html", "summary.json"])
-    data.summary.documents = sorted(written)
+    # The summary is the ONE thing the writer legitimately completes - the
+    # document list is not knowable until the files exist - so it is recorded
+    # here and nowhere else. Everything else in ``data`` is read-only to the
+    # writer; it used to mutate the payload it was handed, which meant
+    # ``build_report``'s output was not final until someone wrote it (C-4).
+    documents = sorted(written)
+    summary = data.summary.model_copy(update={"documents": documents})
     (out_dir / "summary.json").write_text(
-        json.dumps(data.summary.model_dump(mode="json"), indent=1, sort_keys=True) + "\n"
+        json.dumps(summary.model_dump(mode="json"), indent=1, sort_keys=True) + "\n"
     )
     (out_dir / "report.html").write_text(_page(data, meta), encoding="utf-8")
-    return data.summary.documents
+    data.summary.documents = documents  # the caller reads it off the summary
+    return documents
 
 
 def _write_csv(path: Path, rows: Table) -> None:
@@ -373,7 +395,7 @@ def _binning(data: ReportData, meta: ReportMeta) -> str:
     rate = "label_rate" if meta.binary else "label_mean"
     parts = ["<h2>Binning</h2>"]
     for bins in data.bins:
-        rows = data.tables[f"binning_{bins.name}"]
+        rows = data.tables.get(binning_key(bins.name), [])
         # Bands nobody's score reached (a probability model that never
         # scores above 0.6 has eight empty 0.05 bands) stay in the CSV only.
         rows = _trim(rows, _occupied(rows))
@@ -529,7 +551,9 @@ def _after_test(data: ReportData, meta: ReportMeta) -> str:
 
 
 def _stability(data: ReportData) -> str:
-    scores = data.tables["stability_scores"]  # set with the period cells, window row first
+    # Guarded like every other table read: the two sat twelve lines apart,
+    # one unguarded and one with a default (C-4).
+    scores = data.tables.get(TableKey.STABILITY_SCORES, [])
     months = [r for r in scores if r["period"] == "month"]
     parts = ["<h3>Stability against the test split</h3>"]
     if months:
@@ -563,7 +587,9 @@ def _stability(data: ReportData) -> str:
             + table(slots, columns)
             + "</details>"
         )
-    features = [r for r in data.tables.get("stability_features", []) if r["period"] == "window"]
+    features = [
+        r for r in data.tables.get(TableKey.STABILITY_FEATURES, []) if r["period"] == "window"
+    ]
     if features:
         worst = sorted(features, key=lambda r: -(r["psi"] or 0.0))[:20]
         parts.append(

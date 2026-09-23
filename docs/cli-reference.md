@@ -328,19 +328,28 @@ See the [rollback procedure](troubleshooting.md#rolling-back-a-bad-champion-inci
 
 ### `mbt ls`
 
-List resources, filtered by the same selectors `--select` accepts.
+List resources, filtered by the same selectors `--select` accepts - including the `state:` methods, which need `--state`.
 
 ```bash
-mbt ls [--select ...] [--output table|name|path|json]
+mbt ls [--select ...] [--exclude ...] [--state PATH_OR_URI] [--state-include-env]
+       [--anchor ISO_TS] [--output table|name|path|json]
 ```
+
+```bash
+mbt ls --select state:modified+ --state state/prod/latest.json --output name
+```
+
+`--anchor` pins the time anchor for the compile this runs, so a listing is reproducible (ADR-12).
 
 ### `mbt show`
 
 Print one resource's compiled configuration, with secrets redacted.
 
 ```bash
-mbt show NAME_OR_UNIQUE_ID [--output yaml|json]
+mbt show NAME_OR_UNIQUE_ID [--anchor ISO_TS] [--output yaml|json]
 ```
+
+`--anchor` pins the time anchor, so the resolved windows printed here match the ones in `target/manifest.json` instead of drifting with wall-clock time (ADR-12).
 
 ### `mbt state diff`
 
@@ -359,8 +368,10 @@ Compare like with like: diff with `--deep-snapshot` against a baseline that was 
 Render model cards and a lineage site into `target/docs/`.
 
 ```bash
-mbt docs generate [--manifest PATH]
+mbt docs generate [--manifest PATH] [--anchor ISO_TS]
 ```
+
+`--anchor` pins the time anchor when generating from a fresh compile; with `--manifest` the stored anchor is used.
 
 Cards show each model's data windows, features, hyperparameters, metrics, slices, gate results, feature importance, partial dependence, and registry and tracking ids, read from the latest training run.
 

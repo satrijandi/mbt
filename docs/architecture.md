@@ -30,7 +30,8 @@ mbt-testing                                              (fakes for every role)
 The rule that keeps this honest: **`mbt-core` never imports an ML framework, and adapters build against `mbt-adapter-base`, not core internals.**
 The compliance suite's `test_plugin_imports_no_mbt_core` fails any adapter whose plugin loads an `mbt.*` module.
 The two deliberate exceptions are compute adapters that run core's own job entrypoint: `mbt-spark`'s `spark-submit` wrapper and `mbt-testing`'s inline runner both call `mbt.execute.job` lazily, inside the method that runs a job, and declare `mbt-core` as a dependency.
-`mbt.contracts` is a thin re-export of `mbt-adapter-base` (`packages/mbt-core/src/mbt/contracts.py`) so core code and the contract share one source of truth while the contract stays versioned on its own cadence.
+`mbt.contracts` (`packages/mbt-core/src/mbt/contracts.py`) re-exports `mbt-adapter-base` for **user projects** - it is the import path `mbt init` stamps into a project's `tests/`, so a data test writes `from mbt.contracts import TestResult`.
+Core itself imports from `mbt_adapter_base` directly.
 
 | Package | Layer | Responsibility |
 |---|---|---|
@@ -185,7 +186,7 @@ All three verdicts are pure comparisons in the coordinator, with zero ML depende
 - **Gates** (`quality/gates.py`) - a *threshold* gate compares the challenger metric to an absolute floor, widened by the adapter's determinism tolerance in the model's favor only.
   A *champion* gate compares against the production version re-evaluated inside the same job on the same pinned test split; with a confidence set (the default), it passes only when the **paired-bootstrap delta lower bound** clears `min_delta` (ADR-18), so a challenger that is ahead on test-set noise alone does not promote.
   No champion yet → pass with a loud warning (ADR-10). A champion that exists but cannot load → hard error, never a silent pass.
-- **Checks** (`quality/checks.py`) - declarative data assertions on datasets and on scoring inputs: `schema`, `not_null`, `unique`, `accepted_values`, `relationships`, `row_count`, `freshness`, `no_future_columns`, `class_balance_report`, the `panel_columns` contract that runs whenever a dataset declares `columns:`, and a `label_leakage_scan` that is **auto-appended to every dataset build** unless you opt out (numeric correlation or categorical association above threshold against the label fails the build). Scoring inputs skip the label-dependent checks - there is no label to leak.
+- **Checks** (`quality/checks.py`) - declarative data assertions on datasets and on scoring inputs: `schema`, `not_null`, `unique`, `accepted_values`, `relationships`, `row_count`, `freshness`, `no_future_columns`, `class_balance_report`, the `panel_columns` contract that runs whenever a dataset declares `columns:`, and a `label_leakage_scan` that is **auto-appended to every dataset build** unless you opt out (numeric `max(|pearson|, |spearman|)` or categorical Cramér's V above threshold against the label fails the build - the rank screen is what catches a monotone but nonlinear leak). Scoring inputs skip the label-dependent checks - there is no label to leak.
 - **Monitors** (`quality/monitors.py`) - scoring-time distribution shift (PSI or KS) of features and scores against the champion's training-time baseline, and, via `mbt monitor`, realized-metric gates once ground-truth labels mature (ADR-21).
 
 Any quality verdict of "no" is exit code **2** and a distinct node status (`gate_failed`, `test_failed`, `monitor_failed`), kept separate from a hard `error` (exit **1**).
@@ -214,7 +215,7 @@ A plugin (`AdapterPlugin`) bundles typed component slots, instantiated on demand
 
 Several capabilities are optional and probed rather than declared.
 Batch-scoring data adapters add `build_scoring_input`/`open_predictions` (contract 1.1, ADR-23).
-Training adapters may add `feature_importance`, `shap_importance`, `explain`, and `train_with_report`, each with a `Supports*` protocol that pins its signature, and set class flags such as `supports_calibration` that the parser reads before accepting a spec that needs them.
+Training adapters may add `feature_importance`, `shap_importance`, `explain`, `train_with_report` and `best_iteration`, each with a `Supports*` protocol that pins its signature. Which of them an adapter HAS is a single declaration, `capabilities(spec) -> frozenset[Capability]`, which the parser reads before accepting a spec that needs one and the job dispatches on - so a renamed method is a capability the adapter stops declaring, rather than one that silently disappears.
 A training adapter that sets `data_access = "path"` receives its splits as Parquet files rather than in-memory Arrow, so JVM and cluster frameworks ingest natively while still seeing exactly what Arrow adapters see (ADR-17).
 Tracking adapters are probed the same way for `prepare()`, `log_trial()`, `log_document()`, and `log_directory()`, and registry adapters for `set_version_tags()` (ADR-30).
 
@@ -259,11 +260,11 @@ Where to start reading, by directory under `packages/mbt-core/src/mbt/` (about 1
 | Directory | What is in it |
 |---|---|
 | `cli/` | The Typer app, flag parsing, the `CLIContext`, and the `_scaffold/` templates `mbt init` stamps out |
-| `parsing/` | YAML + Jinja → a validated `ParsedProject` (specs, tests, sources) |
+| `parsing/` | YAML + Jinja → a validated `ParsedProject` (specs, tests, sources). `parsing/rules.py` holds every cross-resource invariant as an addressable list, and the compiler runs the **same list** over the target-rendered specs, so a `var()` that moves a value cannot slip past a check |
 | `compile/` | `compiler.py` (build the manifest), `hashing.py` (the two hashes + env digests), `windows.py` (anchor-relative windows) |
 | `dag/` | `graph.py` (the `networkx` DAG) and `selector.py` (the dbt-style selection grammar) |
-| `execute/` | The engine: `orchestrator`, `planner`, `scheduler`, `runners` (coordinator side), `job` (subprocess), `monitor` |
-| `quality/` | Pure comparison modules: `gates`, `checks`, `monitors`, `metrics`, `python_tests`, `hooks` |
+| `execute/` | The engine: `orchestrator`, `planner`, `scheduler`, `runners` (coordinator side), `job` (subprocess), `monitor`. `job_runtime` holds the context a job runs against, `seeds` is the seed ladder, `training_report` the ADR-30 report step |
+| `quality/` | Pure comparison modules: `gates`, `checks`, `monitors`, `metrics`, `python_tests`, `hooks`, and `judgement` - which composes gates + stability into one verdict |
 | `adapters/` | `registry.py` (plugin discovery/versioning) and the built-in `local` adapter (DuckDB data, subprocess compute) |
 | `config/` | `profiles.py`, `project.py`, and the `tasks/` schemas (binary classification, regression) |
 | `artifacts/` | The `Manifest` (plan) and `RunResults` (outcome) models |
@@ -271,7 +272,7 @@ Where to start reading, by directory under `packages/mbt-core/src/mbt/` (about 1
 | `state/` | `diff.py` - `input_hash` comparison that powers `state:modified` |
 | `docsgen/` | Model cards and lineage for `mbt docs generate` |
 
-The interchange types these modules pass around (`ManifestNode`, `TrainingJob`, `JobResult`, the specs, the adapter protocols) are defined in `mbt-adapter-base`, not here; `mbt.contracts` re-exports them.
+The interchange types these modules pass around (`ManifestNode`, `TrainingJob`, `JobResult`, the specs, the adapter protocols) are defined in `mbt-adapter-base`, not here, and core imports them from there directly.
 
 ## Where the decisions live
 

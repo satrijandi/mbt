@@ -23,22 +23,6 @@ from mbt.artifacts.run_results import (
     TestResultEntry,
 )
 from mbt.config.profiles import LoadedProfiles
-from mbt.contracts import (
-    AdapterRef,
-    ArtifactRef,
-    DatasetLocator,
-    DatasetSpec,
-    JobResult,
-    ManifestNode,
-    MetricSpec,
-    ModelSpec,
-    ModelVersion,
-    ScoringOutputSpec,
-    ScoringSpec,
-    SourceTable,
-    Stage,
-    TrainingJob,
-)
 from mbt.dag.selector import SelectableNode, evaluate_selector
 from mbt.events import get_bus
 from mbt.events.models import ArtifactRegistered, LogMessage, NodeFinished, NodeStarted
@@ -46,8 +30,9 @@ from mbt.events.node_log import NodeLogSink, combined_log, node_scope
 from mbt.exceptions import AdapterError, ConfigError, MbtError, StateError
 from mbt.quality.checks import SourceAccess, labeled_splits, run_checks, run_scoring_checks
 from mbt.quality.gates import all_gates_passed, evaluate_gates
+from mbt.quality.judgement import after_test_tags, gate_failure_summary, judge
 from mbt.quality.metrics import resolve_model_metrics
-from mbt.quality.monitors import all_monitors_passed, evaluate_monitors, evaluate_stability
+from mbt.quality.monitors import all_monitors_passed, evaluate_monitors
 from mbt.quality.python_tests import PythonTestFile, run_python_tests
 from mbt.runtime import (
     data_adapter as build_data_adapter,
@@ -64,66 +49,33 @@ from mbt.runtime import (
 from mbt.secrets import Secret
 from mbt.storage import artifact_store_for
 from mbt.utils import canonical_json
-
-
-def after_test_verdict(
-    spec: ModelSpec, gates: list[GateResult], stability: list[MonitorResult]
-) -> str | None:
-    """``true`` / ``false`` / ``not_gated`` for the after-test gates (ADR-30).
-
-    None when the model declares none. ``not_gated`` means they were declared
-    but nothing was mature enough to judge - a promotion that requires the
-    check refuses it, because a gate that judged nothing proved nothing.
-    """
-    declared = spec.evaluation.stability is not None or any(
-        gate.source == "out_of_time" for gate in spec.evaluation.gates
-    )
-    if not declared:
-        return None
-    after = [gate for gate in gates if gate.period is not None]
-    if not any(gate.applicable for gate in after) and not stability:
-        return "not_gated"
-    passed = all(gate.passed for gate in after) and all_monitors_passed(stability)
-    return "true" if passed else "false"
-
-
-def after_test_tags(verdict: str, anchor: str, source: str) -> dict[str, str]:
-    """The registry and tracking tags that record an after-test verdict."""
-    return {
-        "mbt.oot_check.passed": verdict,
-        "mbt.oot_check.anchor": anchor,
-        "mbt.oot_check.source": source,
-    }
-
-
-def gate_failure_summary(
-    gates: list[GateResult], monitors: list[MonitorResult] | None = None
-) -> str:
-    """A specific, reviewer-facing summary of which gate(s) failed - feeds the
-    node message shown in the results table, the JSON run_results, and the
-    GitOps PR comment, consistent with the monitor path's ``gate breach: ...``.
-    """
-    parts: list[str] = []
-    for gate in gates:
-        if gate.passed:
-            continue
-        where = f" [{gate.slice}]" if gate.slice else ""
-        if gate.kind == "champion" and gate.delta_lower is not None:
-            parts.append(
-                f"{gate.metric}{where}: challenger delta lower bound "
-                f"{gate.delta_lower:.4f} < required {gate.min_delta}"
-            )
-        elif gate.actual is not None:
-            cell = f" [{gate.cell}]" if gate.cell else ""
-            parts.append(
-                f"{gate.metric}{where}{cell}={gate.actual:.4f} failed threshold {gate.expected}"
-            )
-        else:
-            parts.append(f"{gate.metric}{where}")
-    for monitor in monitors or []:
-        if not monitor.passed:
-            parts.append(f"stability {monitor.message or monitor.subject}")
-    return "gate breach: " + "; ".join(parts) if parts else "one or more gates failed"
+from mbt_adapter_base import (
+    AdapterRef,
+    ArtifactRef,
+    DatasetLocator,
+    DatasetSpec,
+    JobResult,
+    ManifestNode,
+    MetricSpec,
+    ModelSpec,
+    ModelVersion,
+    ScoringOutputSpec,
+    ScoringSpec,
+    SourceTable,
+    Stage,
+    TrainingJob,
+)
+from mbt_adapter_base.champion import (
+    BASELINE,
+    GATES_PASSED,
+    HOOKS_HASH,
+    INFERENCE_CONFIG,
+    AfterTestVerdict,
+    ChampionRecord,
+    has_inference_config,
+    operating_points,
+    unpack_artifact,
+)
 
 
 def evaluation_node_result(
@@ -543,6 +495,9 @@ class ModelRunner:
         *,
         mode: str = "train",
         artifact: ArtifactRef | None = None,
+        champion_spec: dict[str, Any] | None = None,
+        champion_feature_columns: list[str] | None = None,
+        tracking_run_id: str | None = None,
     ) -> TrainingJob:
         ctx = self.ctx
         dataset_uid = next(d for d in node.depends_on if d.startswith("dataset."))
@@ -566,6 +521,13 @@ class ModelRunner:
             metric_specs=metric_specs,
             champion=champion.artifact if champion else None,
             artifact=artifact,
+            # Set here rather than patched onto the returned job by the caller
+            # (C-3): ``artifact`` already had a parameter this path bypassed in
+            # favour of a model_copy, so there were two ways to set one field
+            # and no way at all to set ``champion_spec``.
+            champion_spec=champion_spec,
+            champion_feature_columns=champion_feature_columns,
+            tracking_run_id=tracking_run_id,
             tuning_engine=(
                 # Engine name from the spec; ops config (sampler/pruner knobs)
                 # from the target profile, so tuning knobs stay out of model
@@ -600,6 +562,74 @@ class ModelRunner:
             },
             vars=ctx.job_safe_vars(),
         )
+
+    def _note_window_reuse(self, node: ManifestNode, uid: str) -> None:
+        """Count how often this test window has arbitrated a gate (D-3).
+
+        A held-out window selected against enough times stops being held out:
+        the decisions are being made by the analyst reading pass/fail and
+        adjusting. Counting is all this does - ADR-30's after-test window is
+        the control, and it is already present.
+        """
+        from mbt.state.gate_log import record_evaluation, reuse_warning
+
+        dataset_uid = next((d for d in node.depends_on if d.startswith("dataset.")), None)
+        if dataset_uid is None:
+            return
+        dataset_node = self.ctx.manifest.nodes.get(dataset_uid)
+        windows = (dataset_node.resolved.get("windows") or {}) if dataset_node else {}
+        test = windows.get("test")
+        window = (str(test[0]), str(test[1])) if test and len(test) == 2 else None
+        use = record_evaluation(self.ctx.project_dir, dataset_uid, window)
+        if use is not None and use.overused:
+            get_bus().emit(LogMessage(level="warn", unique_id=uid, message=reuse_warning(use)))
+
+    # -- public seams for the pre-deploy check (C-3) --------------------------
+
+    def check_job(
+        self,
+        node: ManifestNode,
+        spec: ModelSpec,
+        *,
+        artifact: ArtifactRef,
+        champion_spec: dict[str, Any],
+        champion_feature_columns: list[str] | None,
+        tracking_run_id: str | None,
+    ) -> tuple[TrainingJob, list[MetricSpec]]:
+        """The job an after-test check runs, and the metric specs it judges with.
+
+        ``oot_check`` used to reach through four private methods
+        (``_metric_specs``, ``_assemble_job``, ``_upload_log``,
+        ``_gate_results``) and then patch the returned job (C-3). This is the
+        seam that path actually needs.
+        """
+        metric_specs = self._metric_specs(spec, node)
+        job = self._assemble_job(
+            node,
+            spec,
+            metric_specs,
+            None,
+            mode="oot_check",
+            artifact=artifact,
+            champion_spec=champion_spec,
+            champion_feature_columns=champion_feature_columns,
+            tracking_run_id=tracking_run_id,
+        )
+        return job, metric_specs
+
+    def after_test_gates(
+        self,
+        spec: ModelSpec,
+        node: ManifestNode,
+        job_result: Any,
+        metric_specs: list[MetricSpec],
+    ) -> list[GateResult]:
+        """Evaluate ONLY the after-test gates (ADR-30)."""
+        return self._gate_results(spec, node, job_result, None, metric_specs, out_of_time="only")
+
+    def upload_run_log(self, node: ManifestNode, tracking_run_id: str | None, *, name: str) -> None:
+        """Attach this run's node log to the tracking run."""
+        self._upload_log(node, tracking_run_id, name=name)
 
     def _gate_results(
         self,
@@ -641,50 +671,41 @@ class ModelRunner:
         ctx = self.ctx
         registry_adapter = ctx.registry_adapter()
         dataset_uid = next(d for d in node.depends_on if d.startswith("dataset."))
-        metadata = {
-            "mbt.config_hash": node.config_hash,
-            "mbt.input_hash": node.input_hash,
-            "mbt.manifest_hash": ctx.manifest.manifest_hash(),
-            "mbt.snapshot_id": ctx.manifest.nodes[dataset_uid].snapshot_id or "",
-            "mbt.git_commit": ctx.manifest.metadata.git.commit or "",
-            "mbt.tracking_run_id": job_result.tracking_run_id or "",
-            "mbt.gates_passed": "true",
-            "mbt.artifact_uri": job_result.artifact.uri,
-            "mbt.artifact_format": job_result.artifact.format,
-            "mbt.artifact_content_hash": job_result.artifact.content_hash,
-            "mbt.artifact_size_bytes": str(job_result.artifact.size_bytes),
-            # Scoring-time feature-transform parity check (ADR-20).
-            "mbt.hooks_hash": node.hooks_hash or "",
-        }
-        if job_result.baseline is not None:
-            # The monitoring baseline scoring runs compare against (ADR-21).
-            metadata["mbt.baseline_uri"] = job_result.baseline.uri
-            metadata["mbt.baseline_format"] = job_result.baseline.format
-            metadata["mbt.baseline_content_hash"] = job_result.baseline.content_hash
-            metadata["mbt.baseline_size_bytes"] = str(job_result.baseline.size_bytes)
-        if job_result.inference_config is not None:
-            # The spec scoring runs reconstruct this champion from (ADR-28),
-            # pinned the same way the baseline is so the two travel together.
-            metadata["mbt.inference_config_uri"] = job_result.inference_config.uri
-            metadata["mbt.inference_config_format"] = job_result.inference_config.format
-            metadata["mbt.inference_config_content_hash"] = job_result.inference_config.content_hash
-            metadata["mbt.inference_config_size_bytes"] = str(
-                job_result.inference_config.size_bytes
-            )
-        if verdict is not None:
+        # One model owns the champion contract (A-5); core no longer spells
+        # 53 keys by hand. The baseline is what scoring runs compare against
+        # (ADR-21) and the inference config is the spec they reconstruct this
+        # champion from (ADR-28), pinned the same way so the two travel together.
+        record = ChampionRecord(
+            artifact=job_result.artifact,
+            config_hash=node.config_hash,
+            input_hash=node.input_hash,
+            manifest_hash=ctx.manifest.manifest_hash(),
+            snapshot_id=ctx.manifest.nodes[dataset_uid].snapshot_id or "",
+            git_commit=ctx.manifest.metadata.git.commit or "",
+            tracking_run_id=job_result.tracking_run_id or "",
+            hooks_hash=node.hooks_hash or "",  # scoring-time parity (ADR-20)
+            gates_passed=True,
+            baseline=job_result.baseline,
+            inference_config=job_result.inference_config,
+            report_uri=(job_result.report.report_uri if job_result.report else None) or None,
             # The after-test verdict at training time (ADR-30); a pre-deploy
             # check replaces it with a fresher one.
-            metadata.update(after_test_tags(verdict, ctx.manifest.metadata.anchor, "build"))
-        if job_result.report is not None and job_result.report.report_uri:
-            metadata["mbt.report_uri"] = job_result.report.report_uri
-        # Persist the champion's operating points (R2-5) so a scoring pipeline
-        # can default its decision cutoff from the model (decision_threshold:
-        # threshold_at_precision_0.9) instead of a hand-copied constant.
-        if job_result.metrics is not None:
-            for name, value in job_result.metrics.metrics.items():
-                if name.startswith(("threshold_at_precision_", "threshold_at_recall_")):
-                    metadata[f"mbt.operating_point.{name}"] = str(value)
-        version = registry_adapter.register(job_result.artifact, spec.registration.name, metadata)
+            after_test=(
+                AfterTestVerdict(
+                    passed=verdict, anchor=ctx.manifest.metadata.anchor, source="build"
+                )
+                if verdict is not None
+                else None
+            ),
+            # Deployable cutoffs (R2-5), so a scoring pipeline can default its
+            # decision rule from the model instead of a hand-copied constant.
+            operating_points=(
+                operating_points(job_result.metrics.metrics) if job_result.metrics else {}
+            ),
+        )
+        version = registry_adapter.register(
+            job_result.artifact, spec.registration.name, record.pack()
+        )
         registry_adapter.transition(version, spec.registration.stage_on_pass)
         get_bus().emit(
             ArtifactRegistered(
@@ -713,7 +734,7 @@ class ModelRunner:
         if job_result.tracking_run_id is None:
             return
         tags = {
-            "mbt.gates_passed": str(all_gates_passed(gates)).lower(),
+            GATES_PASSED: str(all_gates_passed(gates)).lower(),
             "mbt.gates": canonical_json([g.model_dump(mode="json") for g in gates]),
         }
         if stability:
@@ -793,13 +814,14 @@ class ModelRunner:
             )
 
         gates = self._gate_results(spec, node, job_result, champion, metric_specs)
-        stability = evaluate_stability(spec.evaluation.stability, job_result.report, resource=uid)
-        verdict = after_test_verdict(spec, gates, stability)
-        passed = all_gates_passed(gates) and all_monitors_passed(stability)
+        # One owner for "judge this job result" (C-1).
+        outcome = judge(spec, gates, job_result.report, resource=uid)
+        self._note_window_reuse(node, uid)
+        stability, verdict, passed = outcome.stability, outcome.verdict, outcome.passed
         registration = None
         if passed:
             registration = self._register(spec, node, job_result, gates, verdict)
-        self._attach_tracking_tags(job_result, gates, registration, stability, verdict)
+        self._attach_tracking_tags(job_result, gates, registration, stability.results, verdict)
         self._upload_log(node, job_result.tracking_run_id)
 
         return NodeResult(
@@ -816,8 +838,8 @@ class ModelRunner:
             partial_dependence=dict(job_result.partial_dependence),
             backtest_metrics=dict(job_result.backtest_metrics),
             backtest_std=dict(job_result.backtest_std),
-            monitors=stability,
-            message=None if passed else gate_failure_summary(gates, stability),
+            monitors=stability.results,
+            message=outcome.failure_summary,
         )
 
     # -- re-evaluation of registered artifacts (FR-RUN-07, TSD §11.3) -----------
@@ -902,7 +924,7 @@ class _ChampionConfig(NamedTuple):
 def check_hooks_parity(version: ModelVersion, model_node: ManifestNode, uid: str) -> None:
     """A registered version must have been trained with the hooks this run
     will apply; silent feature skew is worse than a hard stop (ADR-20)."""
-    registered = version.tags.get("mbt.hooks_hash")
+    registered = version.tags.get(HOOKS_HASH)
     if registered is None:
         get_bus().emit(
             LogMessage(
@@ -927,14 +949,19 @@ def check_hooks_parity(version: ModelVersion, model_node: ManifestNode, uid: str
 
 def read_inference_config(ctx: ExecutionContext, version: ModelVersion) -> dict[str, Any]:
     """The inference config a version was registered with (ADR-28), fetched
-    and content-verified from the artifact store. Callers check the
-    ``mbt.inference_config_uri`` tag exists first."""
-    ref = ArtifactRef(
-        uri=version.tags["mbt.inference_config_uri"],
-        format=version.tags.get("mbt.inference_config_format", "json"),
-        content_hash=version.tags.get("mbt.inference_config_content_hash", ""),
-        size_bytes=int(version.tags.get("mbt.inference_config_size_bytes", "0")),
-    )
+    and content-verified from the artifact store.
+
+    The obligation "callers check the tag exists first" used to be held in this
+    docstring and honoured by one of its callers (A-5). It is
+    ``has_inference_config`` now, and this raises rather than KeyError-ing when
+    a caller forgets.
+    """
+    ref = unpack_artifact(INFERENCE_CONFIG, version.tags)
+    if ref is None:
+        raise StateError(
+            "the champion carries no inference config to read",
+            hint="callers check the tag exists first; see has_inference_config",
+        )
     store = artifact_store_for(
         resolve_artifact_store_uri(ctx.profiles.target.artifact_store, ctx.project_dir)
     )
@@ -988,16 +1015,8 @@ class ScoringRunner:
     ) -> None:
         check_hooks_parity(champion, model_node, uid)
 
-    def _baseline_ref(self, champion: ModelVersion) -> ArtifactRef | None:
-        uri = champion.tags.get("mbt.baseline_uri")
-        if not uri:
-            return None
-        return ArtifactRef(
-            uri=uri,
-            format=champion.tags.get("mbt.baseline_format", "json"),
-            content_hash=champion.tags.get("mbt.baseline_content_hash", ""),
-            size_bytes=int(champion.tags.get("mbt.baseline_size_bytes", "0")),
-        )
+    def _baseline_ref(self, version: ModelVersion) -> ArtifactRef | None:
+        return unpack_artifact(BASELINE, version.tags)
 
     def _champion_config(
         self, champion: ModelVersion, model_node: ManifestNode, uid: str
@@ -1015,8 +1034,7 @@ class ScoringRunner:
         as before - the same shape ADR-21 gave a champion registered before
         baselines existed.
         """
-        uri = champion.tags.get("mbt.inference_config_uri")
-        if not uri:
+        if not has_inference_config(champion.tags):
             get_bus().emit(
                 LogMessage(
                     level="warn",
@@ -1036,7 +1054,7 @@ class ScoringRunner:
             raise StateError(
                 f"champion v{champion.version} inference config has no model spec",
                 resource=uid,
-                hint=f"the document at {uri} is malformed; retrain and promote",
+                hint="the recorded inference config is malformed; retrain and promote",
             )
         recorded = str(document.get("identity", {}).get("config_hash", ""))
         if recorded and recorded != model_node.config_hash:
@@ -1056,7 +1074,11 @@ class ScoringRunner:
             )
         resolved = document.get("resolved")
         columns = resolved.get("feature_columns") if isinstance(resolved, dict) else None
-        return _ChampionConfig(spec, list(columns) if isinstance(columns, list) else None)
+        # An EMPTY recorded list is a MISSING pin, not a pin of zero features
+        # (C-2): the write side and the read side disagreed about what empty
+        # meant, and `_apply_pin` treats any non-None pin as authoritative.
+        pinned = list(columns) if isinstance(columns, list) and columns else None
+        return _ChampionConfig(spec, pinned)
 
     def _materialize_input(self, node: ManifestNode, spec: ScoringSpec) -> Any:
         ctx = self.ctx

@@ -5,8 +5,12 @@ task/adapter builtin > hook metric; unknown names are a parse error listing
 the candidates.
 """
 
-from mbt.contracts import MetricSpec, ModelSpec, TaskSchema
 from mbt.utils import did_you_mean
+from mbt_adapter_base import (
+    MetricSpec,
+    ModelSpec,
+    TaskSchema,
+)
 from mbt_adapter_base.metrics import parse_metric_sugar
 
 #: Builtin metrics where lower is better; everything else defaults to higher

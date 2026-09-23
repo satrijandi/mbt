@@ -10,6 +10,7 @@ import pytest
 
 from mbt.adapters.local.data import LocalDataAdapter
 from mbt.contracts import ManifestNode, ScoringInputSpec, SourceTable
+from mbt.events.models import ScoringInputMaterialized
 from mbt.execute.runners import BuildContext
 from mbt_adapter_base.compliance import PredictionStoreCompliance
 from mbt_adapter_base.predictions import LocalPredictionStore, PredictionStoreError
@@ -107,7 +108,9 @@ def test_single_source_build_with_window_and_filters(tmp_path: Path) -> None:
     handle = adapter.build_scoring_input(spec, ctx)
     assert handle.splits() == {"score"}
     # the positive path reports its row count on the bus (not just 0-row warns)
-    assert any("materialized" in getattr(e, "message", "") for e in events.events)
+    scored = [e for e in events.events if isinstance(e, ScoringInputMaterialized)]
+    assert len(scored) == 1
+    assert scored[0].rows > 0 and scored[0].level == "info"
     table = handle.read("score")
     assert table.num_rows > 0
     dates = table.column("snapshot_date").to_pylist()
@@ -130,7 +133,9 @@ def test_zero_rows_warns_instead_of_failing(tmp_path: Path) -> None:
     ctx, events = _ctx(adapter, tables, tmp_path / "target/scoring_inputs/batch_scoring/k3")
     handle = adapter.build_scoring_input(spec, ctx)
     assert handle.read("score").num_rows == 0
-    assert any("0 rows" in getattr(e, "message", "") for e in events.events)
+    empty = [e for e in events.events if isinstance(e, ScoringInputMaterialized)]
+    # zero rows is a WARNING, and that severity is the event's, not the adapter's
+    assert [(e.rows, e.level) for e in empty] == [(0, "warn")]
 
 
 def test_scoring_input_ignores_snapshot_drift(tmp_path: Path) -> None:

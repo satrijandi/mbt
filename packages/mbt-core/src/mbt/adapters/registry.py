@@ -10,9 +10,13 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any
 
-from mbt.contracts import CONTRACT_VERSION, AdapterPlugin, TaskType
 from mbt.exceptions import ConfigError
 from mbt.utils import did_you_mean
+from mbt_adapter_base import (
+    CONTRACT_VERSION,
+    AdapterPlugin,
+    TaskType,
+)
 
 
 def _parse_version(version: str) -> tuple[int, int]:
@@ -39,7 +43,6 @@ class AdapterRegistry:
     def __init__(self, core_contract: str = CONTRACT_VERSION) -> None:
         self._core_contract = _parse_version(core_contract)
         self._entries: dict[str, _Entry] = {}
-        self._task_schemas_registered: set[str] = set()
         self._discover()
 
     def _discover(self) -> None:
@@ -80,7 +83,6 @@ class AdapterRegistry:
                 )
             self._check_contract(plugin)
             entry.plugin = plugin
-            self._register_task_schemas(plugin)
         return entry.plugin
 
     def _check_contract(self, plugin: AdapterPlugin) -> None:
@@ -100,16 +102,6 @@ class AdapterRegistry:
                     + " so contract majors match and the adapter's minor is not newer"
                 ),
             )
-
-    def _register_task_schemas(self, plugin: AdapterPlugin) -> None:
-        if plugin.name in self._task_schemas_registered:
-            return
-        self._task_schemas_registered.add(plugin.name)
-        if plugin.task_schemas:
-            from mbt.config.tasks import register_task_schema
-
-            for schema_cls in plugin.task_schemas.values():
-                register_task_schema(schema_cls())
 
     # -- typed helpers -------------------------------------------------------
 

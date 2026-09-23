@@ -13,9 +13,31 @@ Requires the ``mbt-adapter-base[compliance]`` extra (pytest + numpy).
 """
 
 from mbt_adapter_base.compliance.suite import (
+    COMPLIANCE_FRACTIONS,
+    COMPLIANCE_SAMPLE_KEY,
+    COMPLIANCE_SPLIT_SEED,
+    CategoricalAdapterCompliance,
+    DataAdapterCompliance,
     PredictionStoreCompliance,
+    RecordingEvents,
+    RegistryAdapterCompliance,
     TrainingAdapterCompliance,
+    categorical_dataset,
     tiny_binary_dataset,
+    tiny_source_rows,
 )
 
-__all__ = ["PredictionStoreCompliance", "TrainingAdapterCompliance", "tiny_binary_dataset"]
+__all__ = [
+    "COMPLIANCE_FRACTIONS",
+    "COMPLIANCE_SAMPLE_KEY",
+    "COMPLIANCE_SPLIT_SEED",
+    "CategoricalAdapterCompliance",
+    "DataAdapterCompliance",
+    "PredictionStoreCompliance",
+    "RecordingEvents",
+    "RegistryAdapterCompliance",
+    "TrainingAdapterCompliance",
+    "categorical_dataset",
+    "tiny_binary_dataset",
+    "tiny_source_rows",
+]

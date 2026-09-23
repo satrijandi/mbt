@@ -7,10 +7,14 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from mbt.contracts import ModelVersion, Stage
 from mbt.events import get_bus
 from mbt.events.models import LogMessage, PromotionApplied
 from mbt.exceptions import ConfigError, StateError
+from mbt_adapter_base import (
+    ModelVersion,
+    Stage,
+)
+from mbt_adapter_base.champion import GATES_PASSED, OOT_CHECK_ANCHOR, OOT_CHECK_PASSED
 
 
 class PromotionEntry(BaseModel):
@@ -73,7 +77,8 @@ def _resolve_version(
 
 
 #: The registry tag the after-test check records its verdict in (ADR-30).
-OOT_CHECK_TAG = "mbt.oot_check.passed"
+#: Re-exported from the champion record, which owns the spelling (A-5).
+OOT_CHECK_TAG = OOT_CHECK_PASSED
 
 
 def _check_after_test(
@@ -88,7 +93,7 @@ def _check_after_test(
     """
     verdict = resolved.tags.get(OOT_CHECK_TAG)
     label = f"{resolved.name} v{resolved.version}"
-    anchor = resolved.tags.get("mbt.oot_check.anchor", "?")
+    anchor = resolved.tags.get(OOT_CHECK_ANCHOR, "?")
     if verdict == "false":
         problem = f"its after-test check at {anchor} failed"
     elif required and verdict != "true":
@@ -130,7 +135,7 @@ def promote_model(
     """Resolve, verify recorded gate passes, transition (TSD §14.4)."""
     resolved = _resolve_version(registry_adapter, name, version, from_stage)
     _check_after_test(resolved, required=require_oot_check, force=force, rollback=rollback)
-    gates_passed = resolved.tags.get("mbt.gates_passed") == "true"
+    gates_passed = resolved.tags.get(GATES_PASSED) == "true"
     if not gates_passed:
         if not force:
             raise StateError(
@@ -175,7 +180,7 @@ def _last_known_good_below(registry_adapter: Any, name: str, champion_version: s
         ) from exc
     for candidate in range(start, 0, -1):
         prior = registry_adapter.get_version(name, str(candidate))
-        if prior is not None and prior.tags.get("mbt.gates_passed") == "true":
+        if prior is not None and prior.tags.get(GATES_PASSED) == "true":
             return str(candidate)
     raise StateError(
         f"model {name!r} has no earlier gated version below v{champion_version} to roll back to",

@@ -119,13 +119,51 @@ def _precision_at_recall(y_true: "np.ndarray", y_score: "np.ndarray", min_recall
     return float(achievable.max()) if achievable.size else 0.0
 
 
+#: Rows at or above a cutoff below which the reported precision/recall is a
+#: point estimate on a handful of rows rather than a number to deploy on (D-1).
+#:
+#: Measured, not guessed. 400 replications against this module's own
+#: ``compute_metric``, drawing a label at a base rate and a score from a normal
+#: shifted by the label, selecting the cutoff on one draw and measuring realized
+#: precision on an independent one:
+#:
+#:   n      base  target  on-test  fresh    bias     n>=t
+#:   5000   0.02  0.50    0.5000   0.4950   +0.0050    24
+#:   5000   0.02  0.70    0.7794   0.6496   +0.1297     7
+#:   5000   0.05  0.50    0.5000   0.5022   -0.0022   146
+#:   20000  0.02  0.70    0.7251   0.6895   +0.0356    22
+#:   20000  0.05  0.70    0.7015   0.7018   -0.0004   172
+#:
+#: The bias is negligible wherever the cutoff is supported by roughly a hundred
+#: rows and serious where it is not: at 7 rows a reported 0.78 is a realized
+#: 0.65. That is the rare-positive, high-precision corner - exactly the
+#: retention-campaign shape the feature was built for.
+MIN_OPERATING_POINT_SUPPORT = 100
+
+
+def operating_point_support(y_score: "np.ndarray", threshold: float) -> int:
+    """How many rows a deployable cutoff actually rests on.
+
+    The number that decides whether a ``threshold_at_*`` value means anything:
+    the reported precision at the cutoff is measured on exactly these rows.
+    """
+    return int((y_score >= threshold).sum())
+
+
 def _threshold_at_precision(
     y_true: "np.ndarray", y_score: "np.ndarray", min_precision: float
 ) -> float:
     """The deployable operating point for a precision target: the smallest
     score threshold whose precision meets it (maximal coverage at the
     required precision). Returns 1.0 when unattainable or degenerate -
-    "predict nothing" is the only rule that honors the target."""
+    "predict nothing" is the only rule that honors the target.
+
+    **It is a fitted parameter selected on the split that reports it** (D-1).
+    The precision at this cutoff is then measured on the same rows, so it is
+    the smallest cutoff meeting the target ON THIS SAMPLE, which lands under
+    the target about half the time on fresh rows by construction. Callers that
+    deploy the value check ``operating_point_support`` first.
+    """
     from sklearn.metrics import precision_recall_curve
 
     if float(y_true.sum()) == 0.0:

@@ -1072,7 +1072,7 @@ def test_newest_row_age_reads_the_window_end_bound() -> None:
     zero, which is the conservative direction - it can only make the maturity
     check stricter, never let an under-matured batch through.
     """
-    from mbt.parsing.project_parser import _newest_row_age_days
+    from mbt.parsing.rules import _newest_row_age_days
 
     assert _newest_row_age_days(None) == 0.0
     assert _newest_row_age_days("-31d:now") == 0.0

@@ -27,9 +27,11 @@ import jinja2
 from jinja2.nativetypes import NativeCodeGenerator, NativeTemplate, native_concat
 from jinja2.sandbox import SandboxedEnvironment
 
-from mbt.contracts import AUTO
 from mbt.exceptions import CompilationError, ConfigError
 from mbt.secrets import taint
+from mbt_adapter_base import (
+    AUTO,
+)
 
 #: A field value that is a bare ref()/source() call is sugar for {{ ... }}.
 _BARE_CALL_RE = re.compile(r"^\s*(ref|source)\((?P<args>[^)]*)\)\s*$")

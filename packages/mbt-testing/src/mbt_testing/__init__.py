@@ -9,6 +9,7 @@ from mbt_testing.adapters import (
     FakeTuningEngine,
     InlineComputeAdapter,
 )
+from mbt_testing.data import InMemoryDataAdapter, InMemoryDataError
 
 __version__ = "0.1.0"
 
@@ -19,5 +20,7 @@ __all__ = [
     "FakeTrackingAdapter",
     "FakeTrainingAdapter",
     "FakeTuningEngine",
+    "InMemoryDataAdapter",
+    "InMemoryDataError",
     "InlineComputeAdapter",
 ]

@@ -28,19 +28,19 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from mbt_adapter_base import (
-    OUT_OF_TIME_SPLIT,
     DatasetLocator,
     DatasetSpec,
     ScoringInputSpec,
     ScoringOutputSpec,
     retry_with_jitter,
 )
+from mbt_adapter_base.errors import AdapterFailure
 from mbt_adapter_base.materialization import (
     MaterializationError,
     MaterializedDatasetHandle,
+    build_dataset_materialization,
+    build_scoring_materialization,
     combine_snapshots,
-    empty_out_of_time_message,
-    write_materialization_metadata,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore, resolve_predictions_root
 from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
@@ -72,13 +72,14 @@ _CONNECT_KEYS = (
 )
 
 
-class SnowflakeAdapterError(RuntimeError):
-    """Snowflake adapter failures with an actionable message."""
+class SnowflakeAdapterError(AdapterFailure):
+    """Snowflake adapter failures with an actionable message.
 
-    def __init__(self, message: str, hint: str | None = None) -> None:
-        if hint:
-            message = f"{message}\n  hint: {hint}"
-        super().__init__(message)
+    ``hint`` is a FIELD on the shared base rather than text flattened into the
+    message, so core can render it the way it renders ``MbtError.hint`` (A-4).
+    ``__str__`` still puts it on its own ``hint:`` line, so the wording is
+    unchanged.
+    """
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -270,7 +271,7 @@ class SnowflakeDataAdapter:
         digest = hashlib.sha256(f"{ref}|{fingerprint}|{token}".encode()).hexdigest()
         return f"sha256:{digest}"
 
-    def _verify_snapshot(self, ctx: DataBuildContext) -> None:
+    def verify_snapshot(self, ctx: DataBuildContext) -> None:
         if ctx.node.snapshot_id is None:
             return
         current = combine_snapshots(
@@ -289,59 +290,32 @@ class SnowflakeDataAdapter:
     # -- materialization ----------------------------------------------------------
 
     def build_dataset(self, spec: DatasetSpec, ctx: DataBuildContext) -> MaterializedDatasetHandle:
-        self._verify_snapshot(ctx)
-        output_dir = ctx.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for stale in output_dir.glob("*"):
-            stale.unlink()
+        return build_dataset_materialization(self, spec, ctx)
 
+    # -- DatasetBuildEngine (A-1) ---------------------------------------------
+
+    def build_failure(
+        self, message: str, *, ctx: DataBuildContext, hint: str | None = None
+    ) -> Exception:
+        return SnowflakeAdapterError(message, hint, resource=ctx.node.unique_id)
+
+    def write_dataset_splits(
+        self, spec: DatasetSpec, ctx: DataBuildContext, output_dir: Path
+    ) -> dict[str, int]:
+        """One pushed-down SELECT per split, streamed to parquet via Arrow."""
         table_refs = {uid: self._table_ref(t) for uid, t in ctx.source_tables.items()}
         where: list[str] = [f"({f})" for f in spec.filters]
-        if not 0.0 < ctx.sample_fraction <= 1.0:
-            raise SnowflakeAdapterError(
-                f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}"
-            )
         if ctx.sample_fraction < 1.0:
             where.append(sampling_predicate(spec.sample_key_columns, ctx.sample_fraction))
-
         try:
             relation, exclude = base_relation(spec, table_refs)
             queries = split_queries(spec, relation, where, ctx.resolved_windows, exclude)
         except SnowflakeSQLError as exc:
             raise SnowflakeAdapterError(str(exc)) from exc
-
-        written: dict[str, int] = {}
-        for split, sql in queries.items():
-            written[split] = self._stream_query_to_parquet(sql, output_dir / f"{split}.parquet")
-        for split, count in written.items():
-            if count != 0:
-                continue
-            if split == OUT_OF_TIME_SPLIT:
-                # A window ending at the anchor is routinely empty (ADR-30).
-                ctx.events.emit(empty_out_of_time_message(ctx.resolved_windows))
-                continue
-            raise SnowflakeAdapterError(
-                f"split {split!r} materialized 0 rows",
-                hint="check the split windows/fractions and filters against the data",
-            )
-        # Positive-path row counts on the bus (a plain string the EventSink
-        # wraps in a LogMessage); mirrors the local adapter.
-        ctx.events.emit(
-            f"dataset {ctx.node.unique_id}: materialized {sum(written.values())} rows: "
-            + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
-        )
-
-        write_materialization_metadata(
-            output_dir,
-            snapshot_id=ctx.node.snapshot_id,
-            dataset=spec.name,
-            label_column=spec.label.column,
-            time_column=spec.split.time_column,
-            windows=ctx.resolved_windows,
-            sample_fraction=ctx.sample_fraction,
-            row_counts=written,
-        )
-        return MaterializedDatasetHandle(output_dir, adapter=self.name)
+        return {
+            split: self._stream_query_to_parquet(sql, output_dir / f"{split}.parquet")
+            for split, sql in queries.items()
+        }
 
     # -- source-level checks (F2/F21) -----------------------------------------
 
@@ -459,22 +433,18 @@ class SnowflakeDataAdapter:
         a pinned manifest scores the live data instead of hard-failing on drift
         the way a dataset does (R2-10).
         """
-        output_dir = ctx.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for stale in output_dir.glob("*"):
-            stale.unlink()
+        return build_scoring_materialization(self, spec, ctx)
 
+    def write_scoring_batch(self, spec: ScoringInputSpec, ctx: DataBuildContext, out: Path) -> int:
+        """One pushed-down SELECT over the unlabeled batch, streamed to parquet."""
         table_refs = {uid: self._table_ref(t) for uid, t in ctx.source_tables.items()}
         where: list[str] = [f"({f})" for f in spec.filters]
-        if not 0.0 < ctx.sample_fraction <= 1.0:
-            raise SnowflakeAdapterError(
-                f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}"
-            )
         if ctx.sample_fraction < 1.0:
             keys = spec.sample_key_columns
             if not keys:
-                raise SnowflakeAdapterError(
+                raise self.build_failure(
                     "sampling a Snowflake scoring input needs a stable row identity",
+                    ctx=ctx,
                     hint="declare input.sample_key (the entity id column(s)) in the "
                     "scoring spec, or set sample_fraction: 1.0 for this target",
                 )
@@ -485,29 +455,7 @@ class SnowflakeDataAdapter:
             sql = scoring_query(spec, table_refs, where, window)
         except SnowflakeSQLError as exc:
             raise SnowflakeAdapterError(str(exc)) from exc
-        count = self._stream_query_to_parquet(sql, output_dir / "score.parquet")
-
-        if count == 0:
-            # EventSink wraps a plain string in a LogMessage (adapters cannot
-            # import core event models); mirrors the local adapter's warning.
-            ctx.events.emit(
-                f"scoring input {ctx.node.unique_id}: materialized 0 rows; nothing to score"
-            )
-        else:
-            ctx.events.emit(
-                f"scoring input {ctx.node.unique_id}: materialized {count} rows to score"
-            )
-        write_materialization_metadata(
-            output_dir,
-            snapshot_id=ctx.node.snapshot_id,
-            dataset=ctx.node.name,
-            label_column="",  # unlabeled by design (ADR-20)
-            time_column=spec.time_column,
-            windows=ctx.resolved_windows,
-            sample_fraction=ctx.sample_fraction,
-            row_counts={"score": count},
-        )
-        return MaterializedDatasetHandle(output_dir, adapter=self.name)
+        return self._stream_query_to_parquet(sql, out)
 
     def open_predictions(self, output: ScoringOutputSpec) -> LocalPredictionStore:
         """Prediction store for a Snowflake scoring pipeline.

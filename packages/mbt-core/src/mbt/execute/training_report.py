@@ -10,40 +10,44 @@ import contextlib
 import json
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
-from mbt.contracts import (
+from mbt.events import get_bus
+from mbt.events.bus import HookEventSink
+from mbt.events.models import LogMessage
+from mbt.exceptions import ConfigError
+from mbt.execute.handles import SplitRouter, TrainingSplitView, TransformedDatasetHandle
+from mbt.execute.job_runtime import JobRuntime
+from mbt.execute.seeds import permutation_importance_seed
+from mbt.reporting.builder import ReportData, ReportInputs, ScoredSplit, TableKey
+from mbt.reporting.writer import ReportMeta, write_report
+from mbt_adapter_base import (
     OUT_OF_TIME_SPLIT,
     DatasetSpec,
     ModelSpec,
     ReportSummary,
     TaskType,
 )
-from mbt.events import get_bus
-from mbt.events.models import LogMessage
-from mbt.exceptions import ConfigError
-from mbt.execute.handles import SplitRouter, TrainingSplitView, TransformedDatasetHandle
-from mbt.reporting.builder import ReportData, ReportInputs, ScoredSplit
-from mbt.reporting.writer import ReportMeta, write_report
+from mbt_adapter_base.capabilities import Capability, capabilities_of
 
 if TYPE_CHECKING:
     import numpy as np
-
-    from mbt.execute.job import _JobRuntime
-
-#: Seed ladder rung for the permutation-importance row sample (CLAUDE.md):
-#: spec.seed train, +1 tuning, +2 validation carve, +3 bootstrap, +4 random
-#: k-fold, +5 calibration carve, +6 this.
-PERMUTATION_SEED_OFFSET = 6
 
 #: Rows the permutation fallback scores per feature, and the most features it
 #: will shuffle - each one is a full predict call.
 PERMUTATION_ROWS = 5000
 PERMUTATION_MAX_FEATURES = 100
+
+#: Shuffles per feature, averaged (D-5). A single shuffle is a high-variance
+#: estimate of a drop, and normalising it to a fraction made the result read as
+#: settled when two runs at different seeds could reorder mid-table features.
+#: sklearn's ``permutation_importance`` defaults to 5 for the same reason.
+PERMUTATION_REPEATS = 5
 
 Stager = Callable[[Any, ModelSpec], Any]
 
@@ -51,22 +55,22 @@ Stager = Callable[[Any, ModelSpec], Any]
 # -- inputs ------------------------------------------------------------------------------------
 
 
-def dataset_spec(runtime: "_JobRuntime") -> DatasetSpec | None:
+def dataset_spec(runtime: JobRuntime) -> DatasetSpec | None:
     node = runtime.job.dataset_node
     if node is None:
         return None
     return DatasetSpec.model_validate(node.config)
 
 
-def job_anchor(runtime: "_JobRuntime") -> datetime:
+def job_anchor(runtime: JobRuntime) -> datetime:
     """The manifest anchor (ADR-12); maturity is measured against it."""
-    raw = str(getattr(runtime.job, "anchor", "") or "")
+    raw = str(runtime.job.anchor or "")
     if not raw:
         return datetime.now(tz=UTC).replace(microsecond=0)
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
-def report_view(runtime: "_JobRuntime") -> TrainingSplitView:
+def report_view(runtime: JobRuntime) -> TrainingSplitView:
     """The training view with the after-test split visible, test narrowed
     exactly as the metrics saw it."""
     test_window = runtime.job.node.resolved.get("test_window")
@@ -89,8 +93,8 @@ def _labels(table: pa.Table, target: str) -> "np.ndarray":
     return np.asarray(values, dtype=float)
 
 
-def scored_splits(
-    runtime: "_JobRuntime",
+def _scored_splits(
+    runtime: JobRuntime,
     model: Any,
     *,
     stage: Stager,
@@ -124,7 +128,7 @@ def scored_splits(
             runtime.hooks,
             lambda split: _hook_context(runtime, split),
             time_column,
-            pinned_features=runtime.transformed.feature_columns,
+            pinned_features=runtime.transformed.feature_columns(),
         )
         if getattr(runtime.adapter, "data_access", "arrow") == "path":
             after = stage(_Only(after, OUT_OF_TIME_SPLIT), spec)
@@ -186,16 +190,21 @@ def _row_count(view: TrainingSplitView, split: str) -> int:
     return int(view.profile().n_rows.get(split, 0))
 
 
-def _hook_context(runtime: "_JobRuntime", split: str) -> Any:
-    from mbt.contracts import HookContext
+def _hook_context(runtime: JobRuntime, split: str) -> Any:
+    from mbt_adapter_base import (
+        HookContext,
+    )
 
     return HookContext(
-        spec=runtime.spec, profile=runtime.base_profile, split=split, logger=get_bus()
+        spec=runtime.spec,
+        profile=runtime.base_profile,
+        split=split,
+        logger=HookEventSink(get_bus()),
     )
 
 
 def report_inputs(
-    runtime: "_JobRuntime", spec: ModelSpec, importance: dict[str, float]
+    runtime: JobRuntime, spec: ModelSpec, importance: dict[str, float]
 ) -> ReportInputs:
     dataset = dataset_spec(runtime)
     windows = dict(runtime.job.dataset_windows.get("windows") or {})
@@ -205,7 +214,7 @@ def report_inputs(
         model_name=spec.name,
         binary=spec.task == TaskType.BINARY_CLASSIFICATION,
         report=spec.evaluation.effective_report,
-        feature_columns=list(runtime.transformed.feature_columns or []),
+        feature_columns=runtime.transformed.feature_columns(),
         importance=importance,
         metric_specs=list(runtime.builtin_specs),
         anchor=job_anchor(runtime),
@@ -220,9 +229,7 @@ def report_inputs(
 # -- importance --------------------------------------------------------------------------------
 
 
-def permutation_importance(
-    runtime: "_JobRuntime", model: Any, test: ScoredSplit
-) -> dict[str, float]:
+def permutation_importance(runtime: JobRuntime, model: Any, test: ScoredSplit) -> dict[str, float]:
     """Model-agnostic importance for adapters that report none.
 
     Shuffles one feature at a time on a seeded sample of the test split and
@@ -232,13 +239,13 @@ def permutation_importance(
     """
     import numpy as np
 
-    from mbt.contracts import MetricSpec
+    from mbt_adapter_base import (
+        MetricSpec,
+    )
     from mbt_adapter_base.datasets import InMemoryDatasetHandle
     from mbt_adapter_base.metrics import compute_metric
 
-    features = [
-        c for c in (runtime.transformed.feature_columns or []) if c in test.features.column_names
-    ]
+    features = [c for c in runtime.transformed.feature_columns() if c in test.features.column_names]
     bus = get_bus()
     uid = runtime.job.node.unique_id
     if len(features) > PERMUTATION_MAX_FEATURES:
@@ -255,11 +262,12 @@ def permutation_importance(
         )
         return {}
     labelled = ~np.isnan(test.labels)
-    rng = np.random.default_rng(runtime.spec.seed + PERMUTATION_SEED_OFFSET)
+    rng = np.random.default_rng(permutation_importance_seed(runtime.spec.seed))
     rows = np.flatnonzero(labelled)
     if rows.size > PERMUTATION_ROWS:
         rows = np.sort(rng.choice(rows, size=PERMUTATION_ROWS, replace=False))
     sample = test.features.take(pa.array(rows))
+    n_rows = sample.num_rows
     labels = test.labels[rows]
     binary = runtime.spec.task == TaskType.BINARY_CLASSIFICATION
     if binary and np.unique(labels).size < 2:
@@ -276,17 +284,39 @@ def permutation_importance(
 
     reference = score(sample)
     drops: dict[str, float] = {}
+    spreads: dict[str, float] = {}
     for name in features:
         index = sample.column_names.index(name)
-        shuffled = sample.column(name).take(pa.array(rng.permutation(sample.num_rows)))
-        drops[name] = max(0.0, reference - score(sample.set_column(index, name, shuffled)))
+        # Repeats, not a single shuffle (D-5). One shuffle is a high-variance
+        # estimate, and normalising it to a tidy fraction made the output read
+        # as more settled than it was - two runs at different seeds could
+        # reorder mid-table features. sklearn's equivalent defaults to 5
+        # repeats for exactly this reason. The cost is linear in repeats and
+        # this path only runs for adapters that report no native importance.
+        measured = [
+            max(
+                0.0,
+                reference
+                - score(
+                    sample.set_column(
+                        index, name, sample.column(name).take(pa.array(rng.permutation(n_rows)))
+                    )
+                ),
+            )
+            for _ in range(PERMUTATION_REPEATS)
+        ]
+        drops[name] = float(np.mean(measured))
+        spreads[name] = float(np.std(measured))
     total = sum(drops.values())
+    noisiest = max(spreads.items(), key=lambda kv: kv[1], default=("", 0.0))
     bus.emit(
         LogMessage(
             unique_id=uid,
             message=(
                 f"feature importance by permutation on {sample.num_rows} test rows "
-                f"({len(features)} features; the adapter reports none)"
+                f"({len(features)} features x {PERMUTATION_REPEATS} shuffles; the adapter "
+                f"reports none; widest spread across shuffles: {noisiest[0] or 'n/a'} "
+                f"+/-{noisiest[1]:.4f})"
             ),
         )
     )
@@ -298,7 +328,7 @@ def permutation_importance(
 # -- publishing --------------------------------------------------------------------------------
 
 
-def dataset_record(runtime: "_JobRuntime") -> dict[str, Any] | None:
+def dataset_record(runtime: JobRuntime) -> dict[str, Any] | None:
     """The dataset side of what the model was trained on (ADR-30): enough for a
     serving system to rebuild the input, and for the pre-deploy check to pin
     the test window the model was judged on."""
@@ -321,14 +351,14 @@ def dataset_record(runtime: "_JobRuntime") -> dict[str, Any] | None:
         "filters": list(dataset.filters),
         "windows": windows,
         "test_window": runtime.job.node.resolved.get("test_window"),
-        "anchor": str(getattr(runtime.job, "anchor", "") or ""),
+        "anchor": str(runtime.job.anchor or ""),
         "sample_fraction": metadata.get("sample_fraction"),
         "row_counts": metadata.get("row_counts") or {},
     }
 
 
-def report_meta(
-    runtime: "_JobRuntime", spec: ModelSpec, splits: dict[str, ScoredSplit], *, kind: str
+def _report_meta(
+    runtime: JobRuntime, spec: ModelSpec, splits: dict[str, ScoredSplit], *, kind: str
 ) -> ReportMeta:
     record = dataset_record(runtime) or {}
     windows = dict(record.get("windows") or {})
@@ -338,7 +368,7 @@ def report_meta(
     return ReportMeta(
         model=spec.name,
         run=meta.get("mbt.run_name") or runtime.job.run_id,
-        anchor=str(getattr(runtime.job, "anchor", "") or ""),
+        anchor=str(runtime.job.anchor or ""),
         binary=spec.task == TaskType.BINARY_CLASSIFICATION,
         kind="training" if kind == "training" else "pre-deploy check",
         dataset=record.get("name"),
@@ -348,7 +378,7 @@ def report_meta(
 
 
 def build_report_data(
-    runtime: "_JobRuntime",
+    runtime: JobRuntime,
     spec: ModelSpec,
     importance: dict[str, float],
     scored: dict[str, ScoredSplit],
@@ -366,7 +396,7 @@ def build_report_data(
 
 
 def render_drift(
-    runtime: "_JobRuntime", spec: ModelSpec, data: ReportData, scored: dict[str, ScoredSplit]
+    runtime: JobRuntime, spec: ModelSpec, data: ReportData, scored: dict[str, ScoredSplit]
 ) -> None:
     """A report engine's drift report per after-test cell (ADR-30).
 
@@ -395,7 +425,7 @@ def render_drift(
     test = scored["test"]
     # the model's own features only (the scored tables still carry the label),
     # most important first
-    features = list(runtime.transformed.feature_columns or [])
+    features = runtime.transformed.feature_columns()
     ranked = [str(row["feature"]) for row in data.tables.get("feature_importance", [])]
     ordered = dict.fromkeys([*(c for c in ranked if c in features), *features])
     present = set(after.features.column_names) & set(test.features.column_names)
@@ -444,12 +474,12 @@ def render_drift(
         )
         column_rows.extend({"cell": key, **c.model_dump()} for c in found.columns)
     data.engine = settings.engine
-    data.tables["engine_drift_summary"] = summary_rows
-    data.tables["engine_drift"] = column_rows
+    data.tables[TableKey.ENGINE_DRIFT_SUMMARY] = summary_rows
+    data.tables[TableKey.ENGINE_DRIFT] = column_rows
 
 
-def publish_report(
-    runtime: "_JobRuntime",
+def _publish_report(
+    runtime: JobRuntime,
     data: ReportData,
     meta: ReportMeta,
     *,
@@ -483,7 +513,7 @@ def publish_report(
 
 
 def _upload(
-    runtime: "_JobRuntime",
+    runtime: JobRuntime,
     tracking: Any,
     run_handle: Any,
     root: Path,
@@ -508,7 +538,7 @@ def _upload(
 
 
 def log_config_documents(
-    runtime: "_JobRuntime", tracking: Any, run_handle: Any, spec: ModelSpec
+    runtime: JobRuntime, tracking: Any, run_handle: Any, spec: ModelSpec
 ) -> None:
     """The resolved model config and the dataset config as JSON on the run -
     the full values behind any parameter a tracker truncated."""
@@ -571,3 +601,90 @@ def report_metrics(summary: ReportSummary) -> dict[str, float]:
         put(f"{prefix}.max_feature_psi", stability.max_feature_psi)
         put(f"{prefix}.features_over_fail", float(stability.features_over_fail))
     return out
+
+
+# -- the one entry point (B-2) -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReportOutcome:
+    """What one report run produced.
+
+    ``summary`` is what most callers want; ``scored`` and ``importance`` are
+    here because the training path reuses the test scores for the monitoring
+    baseline and the importance for partial dependence, and recomputing either
+    would mean scoring every split twice.
+    """
+
+    summary: ReportSummary
+    scored: dict[str, ScoredSplit]
+    importance: dict[str, float]
+    data: ReportData
+
+
+def feature_importance(
+    runtime: JobRuntime, model: Any, scored: ScoredSplit | None = None
+) -> dict[str, float]:
+    """Per-feature importance for the model card (FR-DOCS-02).
+
+    Prefers a data-grounded SHAP importance when the adapter declares it (the
+    tree adapters), since split-gain is cardinality-biased; falls back to the
+    adapter's model-intrinsic ``feature_importance``, and then to the
+    model-agnostic permutation fallback.
+
+    The three-way preference used to be two functions in two modules with the
+    fallback written out at both of ``job.py``'s call sites (B-2).
+    """
+    adapter = runtime.adapter
+    # Declared, not probed (B-1): a renamed method is a capability the adapter
+    # stops declaring, rather than one that silently disappears.
+    can = capabilities_of(adapter, runtime.spec)
+    if Capability.SHAP_IMPORTANCE in can:
+        return dict(adapter.shap_importance(model, runtime.handle, "test"))
+    if Capability.FEATURE_IMPORTANCE in can:
+        return dict(adapter.feature_importance(model))
+    # The permutation fallback shuffles scored test rows, so it needs them;
+    # a caller with no scored split (``mbt evaluate``) simply gets no table.
+    if scored is None:
+        return {}
+    return permutation_importance(runtime, model, scored)
+
+
+def produce_report(
+    runtime: JobRuntime,
+    spec: ModelSpec,
+    model: Any,
+    *,
+    kind: str,
+    stage: Stager,
+    include_train: bool = True,
+    tracking: Any = None,
+    run_handle: Any = None,
+    prefix: str = "report",
+    artifact_path: str | None = None,
+) -> ReportOutcome:
+    """Score the report splits, build the report, publish it (ADR-30).
+
+    The six-step sequence this replaces was an ordered protocol the CALLER had
+    to restate, and it was restated twice in ``job.py`` - at the training path
+    and at the pre-deploy check - differing only in ``include_train``, ``kind``
+    and ``artifact_path``, which are the three parameters here (B-2).
+
+    That is what made ``training_report.py`` a file split rather than a seam:
+    the interface was as large as the implementation, so pasting the module
+    back into ``job.py`` would have changed nothing a reader holds in their
+    head. Now there is one call.
+    """
+    scored = _scored_splits(runtime, model, stage=stage, include_train=include_train)
+    importance = feature_importance(runtime, model, scored["test"])
+    data = build_report_data(runtime, spec, importance, scored)
+    summary = _publish_report(
+        runtime,
+        data,
+        _report_meta(runtime, spec, scored, kind=kind),
+        tracking=tracking,
+        run_handle=run_handle,
+        prefix=prefix,
+        artifact_path=artifact_path,
+    )
+    return ReportOutcome(summary=summary, scored=scored, importance=importance, data=data)

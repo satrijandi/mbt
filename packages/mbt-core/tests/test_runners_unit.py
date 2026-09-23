@@ -479,3 +479,70 @@ def test_materialization_key_partitions_by_sample_fraction() -> None:
     half = materialization_key(node, 0.5)
     assert half != full
     assert materialization_key(node, 0.25) not in {full, half}
+
+
+# -- D-3 / C-3: window reuse and the inference-config guard ------------------
+
+
+def test_reading_an_inference_config_a_version_does_not_have_fails_clearly() -> None:
+    """A-5: the obligation "callers check the tag exists first" used to be held
+    in a docstring and honoured by one of its callers."""
+    import pytest
+
+    from mbt.contracts import ModelVersion
+    from mbt.exceptions import StateError
+    from mbt.execute.runners import read_inference_config
+
+    version = ModelVersion(name="m", version="1", tags={})
+    with pytest.raises(StateError, match="no inference config"):
+        read_inference_config(None, version)  # type: ignore[arg-type]
+
+
+def test_a_model_with_no_dataset_dependency_records_no_window_use(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from mbt.contracts import ManifestNode
+    from mbt.execute.runners import ModelRunner
+    from mbt.state.gate_log import read_log
+
+    ctx = SimpleNamespace(manifest=SimpleNamespace(nodes={}), project_dir=tmp_path)
+    node = ManifestNode(
+        unique_id="model.d.m", resource_type="model", name="m", path="m.yml", config={}
+    )
+    ModelRunner(ctx)._note_window_reuse(node, "model.d.m")  # type: ignore[arg-type]
+    assert read_log(tmp_path) == {}
+
+
+def test_an_overused_test_window_warns_on_the_bus(tmp_path: Path) -> None:
+    """D-3: a window selected against enough times is no longer held out."""
+    from types import SimpleNamespace
+
+    from mbt.contracts import ManifestNode
+    from mbt.execute.runners import ModelRunner
+    from mbt.state.gate_log import REUSE_WARN_THRESHOLD
+
+    dataset = ManifestNode(
+        unique_id="dataset.d.panel",
+        resource_type="dataset",
+        name="panel",
+        path="d.yml",
+        config={},
+        resolved={"windows": {"test": ["2026-05-01T00:00:00Z", "2026-06-01T00:00:00Z"]}},
+    )
+    node = ManifestNode(
+        unique_id="model.d.m",
+        resource_type="model",
+        name="m",
+        path="m.yml",
+        config={},
+        depends_on=["dataset.d.panel"],
+    )
+    ctx = SimpleNamespace(
+        manifest=SimpleNamespace(nodes={"dataset.d.panel": dataset}), project_dir=tmp_path
+    )
+    runner = ModelRunner(ctx)  # type: ignore[arg-type]
+    with recording_bus() as sink:
+        for _ in range(REUSE_WARN_THRESHOLD):
+            runner._note_window_reuse(node, "model.d.m")
+    warnings = [e for e in sink.events if getattr(e, "level", "") == "warn"]
+    assert warnings and "no longer fully held out" in warnings[-1].message

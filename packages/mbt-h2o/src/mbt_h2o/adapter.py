@@ -47,6 +47,8 @@ if TYPE_CHECKING:
     import numpy as np
 
     from mbt_adapter_base.calibration import Calibrator
+from mbt_adapter_base.capabilities import Capability, method_capabilities
+from mbt_adapter_base.events import AdapterMessage
 
 _shutdown_registered = False
 
@@ -127,13 +129,18 @@ class H2OAutoMLAdapter:
         TaskType.REGRESSION,
     }
     #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
-    supports_calibration: ClassVar[bool] = True
+    #: Declared, not probed (B-1). This adapter is NOT an ArrowTrainingAdapter:
+    #: it reads splits by path (ADR-17), so it implements the protocol directly
+    #: and derives the method-backed half of its capability set the same way.
+    extra_capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CALIBRATION})
+
+    def capabilities(self, spec: "ModelSpec | None" = None) -> frozenset[Capability]:
+        return method_capabilities(self) | self.extra_capabilities
+
     #: Declared False rather than left to the getattr default (ADR-27): AutoML
     #: picks the leader from a family whose members honour monotone constraints
     #: differently or not at all, and asfactor() derives its own levels, so
     #: neither declaration could be enforced for the model that actually wins.
-    supports_monotonic_constraints: ClassVar[bool] = False
-    supports_categorical_pooling: ClassVar[bool] = False
     #: AutoML rankings can flip between near-tied leaders across environments;
     #: metric-level variance stays small when runs are models-bounded.
     determinism = DeterminismTier(kind="tolerance", tolerances={"*": 0.02})
@@ -356,8 +363,14 @@ class H2OAutoMLAdapter:
             board = automl.leaderboard.as_data_frame(use_multi_thread=True)
             for _, row in board.head(5).iterrows():
                 ctx.events.emit(
-                    f"h2o leaderboard: {row.iloc[0]}  "
-                    + "  ".join(f"{c}={row[c]:.4f}" for c in board.columns[1:3])
+                    AdapterMessage(
+                        adapter=self.name,
+                        unique_id=ctx.unique_id,
+                        message=(
+                            f"leaderboard: {row.iloc[0]}  "
+                            + "  ".join(f"{c}={row[c]:.4f}" for c in board.columns[1:3])
+                        ),
+                    )
                 )
         except Exception:
             pass

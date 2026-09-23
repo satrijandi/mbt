@@ -254,3 +254,22 @@ def test_monotone_constraints_are_refused_on_every_estimator_but_hist_gb() -> No
     assert refused[0].field_path == "/features/monotonic"
     assert "hist_gradient_boosting" in (refused[0].hint or "")
     assert not issues("hist_gradient_boosting")
+
+
+def test_monotone_support_is_answered_per_estimator() -> None:
+    """B-1: the blunt class-variable flag advertised an unconditional yes and
+    then ``validate`` raised for the estimators that cannot honour one - the
+    adapter contradicting its own flag. With the spec in hand it can be right.
+    """
+    from mbt_adapter_base.capabilities import Capability
+
+    adapter = SklearnTrainingAdapter({})
+    hist = _spec(estimator="hist_gradient_boosting")
+    logistic = _spec(estimator="logistic_regression")
+
+    assert Capability.MONOTONIC_CONSTRAINTS in adapter.capabilities(hist)
+    assert Capability.MONOTONIC_CONSTRAINTS not in adapter.capabilities(logistic)
+    # with no spec at all it reports the optimistic set: some estimator can
+    assert Capability.MONOTONIC_CONSTRAINTS in adapter.capabilities()
+    # and the capabilities that ARE properties of the library come along
+    assert Capability.CALIBRATION in adapter.capabilities(logistic)

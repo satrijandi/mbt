@@ -27,19 +27,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from mbt_adapter_base import (
-    OUT_OF_TIME_SPLIT,
     DatasetLocator,
     DatasetSpec,
     ScoringInputSpec,
     ScoringOutputSpec,
 )
+from mbt_adapter_base.errors import AdapterFailure
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
     MaterializationError,
     MaterializedDatasetHandle,
+    bucket_ranges,
+    build_dataset_materialization,
+    build_scoring_materialization,
     combine_snapshots,
-    empty_out_of_time_message,
-    write_materialization_metadata,
+    split_fractions,
 )
 from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
 
@@ -49,13 +51,14 @@ if TYPE_CHECKING:
     from mbt_adapter_base.predictions import LocalPredictionStore
 
 
-class SparkAdapterError(RuntimeError):
-    """Spark adapter failures with an actionable message."""
+class SparkAdapterError(AdapterFailure):
+    """Spark adapter failures with an actionable message.
 
-    def __init__(self, message: str, hint: str | None = None) -> None:
-        if hint:
-            message = f"{message}\n  hint: {hint}"
-        super().__init__(message)
+    ``hint`` is a FIELD on the shared base rather than text flattened into the
+    message, so core can render it the way it renders ``MbtError.hint`` (A-4).
+    ``__str__`` still puts it on its own ``hint:`` line, so the wording a user
+    or a test sees is unchanged.
+    """
 
 
 #: Which of a source table's two addresses this adapter reads it by.
@@ -259,7 +262,7 @@ class SparkDataAdapter:
                 digest.update(b"\n")
         return "sha256:" + digest.hexdigest()
 
-    def _verify_snapshot(self, ctx: DataBuildContext) -> None:
+    def verify_snapshot(self, ctx: DataBuildContext) -> None:
         if ctx.node.snapshot_id is None:
             return
         current = combine_snapshots(
@@ -275,52 +278,27 @@ class SparkDataAdapter:
     # -- materialization ----------------------------------------------------------------
 
     def build_dataset(self, spec: DatasetSpec, ctx: DataBuildContext) -> MaterializedDatasetHandle:
-        self._verify_snapshot(ctx)
-        spark = self._spark()
-        output_dir = ctx.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for stale in output_dir.glob("*"):
-            stale.unlink()
+        return build_dataset_materialization(self, spec, ctx)
 
+    # -- DatasetBuildEngine (A-1) --------------------------------------------
+
+    def build_failure(
+        self, message: str, *, ctx: DataBuildContext, hint: str | None = None
+    ) -> Exception:
+        return SparkAdapterError(message, hint, resource=ctx.node.unique_id)
+
+    def write_dataset_splits(
+        self, spec: DatasetSpec, ctx: DataBuildContext, output_dir: Path
+    ) -> dict[str, int]:
+        """Read the relation, filter, sample, and write one parquet per split."""
+        self._spark()  # session kept alive for the adapter's lifetime
         base = self._base_frame(spec, ctx)
         for clause in spec.filters:
             base = base.filter(clause)
-        if not 0.0 < ctx.sample_fraction <= 1.0:
-            raise SparkAdapterError(f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}")
         if ctx.sample_fraction < 1.0:
             threshold = int(ctx.sample_fraction * SAMPLE_MODULUS)
             base = base.filter(f"{key_hash_sql(spec.sample_key_columns)} < {threshold}")
-
-        written = self._write_splits(base, spec, ctx, output_dir)
-        for split, count in written.items():
-            if count != 0:
-                continue
-            if split == OUT_OF_TIME_SPLIT:
-                # A window ending at the anchor is routinely empty (ADR-30).
-                ctx.events.emit(empty_out_of_time_message(ctx.resolved_windows))
-                continue
-            raise SparkAdapterError(
-                f"split {split!r} materialized 0 rows",
-                hint="check the split windows/fractions and filters",
-            )
-        # Positive-path row counts on the bus (a plain string the EventSink
-        # wraps in a LogMessage); mirrors the local and snowflake adapters.
-        ctx.events.emit(
-            f"dataset {ctx.node.unique_id}: materialized {sum(written.values())} rows: "
-            + ", ".join(f"{split}={count}" for split, count in sorted(written.items()))
-        )
-        write_materialization_metadata(
-            output_dir,
-            snapshot_id=ctx.node.snapshot_id,
-            dataset=spec.name,
-            label_column=spec.label.column,
-            time_column=spec.split.time_column,
-            windows=ctx.resolved_windows,
-            sample_fraction=ctx.sample_fraction,
-            row_counts=written,
-        )
-        _ = spark  # session kept alive for the adapter's lifetime
-        return MaterializedDatasetHandle(output_dir, adapter=self.name)
+        return self._write_splits(base, spec, ctx, output_dir)
 
     def _base_frame(self, spec: DatasetSpec, ctx: DataBuildContext) -> "DataFrame":
         """The dataset's one relation, whatever built it (ADR-29)."""
@@ -372,25 +350,11 @@ class SparkDataAdapter:
 
         # sample_key is required and validated non-empty on the spec (ADR-29).
         bucket = key_hash_sql(spec.sample_key_columns, salt=str(spec.split.seed or 0))
-        fractions: dict[str, float] = {"train": float(spec.split.train)}
-        if spec.split.validation is not None:
-            fractions["validation"] = float(spec.split.validation)
-        fractions["test"] = float(spec.split.test)
-        low = 0.0
-        entries = list(fractions.items())
-        for index, (split, fraction) in enumerate(entries):
-            lo = int(low * SAMPLE_MODULUS)
-            # the final split's upper bound is pinned to the modulus, mirroring
-            # the local and snowflake adapters, so no bucket can fall through a
-            # float-accumulation gap (F19)
-            hi = (
-                SAMPLE_MODULUS
-                if index == len(entries) - 1
-                else int((low + fraction) * SAMPLE_MODULUS)
-            )
+        # Shared bucket edges (A-1): the three backends agree by construction
+        # rather than by three implementations mirroring each other (F19).
+        for split, lo, hi in bucket_ranges(split_fractions(spec.split)):
             frame = base.filter(f"{bucket} >= {lo} AND {bucket} < {hi}")
             written[split] = self._write_one(frame, output_dir / f"{split}.parquet")
-            low += fraction
         return written
 
     def _write_one(self, frame: "DataFrame", out: Path) -> int:
@@ -441,32 +405,20 @@ class SparkDataAdapter:
     def build_scoring_input(
         self, spec: ScoringInputSpec, ctx: DataBuildContext
     ) -> MaterializedDatasetHandle:
-        """Materialize one unlabeled Spark batch as a single ``score`` split.
+        return build_scoring_materialization(self, spec, ctx)
 
-        Mirrors ``build_dataset`` (one relation, filters, key sampling, the
-        ``score`` window) but writes one ``score.parquet`` with no label.
-        Zero rows is a warning, not an error - an empty nightly batch is
-        legitimate (unlike a training split; ADR-20). No snapshot verification:
-        the scoring input (and the monitor's arriving labels, read through this
-        same path) is expected to change every run, so a pinned manifest scores
-        the live data instead of hard-failing on drift the way a dataset does
-        (R2-10)."""
+    def write_scoring_batch(self, spec: ScoringInputSpec, ctx: DataBuildContext, out: Path) -> int:
+        """One relation, filters, key sampling, the ``score`` window - no label."""
         self._spark()  # session kept alive for the adapter's lifetime
-        output_dir = ctx.output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for stale in output_dir.glob("*"):
-            stale.unlink()
-
         base = self._scoring_frame(spec, ctx)
         for clause in spec.filters:
             base = base.filter(clause)
-        if not 0.0 < ctx.sample_fraction <= 1.0:
-            raise SparkAdapterError(f"sample_fraction must be in (0, 1], got {ctx.sample_fraction}")
         if ctx.sample_fraction < 1.0:
             keys = spec.sample_key_columns
             if not keys:
-                raise SparkAdapterError(
+                raise self.build_failure(
                     "sampling a Spark scoring input needs a stable row identity",
+                    ctx=ctx,
                     hint="declare input.sample_key (the entity id column(s)) in the "
                     "scoring spec, or set sample_fraction: 1.0 for this target",
                 )
@@ -482,29 +434,7 @@ class SparkDataAdapter:
                     f"{time_sql} >= to_timestamp('{_iso_to_ts(start)}') AND "
                     f"{time_sql} < to_timestamp('{_iso_to_ts(end)}')"
                 )
-
-        count = self._write_one(base, output_dir / "score.parquet")
-        # A plain string the EventSink wraps in a LogMessage (adapters cannot
-        # import core event models); mirrors the local and snowflake adapters.
-        if count == 0:
-            ctx.events.emit(
-                f"scoring input {ctx.node.unique_id}: materialized 0 rows; nothing to score"
-            )
-        else:
-            ctx.events.emit(
-                f"scoring input {ctx.node.unique_id}: materialized {count} rows to score"
-            )
-        write_materialization_metadata(
-            output_dir,
-            snapshot_id=ctx.node.snapshot_id,
-            dataset=ctx.node.name,
-            label_column="",  # unlabeled by design (ADR-20)
-            time_column=spec.time_column,
-            windows=ctx.resolved_windows,
-            sample_fraction=ctx.sample_fraction,
-            row_counts={"score": count},
-        )
-        return MaterializedDatasetHandle(output_dir, adapter=self.name)
+        return self._write_one(base, out)
 
     def open_predictions(self, output: ScoringOutputSpec) -> "LocalPredictionStore":
         """Prediction store for a Spark scoring pipeline.

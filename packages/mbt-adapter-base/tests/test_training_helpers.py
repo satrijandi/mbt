@@ -6,6 +6,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from mbt_adapter_base.compliance import tiny_binary_dataset
+from mbt_adapter_base.events import EarlyStoppingWithoutValidation
 from mbt_adapter_base.interchange import DatasetProfile
 from mbt_adapter_base.specs import MetricSpec
 from mbt_adapter_base.training_helpers import (
@@ -114,10 +115,12 @@ def test_early_stopping_without_a_validation_split_is_said_out_loud() -> None:
 
     sink = _Sink()
     assert note_early_stopping_without_validation(no_validation, 30, sink, adapter="xgboost")
-    assert sink.messages == [
-        "xgboost: early_stopping_rounds=30 has no validation split to stop on, so every "
-        "boosting round trains; declare split.validation on the dataset to stop early"
-    ]
+    # A typed WARN, not a bare string at the bus's default level (B-4), and
+    # worded as the CONSEQUENCE rather than as a missing declaration (D-2).
+    [said] = sink.messages
+    assert isinstance(said, EarlyStoppingWithoutValidation)
+    assert (said.adapter, said.rounds, said.level) == ("xgboost", 30, "warn")
+    assert "regularized differently from the one the search scored" in said.human()
     # nothing to say when early stopping is off, or has a split to watch
     quiet = _Sink()
     assert not note_early_stopping_without_validation(no_validation, None, quiet, adapter="x")

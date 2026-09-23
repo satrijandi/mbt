@@ -2,7 +2,10 @@
 
 from mbt.adapters.local.compute import LocalComputeAdapter
 from mbt.adapters.local.data import LocalDataAdapter
-from mbt.contracts import CONTRACT_VERSION, AdapterPlugin
+from mbt_adapter_base import (
+    CONTRACT_VERSION,
+    AdapterPlugin,
+)
 
 PLUGIN = AdapterPlugin(
     name="local",

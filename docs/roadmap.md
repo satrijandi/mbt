@@ -23,7 +23,7 @@ These build on seams the architecture already has; none needs a change to the ad
 | **PyPI publication** | The release workflow builds and attests wheels for every package; publishing waits on creating the PyPI projects and their Trusted Publishers (see CONTRIBUTING) |
 | **Warehouse-native prediction stores** | Designed in [ADR-23](adr/0023-warehouse-batch-scoring.md): predictions written back into Snowflake or lakehouse tables instead of staged Parquet. Gated on a live verification of the Snowflake serving leg, tracked in [issue #1](https://github.com/satrijandi/mbt/issues/1) |
 | **PyTorch adapter** | A new training package against the same contract, declaring a tolerance determinism tier |
-| **Survival and ranking tasks** | Adapters register task schemas through `AdapterPlugin.task_schemas`, with no core changes |
+| **Survival and ranking tasks** | A plugin-side task-schema registration hook, designed against the first adapter that needs one (the speculative `AdapterPlugin.task_schemas` field was removed in v5: no plugin ever populated it, so there was nothing to validate its shape against) |
 | **Multiclass classification** | Not started; binary classification and regression are the two verticals today |
 | **Feast data adapter** | `source()` gains a feature-view form behind the same dataset handle and locator |
 | **Ensembles and stacking** | Models with `ref()` inputs from other models; the DAG and manifest already support model-to-model edges |

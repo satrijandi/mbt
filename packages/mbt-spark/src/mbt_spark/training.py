@@ -36,6 +36,7 @@ from mbt_adapter_base import (
     TaskType,
     ValidationIssue,
 )
+from mbt_adapter_base.capabilities import Capability, method_capabilities
 
 if TYPE_CHECKING:
     import numpy as np
@@ -88,13 +89,18 @@ class SparkMLTrainingAdapter:
         TaskType.REGRESSION,
     }
     #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
-    supports_calibration: ClassVar[bool] = True
+    #: Declared, not probed (B-1). This adapter is NOT an ArrowTrainingAdapter:
+    #: it reads splits by path (ADR-17), so it implements the protocol directly
+    #: and derives the method-backed half of its capability set the same way.
+    extra_capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CALIBRATION})
+
+    def capabilities(self, spec: "ModelSpec | None" = None) -> frozenset[Capability]:
+        return method_capabilities(self) | self.extra_capabilities
+
     #: Declared False rather than left to the getattr default (ADR-27):
     #: SparkML's GBT takes no monotone constraint, and StringIndexer owns its
     #: own level handling, so a level map pooled elsewhere is not the one it
     #: indexes against.
-    supports_monotonic_constraints: ClassVar[bool] = False
-    supports_categorical_pooling: ClassVar[bool] = False
     determinism = DeterminismTier(kind="tolerance", tolerances={"*": 0.01})
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:

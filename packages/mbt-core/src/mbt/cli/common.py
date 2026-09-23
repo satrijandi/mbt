@@ -25,7 +25,16 @@ out_console = Console(highlight=False)
 
 @dataclass
 class CLIContext:
-    """Global flag state shared by all commands (FR-CLI-04)."""
+    """Global flag state shared by all commands (FR-CLI-04).
+
+    Build one with :meth:`CLIContext.enter`, which is the CLI's composition
+    root: establishing project-dir semantics (absolutize, chdir, install the
+    event bus) is a construction obligation rather than a convention every
+    command body has to remember (A-2). ``make_ctx`` used to be a free function
+    called at 17 sites with seven positional arguments, and three commands did
+    not call it at all - one of which, ``clean``, then ran ``shutil.rmtree`` on
+    a raw unresolved typer path with no context and no event bus.
+    """
 
     project_dir: Path = Path(".")
     #: Where the user invoked mbt. The coordinator chdirs to project_dir so
@@ -42,6 +51,112 @@ class CLIContext:
     #: Surface debug-level events in text mode (ConsoleSink drops them by
     #: default); no effect in json/quiet modes, which are unconditional.
     verbose: bool = False
+
+    @classmethod
+    def enter(
+        cls,
+        project_dir: Path,
+        profiles_dir: Path | None = None,
+        target: str | None = None,
+        vars_: str | None = None,
+        log_format: str = "text",
+        quiet: bool = False,
+        verbose: bool = False,
+        *,
+        chdir: bool = True,
+    ) -> "CLIContext":
+        """Build the per-command context and enter the project directory.
+
+        The coordinator chdirs to the project dir so config-relative paths
+        (file:// artifact stores, sqlite URIs, adapter roots) resolve against
+        the project no matter where mbt was invoked - job subprocesses already
+        run with cwd=project_dir, this makes the coordinator match. Paths the
+        user typed on the command line are absolutized against the invocation
+        cwd via :meth:`resolve_cli_path` BEFORE they are used.
+
+        ``chdir=False`` is for ``mbt init``, whose ``--project-dir`` is the
+        parent to scaffold INTO and so need not exist yet.
+        """
+        import os
+
+        invocation_cwd = Path.cwd()
+        resolved = (invocation_cwd / project_dir).resolve()
+        if profiles_dir is not None:
+            profiles_dir = (invocation_cwd / profiles_dir).resolve()
+        if chdir:
+            if not resolved.is_dir():
+                raise ConfigError(
+                    f"--project-dir {resolved} is not a directory",
+                    hint="run mbt from a project or point --project-dir at one",
+                )
+            os.chdir(resolved)
+        ctx = cls(
+            project_dir=resolved,
+            invocation_cwd=invocation_cwd,
+            profiles_dir=profiles_dir,
+            target=target,
+            cli_vars=parse_vars(vars_),
+            log_format=log_format,
+            quiet=quiet,
+            verbose=verbose,
+        )
+        setup_bus(ctx)
+        return ctx
+
+    def parse(self, *, warn: bool = True) -> ParsedProject:
+        """Parse the project, surfacing the parser's warnings by default.
+
+        ``warn`` exists only for the one caller that has already printed them.
+        It defaults to True because the alternative default is what went wrong:
+        ``print_warnings`` was a separate call that four composition sites each
+        had to remember, and two of them - ``mbt show`` and ``mbt docs
+        generate`` - did not, so they silently dropped the split-protocol
+        leakage warnings the parser produces (A-2).
+        """
+        from mbt.parsing import parse_project
+
+        parsed = parse_project(self.project_dir, cli_vars=self.cli_vars)
+        if warn:
+            print_warnings(parsed)
+        return parsed
+
+    def compile(
+        self,
+        *,
+        anchor: str | None = None,
+        deep_snapshot: bool = False,
+        write_to: Path | None = None,
+    ) -> "tuple[ParsedProject, Any]":
+        """Parse, load profiles, and compile: the CLI's three-step composition.
+
+        It was retyped at four sites and had DRIFTED at every one of them -
+        whether parse warnings printed, whether the anchor came from
+        ``CompileOptions`` or from ``now()``, whether a manifest was written
+        (A-2).
+
+        ``anchor`` is always threaded through ``CompileOptions``. ``mbt show``
+        and ``mbt docs generate`` used to compile with none, which re-anchored
+        them to ``now()`` on every invocation - so ``mbt show``'s resolved
+        windows drifted from ``target/manifest.json`` with wall-clock time,
+        which is the exact thing ADR-12 exists to pin.
+        """
+        from mbt.compile.compiler import CompileOptions, compile_project
+
+        parsed = self.parse()
+        profiles = self.profiles(parsed)
+        manifest = compile_project(
+            parsed,
+            profiles,
+            options=CompileOptions(
+                anchor=parse_anchor(anchor),
+                deep_snapshot=deep_snapshot,
+                manifest_path=write_to,
+            ),
+            cli_vars=self.cli_vars,
+        )
+        if write_to is not None:
+            manifest.write(write_to)
+        return parsed, manifest
 
     def resolve_cli_path(self, value: str | None) -> str | None:
         """Absolutize a path the user typed on the command line.

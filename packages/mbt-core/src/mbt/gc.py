@@ -61,7 +61,9 @@ def run_results_artifact_uris(project_dir: Path) -> set[str]:
 
 def champion_artifact_uris(parsed: Any, registry_adapter: Any) -> set[str]:
     """Artifact URIs of every stage champion of every registered model."""
-    from mbt.contracts import Stage
+    from mbt_adapter_base import (
+        Stage,
+    )
 
     keep: set[str] = set()
     for resource in parsed.models.values():

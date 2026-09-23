@@ -24,6 +24,7 @@ from mbt_adapter_base import (
     RunHandle,
     Stage,
 )
+from mbt_adapter_base.champion import ARTIFACT, TRACKING_RUN_ID, pack_artifact, unpack_artifact
 
 if TYPE_CHECKING:
     from mlflow.tracking import MlflowClient
@@ -116,12 +117,6 @@ _STAGE_REVERSE = {v: k for k, v in _STAGE_MAP.items()}
 #: net for aliases set outside mbt.
 _ALIAS_STAGES = (Stage.PRODUCTION, Stage.STAGING, Stage.ARCHIVED)
 
-_ARTIFACT_TAGS = (
-    "mbt.artifact_uri",
-    "mbt.artifact_format",
-    "mbt.artifact_content_hash",
-    "mbt.artifact_size_bytes",
-)
 
 #: MLflow's request limits (``mlflow/utils/validation.py``): params and tags
 #: share a per-request cap, metrics have their own, and a value past its length
@@ -344,29 +339,22 @@ class MlflowRegistry(_MlflowBase):
     def register(self, artifact: ArtifactRef, name: str, metadata: dict[str, str]) -> ModelVersion:
         client = self.client()
         self._ensure_registered_model(name)
-        tags = dict(metadata)
-        tags.setdefault("mbt.artifact_uri", artifact.uri)
-        tags.setdefault("mbt.artifact_format", artifact.format)
-        tags.setdefault("mbt.artifact_content_hash", artifact.content_hash)
-        tags.setdefault("mbt.artifact_size_bytes", str(artifact.size_bytes))
+        # The artifact codec belongs to ChampionRecord (A-5); this adapter no
+        # longer spells the four keys. setdefault, not update: core's record
+        # already carries them, and a direct caller passing bare metadata is
+        # still given a resolvable version.
+        tags = {**pack_artifact(ARTIFACT, artifact), **metadata}
         version = client.create_model_version(
             name=name,
             source=artifact.uri,
-            run_id=metadata.get("mbt.tracking_run_id") or None,
+            run_id=metadata.get(TRACKING_RUN_ID) or None,
             tags=tags,
         )
         return ModelVersion(name=name, version=str(version.version), artifact=artifact, tags=tags)
 
     def _to_model_version(self, mv: Any) -> ModelVersion:
         tags = dict(mv.tags or {})
-        artifact = None
-        if all(tag in tags for tag in _ARTIFACT_TAGS):
-            artifact = ArtifactRef(
-                uri=tags["mbt.artifact_uri"],
-                format=tags["mbt.artifact_format"],
-                content_hash=tags["mbt.artifact_content_hash"],
-                size_bytes=int(tags["mbt.artifact_size_bytes"]),
-            )
+        artifact = unpack_artifact(ARTIFACT, tags)
         stage = _STAGE_REVERSE.get(getattr(mv, "current_stage", None) or "")
         if stage is None:
             aliases = set(getattr(mv, "aliases", None) or [])

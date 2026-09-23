@@ -22,9 +22,10 @@ They carry the reasoning behind a large share of the current design, and several
 - `reviews/feedback-v2.md` - review 3, closed 2026-07-22. Finding IDs `F1`-`F27`, `P3`.
 - `reviews/feedback-v3.md` - review 4, closed 2026-09-01. Finding IDs `A-1`-`G-2`, cited as `FEEDBACK v3 A-1`.
 - `reviews/feedback-v4.md` - review 5, closed 2026-09-09. Finding IDs `A-1`-`E-1`; code comments cite them as `FEEDBACK B-1`, `FEEDBACK D-3`.
+- `reviews/feedback-v5.md` - review 6, closed 2026-09-23. Finding IDs `A-1`-`C-6` (architecture: module depth, seams, testability) plus a data-science addendum `D-1`-`D-5`; code comments cite them as `A-1`, `B-4`, `C-2`, `D-2`.
+  Unlike the five cycles above it reviews the shape of the code rather than practice, which is why its findings are cited by the modules they created (`execute/seeds.py`, `parsing/rules.py`, `quality/judgement.py`, `mbt_adapter_base/{base,capabilities,champion,events,errors}.py`).
 
-One review is in flight: `FEEDBACK_v5.md` at the repo root, an architecture review opened 2026-09-20 against `f1433bc`, with finding IDs `A-1`-`C-6`.
-Unlike the four cycles above it reviews module depth rather than practice, and none of its findings have been worked yet.
+No review is in flight.
 A review in flight lives at the repo root as `FEEDBACK_v<n>.md` so it is impossible to miss, and moves here once its progress log is closed.
 
 ## Authoritative sources instead

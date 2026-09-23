@@ -5,6 +5,14 @@ sandboxed iframe as often as on its own. Charts are inline SVG styled by role
 variables, so light and dark are two token sets over one markup. Every chart
 has a table twin carrying the same numbers, and every mark a native tooltip -
 hover enhances, it never gates.
+
+**Scope.** This is ``writer.py``'s rendering vocabulary, not a general-purpose
+one: all thirteen of its exported symbols have exactly one caller, which is
+``writer``. So ``builder`` / ``writer`` / ``render`` is two deep modules and a
+section header rather than three (C-4). That is fine - the file is worth having
+for the same reason a long function is worth splitting - but nothing outside
+``writer`` should import from here, and a symbol that gains a second caller is
+a sign the vocabulary wants a home of its own.
 """
 
 import html

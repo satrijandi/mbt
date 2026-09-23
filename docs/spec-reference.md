@@ -591,6 +591,21 @@ cutoff meeting the precision target (maximal coverage), and
 `threshold_at_recall_*` the largest cutoff meeting the recall target (best
 precision) - the deployable decision rule interventions consume; an
 unattainable precision target reports the 1.0 sentinel ("predict nothing").
+
+A threshold is a **fitted parameter selected on the split that reports it**, so
+read it as an estimate, not a guarantee.
+It is the smallest cutoff meeting the target *on the test sample*, which means
+the realized precision on fresh rows lands below the target roughly half the
+time even when the estimate is unbiased - that is a property of taking a point
+estimate of a minimum, not a defect.
+What decides whether the estimate is trustworthy is how many rows sit at or
+above the cutoff: with roughly a hundred or more the bias is under 0.01, and
+well below that it is not - a cutoff resting on 7 rows can report 0.78 and
+realize 0.65.
+mbt counts that support on every run and warns when it is thin (see
+[the operating-point support warning](troubleshooting.md#operating-point-rests-on-only-n-test-rows)).
+For a high-precision target on a low-prevalence problem, widen the test window
+or lower the target rather than deploying a cutoff the data cannot support.
 Lower-is-better defaults: `logloss`, `ece`, `brier`.
 `ece` uses equal-frequency (adaptive) bins - `n_bins` (default 10) equal-mass
 score buckets - which stays stable on the skewed score distributions common in

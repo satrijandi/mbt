@@ -12,8 +12,10 @@ from typing import Any
 
 import pyarrow as pa
 
-from mbt.contracts import HookContext
 from mbt.exceptions import AdapterError
+from mbt_adapter_base import (
+    HookContext,
+)
 
 HOOK_TRANSFORM = "transform_features"
 HOOK_METRICS = "custom_metrics"

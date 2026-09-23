@@ -3,45 +3,25 @@
 Every significant occurrence is a Pydantic event carrying ``run_id``,
 ``unique_id`` (where applicable), and a timestamp. Sinks render them for
 humans (Rich) or machines (JSON lines).
+
+``Event`` and ``LogMessage`` are DEFINED in ``mbt_adapter_base.events`` and
+re-exported here, along with the events adapters emit. An adapter package
+cannot import core, so keeping the base on the adapter side is what lets the
+seam be typed at all (B-4) - and it makes ``isinstance(x, Event)`` mean the
+same thing in an adapter, in the bus, and in a sink. This module holds the
+events only core emits.
 """
 
-from datetime import UTC, datetime
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field
-
-
-def _now() -> datetime:
-    return datetime.now(tz=UTC)
-
-
-class Event(BaseModel):
-    """Base event: name, level, timestamps, correlation ids."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    event: str = ""
-    level: Literal["debug", "info", "warn", "error"] = "info"
-    ts: datetime = Field(default_factory=_now)
-    run_id: str | None = None
-    unique_id: str | None = None
-
-    def model_post_init(self, __context: object) -> None:
-        if not self.event:
-            self.event = type(self).__name__
-
-    def human(self) -> str:
-        """One-line human rendering; sinks may add color."""
-        return self.event
-
-
-class LogMessage(Event):
-    """Free-form informational message."""
-
-    message: str = ""
-
-    def human(self) -> str:
-        return self.message
+from mbt_adapter_base.events import (
+    AdapterMessage,
+    DatasetMaterialized,
+    EarlyStoppingWithoutValidation,
+    EmptyAfterTestSplit,
+    Event,
+    Level,
+    LogMessage,
+    ScoringInputMaterialized,
+)
 
 
 class ParseStarted(Event):
@@ -225,7 +205,7 @@ class PromotionApplied(Event):
     version: str = ""
     to_stage: str = ""
     forced: bool = False
-    level: Literal["debug", "info", "warn", "error"] = "debug"
+    level: Level = "debug"
 
     def human(self) -> str:
         forced = " (FORCED)" if self.forced else ""
@@ -235,7 +215,7 @@ class PromotionApplied(Event):
 class AdapterWarning(Event):
     adapter: str = ""
     message: str = ""
-    level: Literal["debug", "info", "warn", "error"] = "warn"
+    level: Level = "warn"
 
     def human(self) -> str:
         return f"[{self.adapter}] {self.message}"
@@ -273,7 +253,37 @@ class JobLine(Event):
     """A raw line forwarded from a training-job subprocess."""
 
     line: str = ""
-    level: Literal["debug", "info", "warn", "error"] = "debug"
+    level: Level = "debug"
 
     def human(self) -> str:
         return self.line
+
+
+__all__ = [
+    "AdapterMessage",
+    "AdapterWarning",
+    "ArtifactRegistered",
+    "AutoResolved",
+    "CheckEvaluated",
+    "CompileCompleted",
+    "CompileStarted",
+    "DatasetMaterialized",
+    "EarlyStoppingWithoutValidation",
+    "EmptyAfterTestSplit",
+    "Event",
+    "GateEvaluated",
+    "JobLine",
+    "Level",
+    "LogMessage",
+    "NodeFinished",
+    "NodeStarted",
+    "ParseCompleted",
+    "ParseStarted",
+    "PromotionApplied",
+    "RunFinished",
+    "RunStarted",
+    "ScoringInputMaterialized",
+    "StageTransitioned",
+    "StateDiffed",
+    "TestEvaluated",
+]

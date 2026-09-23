@@ -13,9 +13,11 @@ import networkx as nx
 
 from mbt.artifacts.manifest import Manifest
 from mbt.artifacts.run_results import NodeResult, RunResults
-from mbt.contracts import AUTO
 from mbt.docsgen.html import page, sparkline
 from mbt.secrets import redact
+from mbt_adapter_base import (
+    AUTO,
+)
 
 
 def _lineage_svg(manifest: Manifest) -> str:

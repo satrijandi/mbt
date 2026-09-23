@@ -5,7 +5,9 @@ from typing import Any
 
 from mbt.adapters.registry import AdapterRegistry
 from mbt.config.profiles import LoadedProfiles
-from mbt.contracts import AdapterRef
+from mbt_adapter_base import (
+    AdapterRef,
+)
 
 #: Joins the two halves of a tracking experiment name (ADR-28). TWO
 #: underscores, because both halves are themselves snake_case and a single one

@@ -2,9 +2,10 @@
 
 mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-sklearn, mbt-mlflow, mbt-optuna, mbt-evidently, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/showcase`, repo-root `tests/` (E2E, golden, perf, live, plus `tests/fixtures/{churn_demo, revenue_demo}` - whole mbt projects the suite copies to tmp and drives through the real CLI, excluded from collection via `norecursedirs`), and `docs/` (mkdocs + ADRs).
 Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anything that looks odd.
-Whole-repo review cycles live in `design-history/reviews/` once closed (newest: `feedback-v4.md`); code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`, `FEEDBACK v3 A-1`), so do not delete them.
+Whole-repo review cycles live in `design-history/reviews/` once closed (newest: `feedback-v5.md`); code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`, `FEEDBACK v3 A-1`, and v5's bare `A-1`/`B-4`/`C-2`/`D-2`), so do not delete them.
 A cycle still in flight sits at the repo root as `FEEDBACK_v<n>.md` instead - findings plus a progress log, one appended entry per completed item (symptom, fix, verification, docs) - and moves into `reviews/` when that log closes.
-`FEEDBACK_v5.md` is in flight right now: an architecture review (module depth, seams, testability), findings `A-1`-`C-6`, nothing swept yet.
+No cycle is in flight.
+v5 was the architecture review (module depth, seams, testability) plus a data-science addendum; it is swept, and the modules it created are the ones to read first when changing those areas: `mbt/execute/seeds.py` (the seed ladder), `mbt/parsing/rules.py` (the parser's invariants, which run at parse AND compile), `mbt/quality/judgement.py` (gates + stability + verdict), `mbt/execute/job_runtime.py`, `mbt/cli/inspect.py`, and `mbt_adapter_base/{base,capabilities,champion,events,errors}.py`.
 
 ## Verify (run all of these before calling work done)
 
@@ -35,6 +36,10 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
 ## Load-bearing decisions (do not "clean up")
 
 - Lazy imports everywhere are intentional (plugin import hygiene, ADR-14); ruff PLC0415 is disabled for this reason.
+- The dataset build recipe lives in `mbt_adapter_base/materialization.py`, not in the adapters (v5 A-1). A data adapter implements `DatasetBuildEngine`'s four methods and delegates to `build_dataset_materialization` / `build_scoring_materialization`; the bucket-edge arithmetic that decides which rows train is `bucket_ranges` + `reference_bucket`, written once and pinned for every engine by `DataAdapterCompliance`. Do not reimplement any of it per adapter.
+- Events are typed end to end (v5 B-4): `EventSink.emit` takes an `Event`, and the base lives in `mbt_adapter_base/events.py` so adapters can emit one. Severity is a property of the EVENT, never of the adapter. The only place a bare string is coerced is `HookEventSink`, at the user-hook boundary.
+- Adapter capability is DECLARED, not probed: `capabilities(spec) -> frozenset[Capability]` (v5 B-1). Never add a `hasattr` probe for an optional adapter method; add a `Capability` and let `capabilities_of` answer. The compliance suite asserts declaration and implementation agree in both directions.
+- The champion contract is `ChampionRecord` (v5 A-5). Registry tag spelling is that module's business; core builds a record and calls `pack()`. Never write an `mbt.*` tag literal outside `mbt_adapter_base/champion.py`.
 - Events go to stderr; stdout is command data. Job subprocesses emit JSON events on stdout and the coordinator forwards them.
 - `main()` in `mbt/cli/main.py` catches BOTH real-click and typer-vendored-click exceptions; typer >= 0.20 vendors click, so the duplicate-looking except tuples are required.
 - `uv.lock` contains TWO pyspark versions on purpose: a `[tool.uv] conflicts` fork keeps the dev lock on Spark 4.x while `mbt-h2o[sparkling]` pins 3.5. Never hand-edit the lock; use `uv lock`.
@@ -47,7 +52,7 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
   Reproduce locally with a throwaway venv, never the repo's own: `uv venv /tmp/floors && VIRTUAL_ENV=/tmp/floors uv run --no-project python scripts/install_floors.py`.
 - CI matrixes the fast suite over CPython 3.11-3.14; the JVM e2e tier stays on 3.11 deliberately.
 - Snapshots: one token scheme per pipeline. The scaffold CI workflows pass `--deep-snapshot` on every compiling step because fresh checkouts rewrite mtimes (ADR-11); a deep baseline diffed with the default mtime scheme flags everything.
-- Champion gates use a paired bootstrap lower bound (ADR-18); the seed ladder is `spec.seed` train, `+1` tuning, `+2` validation carve, `+3` bootstrap, `+4` random k-fold, `+5` calibration carve, `+6` permutation-importance sample (ADR-30) - a new seeded stage takes the next rung.
+- Champion gates use a paired bootstrap lower bound (ADR-18). The seed ladder lives in `mbt/execute/seeds.py` (`SeedRung` + one named accessor per rung) and is the only place it is written down executably; a new seeded stage adds a rung with the next free offset and its accessor, never reuses or renumbers one, and `test_seeds_unit.py` fails if two stages share an offset.
 - Path semantics: the CLI coordinator chdirs to `--project-dir` in `make_ctx` (jobs already run with cwd=project), so config-relative paths are project-relative; paths typed on the command line are absolutized against the invocation cwd via `ctx.resolve_cli_path` BEFORE use. New CLI path options must go through `resolve_cli_path`.
 - Manifests verify `env_digest` on `--manifest` execution (ADR-19); `generated_at == anchor` keeps same-anchor compiles byte-identical.
 

@@ -5,7 +5,7 @@ continuous numeric column, validated by dtype rather than class count, and no
 ``scale_pos_weight`` applies.
 """
 
-from mbt.contracts import (
+from mbt_adapter_base import (
     DatasetProfile,
     ModelSpec,
     TaskType,

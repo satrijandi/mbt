@@ -8,8 +8,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from mbt.contracts import ArtifactRef
 from mbt.exceptions import MbtError, StateError
+from mbt_adapter_base import (
+    ArtifactRef,
+)
 
 #: Read size for the streaming hashes below. Big enough that a multi-GB model
 #: is not millions of syscalls, small enough that nothing large is ever resident.

@@ -26,9 +26,9 @@ from mbt.contracts import (
 from mbt.events.models import LogMessage
 from mbt.events.node_log import INVOCATION_LOG, NodeLogSink, combined_log, node_scope
 from mbt.execute.handles import SplitRouter
-from mbt.execute.runners import after_test_tags, after_test_verdict, gate_failure_summary
 from mbt.quality.gates import evaluate_gates
-from mbt.quality.monitors import evaluate_stability
+from mbt.quality.judgement import after_test_tags, after_test_verdict, gate_failure_summary
+from mbt.quality.monitors import StabilityOutcome, evaluate_stability
 from mbt.reporting.flatten import dataset_params, flatten, model_params
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
 
@@ -150,7 +150,9 @@ def test_stability_judges_each_cell_with_the_monitor_rules() -> None:
         ]
     )
     with recording_bus() as sink:
-        results = evaluate_stability(spec, report, resource="model.demo.m")
+        outcome = evaluate_stability(spec, report, resource="model.demo.m")
+    assert outcome.declared and outcome.judged
+    results = outcome.results
     subjects = {(r.subject, r.passed) for r in results}
     assert ("2026-05", True) in subjects and ("2026-06: x", False) in subjects
     assert not any("2026-07" in (r.subject or "") for r in results)
@@ -160,11 +162,24 @@ def test_stability_judges_each_cell_with_the_monitor_rules() -> None:
 
 
 def test_stability_with_nothing_to_judge_warns() -> None:
+    """Three states, not two (C-1).
+
+    "not declared" and "declared but nothing mature" both used to return ``[]``,
+    and the caller read ``not stability`` as if it meant one - while that
+    distinction is exactly what separates a ``not_gated`` verdict from a
+    ``true`` one.
+    """
     spec = StabilitySpec.model_validate({"prediction_shift": {"threshold": 0.25}})
-    assert evaluate_stability(None, None, resource="m") == []
+    undeclared = evaluate_stability(None, None, resource="m")
+    assert (undeclared.declared, undeclared.judged, undeclared.results) == (False, False, [])
     with recording_bus() as sink:
-        assert evaluate_stability(spec, None, resource="m") == []
+        nothing_mature = evaluate_stability(spec, None, resource="m")
+    assert (nothing_mature.declared, nothing_mature.judged) == (True, False)
+    assert nothing_mature.results == []
     assert any("stability not judged" in m for m in sink.messages())
+    # and the ambiguity cannot be reintroduced by a truthiness test
+    with pytest.raises(TypeError, match="three states"):
+        bool(nothing_mature)
 
 
 def _spec(**evaluation: Any) -> ModelSpec:
@@ -184,18 +199,29 @@ def _spec(**evaluation: Any) -> ModelSpec:
 
 def test_the_after_test_verdict() -> None:
     oot = {"metric": "roc_auc", "threshold": 0.5, "source": "out_of_time"}
-    judged = GateResult(metric="oot_roc_auc", kind="threshold", passed=True, period="month")
+    # source is THE discriminator now, not period (C-1)
+    judged = GateResult(
+        metric="oot_roc_auc", kind="threshold", passed=True, period="month", source="out_of_time"
+    )
     unjudged = judged.model_copy(update={"applicable": False})
     failed = judged.model_copy(update={"passed": False})
     breach = MonitorResult(
         monitor="prediction_shift", measure="psi", threshold=0.2, passed=False, value=0.3
     )
-    assert after_test_verdict(_spec(), [], []) is None
-    assert after_test_verdict(_spec(gates=[oot]), [unjudged], []) == "not_gated"
-    assert after_test_verdict(_spec(gates=[oot]), [judged], []) == "true"
-    assert after_test_verdict(_spec(gates=[oot]), [failed], []) == "false"
+    none_declared = StabilityOutcome(declared=False)
+    assert after_test_verdict(_spec(), [], none_declared) is None
+    assert after_test_verdict(_spec(gates=[oot]), [unjudged], none_declared) == "not_gated"
+    assert after_test_verdict(_spec(gates=[oot]), [judged], none_declared) == "true"
+    assert after_test_verdict(_spec(gates=[oot]), [failed], none_declared) == "false"
     stability = {"prediction_shift": {"threshold": 0.2}}
-    assert after_test_verdict(_spec(stability=stability), [], [breach]) == "false"
+    breached = StabilityOutcome(declared=True, results=[breach])
+    assert after_test_verdict(_spec(stability=stability), [], breached) == "false"
+    # a gate whose period is set but whose source is NOT out_of_time is not an
+    # after-test gate: the old `period is not None` test could not say so
+    other_kind = GateResult(
+        metric="roc_auc", kind="threshold", passed=False, period="month", source="test"
+    )
+    assert after_test_verdict(_spec(gates=[oot]), [judged, other_kind], none_declared) == "true"
     assert after_test_tags("true", "a", "build") == {
         "mbt.oot_check.passed": "true",
         "mbt.oot_check.anchor": "a",
@@ -412,3 +438,63 @@ def test_the_run_log_upload_falls_back_and_survives_errors(
         assert any("could not upload the run log" in m for m in bus.messages())
     else:
         assert documents and "trained" in documents[0]
+
+
+# -- the composition, directly (C-1) ----------------------------------------
+
+
+def test_judge_composes_gates_stability_verdict_and_summary() -> None:
+    """The five-call sequence, tested at the seam rather than through run_command.
+
+    Each leaf had a tight unit test; the composition was reachable only through
+    a full ``run_command``, and the composition is where the coupling was.
+    """
+    from mbt.quality.judgement import judge
+
+    oot = {"metric": "roc_auc", "threshold": 0.5, "source": "out_of_time"}
+    passing = GateResult(
+        metric="oot_roc_auc", kind="threshold", passed=True, period="month", source="out_of_time"
+    )
+    outcome = judge(_spec(gates=[oot]), [passing], None, resource="m")
+    assert outcome.passed is True
+    assert outcome.verdict == "true"
+    assert outcome.failure_summary is None
+    assert outcome.stability.declared is False
+
+
+def test_judge_reports_the_failure_and_the_verdict_together() -> None:
+    from mbt.quality.judgement import judge
+
+    oot = {"metric": "roc_auc", "threshold": 0.5, "source": "out_of_time"}
+    failing = GateResult(
+        metric="oot_roc_auc",
+        kind="threshold",
+        passed=False,
+        expected=0.5,
+        actual=0.4,
+        period="month",
+        source="out_of_time",
+    )
+    outcome = judge(_spec(gates=[oot]), [failing], None, resource="m")
+    assert outcome.passed is False
+    assert outcome.verdict == "false"
+    assert outcome.failure_summary and "oot_roc_auc" in outcome.failure_summary
+
+
+def test_judge_says_not_gated_when_nothing_was_mature_enough() -> None:
+    """A gate that judged nothing proved nothing, and a promotion requiring the
+    check must be able to tell that apart from a pass."""
+    from mbt.quality.judgement import judge
+
+    oot = {"metric": "roc_auc", "threshold": 0.5, "source": "out_of_time"}
+    unjudged = GateResult(
+        metric="oot_roc_auc",
+        kind="threshold",
+        passed=True,
+        applicable=False,
+        period="month",
+        source="out_of_time",
+    )
+    outcome = judge(_spec(gates=[oot]), [unjudged], None, resource="m")
+    assert outcome.passed is True  # an inapplicable gate does not fail the run
+    assert outcome.verdict == "not_gated"  # but it did not prove anything either

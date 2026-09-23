@@ -23,7 +23,6 @@ from mbt.artifacts.run_results import (
 )
 from mbt.compile.compiler import CompileOptions, compile_project
 from mbt.config.profiles import LoadedProfiles, load_profiles
-from mbt.contracts import ModelSpec, ModelVersion, Stage
 from mbt.dag.selector import StateIndex
 from mbt.events import get_bus
 from mbt.events.models import LogMessage, RunFinished, RunStarted
@@ -41,6 +40,11 @@ from mbt.execute.runners import (
 from mbt.execute.scheduler import execute_plan
 from mbt.parsing import ParsedProject, parse_project
 from mbt.state.diff import ManifestStateIndex, load_state
+from mbt_adapter_base import (
+    ModelSpec,
+    ModelVersion,
+    Stage,
+)
 
 
 @dataclass(frozen=True)

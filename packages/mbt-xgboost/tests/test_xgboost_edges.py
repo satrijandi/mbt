@@ -28,6 +28,7 @@ from mbt_adapter_base import (
 from mbt_adapter_base.compliance import tiny_binary_dataset
 from mbt_adapter_base.compliance.suite import TempArtifactStore
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
+from mbt_adapter_base.events import EarlyStoppingWithoutValidation
 
 
 def _spec(**overrides: Any) -> ModelSpec:
@@ -296,7 +297,8 @@ def test_early_stopping_without_validation_is_announced_not_silent() -> None:
     sink = _Recording()
     ctx = RunContext(**{**ctx.__dict__, "events": sink})
     XGBoostTrainingAdapter({}).train(_spec(hyperparameters=hp), base, ctx)
-    assert any("has no validation split to stop on" in str(m) for m in sink.messages)
+    warned = [m for m in sink.messages if isinstance(m, EarlyStoppingWithoutValidation)]
+    assert [(m.adapter, m.level) for m in warned] == [("xgboost", "warn")]
 
     with_validation = InMemoryDatasetHandle(
         {"train": base.read("train"), "validation": base.read("test"), "test": base.read("test")},
@@ -306,3 +308,15 @@ def test_early_stopping_without_validation_is_announced_not_silent() -> None:
     ctx = RunContext(**{**_ctx().__dict__, "events": quiet})
     XGBoostTrainingAdapter({}).train(_spec(hyperparameters=hp), with_validation, ctx)
     assert not any("has no validation split" in str(m) for m in quiet.messages)
+
+
+def test_best_iteration_reports_the_round_count_or_none() -> None:
+    """D-2: the rounds a fit actually kept, so tuning can carry the complexity
+    its trials chose into a final fit that has nothing to stop on."""
+    from types import SimpleNamespace
+
+    adapter = XGBoostTrainingAdapter({})
+    # xgboost's best_iteration is 0-based, so the COUNT is one more
+    assert adapter.best_iteration(SimpleNamespace(booster=SimpleNamespace(best_iteration=7))) == 8
+    assert adapter.best_iteration(SimpleNamespace(booster=SimpleNamespace(best_iteration=0))) == 1
+    assert adapter.best_iteration(SimpleNamespace(booster=SimpleNamespace())) is None

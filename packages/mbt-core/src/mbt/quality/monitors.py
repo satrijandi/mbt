@@ -6,10 +6,14 @@ declared thresholds ("jobs compute, core compares", ADR-3). A breach sets
 node status ``monitor_failed`` (exit code 2).
 """
 
+from dataclasses import dataclass, field
 from typing import Literal, NamedTuple
 
 from mbt.artifacts.run_results import MonitorResult
-from mbt.contracts import (
+from mbt.events import get_bus
+from mbt.events.models import LogMessage
+from mbt.quality.metrics import metric_direction
+from mbt_adapter_base import (
     MetricSpec,
     MonitorsSpec,
     MonitorStats,
@@ -17,9 +21,6 @@ from mbt.contracts import (
     ShiftStat,
     StabilitySpec,
 )
-from mbt.events import get_bus
-from mbt.events.models import LogMessage
-from mbt.quality.metrics import metric_direction
 from mbt_adapter_base.specs import FeatureShiftSpec, MonitorGateSpec, PredictionShiftSpec
 
 
@@ -516,12 +517,40 @@ def all_monitors_passed(results: list[MonitorResult]) -> bool:
     return all(r.passed for r in results)
 
 
+@dataclass(frozen=True)
+class StabilityOutcome:
+    """Three states, not two (C-1).
+
+    ``evaluate_stability`` used to return ``[]`` for two different facts - "not
+    declared" and "declared but nothing mature enough to judge" - and callers
+    consumed ``not stability`` as if it meant one. That distinction is exactly
+    what separates a ``not_gated`` verdict from a ``true`` one, and it was
+    carried by a warning log line rather than by the return type.
+    """
+
+    #: The spec declares after-test stability gates at all.
+    declared: bool
+    #: Per-cell results; empty when nothing was mature enough to judge.
+    results: list[MonitorResult] = field(default_factory=list)
+
+    @property
+    def judged(self) -> bool:
+        """Declared AND something was actually judged."""
+        return self.declared and bool(self.results)
+
+    def __bool__(self) -> bool:  # pragma: no cover - guarded against below
+        raise TypeError(
+            "StabilityOutcome has three states; test .declared, .judged, or "
+            ".results explicitly (C-1)"
+        )
+
+
 def evaluate_stability(
     stability: StabilitySpec | None,
     report: ReportSummary | None,
     *,
     resource: str,
-) -> list[MonitorResult]:
+) -> StabilityOutcome:
     """After-test stability gates (ADR-30), with the scoring monitors' semantics.
 
     Each after-test cell at the declared grain is judged by
@@ -531,7 +560,7 @@ def evaluate_stability(
     warning, and the empty result says so to callers that record a verdict.
     """
     if stability is None:
-        return []
+        return StabilityOutcome(declared=False)
     cells = [
         cell
         for cell in (report.stability if report is not None else [])
@@ -550,7 +579,7 @@ def evaluate_stability(
                 ),
             )
         )
-        return []
+        return StabilityOutcome(declared=True)
     results: list[MonitorResult] = []
     for cell in cells:
         assert cell.gate is not None  # filtered above
@@ -567,4 +596,4 @@ def evaluate_stability(
             subject = f"{cell.key}: {result.subject}" if result.subject else cell.key
             message = f"[{cell.key}] {result.message}" if result.message else None
             results.append(result.model_copy(update={"subject": subject, "message": message}))
-    return results
+    return StabilityOutcome(declared=True, results=results)

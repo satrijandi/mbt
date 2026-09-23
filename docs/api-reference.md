@@ -7,7 +7,7 @@ Prose guide: [Adapter authoring](adapter-authoring.md).
 ## Protocols
 
 What an adapter implements.
-The four `Supports*` protocols (`SupportsFeatureImportance`, `SupportsShapImportance`, `SupportsExplain`, `SupportsTrainWithReport`) are optional capabilities probed with `hasattr`; implementing them with these exact signatures is what keeps adapters from drifting apart.
+The `Supports*` protocols (`SupportsFeatureImportance`, `SupportsShapImportance`, `SupportsExplain`, `SupportsTrainWithReport`, `SupportsBestIteration`) pin the SIGNATURE of each optional capability; which ones an adapter has is what its `capabilities(spec)` returns, and that is what core dispatches on.
 
 ::: mbt_adapter_base.protocols
     options:

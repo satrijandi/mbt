@@ -72,7 +72,7 @@ min_samples_split, n_estimators, n_jobs
   the label. Either way the train-time levels persist in the artifact, and an
   unseen level becomes the `-1` sentinel (trees) or an all-zero row (one-hot)
   at prediction time.
-- **Calibration**: `supports_calibration` is true, so `calibration:` in a spec
+- **Calibration**: the adapter declares `Capability.CALIBRATION`, so `calibration:` in a spec
   fits a post-hoc calibrator on the dedicated calibration slice carved from train
   and every downstream metric, gate, and prediction sees calibrated scores.
 - **Feature importance**: `feature_importances_` for the tree estimators,

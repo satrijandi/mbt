@@ -102,11 +102,14 @@ def test_the_check_reports_on_the_training_run_and_records_its_verdict(
 def test_the_check_ranks_features_by_permutation_when_the_model_cannot(
     demo_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from mbt.execute import job as job_module
+    from mbt.execute import training_report as report_module
 
     reporting_project(demo_project)
     _build(demo_project, fake_registry)
-    monkeypatch.setattr(job_module, "_feature_importance", lambda runtime, model: {})
+    # The adapter declares NO importance capability, which is the condition the
+    # permutation fallback exists for (B-1: capability is declared, so the test
+    # says so rather than patching out the function that asks).
+    monkeypatch.setattr(report_module, "capabilities_of", lambda adapter, spec=None: frozenset())
     with recording_bus() as sink:
         results = _check(demo_project, fake_registry, apply_gates=False)
     assert [r.status for r in results.results] == ["success", "success"]

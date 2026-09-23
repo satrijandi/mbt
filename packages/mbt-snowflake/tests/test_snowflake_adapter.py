@@ -44,6 +44,11 @@ from mbt_adapter_base import (
     ScoringInputSpec,
     ScoringOutputSpec,
 )
+from mbt_adapter_base.events import (
+    DatasetMaterialized,
+    EmptyAfterTestSplit,
+    ScoringInputMaterialized,
+)
 from mbt_adapter_base.materialization import combine_snapshots
 
 ANCHOR = datetime(2026, 7, 1)
@@ -211,9 +216,9 @@ def test_build_dataset_joins_streams_and_normalizes_case(tmp_path: Path) -> None
     # assemble it, so a join appearing here would mean the retraction leaked.
     assert not any("JOIN" in q for q in selects)
     # the successful build reports its per-split row counts on the bus
-    row_logs = [str(m) for m in ctx.events.messages if "materialized" in str(m)]
+    row_logs = [m for m in ctx.events.messages if isinstance(m, DatasetMaterialized)]
     assert len(row_logs) == 1
-    assert "train=" in row_logs[0] and "test=" in row_logs[0]
+    assert set(row_logs[0].row_counts) == {"train", "test"}
 
 
 def test_push_down_sampling_is_reproducible_and_monotone(tmp_path: Path) -> None:
@@ -778,7 +783,7 @@ def test_verify_snapshot_skipped_without_a_pin(tmp_path: Path) -> None:
     stub = StubConnection(tables=_make_tables())
     adapter = _adapter(stub)
     spec = _spec()
-    adapter._verify_snapshot(_ctx(tmp_path, spec, adapter, snapshot=None))
+    adapter.verify_snapshot(_ctx(tmp_path, spec, adapter, snapshot=None))
     assert stub.executed == []  # no pin -> no snapshot queries
 
 
@@ -867,10 +872,11 @@ def test_empty_after_test_split_warns_and_is_kept(tmp_path: Path) -> None:
     handle = adapter.build_dataset(spec, ctx)
     assert handle.splits() == {"train", "test", "out_of_time"}
     assert handle.read("out_of_time").num_rows == 0
-    assert any(
-        "'out_of_time' materialized 0 rows [2026-07-01T00:00:00Z" in str(message)
-        for message in ctx.events.messages
-    )
+    # Warn severity comes from the shared event, not from this adapter (v5
+    # live defect 1): Snowflake used to emit a bare string the bus logged at info.
+    empty = [m for m in ctx.events.messages if isinstance(m, EmptyAfterTestSplit)]
+    assert [e.level for e in empty] == ["warn"]
+    assert "'out_of_time' materialized 0 rows [2026-07-01T00:00:00Z" in empty[0].human()
 
 
 @dataclass
@@ -980,7 +986,8 @@ def test_build_scoring_input_streams_windowed_single_source(tmp_path: Path) -> N
     assert "monthly_usage" in score.column_names  # normalized to lowercase
     assert 0 < score.num_rows < 200  # the score window pruned the batch
     # positive-path scoring row count reaches the bus
-    assert any("rows to score" in str(m) for m in ctx.events.messages)
+    scored = [m for m in ctx.events.messages if isinstance(m, ScoringInputMaterialized)]
+    assert len(scored) == 1 and scored[0].rows > 0 and scored[0].level == "info"
     selects = [q for q in stub.executed if q.startswith("SELECT *")]
     assert len(selects) == 1 and "TO_TIMESTAMP_NTZ" in selects[0]
 
@@ -1052,7 +1059,8 @@ def test_build_scoring_input_zero_rows_warns_not_errors(tmp_path: Path) -> None:
     ctx = _scoring_ctx(tmp_path, adapter, _scoring_sources(), window=future, events=events)
     handle = adapter.build_scoring_input(spec, ctx)
     assert handle.read("score").num_rows == 0
-    assert any("0 rows" in str(m) for m in events.messages)
+    empty = [m for m in events.messages if isinstance(m, ScoringInputMaterialized)]
+    assert [(m.rows, m.level) for m in empty] == [(0, "warn")]
 
 
 def test_open_predictions_stages_runs_under_root(tmp_path: Path) -> None:

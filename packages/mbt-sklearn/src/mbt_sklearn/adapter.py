@@ -47,13 +47,13 @@ from mbt_adapter_base import (
     DatasetHandle,
     DatasetProfile,
     DeterminismTier,
-    MetricResults,
-    MetricSpec,
     ModelSpec,
     RunContext,
     TaskType,
     ValidationIssue,
 )
+from mbt_adapter_base.base import ArrowTrainingAdapter
+from mbt_adapter_base.capabilities import Capability
 from mbt_adapter_base.encoding import categorical_codes, split_feature_columns, train_categories
 from mbt_adapter_base.training_helpers import monotone_vector
 from mbt_sklearn.params import (
@@ -108,7 +108,7 @@ class SklearnModel:
         self.calibrator = calibrator
 
 
-class SklearnTrainingAdapter:
+class SklearnTrainingAdapter(ArrowTrainingAdapter):
     """TrainingAdapter for binary classification and regression over Arrow tables."""
 
     name = "sklearn"
@@ -118,14 +118,28 @@ class SklearnTrainingAdapter:
         TaskType.BINARY_CLASSIFICATION,
         TaskType.REGRESSION,
     }
-    #: Probed by the parser (R2-8): this adapter can post-hoc calibrate scores.
-    supports_calibration: ClassVar[bool] = True
-    #: Probed by the parser (ADR-27). Monotone constraints are a property of the
-    #: ESTIMATOR, not of sklearn, so the blunt yes here is refined per estimator
-    #: in ``validate`` - only the histogram booster takes ``monotonic_cst``.
-    supports_monotonic_constraints: ClassVar[bool] = True
-    supports_categorical_pooling: ClassVar[bool] = True
+    extra_capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.CALIBRATION, Capability.CATEGORICAL_POOLING}
+    )
     determinism = DeterminismTier(kind="exact")
+
+    def capabilities(self, spec: ModelSpec | None = None) -> frozenset[Capability]:
+        """Estimator-accurate, which the old blunt flag could not be (B-1).
+
+        Monotone constraints are a property of the ESTIMATOR, not of sklearn:
+        only the histogram booster takes ``monotonic_cst``. The class variable
+        had no granularity, so it advertised an unconditional yes and then
+        ``validate`` raised for the estimators that cannot honour one - the
+        adapter contradicting its own flag. With the spec in hand the answer
+        can just be right.
+
+        With no spec (a capability listing rather than a decision about one
+        model) it reports the optimistic set, because some estimator can.
+        """
+        base = super().capabilities(spec)
+        if spec is None or self._estimator_name(spec) == _MONOTONIC_ESTIMATOR:
+            return base | {Capability.MONOTONIC_CONSTRAINTS}
+        return base
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
@@ -148,10 +162,11 @@ class SklearnTrainingAdapter:
             )
             for warning in self.nondeterminism_warnings(spec)
         ]
-        # The parser's blunt supports_monotonic_constraints probe says yes for
-        # sklearn as a whole; only the histogram booster can actually honour a
-        # constraint, and a constraint silently dropped is worse than none
-        # (ADR-27), so refine it here where the estimator is known.
+        # capabilities(spec) already answers per estimator (B-1), so the parser
+        # rejects a monotone constraint on the wrong estimator before this runs.
+        # This stays as the adapter-side guard for a DIRECT caller that never
+        # went through the parser: a constraint silently dropped is worse than
+        # no constraint at all (ADR-27).
         estimator = self._estimator_name(spec)
         if spec.features.monotonic_constraints and estimator != _MONOTONIC_ESTIMATOR:
             issues.append(
@@ -332,17 +347,8 @@ class SklearnTrainingAdapter:
         return model
 
     def _fit_calibrator(self, model: SklearnModel, spec: ModelSpec, data: DatasetHandle) -> None:
-        """Fit a post-hoc probability calibrator on the held-out calibration
-        slice (R2-8), the same mechanism and the same slice choice as the
-        xgboost and lightgbm adapters (F17)."""
-        from mbt_adapter_base.calibration import Calibrator
-        from mbt_adapter_base.training_helpers import calibration_split
-
-        assert spec.calibration is not None  # guarded by the caller
-        val = data.read(calibration_split(data))
-        raw = self._scores(model, val)  # no calibrator attached yet -> raw scores
-        labels = val.column(spec.target).to_numpy(zero_copy_only=False)
-        model.calibrator = Calibrator.fit(raw, labels, spec.calibration)
+        """Fit the calibrator (shared) and hold it on the wrapper."""
+        model.calibrator = self.fit_calibrator(model, spec, data)
 
     # -- evaluation ----------------------------------------------------------------------
 
@@ -359,24 +365,6 @@ class SklearnTrainingAdapter:
         if model.calibrator is not None:
             return model.calibrator.transform(raw)
         return raw
-
-    def evaluate(
-        self,
-        model: SklearnModel,
-        data: DatasetHandle,
-        split: str,
-        metrics: list[MetricSpec],
-        slices: list[str] | None = None,
-    ) -> MetricResults:
-        from mbt_adapter_base.training_helpers import evaluate_split
-
-        table = data.read(split)
-        return evaluate_split(table, model.target, self._scores(model, table), metrics, slices)
-
-    def predict(self, model: SklearnModel, data: DatasetHandle, split: str) -> pa.Table:
-        table = data.read(split)
-        scores = self._scores(model, table)
-        return table.append_column("prediction", pa.array(scores.astype("float64")))
 
     def feature_importance(self, model: SklearnModel) -> dict[str, float]:
         """Global importance, normalized to fractions (FR-DOCS-02).

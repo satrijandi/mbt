@@ -44,7 +44,6 @@ from mbt.execute.job import (
     _carve_calibration,
     _carve_validation,
     _champion_delta_bounds,
-    _feature_importance,
     _partial_dependence,
     _prepare,
     _render_adapter_ref,
@@ -55,6 +54,7 @@ from mbt.execute.job import (
     main,
     run_job,
 )
+from mbt.execute.training_report import feature_importance
 from mbt.secrets import clear_taints, redact
 
 SOURCES_WITH_BATCH = """
@@ -378,22 +378,38 @@ def test_hook_metrics_missing_declared_name_errors(
 
 
 def test_feature_importance_absent_returns_empty() -> None:
-    runtime = SimpleNamespace(adapter=SimpleNamespace())
-    assert _feature_importance(runtime, object()) == {}
+    runtime = SimpleNamespace(adapter=SimpleNamespace(), spec=None)
+    assert feature_importance(runtime, object()) == {}
 
 
 def test_feature_importance_prefers_shap_over_gain_when_available() -> None:
     """The model card uses the data-grounded SHAP importance when the adapter
-    exposes it (tree adapters), falling back to model-intrinsic gain otherwise."""
+    declares it (tree adapters), falling back to model-intrinsic gain otherwise.
+
+    These doubles declare no ``capabilities()``, so they exercise the
+    compatibility path in ``capabilities_of`` - a third-party adapter built
+    against the pre-v5 contract must keep behaving exactly as it did (B-1).
+    """
     shap_adapter = SimpleNamespace(
         shap_importance=lambda model, handle, split: {"a": 0.7, "b": 0.3},
         feature_importance=lambda model: {"a": 0.5, "b": 0.5},  # the gain fallback
     )
-    runtime = SimpleNamespace(adapter=shap_adapter, handle=object())
-    assert _feature_importance(runtime, object()) == {"a": 0.7, "b": 0.3}  # SHAP preferred
+    runtime = SimpleNamespace(adapter=shap_adapter, handle=object(), spec=None)
+    assert feature_importance(runtime, object()) == {"a": 0.7, "b": 0.3}  # SHAP preferred
 
     gain_only = SimpleNamespace(feature_importance=lambda model: {"a": 0.5, "b": 0.5})
-    assert _feature_importance(SimpleNamespace(adapter=gain_only), object()) == {"a": 0.5, "b": 0.5}
+    assert feature_importance(SimpleNamespace(adapter=gain_only, spec=None), object()) == {
+        "a": 0.5,
+        "b": 0.5,
+    }
+
+    # and an adapter that DECLARES its capabilities is taken at its word, even
+    # when the method happens to exist: declaration is the contract now
+    silent = SimpleNamespace(
+        capabilities=lambda spec: frozenset(),
+        feature_importance=lambda model: {"a": 1.0},
+    )
+    assert feature_importance(SimpleNamespace(adapter=silent, spec=None), object()) == {}
 
 
 def test_partial_dependence_covers_top_numeric_features_only() -> None:
@@ -1448,3 +1464,134 @@ def test_run_train_reports_walk_forward_backtest_when_configured(
     assert result.backtest_metrics and "pr_auc" in result.backtest_metrics
     # the std is reported alongside the mean, on the same metric keys
     assert result.backtest_std.keys() == result.backtest_metrics.keys()
+
+
+# -- D-1: the operating-point support warning -------------------------------
+
+
+def _scored_split(scores: "list[float]") -> SimpleNamespace:
+    import numpy as np
+
+    return SimpleNamespace(scores=np.array(scores, dtype=float))
+
+
+def test_a_thinly_supported_operating_point_warns_loudly() -> None:
+    """D-1: the cutoff is fitted on the rows that report its precision, so a
+    handful of supporting rows makes the reported number misleading."""
+    from mbt.execute.job import _check_operating_point_support
+
+    runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
+    test = _scored_split([0.1] * 500 + [0.99] * 5)
+    with recording_bus() as sink:
+        support = _check_operating_point_support(
+            runtime, {"threshold_at_precision_0.9": 0.98, "roc_auc": 0.8}, test
+        )
+    assert support == {"threshold_at_precision_0.9": 5}  # roc_auc is not an operating point
+    warnings = [e for e in sink.events if getattr(e, "level", "") == "warn"]
+    assert any("rests on only 5 test row(s)" in e.message for e in warnings)
+
+
+def test_a_well_supported_operating_point_is_reported_not_warned() -> None:
+    from mbt.execute.job import _check_operating_point_support
+
+    runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
+    test = _scored_split([0.1] * 500 + [0.99] * 250)
+    with recording_bus() as sink:
+        support = _check_operating_point_support(
+            runtime, {"threshold_at_precision_0.35": 0.98}, test
+        )
+    assert support == {"threshold_at_precision_0.35": 250}
+    assert not [e for e in sink.events if getattr(e, "level", "") == "warn"]
+    assert any("rests on 250 test row(s)" in m for m in sink.messages())
+
+
+# -- D-2: the tuned model and the shipped model agree on complexity ---------
+
+
+def test_the_final_fit_carries_the_complexity_the_trials_chose() -> None:
+    """D-2, at the seam.
+
+    With no declared validation split the final fit reabsorbs the tuning carve
+    (ADR-8), so it early-stops on nothing while every trial that voted on the
+    hyperparameters DID stop early - shipping a less-regularized model than the
+    search scored.
+    """
+    from mbt.execute.job import _carry_trial_rounds
+
+    runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
+    declared = {"n_estimators": 500, "early_stopping_rounds": 20, "learning_rate": 0.3}
+    with recording_bus() as sink:
+        carried = _carry_trial_rounds(runtime, declared, [40, 55, 61])
+    assert carried["n_estimators"] == 55  # the median of what the trials used
+    assert "early_stopping_rounds" not in carried  # inert without a validation split
+    assert carried["learning_rate"] == 0.3  # everything else is untouched
+    assert any("median of 3 tuning trial(s)" in m for m in sink.messages())
+
+
+def test_no_trial_rounds_leaves_the_declared_hyperparameters_alone() -> None:
+    """An adapter that cannot report rounds, or trials that never stopped
+    early, must change nothing."""
+    from mbt.execute.job import _carry_trial_rounds
+
+    runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
+    declared = {"n_estimators": 500, "early_stopping_rounds": 20}
+    assert _carry_trial_rounds(runtime, declared, []) == declared
+
+
+def test_tuning_collects_the_trials_rounds_when_the_final_fit_cannot_stop_early() -> None:
+    """D-2 end to end through the tuning loop, with a real booster.
+
+    No declared validation split + early_stopping_rounds set + an adapter that
+    reports best_iteration = the final fit ships the complexity the trials
+    actually chose, instead of training every declared round.
+    """
+    import numpy as np
+    from mbt_xgboost.adapter import XGBoostTrainingAdapter
+
+    from mbt.contracts import AdapterRef, MetricSpec, RunContext
+    from mbt.events import EventBus
+    from mbt.execute.job import _run_tuning
+
+    rng = np.random.default_rng(3)
+    n = 400
+    x = rng.normal(0, 1, n)
+    y = (rng.random(n) < 1 / (1 + np.exp(-2.5 * x))).astype("int64")
+    table = pa.table({"x": x, "noise": rng.normal(0, 1, n), "y": y})
+
+    spec = minimal_model_spec(
+        adapter="xgboost",
+        target="y",
+        evaluation={"protocol": {"split": "temporal"}, "metrics": ["roc_auc"]},
+        hyperparameters={"n_estimators": 400, "early_stopping_rounds": 5, "learning_rate": 0.3},
+        tuning={
+            "engine": "optuna",
+            "n_trials": 2,
+            "objective": {"metric": "roc_auc", "direction": "maximize"},
+            "search_space": {"max_depth": {"type": "int", "low": 2, "high": 4}},
+        },
+    )
+    runtime = make_inline_runtime(
+        {"train": table, "test": table},
+        spec,
+        adapter=XGBoostTrainingAdapter({}),
+        builtin_specs=[MetricSpec(name="roc_auc", kind="builtin")],
+    )
+    runtime.job.tuning_engine = AdapterRef(adapter="optuna", config={})
+    runtime.job.tuning_cap = None
+    runtime.ctx = RunContext(
+        run_id="d2",
+        unique_id="m",
+        seed=7,
+        target_name="dev",
+        project_dir=".",
+        vars={},
+        events=EventBus(),
+    )
+
+    with recording_bus() as sink:
+        tuned, _ = _run_tuning(runtime, spec)
+
+    shipped = tuned.hyperparameters["n_estimators"]
+    assert shipped < 400, "the final fit must not train every declared round"
+    assert "early_stopping_rounds" not in tuned.hyperparameters
+    assert any("median of 2 tuning trial(s)" in m for m in sink.messages())

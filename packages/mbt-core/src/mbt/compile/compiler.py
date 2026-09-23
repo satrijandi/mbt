@@ -26,14 +26,6 @@ from mbt.artifacts.manifest import (
 from mbt.compile.hashing import config_hash, env_digest, env_freeze_digest, input_hash
 from mbt.compile.windows import format_ts, parse_window, subtract_duration
 from mbt.config.profiles import LoadedProfiles
-from mbt.contracts import (
-    OUT_OF_TIME_SPLIT,
-    DatasetSpec,
-    ManifestNode,
-    ModelSpec,
-    ScoringSpec,
-    SplitStrategy,
-)
 from mbt.dag.graph import topological_order
 from mbt.events import get_bus
 from mbt.events.models import AdapterWarning, CompileCompleted, CompileStarted
@@ -41,8 +33,17 @@ from mbt.exceptions import CompilationError, ConfigError, cause_message
 from mbt.gitinfo import collect_git_info
 from mbt.jinja.environment import ResolveContext, TargetContext
 from mbt.parsing.errors import ParseReport
-from mbt.parsing.project_parser import ParsedProject, ParsedResource, validate_hyperparameters
+from mbt.parsing.project_parser import ParsedProject, ParsedResource, rule_context
+from mbt.parsing.rules import ResolvedTarget, run_rules
 from mbt.runtime import data_adapter as build_data_adapter
+from mbt_adapter_base import (
+    OUT_OF_TIME_SPLIT,
+    DatasetSpec,
+    ManifestNode,
+    ModelSpec,
+    ScoringSpec,
+    SplitStrategy,
+)
 from mbt_adapter_base.materialization import combine_snapshots
 
 
@@ -82,17 +83,40 @@ def compile_project(
 
     # 1. resolve-render every node against the target
     rendered_datasets = {
-        uid: _resolve_dataset(res, parsed, resolve_ctx, anchor, report)
+        uid: _resolve_dataset(res, parsed, resolve_ctx, anchor)
         for uid, res in parsed.datasets.items()
     }
     rendered_models = {
-        uid: _resolve_model(res, parsed, resolve_ctx, anchor, registry, report)
-        for uid, res in parsed.models.items()
+        uid: _resolve_model(res, parsed, resolve_ctx, anchor) for uid, res in parsed.models.items()
     }
     rendered_scoring = {
         uid: _resolve_scoring(res, parsed, resolve_ctx, anchor)
         for uid, res in parsed.scoring.items()
     }
+
+    # Re-run EVERY parse-time invariant against the target-rendered specs
+    # (A-3). The re-render above is deliberate and necessary - the capture
+    # phase cannot see target scope, so a var() inside a spec can genuinely
+    # differ per target (ADR-5) - but until v5 compile re-ran exactly one of
+    # the nineteen rules, so a target var that moved spec.target,
+    # evaluation.protocol.test_window or a gate's source passed `mbt parse`
+    # and reached execution unchecked. Same list, same context shape.
+    run_rules(
+        rule_context(
+            parsed.project.name,
+            _resolved_targets(parsed.datasets, rendered_datasets),
+            _resolved_targets(parsed.models, rendered_models),
+            _resolved_targets(parsed.scoring, rendered_scoring),
+            registry,
+            phase="compile",
+            depends_on={
+                res.unique_id: list(res.depends_on)
+                for pool in (parsed.datasets, parsed.models, parsed.scoring)
+                for res in pool.values()
+            },
+        ),
+        report,
+    )
     report.raise_if_errors()
 
     # 2. pin data snapshots per source (parallel, cheap metadata calls)
@@ -250,12 +274,28 @@ def build_resolve_context(
     )
 
 
+def _resolved_targets(
+    resources: dict[str, ParsedResource],
+    rendered: dict[str, tuple[Any, dict[str, Any], dict[str, Any]]],
+) -> dict[str, Any]:
+    """Pair each resource's identity with the spec it renders to on THIS target.
+
+    The rules need a ``RuleTarget`` (unique_id, name, path, spec). At parse
+    time a ``ParsedResource`` is one; here the spec comes from the re-render
+    instead, so the same rule sees the values execution will actually use.
+    """
+    return {
+        uid: ResolvedTarget(unique_id=uid, name=res.name, path=res.path, spec=rendered[uid][0])
+        for uid, res in resources.items()
+        if uid in rendered
+    }
+
+
 def _resolve_dataset(
     res: ParsedResource,
     parsed: ParsedProject,
     ctx: ResolveContext,
     anchor: datetime,
-    report: ParseReport,
 ) -> tuple[DatasetSpec, dict[str, Any], dict[str, Any]]:
     rendered = parsed.renderer.resolve(
         res.raw, ctx, resource=res.unique_id, path=parsed.project_dir / res.path
@@ -348,8 +388,6 @@ def _resolve_model(
     parsed: ParsedProject,
     ctx: ResolveContext,
     anchor: datetime,
-    registry: AdapterRegistry,
-    report: ParseReport,
 ) -> tuple[ModelSpec, dict[str, Any], dict[str, Any]]:
     rendered = parsed.renderer.resolve(
         res.raw, ctx, resource=res.unique_id, path=parsed.project_dir / res.path
@@ -362,16 +400,6 @@ def _resolve_model(
             resource=res.unique_id,
             path=res.path,
         ) from exc
-    adapter = registry.training(spec.adapter)
-    validate_hyperparameters(
-        adapter,
-        spec.task,
-        spec.hyperparameters,
-        resource=res.unique_id,
-        rel=res.path,
-        report=report,
-        phase="compile",
-    )
     resolved: dict[str, Any] = {}
     if spec.evaluation.protocol.test_window is not None:
         start, end = parse_window(spec.evaluation.protocol.test_window).resolve(anchor)
