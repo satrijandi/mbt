@@ -5,8 +5,8 @@ wide table in the lake, the way a gold-layer customer snapshot usually does:
 
     s3://mbt-lake/churn_panel/<inference_date>-<state>-<chunk>.parquet
 
-One row per customer per month-start ``inference_date`` (2025-07-01 ..
-2026-06-01), carrying
+One row per customer per weekly ``inference_date``, every Monday from
+2026-08-03 to 2026-10-05 (10 cohorts), carrying
 
     customer_id, inference_date   the natural key
     is_active                     the population flag: churned customers keep
@@ -16,7 +16,7 @@ One row per customer per month-start ``inference_date`` (2025-07-01 ..
     f0000 .. fNNNN                pure-noise columns - the "huge" knob; a real
                                   lake table carries hundreds of columns no
                                   model uses
-    is_churn                      churned during the month after
+    is_churn                      churned during the 7 days after
                                   inference_date; NULL where there is no
                                   outcome to know: inactive rows, and the
                                   newest cohort while its outcome window is
@@ -24,17 +24,17 @@ One row per customer per month-start ``inference_date`` (2025-07-01 ..
 
 Nothing about it is committed: ``seed`` synthesizes it deterministically
 (fixed seed) straight into the lake. Scale is a knob, not a fork -
-``--scale huge`` is ~1.6M rows x ~320 columns through exactly the same code,
+``--scale huge`` is ~1.3M rows x ~320 columns through exactly the same code,
 generated and written one chunk at a time so memory stays bounded.
 
-The newest cohort (2026-06-01) is the scoring batch, and it is the only part
+The newest cohort (2026-10-05) is the scoring batch, and it is the only part
 of the table that changes after seeding. Each change rewrites that cohort
 under NEW file names and then deletes the old ones, never in place: Spark
 pins an object-store source by its file LISTING, so an in-place rewrite would
 change the data under a pinned manifest without changing its snapshot.
 
     seed           write every cohort; the newest one "open" (label NULL)
-    land-outcomes  a month passed: rewrite the newest cohort with its labels
+    land-outcomes  a week passed: rewrite the newest cohort with its labels
     inject-drift   rewrite the newest cohort with numeric features x3, which
                    breaches the scoring monitors' PSI threshold
     reset          rewrite the newest cohort "open" again (undoes both)
@@ -56,7 +56,7 @@ import json
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -71,8 +71,9 @@ TABLE = "churn_panel"
 DEFAULT_LAKE = f"s3://{LAKE_BUCKET}/{TABLE}"
 
 SEED = 20260717
-MONTHS = [datetime(2025, m, 1) for m in range(7, 13)] + [datetime(2026, m, 1) for m in range(1, 7)]
-NEWEST = MONTHS[-1]
+#: The weekly cohorts: every Monday from 2026-08-03 to 2026-10-05.
+COHORTS = [datetime(2026, 8, 3) + timedelta(weeks=week) for week in range(10)]
+NEWEST = COHORTS[-1]
 
 #: name -> (customers, noise columns). The default keeps the live tier fast;
 #: huge is the biggest shape the stack is sized for - SeaweedFS's capacity is
@@ -175,22 +176,22 @@ class Cohort:
     index: int
     when: datetime
     #: the table's signal columns (everything but the noise), one row per
-    #: customer in the book this month
+    #: customer in the book this week
     columns: dict[str, np.ndarray]
     #: realized outcome for every row; meaningful only where is_active
     churned: np.ndarray
 
 
 def simulate(customers: int) -> Iterator[Cohort]:
-    """Yield the 12 cohorts in order, deterministically.
+    """Yield the weekly cohorts in order, deterministically.
 
     Replaying the whole simulation is how the newest cohort is rebuilt on its
-    own: the signal columns are cheap (a handful of vectors per month) and the
+    own: the signal columns are cheap (a handful of vectors per week) and the
     random stream is a pure function of the seed, so every replay agrees.
     """
     rng = np.random.default_rng(SEED)
-    # The pool is bigger than the starting base: every month ~6% fresh
-    # customers join while churners leave. Without acquisition, 12 months of
+    # The pool is bigger than the starting base: every week ~6% fresh
+    # customers join while churners leave. Without acquisition, 10 weeks of
     # survivor culling would leave only low-hazard customers and the newest
     # cohort would carry almost no discriminable signal.
     pool = customers * 2
@@ -209,18 +210,19 @@ def simulate(customers: int) -> Iterator[Cohort]:
     active = np.zeros(pool, dtype=bool)
     in_book[:customers] = active[:customers] = True
     next_joiner = customers
-    joiners_per_month = int(customers * 0.06)
-    for index, when in enumerate(MONTHS):
+    joiners_per_week = int(customers * 0.06)
+    for index, when in enumerate(COHORTS):
         if index > 0:
-            fresh = slice(next_joiner, next_joiner + joiners_per_month)
+            fresh = slice(next_joiner, next_joiner + joiners_per_week)
             in_book[fresh] = active[fresh] = True
-            next_joiner += joiners_per_month
+            next_joiner += joiners_per_week
         idx = np.flatnonzero(in_book)
         live = active[idx]
         n = idx.size
 
-        # Monthly activity around each customer's base. An inactive (churned)
-        # customer's row reports no activity; the population filter drops it.
+        # This week's snapshot of each customer's rolling activity. An inactive
+        # (churned) customer's row reports no activity; the population filter
+        # drops it.
         login_days = np.clip(login_base[idx] * rng.normal(1.0, 0.28, n), 0.0, 30.0).round(1)
         days_since_login = np.clip(rng.exponential(30.0 / (1.0 + login_days)), 0.0, 30.0).round(1)
         txn_cnt = np.clip(txn_base[idx] * rng.normal(1.0, 0.22, n), 0.0, None).round(0)
@@ -236,7 +238,7 @@ def simulate(customers: int) -> Iterator[Cohort]:
         diversity[~live] = 0.0
         tickets[~live] = 0
 
-        # Churn hazard: inactivity dominates, income adds a mild tilt, and
+        # Weekly churn hazard: inactivity dominates, income adds a mild tilt, and
         # contract_code's effect is non-monotone (0 churns most, 3 second-most).
         hazard = (
             0.015
@@ -382,7 +384,7 @@ class Lake:
 
     def params(self) -> Params:
         """The parameters the table was seeded with, from a file's footer."""
-        names = [n for n in self.names() if n.startswith(f"{MONTHS[0]:%Y-%m-%d}-")]
+        names = [n for n in self.names() if n.startswith(f"{COHORTS[0]:%Y-%m-%d}-")]
         if not names:
             raise SystemExit(f"{self.location} holds no seeded {TABLE} table - run `seed` first")
         if self._s3 is None:

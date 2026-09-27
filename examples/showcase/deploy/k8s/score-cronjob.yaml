@@ -14,7 +14,8 @@ metadata:
   name: mbt-score
   namespace: mbt
 spec:
-  schedule: "0 6 * * *"
+  # Weekly: Tuesdays, the day after the Monday cohort lands.
+  schedule: "0 6 * * 2"
   suspend: true
   jobTemplate:
     spec:
@@ -30,7 +31,7 @@ spec:
                 - -c
                 - >
                   mbt score --target batch
-                  --anchor 2026-06-30T00:00:00Z
+                  --anchor 2026-10-06T00:00:00Z
               env:
                 - name: AWS_ACCESS_KEY_ID
                   value: mbtadmin

@@ -1,7 +1,7 @@
 # mbt showcase: the full lifecycle on a dockerized platform stack
 
 A laptop-runnable reference environment that demonstrates mbt end to end on real services instead of local stand-ins.
-The data is ONE big table that already lives in the data lake - `s3://mbt-lake/churn_panel`, one row per customer per month, holding the population flag, every feature, and the label - and everything the showcase trains, scores, and monitors reads that table.
+The data is ONE big table that already lives in the data lake - `s3://mbt-lake/churn_panel`, one row per customer per week, holding the population flag, every feature, and the label - and everything the showcase trains, scores, and monitors reads that table.
 Around it: SeaweedFS is the S3 data lake and artifact store, MLflow (over HTTP) is the tracking server and model registry, a standalone Spark cluster does dataset pushdown and in-executor H2O (sparkling) AutoML training, JupyterLab is the DS workbench, Gitea + Woodpecker run the state-diff CI loop with PR comments and gate-classified alerts, Zot holds the digest-pinned deployable unit and its oras provenance artifacts, Airflow (fed by git-sync from the Gitea `deploy` repo) schedules retrain/score/monitor runs of that unit, and Prometheus + Grafana observe production scoring through the Pushgateway spec documented in the tutorial.
 
 The design of record is [DESIGN.md](DESIGN.md).
@@ -13,25 +13,26 @@ Everything mbt-related runs inside ONE runner image (Jupyter kernel, Spark maste
 ```text
 s3://mbt-lake/churn_panel/<inference_date>-<state>-<chunk>.parquet
 
-customer_id, inference_date   the natural key: one row per customer per month-start cohort
+customer_id, inference_date   the natural key: one row per customer per weekly (Monday) cohort
 is_active                     the population - churned customers keep their rows, marked inactive
 16 named features             demographics, logins, transactions (contract_code is a coded categorical)
 f0000 .. fNNNN                columns no model uses - the "huge" knob
-is_churn                      churned the following month; NULL where nobody knows yet
+is_churn                      churned in the following 7 days; NULL where nobody knows yet
 ```
 
-The project reads it three ways, and they differ only in which rows they take:
+The cohorts are weekly - every Monday from 2026-08-03 to 2026-10-05 - and so is the model: it predicts churn in the 7 days after a cohort, and that label matures 7 days later.
+The project reads the table three ways, and they differ only in which rows they take:
 
 | Reader | Spec | Rows |
 |---|---|---|
-| Training set | `datasets/churn_training.yml` | active customers in the labelled cohorts (2025-07 .. 2026-05), split by time |
-| Scoring input | `scoring/retention_scoring.yml` `input:` | active customers in the newest cohort (2026-06-01), whose label is still NULL |
+| Training set | `datasets/churn_training.yml` | active customers, a month of training (08-03 .. 08-24), the 08-31 cohort embargoed (7d, the label horizon), and a month of testing (09-07 .. 09-28) |
+| Scoring input | `scoring/retention_scoring.yml` `input:` | active customers in the newest cohort (2026-10-05, the `7d` window at the pinned anchor), whose label is still NULL |
 | Ground truth | `scoring/retention_scoring.yml` `ground_truth:` | the same cohort's `is_churn`, once its outcomes land, joined on `(customer_id, inference_date)` |
 
 The models name the 16 columns they train on; the rest of the width never reaches them.
 Nothing is committed under the showcase: `make seed` generates the table deterministically (`bootstrap/churn_panel.py`) straight into the lake, and `make seed SCALE=huge` writes the realistic shape through the same code.
 
-Only the newest cohort ever changes after seeding, and always as a partition rewrite under new file names: `make outcomes` lands its labels (a month has passed), `make inject-drift` poisons its features, and `make reset` puts it back byte for byte.
+Only the newest cohort ever changes after seeding, and always as a partition rewrite under new file names: `make outcomes` lands its labels (a week has passed), `make inject-drift` poisons its features, and `make reset` puts it back byte for byte.
 
 ## Run it
 
@@ -72,14 +73,14 @@ The default table is small so every recipe stays quick; `SCALE=huge` reseeds it 
 
 | `SCALE` | Customers | Noise columns | Rows | Columns | Parquet in the lake |
 |---|---|---|---|---|---|
-| `default` | 3,000 | 48 | 47,880 | 68 | 14MB |
-| `huge` | 100,000 | 300 | 1,596,000 | 320 | 2.9GB |
+| `default` | 3,000 | 48 | 38,100 | 68 | 11MB |
+| `huge` | 100,000 | 300 | 1,270,000 | 320 | 2.3GB |
 
 `make seed SCALE=huge` then `make demo` is the same lifecycle on the big table: the seed takes about a minute and the demo about 29 minutes on the machine in [Knobs](#knobs), against a few minutes at the default.
 `huge` is the biggest shape the stack is sized for - SeaweedFS's capacity is pinned at 6.4GB and the artifact bucket shares it - so a production-sized table (millions of rows by thousands of columns) wants a bigger lake, not a bigger knob.
 Two levers keep it tractable, and both are the spec's, not the showcase's:
 the models read 16 named columns, so the noise width costs I/O but never training time, and `sample_key: customer_id` hash-samples whole customers in the source query - `--vars '{sample_fraction: 0.1}'` trains on a coherent tenth, and smaller fractions are subsets of larger ones.
-What does grow with width is every full read of the table: mbt materializes every column of the relation into a dataset's splits and selects the models' columns afterwards, and `mbt monitor` reads the whole table to take its join keys and label - at `huge`, each monitor run spends about four minutes on that read.
+What does grow with width is every full read of the table: mbt materializes every column of the relation into a dataset's splits and selects the models' columns afterwards, and `mbt monitor` reads the whole table to take its join keys and label - at `huge`, each monitor run that evaluates spends between two and three minutes on it.
 `--customers`, `--noise-columns` and `--rows-per-file` on `bootstrap/churn_panel.py seed` set any shape in between.
 
 ## The CI loop (make ci)
@@ -131,7 +132,7 @@ Three hermetic modules keep the showcase honest in the ordinary fast suite, wher
 
 - **No `--deep-snapshot` anywhere**: it would be a no-op. The table lives in the object store, so `SparkDataAdapter.snapshot_id` takes its URI branch and hashes the `df.inputFiles()` listing, which is checkout-mtime-independent already - deep and shallow produce the same token. ADR-11's fresh-checkout problem is a local-path problem. The "one token scheme per pipeline" rule is therefore satisfied with the spark scheme on both the baseline-publish and PR-diff sides, so the `.woodpecker/` pipelines pass no `--deep-snapshot` either (unlike the GitHub scaffold). The flip side: the table's files are immutable, and every change to it is a new file name.
 - **Scoring and monitoring run on their own cluster-free `batch` target**: Spark `local[2]` straight off the lake, with champion MOJOs in a local H2O JVM by design - the cluster is train-time only.
-- **Anchors are pinned constants** (`2026-06-30T00:00:00Z`; monitor at `2026-07-20T00:00:00Z`, past the 14d maturity) matching the seeded cohorts - wall-clock anchors over fixed-date data rot into empty windows. The `.woodpecker/` pipelines pin the same anchor, which also makes same-source rebuilds byte-identical (`generated_at == anchor`, ADR-19).
+- **Anchors are pinned constants** (`2026-10-06T00:00:00Z`, the day after the newest Monday cohort; monitor at `2026-10-16T00:00:00Z`, past the 7d maturity) matching the seeded cohorts - wall-clock anchors over fixed-date data rot into empty windows. The `.woodpecker/` pipelines pin the same anchor, which also makes same-source rebuilds byte-identical (`generated_at == anchor`, ADR-19).
 - **PR builds use the `ci` target**: a per-run sqlite MLflow and a workspace-local artifact store, so green PRs never register versions or re-point the shared `staging` alias; champion gates render "none (bootstrap)" in PR comments. The merge-time prod-build targets `dev` (spark local[2] + the SHARED registry): cluster/sparkling training from CI step containers is P3 deployable-unit territory, and the cluster path is proven live by the lifecycle tier.
 - **One table serves training, scoring and ground truth**, where ADR-29 recommends a label-free serving twin. It is safe here because a model's target is never among its features, the prediction store never copies the label, and ground truth joins on `(customer_id, inference_date)` and treats a NULL label as not yet landed.
 - The SeaweedFS buckets are created without any TTL/retention: nothing protects champion objects server-side, so retention rules would silently break champion gates and scoring.

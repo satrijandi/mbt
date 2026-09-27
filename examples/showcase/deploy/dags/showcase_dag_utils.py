@@ -23,8 +23,8 @@ from airflow.sdk.exceptions import AirflowException, AirflowFailException
 
 CONF_PATH = Path(__file__).resolve().parent.parent / "images.env"
 
-ANCHOR = "2026-06-30T00:00:00Z"
-MONITOR_ANCHOR = "2026-07-20T00:00:00Z"
+ANCHOR = "2026-10-06T00:00:00Z"
+MONITOR_ANCHOR = "2026-10-16T00:00:00Z"
 
 
 def load_conf() -> dict:

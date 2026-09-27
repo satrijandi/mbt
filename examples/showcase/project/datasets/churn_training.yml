@@ -2,7 +2,7 @@
 # population, in the cohorts whose outcomes are known.
 datasets:
   - name: churn_training
-    description: Active customers per month-start cohort, labeled with next-month churn.
+    description: Active customers per weekly cohort, labeled with churn in the following 7 days.
     source: source('lake', 'churn_panel')
     # No `columns:` panel contract on purpose: the table's width is a scale
     # knob (hundreds of noise columns at --scale huge), so an enumerated list
@@ -18,22 +18,28 @@ datasets:
     sample_key: customer_id
     label:
       column: is_churn
-      definition: "churned during the month after inference_date"
-      # Declarative: the outcome is observed one calendar month after the
-      # prediction date. It is what lets mbt check that the embargo below and
+      definition: "churned during the 7 days after inference_date"
+      # Declarative: the outcome is observed 7 days after the prediction
+      # date - a weekly model with 7d label maturity. It is what lets mbt check that the embargo below and
       # the scoring node's ground_truth.maturity are long enough.
-      horizon: "1mo"
+      horizon: "7d"
     split:
       strategy: temporal
       time_column: inference_date
-      # Explicit cohort boundaries. Both windows end before 2026-06-01, the
-      # newest cohort - the one whose label is still NULL, and the one scoring
-      # reads - so no row with an unknown outcome is ever a training example.
-      train: "2025-07-01:2026-04-01"
-      test: "2026-04-01:2026-06-01"
-      # At least the label horizon: the last training cohort's outcome is
-      # observed a month later, inside the test window, without it.
-      embargo: "1mo"
+      # Explicit weekly cohort boundaries (every inference_date is a Monday):
+      # a month of training and a month of testing. Both windows end before
+      # 2026-10-05, the newest cohort - the one whose label is still NULL, and
+      # the one scoring reads - so no row with an unknown outcome is ever a
+      # training example.
+      #   train  2026-08-03 .. 2026-08-24   4 cohorts (August)
+      #   gap    2026-08-31                 dropped by the embargo
+      #   test   2026-09-07 .. 2026-09-28   4 cohorts (September)
+      train: "2026-08-03:2026-09-07"
+      test: "2026-09-07:2026-10-05"
+      # At least the label horizon: it trims the train window's last 7 days,
+      # so the last training cohort's outcome week never reaches the test
+      # window.
+      embargo: "7d"
     checks:
       - class_balance_report
       - no_future_columns

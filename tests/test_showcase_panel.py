@@ -11,12 +11,15 @@ repo battery could not see the showcase project or its generator at all.
 
 import importlib.util
 import os
+import re
 import sys
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
+from showcase_utils import ANCHOR, MONITOR_ANCHOR
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHOWCASE = REPO_ROOT / "examples" / "showcase"
@@ -68,7 +71,7 @@ def test_one_table_holds_population_features_and_label(panel, tmp_path: Path) ->
     lake = _seed(panel, tmp_path / "lake")
     rows = _rows(lake)
     cohorts = sorted({row["inference_date"] for row in rows})
-    assert cohorts == panel.MONTHS
+    assert cohorts == panel.COHORTS
 
     # The label is NULL exactly where no outcome is known: inactive rows, and
     # the newest cohort while its outcome window is open.
@@ -168,7 +171,7 @@ def test_every_node_reads_the_one_table(parsed) -> None:
 
 def test_ground_truth_joins_on_key_and_cohort(parsed) -> None:
     """customer_id alone matches every cohort a customer was ever in, grading
-    this month's prediction against old outcomes. The join must carry the
+    this week's prediction against old outcomes. The join must carry the
     cohort's time column too."""
     (dataset,) = parsed.datasets.values()
     (scoring,) = parsed.scoring.values()
@@ -176,6 +179,70 @@ def test_ground_truth_joins_on_key_and_cohort(parsed) -> None:
     assert scoring.spec.input.time_column == time_column
     assert set(scoring.spec.ground_truth.join_columns) == {"customer_id", time_column}
     assert scoring.spec.ground_truth.label.column == dataset.spec.label.column
+
+
+def test_cohorts_are_weekly_from_august_3_to_october_5(panel) -> None:
+    first, *_, newest = panel.COHORTS
+    assert (first, newest) == (datetime(2026, 8, 3), datetime(2026, 10, 5))
+    assert newest == panel.NEWEST
+    assert all(c.weekday() == 0 for c in panel.COHORTS), "every cohort is a Monday"
+    gaps = {b - a for a, b in pairwise(panel.COHORTS)}
+    assert gaps == {timedelta(weeks=1)}
+
+
+def _cohorts_in(panel, start: datetime, end: datetime) -> list[datetime]:
+    return [c for c in panel.COHORTS if start <= c.replace(tzinfo=UTC) < end]
+
+
+def test_a_month_of_training_and_a_month_of_testing(parsed, panel) -> None:
+    """The weekly model's contract: a 7d label, embargoed by 7d, trained on
+    August's four Monday cohorts and tested on September's four. The windows
+    resolve the way the compiler resolves them (absolute bounds, the embargo
+    trimming the train window's tail)."""
+    from mbt.compile.windows import parse_window, subtract_duration
+
+    (dataset,) = parsed.datasets.values()
+    (scoring,) = parsed.scoring.values()
+    split = dataset.spec.split
+    assert dataset.spec.label.horizon == "7d"
+    assert split.embargo == "7d"
+    assert scoring.spec.ground_truth.maturity == "7d"
+
+    anchor = datetime.fromisoformat(ANCHOR)
+    start, end = parse_window(str(split.train)).resolve(anchor)
+    train = _cohorts_in(panel, start, subtract_duration(end, split.embargo))
+    test = _cohorts_in(panel, *parse_window(str(split.test)).resolve(anchor))
+    assert train == [datetime(2026, 8, d) for d in (3, 10, 17, 24)]
+    assert test == [datetime(2026, 9, d) for d in (7, 14, 21, 28)]
+
+
+@pytest.mark.parametrize("days_late", [0, 1, 2])
+def test_scoring_reads_exactly_the_newest_cohort(parsed, panel, days_late: int) -> None:
+    """At the pinned anchor and the later anchors the live tier scores at, the
+    input window is the newest (still unlabelled) cohort and nothing else."""
+    from mbt.compile.windows import parse_window
+
+    (scoring,) = parsed.scoring.values()
+    anchor = datetime.fromisoformat(ANCHOR) + timedelta(days=days_late)
+    window = parse_window(str(scoring.spec.input.window)).resolve(anchor)
+    assert _cohorts_in(panel, *window) == [panel.NEWEST]
+    # Monitoring waits out the maturity for every one of those runs.
+    maturity = timedelta(days=int(scoring.spec.ground_truth.maturity.removesuffix("d")))
+    assert anchor + maturity <= datetime.fromisoformat(MONITOR_ANCHOR)
+
+
+def test_every_pinned_anchor_agrees() -> None:
+    """The Makefile, DAGs, CI pipelines, CronJob and notebook pin the same
+    anchors as the live tier; one stale copy scores an empty window."""
+    pinned = {
+        path.relative_to(SHOWCASE): set(re.findall(r"\d{4}-\d\d-\d\dT00:00:00Z", path.read_text()))
+        for path in SHOWCASE.rglob("*")
+        if path.is_file() and path.suffix in {".py", ".yml", ".yaml", ".ipynb", ""}
+    }
+    pinned = {path: found for path, found in pinned.items() if found}
+    assert pinned, "no pinned anchors found"
+    for path, found in pinned.items():
+        assert found <= {ANCHOR, MONITOR_ANCHOR}, (path, sorted(found))
 
 
 def test_training_never_reaches_the_open_cohort(parsed, panel) -> None:

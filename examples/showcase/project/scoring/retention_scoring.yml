@@ -1,6 +1,6 @@
 scoring:
   - name: retention_scoring
-    description: Month-start churn scores feeding the retention campaign.
+    description: Weekly churn scores feeding the retention campaign.
     owner: lifecycle-eng@example.com
     tags: [churn]
 
@@ -16,11 +16,11 @@ scoring:
       filters:
         - "is_active = true"
       time_column: inference_date
-      # Exactly the newest cohort (2026-06-01 at the pinned anchor
-      # 2026-06-30), and no newer. Ending the window 28 days back rather than
-      # at `now` is also what lets the 14d maturity below reach the 1mo label
-      # horizon: a row is already 28 days old when it is scored.
-      window: "-31d:-28d"
+      # The last week: exactly one Monday cohort at any anchor - the newest,
+      # 2026-10-05, at the pinned anchor 2026-10-06 (the day after it lands).
+      # Ending at `now` means a row can be scored the day it arrives, so the
+      # 7d maturity below alone has to reach the 7d label horizon.
+      window: "7d"
       sample_key: customer_id
 
     checks:
@@ -36,16 +36,16 @@ scoring:
         threshold: 0.25
 
     # Realized metrics once outcomes land - again from the same table, whose
-    # newest cohort gets its is_churn filled when the outcome window closes
+    # newest cohort gets its is_churn filled when its outcome week closes
     # (bootstrap/churn_panel.py land-outcomes). The join key MUST include
     # inference_date: customer_id alone matches every cohort a customer has
-    # ever been in, grading this month's prediction against old outcomes.
+    # ever been in, grading this week's prediction against old outcomes.
     ground_truth:
       label:
         source: source('lake', 'churn_panel')
         column: is_churn
       join_key: [customer_id, inference_date]
-      maturity: "14d"
+      maturity: "7d"
       metrics: [pr_auc, roc_auc]
       gates:
         - metric: pr_auc

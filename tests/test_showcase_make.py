@@ -192,7 +192,7 @@ def test_runbook_golden_path(runbook) -> None:
     assert json.loads(login.stdout.strip().splitlines()[-1])["woodpecker_token"]
 
     # The standalone targets rerun cleanly on the same anchors, from the
-    # seeded table: reset, score, a month passes, monitor.
+    # seeded table: reset, score, a week passes, monitor.
     runner.make("reset")
     runner.make("score")
     runner.make("outcomes")

@@ -27,8 +27,8 @@ export DOCKER_SOCK_GID ?= $(shell [ "$$(uname -s)" = Linux ] && stat -c %g /var/
 COMPOSE := docker compose -p $(SHOWCASE_PROJECT) -f $(SHOWCASE_DIR)/compose/docker-compose.yml \
 	--profile core --profile spark --profile dev --profile obs --profile ci --profile orch
 EXEC := $(COMPOSE) exec -T --workdir /workspace/project jupyterlab
-ANCHOR := 2026-06-30T00:00:00Z
-MONITOR_ANCHOR := 2026-07-20T00:00:00Z
+ANCHOR := 2026-10-06T00:00:00Z
+MONITOR_ANCHOR := 2026-10-16T00:00:00Z
 GITEA_PORT = $(or $(SHOWCASE_GITEA_PORT),3305)
 WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
@@ -50,7 +50,7 @@ help:
 	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
 	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
 	@echo "  make score         score the newest cohort with the production champion, push metrics"
-	@echo "  make outcomes      a month passes: the newest cohort's labels land in the table"
+	@echo "  make outcomes      a week passes: the newest cohort's labels land in the table"
 	@echo "  make monitor       ground-truth monitoring at the pinned anchor"
 	@echo "  make inject-drift  poison the newest cohort and watch MbtShiftBreach fire"
 	@echo "  make reset         put the newest cohort back as seeded (undoes outcomes and drift)"
@@ -146,8 +146,9 @@ clean: down
 	}
 
 # The whole lifecycle, narrated, on the one lake table. Anchors are pinned to
-# the seeded cohorts (2025-07..2026-06): ANCHOR makes 2026-06-01 the scoring
-# cohort, and MONITOR_ANCHOR sits past the 14d ground-truth maturity.
+# the seeded weekly cohorts (Mondays 2026-08-03..2026-10-05): ANCHOR, the day
+# after the newest one lands, makes 2026-10-05 the scoring cohort, and
+# MONITOR_ANCHOR sits past the 7d ground-truth maturity.
 demo:
 	@echo "==> [1/7] DS inner loop: mbt build --target dev (Spark local[2] over the s3a lake, H2O local)"
 	$(EXEC) mbt build --target dev --anchor $(ANCHOR)
@@ -160,7 +161,7 @@ demo:
 	$(EXEC) python scripts/push_metrics.py /workspace/project
 	@echo "==> [5/7] Monitoring before the outcomes land: the labels are still NULL, so it waits"
 	$(EXEC) mbt monitor --target batch --anchor $(MONITOR_ANCHOR)
-	@echo "==> [6/7] A month passes: the newest cohort's outcomes land in the same table"
+	@echo "==> [6/7] A week passes: the newest cohort's outcomes land in the same table"
 	$(PANEL) land-outcomes
 	@echo "==> [7/7] Ground-truth monitoring: realized metrics and gates"
 	$(EXEC) mbt monitor --target batch --anchor $(MONITOR_ANCHOR)

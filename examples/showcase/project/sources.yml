@@ -1,7 +1,7 @@
 # The showcase's whole data model: ONE table, already in the lake.
 #
 # churn_panel is a gold-layer customer snapshot - one row per customer per
-# month-start inference_date, carrying the population flag, every feature,
+# weekly (Monday) inference_date, carrying the population flag, every feature,
 # and the label. The dataset, the scoring input, and the ground-truth labels
 # all read it; they differ only in which rows they take (docs/showcase.md).
 #
@@ -16,7 +16,7 @@ sources:
       - name: churn_panel
         path: churn_panel/*.parquet
         description: >-
-          One row per customer per month-start inference_date: customer_id, the is_active
+          One row per customer per weekly (Monday) inference_date: customer_id, the is_active
           population flag, named features, hundreds of unused noise columns, and is_churn
-          (churned during the following month; NULL for inactive rows and for the newest
+          (churned during the following 7 days; NULL for inactive rows and for the newest
           cohort until its outcome window closes).
