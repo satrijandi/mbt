@@ -165,7 +165,7 @@ def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
         (_predictions_root(stack) / runs_after_first[0] / "predictions.json").read_text()
     )
     assert str(sidecar["model_version"]) == str(_state["prod_version"]), sidecar
-    assert sidecar["scored_at"].startswith("2026-10-06"), sidecar
+    assert sidecar["scored_at"].startswith("2026-09-29"), sidecar
 
     # Same anchor again: the run_key is anchor-independent by construction
     # (input hash + windows + champion version), so this OVERWRITES.
@@ -184,7 +184,7 @@ def test_champion_scoring_and_prediction_idempotency(showcase_stack) -> None:
         "--target",
         "batch",
         "--anchor",
-        "2026-10-07T00:00:00Z",
+        "2026-09-30T00:00:00Z",
     )
     runs_after_third = _predictions_runs(stack)
     assert len(runs_after_third) == 2, runs_after_third
@@ -227,7 +227,7 @@ def test_ground_truth_monitoring_exactly_once_and_exit_2(showcase_stack) -> None
         # A fresh prediction run + an impossible realized-metric floor: the
         # gate verdict is deterministic quality failure (exit 2), never a hard
         # error.
-        stack.mbt("score", "--target", "batch", "--anchor", "2026-10-08T00:00:00Z")
+        stack.mbt("score", "--target", "batch", "--anchor", "2026-10-01T00:00:00Z")
         breached = stack.mbt(
             "monitor",
             "--target",

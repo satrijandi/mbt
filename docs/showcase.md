@@ -21,18 +21,18 @@ Everything mbt-related runs inside one runner image (Jupyter kernel, Spark maste
 
 ## The one table
 
-`s3://mbt-lake/churn_panel` has one row per customer per weekly `inference_date`, every Monday from 2026-08-03 to 2026-10-05:
+`s3://mbt-lake/churn_panel` has one row per customer per weekly `inference_date`, every Monday from 2026-08-03 to 2026-09-28 (the table as it stands on 2026-09-28, so there is no October cohort yet):
 
 - `customer_id` and `inference_date`, the natural key;
 - `is_active`, the population - churned customers keep their rows, marked inactive;
 - 16 named features, among them a numeric-coded categorical (`contract_code`) whose effect is deliberately non-monotone;
 - hundreds of columns no model uses, at the realistic scale - the width a real gold-layer table carries;
-- `is_churn`, churned during the following 7 days, NULL where nobody knows yet: on inactive rows, and on the newest cohort until its outcome week closes.
+- `is_churn`, churned during the following 7 days, NULL where nobody knows yet: on inactive rows, and on any cohort whose outcome week has not closed by 2026-09-28 - only the newest, 2026-09-28 itself.
 
 The project reads it three ways, and the three differ only in which rows they take:
 
-- the **training set** (`datasets/churn_training.yml`) filters to the active population and splits the labelled cohorts by time - a month of training (August's four cohorts), a 7d embargo, and a month of testing (September's four) - with both windows ending before the newest cohort;
-- the **scoring input** reads the same table's newest cohort (2026-10-05, through a `7d` window), the one still waiting on its outcomes;
+- the **training set** (`datasets/churn_training.yml`) filters to the active population and splits the labelled cohorts by time - a month of training (August's four cohorts), a 7d embargo, and September's three labelled weeks for testing - with both windows ending before the newest cohort;
+- the **scoring input** reads the same table's newest cohort (2026-09-28, through a `7d` window), the one still waiting on its outcomes;
 - the **ground truth** reads that cohort's `is_churn` from the same table once it lands (a 7d maturity, matching the weekly label), joined on `(customer_id, inference_date)` - the key alone would match every cohort a customer was ever in.
 
 The models name the 16 columns they train on, so the rest of the table's width never reaches them.

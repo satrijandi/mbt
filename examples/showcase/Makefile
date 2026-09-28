@@ -27,8 +27,8 @@ export DOCKER_SOCK_GID ?= $(shell [ "$$(uname -s)" = Linux ] && stat -c %g /var/
 COMPOSE := docker compose -p $(SHOWCASE_PROJECT) -f $(SHOWCASE_DIR)/compose/docker-compose.yml \
 	--profile core --profile spark --profile dev --profile obs --profile ci --profile orch
 EXEC := $(COMPOSE) exec -T --workdir /workspace/project jupyterlab
-ANCHOR := 2026-10-06T00:00:00Z
-MONITOR_ANCHOR := 2026-10-16T00:00:00Z
+ANCHOR := 2026-09-29T00:00:00Z
+MONITOR_ANCHOR := 2026-10-09T00:00:00Z
 GITEA_PORT = $(or $(SHOWCASE_GITEA_PORT),3305)
 WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
@@ -146,8 +146,8 @@ clean: down
 	}
 
 # The whole lifecycle, narrated, on the one lake table. Anchors are pinned to
-# the seeded weekly cohorts (Mondays 2026-08-03..2026-10-05): ANCHOR, the day
-# after the newest one lands, makes 2026-10-05 the scoring cohort, and
+# the seeded weekly cohorts (Mondays 2026-08-03..2026-09-28): ANCHOR, the day
+# after the newest one lands, makes 2026-09-28 the scoring cohort, and
 # MONITOR_ANCHOR sits past the 7d ground-truth maturity.
 demo:
 	@echo "==> [1/7] DS inner loop: mbt build --target dev (Spark local[2] over the s3a lake, H2O local)"

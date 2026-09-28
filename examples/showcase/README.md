@@ -20,13 +20,14 @@ f0000 .. fNNNN                columns no model uses - the "huge" knob
 is_churn                      churned in the following 7 days; NULL where nobody knows yet
 ```
 
-The cohorts are weekly - every Monday from 2026-08-03 to 2026-10-05 - and so is the model: it predicts churn in the 7 days after a cohort, and that label matures 7 days later.
+The cohorts are weekly - every Monday from 2026-08-03 to 2026-09-28, the table as it stands on 2026-09-28 - and so is the model: it predicts churn in the 7 days after a cohort, and that label matures 7 days later.
+A cohort is labelled only once its outcome week has closed: 2026-09-21's closed on 2026-09-28, while 2026-09-28's runs to 2026-10-05, so it is the one open cohort. There is no October cohort; that population does not exist yet.
 The project reads the table three ways, and they differ only in which rows they take:
 
 | Reader | Spec | Rows |
 |---|---|---|
-| Training set | `datasets/churn_training.yml` | active customers, a month of training (08-03 .. 08-24), the 08-31 cohort embargoed (7d, the label horizon), and a month of testing (09-07 .. 09-28) |
-| Scoring input | `scoring/retention_scoring.yml` `input:` | active customers in the newest cohort (2026-10-05, the `7d` window at the pinned anchor), whose label is still NULL |
+| Training set | `datasets/churn_training.yml` | active customers, a month of training (08-03 .. 08-24), the 08-31 cohort embargoed (7d, the label horizon), and September's labelled weeks for testing (09-07 .. 09-21) |
+| Scoring input | `scoring/retention_scoring.yml` `input:` | active customers in the newest cohort (2026-09-28, the `7d` window at the pinned anchor), whose label is still NULL |
 | Ground truth | `scoring/retention_scoring.yml` `ground_truth:` | the same cohort's `is_churn`, once its outcomes land, joined on `(customer_id, inference_date)` |
 
 The models name the 16 columns they train on; the rest of the width never reaches them.
@@ -73,8 +74,8 @@ The default table is small so every recipe stays quick; `SCALE=huge` reseeds it 
 
 | `SCALE` | Customers | Noise columns | Rows | Columns | Parquet in the lake |
 |---|---|---|---|---|---|
-| `default` | 3,000 | 48 | 38,100 | 68 | 11MB |
-| `huge` | 100,000 | 300 | 1,270,000 | 320 | 2.3GB |
+| `default` | 3,000 | 48 | 33,480 | 68 | 10MB |
+| `huge` | 100,000 | 300 | 1,116,000 | 320 | 2.0GB |
 
 `make seed SCALE=huge` then `make demo` is the same lifecycle on the big table: the seed takes about a minute and the demo about 29 minutes on the machine in [Knobs](#knobs), against a few minutes at the default.
 `huge` is the biggest shape the stack is sized for - SeaweedFS's capacity is pinned at 6.4GB and the artifact bucket shares it - so a production-sized table (millions of rows by thousands of columns) wants a bigger lake, not a bigger knob.
@@ -132,7 +133,7 @@ Three hermetic modules keep the showcase honest in the ordinary fast suite, wher
 
 - **No `--deep-snapshot` anywhere**: it would be a no-op. The table lives in the object store, so `SparkDataAdapter.snapshot_id` takes its URI branch and hashes the `df.inputFiles()` listing, which is checkout-mtime-independent already - deep and shallow produce the same token. ADR-11's fresh-checkout problem is a local-path problem. The "one token scheme per pipeline" rule is therefore satisfied with the spark scheme on both the baseline-publish and PR-diff sides, so the `.woodpecker/` pipelines pass no `--deep-snapshot` either (unlike the GitHub scaffold). The flip side: the table's files are immutable, and every change to it is a new file name.
 - **Scoring and monitoring run on their own cluster-free `batch` target**: Spark `local[2]` straight off the lake, with champion MOJOs in a local H2O JVM by design - the cluster is train-time only.
-- **Anchors are pinned constants** (`2026-10-06T00:00:00Z`, the day after the newest Monday cohort; monitor at `2026-10-16T00:00:00Z`, past the 7d maturity) matching the seeded cohorts - wall-clock anchors over fixed-date data rot into empty windows. The `.woodpecker/` pipelines pin the same anchor, which also makes same-source rebuilds byte-identical (`generated_at == anchor`, ADR-19).
+- **Anchors are pinned constants** (`2026-09-29T00:00:00Z`, the day after the newest Monday cohort; monitor at `2026-10-09T00:00:00Z`, past the 7d maturity) matching the seeded cohorts - wall-clock anchors over fixed-date data rot into empty windows. The monitor anchor is deliberately later than the table's as-of date: it pairs with `make outcomes`, which is the week passing. The `.woodpecker/` pipelines pin the same anchor, which also makes same-source rebuilds byte-identical (`generated_at == anchor`, ADR-19).
 - **PR builds use the `ci` target**: a per-run sqlite MLflow and a workspace-local artifact store, so green PRs never register versions or re-point the shared `staging` alias; champion gates render "none (bootstrap)" in PR comments. The merge-time prod-build targets `dev` (spark local[2] + the SHARED registry): cluster/sparkling training from CI step containers is P3 deployable-unit territory, and the cluster path is proven live by the lifecycle tier.
 - **One table serves training, scoring and ground truth**, where ADR-29 recommends a label-free serving twin. It is safe here because a model's target is never among its features, the prediction store never copies the label, and ground truth joins on `(customer_id, inference_date)` and treats a NULL label as not yet landed.
 - The SeaweedFS buckets are created without any TTL/retention: nothing protects champion objects server-side, so retention rules would silently break champion gates and scoring.

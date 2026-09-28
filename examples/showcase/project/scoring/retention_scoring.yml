@@ -17,7 +17,7 @@ scoring:
         - "is_active = true"
       time_column: inference_date
       # The last week: exactly one Monday cohort at any anchor - the newest,
-      # 2026-10-05, at the pinned anchor 2026-10-06 (the day after it lands).
+      # 2026-09-28, at the pinned anchor 2026-09-29 (the day after it lands).
       # Ending at `now` means a row can be scored the day it arrives, so the
       # 7d maturity below alone has to reach the 7d label horizon.
       window: "7d"

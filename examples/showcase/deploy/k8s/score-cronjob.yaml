@@ -31,7 +31,7 @@ spec:
                 - -c
                 - >
                   mbt score --target batch
-                  --anchor 2026-10-06T00:00:00Z
+                  --anchor 2026-09-29T00:00:00Z
               env:
                 - name: AWS_ACCESS_KEY_ID
                   value: mbtadmin

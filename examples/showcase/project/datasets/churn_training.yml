@@ -27,15 +27,16 @@ datasets:
       strategy: temporal
       time_column: inference_date
       # Explicit weekly cohort boundaries (every inference_date is a Monday):
-      # a month of training and a month of testing. Both windows end before
-      # 2026-10-05, the newest cohort - the one whose label is still NULL, and
-      # the one scoring reads - so no row with an unknown outcome is ever a
-      # training example.
+      # a month of training and September's labelled weeks for testing. Both
+      # windows end before 2026-09-28, the newest cohort - its outcome week
+      # closes 2026-10-05, so its label is still NULL, and it is the one
+      # scoring reads - so no row with an unknown outcome is ever a training
+      # or test example.
       #   train  2026-08-03 .. 2026-08-24   4 cohorts (August)
       #   gap    2026-08-31                 dropped by the embargo
-      #   test   2026-09-07 .. 2026-09-28   4 cohorts (September)
+      #   test   2026-09-07 .. 2026-09-21   3 cohorts (September, labelled)
       train: "2026-08-03:2026-09-07"
-      test: "2026-09-07:2026-10-05"
+      test: "2026-09-07:2026-09-28"
       # At least the label horizon: it trims the train window's last 7 days,
       # so the last training cohort's outcome week never reaches the test
       # window.

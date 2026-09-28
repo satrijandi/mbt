@@ -76,7 +76,7 @@ def test_one_table_holds_population_features_and_label(panel, tmp_path: Path) ->
     # The label is NULL exactly where no outcome is known: inactive rows, and
     # the newest cohort while its outcome window is open.
     for row in rows:
-        known = row["is_active"] and row["inference_date"] != panel.NEWEST
+        known = row["is_active"] and panel.outcome_known(row["inference_date"])
         assert (row["is_churn"] is not None) == known, row
 
     labelled = [row["is_churn"] for row in rows if row["is_churn"] is not None]
@@ -181,22 +181,37 @@ def test_ground_truth_joins_on_key_and_cohort(parsed) -> None:
     assert scoring.spec.ground_truth.label.column == dataset.spec.label.column
 
 
-def test_cohorts_are_weekly_from_august_3_to_october_5(panel) -> None:
+def test_cohorts_are_weekly_from_august_3_to_the_as_of_date(panel) -> None:
     first, *_, newest = panel.COHORTS
-    assert (first, newest) == (datetime(2026, 8, 3), datetime(2026, 10, 5))
+    assert (first, newest) == (datetime(2026, 8, 3), datetime(2026, 9, 28))
     assert newest == panel.NEWEST
     assert all(c.weekday() == 0 for c in panel.COHORTS), "every cohort is a Monday"
     gaps = {b - a for a, b in pairwise(panel.COHORTS)}
     assert gaps == {timedelta(weeks=1)}
+    # No cohort from a population that does not exist yet.
+    assert max(panel.COHORTS) <= panel.AS_OF
+
+
+def test_only_cohorts_whose_outcome_week_closed_are_labelled(parsed, panel) -> None:
+    """On the as-of date, a cohort's label exists only once its whole outcome
+    week has passed. 2026-09-21's closed on 2026-09-28; 2026-09-28's runs to
+    2026-10-05, so it is the one open cohort - and the only one land-outcomes,
+    inject-drift and reset rewrite."""
+    (dataset,) = parsed.datasets.values()
+    # The generator's outcome week IS the dataset's declared label horizon.
+    assert dataset.spec.label.horizon == f"{panel.LABEL_HORIZON.days}d" == "7d"
+    assert [c for c in panel.COHORTS if not panel.outcome_known(c)] == [panel.NEWEST]
+    assert panel.outcome_known(datetime(2026, 9, 21))
 
 
 def _cohorts_in(panel, start: datetime, end: datetime) -> list[datetime]:
     return [c for c in panel.COHORTS if start <= c.replace(tzinfo=UTC) < end]
 
 
-def test_a_month_of_training_and_a_month_of_testing(parsed, panel) -> None:
+def test_a_month_of_training_and_the_labelled_september_weeks_of_testing(parsed, panel) -> None:
     """The weekly model's contract: a 7d label, embargoed by 7d, trained on
-    August's four Monday cohorts and tested on September's four. The windows
+    August's four Monday cohorts and tested on September's three labelled
+    ones (09-28 is still open). The windows
     resolve the way the compiler resolves them (absolute bounds, the embargo
     trimming the train window's tail)."""
     from mbt.compile.windows import parse_window, subtract_duration
@@ -213,7 +228,8 @@ def test_a_month_of_training_and_a_month_of_testing(parsed, panel) -> None:
     train = _cohorts_in(panel, start, subtract_duration(end, split.embargo))
     test = _cohorts_in(panel, *parse_window(str(split.test)).resolve(anchor))
     assert train == [datetime(2026, 8, d) for d in (3, 10, 17, 24)]
-    assert test == [datetime(2026, 9, d) for d in (7, 14, 21, 28)]
+    assert test == [datetime(2026, 9, d) for d in (7, 14, 21)]
+    assert all(panel.outcome_known(c) for c in train + test)
 
 
 @pytest.mark.parametrize("days_late", [0, 1, 2])

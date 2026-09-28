@@ -44,8 +44,8 @@ SHOWCASE_MARKS = [
     pytest.mark.skipif(os.environ.get("MBT_LIVE_SHOWCASE") != "1", reason=SKIP_REASON),
 ]
 
-ANCHOR = "2026-10-06T00:00:00Z"
-MONITOR_ANCHOR = "2026-10-16T00:00:00Z"
+ANCHOR = "2026-09-29T00:00:00Z"
+MONITOR_ANCHOR = "2026-10-09T00:00:00Z"
 RUNNER_IMAGE = os.environ.get("MBT_SHOWCASE_RUNNER_IMAGE", "mbt-showcase-runner:dev")
 
 

@@ -21,7 +21,7 @@ steps:
       AWS_SECRET_ACCESS_KEY: mbtsecret
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
-      SHOWCASE_ANCHOR: "2026-10-06T00:00:00Z"
+      SHOWCASE_ANCHOR: "2026-09-29T00:00:00Z"
       MBT_STATE_URI: state/prod/latest.json
       MBT_ALERT_WEBHOOK: http://webhook-sink:9099/alert
     commands:

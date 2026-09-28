@@ -6,7 +6,8 @@ wide table in the lake, the way a gold-layer customer snapshot usually does:
     s3://mbt-lake/churn_panel/<inference_date>-<state>-<chunk>.parquet
 
 One row per customer per weekly ``inference_date``, every Monday from
-2026-08-03 to 2026-10-05 (10 cohorts), carrying
+2026-08-03 to 2026-09-28 (9 cohorts), as the lake stands on its as-of date
+2026-09-28, carrying
 
     customer_id, inference_date   the natural key
     is_active                     the population flag: churned customers keep
@@ -18,22 +19,24 @@ One row per customer per weekly ``inference_date``, every Monday from
                                   model uses
     is_churn                      churned during the 7 days after
                                   inference_date; NULL where there is no
-                                  outcome to know: inactive rows, and the
-                                  newest cohort while its outcome window is
-                                  still open
+                                  outcome to know: inactive rows, and any
+                                  cohort whose outcome week has not closed by
+                                  the as-of date - on 2026-09-28 that is the
+                                  newest one, 2026-09-28 itself
 
 Nothing about it is committed: ``seed`` synthesizes it deterministically
 (fixed seed) straight into the lake. Scale is a knob, not a fork -
-``--scale huge`` is ~1.3M rows x ~320 columns through exactly the same code,
+``--scale huge`` is ~1.1M rows x ~320 columns through exactly the same code,
 generated and written one chunk at a time so memory stays bounded.
 
-The newest cohort (2026-10-05) is the scoring batch, and it is the only part
+The newest cohort (2026-09-28) is the scoring batch, and it is the only part
 of the table that changes after seeding. Each change rewrites that cohort
 under NEW file names and then deletes the old ones, never in place: Spark
 pins an object-store source by its file LISTING, so an in-place rewrite would
 change the data under a pinned manifest without changing its snapshot.
 
-    seed           write every cohort; the newest one "open" (label NULL)
+    seed           write every cohort; the ones whose outcome week is still
+                   open on the as-of date "open" (label NULL)
     land-outcomes  a week passed: rewrite the newest cohort with its labels
     inject-drift   rewrite the newest cohort with numeric features x3, which
                    breaches the scoring monitors' PSI threshold
@@ -71,9 +74,16 @@ TABLE = "churn_panel"
 DEFAULT_LAKE = f"s3://{LAKE_BUCKET}/{TABLE}"
 
 SEED = 20260717
-#: The weekly cohorts: every Monday from 2026-08-03 to 2026-10-05.
-COHORTS = [datetime(2026, 8, 3) + timedelta(weeks=week) for week in range(10)]
+#: The weekly cohorts: every Monday from 2026-08-03 to 2026-09-28. There is no
+#: October cohort: that population does not exist yet on the as-of date.
+COHORTS = [datetime(2026, 8, 3) + timedelta(weeks=week) for week in range(9)]
 NEWEST = COHORTS[-1]
+#: The day the lake is a snapshot of, and the label's outcome window (the
+#: dataset's label.horizon). A cohort's is_churn is known only once its whole
+#: outcome week has passed by AS_OF: 2026-09-21's closed on 2026-09-28, so it
+#: is labelled; 2026-09-28's closes on 2026-10-05, so it is open.
+AS_OF = datetime(2026, 9, 28)
+LABEL_HORIZON = timedelta(days=7)
 
 #: name -> (customers, noise columns). The default keeps the live tier fast;
 #: huge is the biggest shape the stack is sized for - SeaweedFS's capacity is
@@ -82,13 +92,20 @@ NEWEST = COHORTS[-1]
 SCALES = {"default": (3000, 48), "huge": (100_000, 300)}
 ROWS_PER_FILE = 100_000
 
-#: The states a cohort's files can be written in. Every cohort but the newest
-#: is matured; the newest starts open.
+#: The states a cohort's files can be written in. A cohort starts matured or
+#: open by `outcome_known`; land-outcomes / inject-drift / reset rewrite the
+#: newest one.
 STATES = ("open", "matured", "drifted")
 #: Never shifted by inject-drift: keys, the population flag, the label, and the
 #: numeric-coded categorical (tripling it would invent unseen levels, not shift).
 UNSHIFTED = {"customer_id", "inference_date", "is_active", "is_churn", "contract_code"}
 META_KEY = b"churn_panel"
+
+
+def outcome_known(when: datetime) -> bool:
+    """Whether a cohort's outcome week has closed by the as-of date."""
+    return when + LABEL_HORIZON <= AS_OF
+
 
 REGIONS = np.array(["north", "south", "east", "west", "central"])
 INCOME_BANDS = np.array(["low", "mid", "upper_mid", "high"])
@@ -415,10 +432,11 @@ def seed(lake: Lake, params: Params) -> None:
     written: set[str] = set()
     rows = active_rows = positives = 0
     for cohort in simulate(params.customers):
-        state = "open" if cohort.when == NEWEST else "matured"
+        known = outcome_known(cohort.when)
+        state = "matured" if known else "open"
         written.update(_write_cohort(lake, cohort, params, state))
         rows += cohort.columns["is_active"].size
-        if cohort.when != NEWEST:
+        if known:
             active_rows += int(cohort.columns["is_active"].sum())
             positives += int(cohort.churned.sum())
     for stale in sorted(set(lake.names()) - written):

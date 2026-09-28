@@ -106,13 +106,13 @@ An `mbt init`-derived `churn_lake` project, source-of-truth at `examples/showcas
 
 The whole data model is one table that is assumed to already exist in the lake, the way a gold-layer customer snapshot usually does: `s3://mbt-lake/churn_panel/*.parquet`.
 
-- One row per customer per weekly `inference_date`: every Monday from 2026-08-03 to 2026-10-05 (10 cohorts).
+- One row per customer per weekly `inference_date`: every Monday from 2026-08-03 to 2026-09-28 (9 cohorts), the lake as it stands on its as-of date 2026-09-28. There is no October cohort: that population does not exist yet.
   The model is weekly: it predicts churn in the 7 days after a cohort, and that label matures 7 days later.
 - `customer_id` + `inference_date` are the natural key (the dataset's `unique` check asserts it).
 - `is_active` is the population: a churned customer keeps its rows, marked inactive, so the dataset and the scoring input both select the population with a filter.
 - 16 named features (demographic, login, transaction), among them the numeric-coded `contract_code` (int8, 0 = month-to-month ... 3 = two-year) whose churn effect is deliberately non-monotone, and four string categoricals.
 - `f0000 .. fNNNN`: pure-noise columns, the "huge" knob. A real lake table carries hundreds of columns no model uses; the models name the 16 they read.
-- `is_churn`: churned during the 7 days after `inference_date`. NULL where no outcome is known - on inactive rows, and on the newest cohort while its outcome window is still open.
+- `is_churn`: churned during the 7 days after `inference_date`. NULL where no outcome is known - on inactive rows, and on any cohort whose outcome week has not closed by the as-of date (`outcome_known` in the generator); on 2026-09-28 that is only the newest cohort, whose week runs to 2026-10-05.
 
 Nothing about it is committed.
 `bootstrap/churn_panel.py` synthesizes it deterministically (fixed seed) straight into the lake at `make seed`, at whatever scale is asked for (`SCALE=huge` is the realistic lake shape through the same code, generated and uploaded one bounded chunk at a time).
@@ -138,9 +138,9 @@ Naming them is the reviewed decision: a column arriving upstream can never start
 
 ### 4.3 The dataset
 
-`datasets/churn_training.yml` is a slice of the one table: `filters: ["is_active = true"]`, `label: {column: is_churn, horizon: 7d}`, `sample_key: customer_id`, and a temporal split with explicit cohort boundaries (train `2026-08-03:2026-09-07`, test `2026-09-07:2026-10-05`, `embargo: 7d`).
-That is a month of training and a month of testing: the embargo trims the train window's last week, so training reads August's four cohorts (08-03 .. 08-24), the 08-31 cohort is the gap, and the test split is September's four (09-07 .. 09-28).
-Both windows end before the newest cohort (10-05), so no row with an unknown outcome is ever a training example.
+`datasets/churn_training.yml` is a slice of the one table: `filters: ["is_active = true"]`, `label: {column: is_churn, horizon: 7d}`, `sample_key: customer_id`, and a temporal split with explicit cohort boundaries (train `2026-08-03:2026-09-07`, test `2026-09-07:2026-09-28`, `embargo: 7d`).
+That is a month of training and September's labelled weeks for testing: the embargo trims the train window's last week, so training reads August's four cohorts (08-03 .. 08-24), the 08-31 cohort is the gap, and the test split is 09-07 .. 09-21 (three cohorts; 09-28 is still open).
+Both windows end before the newest cohort (09-28), so no row with an unknown outcome is ever a training or test example.
 It declares no `columns:` panel contract on purpose: the table's width is a scale knob, so an enumerated list would go stale with every reseed, and the models' include lists carry the review burden instead.
 
 ### 4.4 Scoring resource
@@ -172,7 +172,8 @@ Note: boto3's env chain is the only S3 endpoint mechanism (nothing in mbt parses
 
 ### 4.6 Anchors (the determinism spine)
 
-Every pipeline, DAG, and test pins anchors to constants: `ANCHOR=2026-10-06T00:00:00Z` (the Tuesday after the newest Monday cohort) for build and score, `MONITOR_ANCHOR=2026-10-16T00:00:00Z` (past the 7d maturity of every score the tier runs) for monitor.
+Every pipeline, DAG, and test pins anchors to constants: `ANCHOR=2026-09-29T00:00:00Z` (the Tuesday after the newest Monday cohort) for build and score, `MONITOR_ANCHOR=2026-10-09T00:00:00Z` (past the 7d maturity of every score the tier runs) for monitor.
+The monitor anchor is later than the table's as-of date (2026-09-28) on purpose: it is only meaningful after `land-outcomes`, which stands for the scored cohort's outcome week passing.
 Wall-clock anchors over fixed-date data are a time bomb: relative windows resolve empty within weeks and every unpinned pipeline rots into `split ... materialized 0 rows`.
 Airflow DAGs therefore take `--anchor` from the deploy repo (`showcase_dag_utils.py`, overridable per run through the DAG's `anchor` param), never from `{{ ts }}`.
 Anchor time travel is also what makes monitoring demoable today: `mbt monitor --anchor <maturity+>` evaluates immediately once the outcomes have landed; re-running with the same anchor evaluates nothing (exactly-once proof).
@@ -332,7 +333,7 @@ single-relation datasets are ADR-29's and the fixtures' concern, the Snowflake a
 The simplification also surfaced one mbt bug, fixed in core: a ground-truth join that met a NULL label either graded the run as "single-class" or crashed on NaN, where a table carrying a cohort's rows before its outcomes needs it to mean "not yet".
 
 **The weekly model (2026-09-27).**
-The one table's cadence moved from twelve month-start cohorts (2025-07 .. 2026-06, a one-month label, 14d maturity scored 28 days late) to a weekly model: ten Monday cohorts from 2026-08-03 to 2026-10-05, a 7d label with 7d maturity, a month of training and a month of testing, and a `7d` scoring window anchored the day after the newest cohort lands.
+The one table's cadence moved from twelve month-start cohorts (2025-07 .. 2026-06, a one-month label, 14d maturity scored 28 days late) to a weekly model: nine Monday cohorts from 2026-08-03 to 2026-09-28 (the lake as of 2026-09-28, so no October cohort and only the newest cohort's label still open), a 7d label with 7d maturity, a month of training and September's three labelled weeks of testing, and a `7d` scoring window anchored the day after the newest cohort lands.
 The churn hazard, features and acquisition rate are unchanged per step, so the per-cohort churn rate (~9-12%) and every gate floor (`pr_auc_floor: 0.2`) keep their meaning; the hermetic `test_showcase_panel.py` pins the cadence, the split and the scoring window against the generator.
 
 ## 12. Open questions
