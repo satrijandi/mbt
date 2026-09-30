@@ -37,6 +37,7 @@ nav:
       - GitOps & CI: gitops.md
       - Naming conventions: naming-conventions.md
       - Showcase: showcase.md
+      - Showcase walkthrough: showcase-walkthrough.md
       - Troubleshooting: troubleshooting.md
   - Reference:
       - Spec reference: spec-reference.md

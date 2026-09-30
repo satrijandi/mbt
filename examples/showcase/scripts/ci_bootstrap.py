@@ -23,6 +23,13 @@ Three phases, because Woodpecker needs OAuth app credentials at boot:
           {woodpecker_token, repo_id}.
   login - the dance alone, for any user: prints {woodpecker_token}. The
           test tier uses it to pin the human login path per persona.
+  protect - put promotions under review (`make protect`, walkthrough step
+          8): commit CODEOWNERS giving promotions.yml to mbtops, then protect
+          main - only mbtops pushes it, every merge needs one approval from
+          mbtops, and administrators get no override (mbtops IS one, and
+          Gitea lets administrators merge past required approvals by
+          default). Idempotent: an existing CODEOWNERS is kept and an
+          existing rule is updated to match. Prints the resulting rule.
 
 Usage:
   ci_bootstrap.py pre   --gitea-url URL --gitea-container NAME \
@@ -30,9 +37,11 @@ Usage:
   ci_bootstrap.py post  --gitea-url URL --woodpecker-url URL --gitea-token TOKEN
   ci_bootstrap.py login --gitea-url URL --woodpecker-url URL \
       --user NAME --password PASS
+  ci_bootstrap.py protect --gitea-url URL
 """
 
 import argparse
+import base64
 import json
 import re
 import shutil
@@ -401,12 +410,69 @@ def phase_post(args: argparse.Namespace) -> dict:
     return {"woodpecker_token": woodpecker_token, "repo_id": repo_id}
 
 
+CODEOWNERS = f"promotions.yml @{USER}\n"
+#: The branch rule the walkthrough's governance step describes. Gitea's API
+#: spells the approvals allowlist in the singular and the push one in the
+#: plural; a misspelling is silently dropped (see test_showcase_ci).
+PROTECTION = {
+    "branch_name": "main",
+    "enable_push": True,
+    "enable_push_whitelist": True,
+    "push_whitelist_usernames": [USER],
+    "required_approvals": 1,
+    "enable_approvals_whitelist": True,
+    "approvals_whitelist_username": [USER],
+    "block_admin_merge_override": True,
+}
+
+
+def phase_protect(args: argparse.Namespace) -> dict:
+    auth = (USER, PASSWORD)
+    repo = f"/repos/{ORG}/{REPO}"
+    if gitea_api(args.gitea_url, "GET", repo, auth=auth, ok_statuses=(404,)) is None:
+        raise SystemExit(f"{ORG}/{REPO} does not exist yet - run `make ci` first")
+    existing = gitea_api(
+        args.gitea_url, "GET", f"{repo}/contents/CODEOWNERS?ref=main", auth=auth, ok_statuses=(404,)
+    )
+    if existing is None:
+        gitea_api(
+            args.gitea_url,
+            "POST",
+            f"{repo}/contents/CODEOWNERS",
+            auth=auth,
+            payload={
+                "branch": "main",
+                "content": base64.b64encode(CODEOWNERS.encode()).decode(),
+                "message": f"ownership: promotions.yml belongs to {USER}",
+            },
+        )
+        print(f"committed CODEOWNERS: {CODEOWNERS.strip()}", file=sys.stderr)
+    else:
+        print("CODEOWNERS already on main; kept as is", file=sys.stderr)
+    rule = gitea_api(
+        args.gitea_url, "GET", f"{repo}/branch_protections/main", auth=auth, ok_statuses=(404,)
+    )
+    if rule is None:
+        rule = gitea_api(
+            args.gitea_url, "POST", f"{repo}/branch_protections", auth=auth, payload=PROTECTION
+        )
+        print("protected main", file=sys.stderr)
+    else:
+        update = {k: v for k, v in PROTECTION.items() if k != "branch_name"}
+        rule = gitea_api(
+            args.gitea_url, "PATCH", f"{repo}/branch_protections/main", auth=auth, payload=update
+        )
+        print("main was already protected; rule updated to match", file=sys.stderr)
+    assert rule is not None
+    return {key: rule.get(key) for key in PROTECTION}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=["pre", "post", "login"])
+    parser.add_argument("phase", choices=["pre", "post", "login", "protect"])
     parser.add_argument("--gitea-url", required=True)
     parser.add_argument("--gitea-container", help="pre only: gitea CLI runs via docker exec")
-    parser.add_argument("--woodpecker-url", required=True, help="browser-facing Woodpecker URL")
+    parser.add_argument("--woodpecker-url", help="browser-facing Woodpecker URL (not protect)")
     parser.add_argument("--project-dir")
     parser.add_argument(
         "--deploy-dir", default=str(Path(__file__).resolve().parent.parent / "deploy")
@@ -421,7 +487,11 @@ def main() -> int:
     parser.add_argument("--password", help="login only: the persona's password")
     args = parser.parse_args()
 
-    if args.phase == "pre":
+    if args.phase != "protect" and not args.woodpecker_url:
+        parser.error(f"{args.phase} needs --woodpecker-url")
+    if args.phase == "protect":
+        result = phase_protect(args)
+    elif args.phase == "pre":
         if not (args.project_dir and args.gitea_container):
             parser.error("pre needs --project-dir and --gitea-container")
         result = phase_pre(args)

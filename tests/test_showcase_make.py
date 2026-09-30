@@ -1,6 +1,6 @@
 """The runbook itself, exercised (SHOW-18): drive the README golden path
-through `make` exactly as a human would - up, demo, ci, score, outcomes,
-monitor, inject-drift + recovery, down, clean.
+through `make` exactly as a human would - up, demo, ci, clone, protect,
+score, outcomes, monitor, inject-drift + recovery, down, clean.
 
 Every other module tests the platform through its own harness; this one
 tests that the COMMANDS THE README TELLS A HUMAN TO TYPE still work, so the
@@ -122,6 +122,21 @@ class MakeRunner:
         return [line for line in proc.stdout.splitlines() if line]
 
 
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    # credential.helper= keeps a developer's keychain out of it: the clone's
+    # remote URL is the only credential `make clone` promises.
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "-c", "credential.helper=", *args],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if check and proc.returncode != 0:
+        pytest.fail(f"git {' '.join(args)} in {repo} exited {proc.returncode}:\n{proc.stderr}")
+    return proc
+
+
 @pytest.fixture(scope="module")
 def runbook(tmp_path_factory: pytest.TempPathFactory):
     runner = MakeRunner(tmp_path_factory.mktemp("showcase-make-ws"))
@@ -190,6 +205,38 @@ def test_runbook_golden_path(runbook) -> None:
     )
     assert login.returncode == 0, f"browser login failed:\n{login.stdout}\n{login.stderr}"
     assert json.loads(login.stdout.strip().splitlines()[-1])["woodpecker_token"]
+
+    # The walkthrough's setup targets: a working copy per persona that can
+    # push (branch pushes - no pipeline to wait for), then the governance
+    # rule, which must refuse the data scientist's direct push to main.
+    work = ws.parent / "showcase-work"
+    runner.env["SHOWCASE_WORK"] = str(work)
+    runner.make("clone")
+    runner.make("clone")  # an existing clone is left alone
+    for clone, user in ((work / "ops", GITEA_USER), (work / "ds", "mbtds")):
+        assert _git(clone, "config", "user.name").stdout.strip() == user
+        _git(clone, "checkout", "-q", "-b", f"hello-{user}")
+        _git(clone, "commit", "-q", "--allow-empty", "-m", f"{user} can push")
+        _git(clone, "push", "-q", "origin", f"hello-{user}")
+
+    runner.make("protect")
+    runner.make("protect")  # re-running resets the rule, never fails
+    api = f"http://localhost:{gitea_port}/api/v1/repos/mbt-showcase/churn"
+    auth = (GITEA_USER, GITEA_PASSWORD)
+    rule = requests.get(f"{api}/branch_protections/main", auth=auth, timeout=30).json()
+    assert rule["block_admin_merge_override"] is True, rule
+    assert rule["required_approvals"] == 1, rule
+    assert rule["approvals_whitelist_username"] == [GITEA_USER], rule
+    owners = requests.get(f"{api}/contents/CODEOWNERS?ref=main", auth=auth, timeout=30)
+    assert owners.ok, owners.status_code
+
+    ds = work / "ds"
+    _git(ds, "checkout", "-q", "main")
+    _git(ds, "pull", "-q")
+    _git(ds, "commit", "-q", "--allow-empty", "-m", "straight to main")
+    refused = _git(ds, "push", "origin", "main", check=False)
+    assert refused.returncode != 0
+    assert "protected branch" in refused.stderr, refused.stderr
 
     # The standalone targets rerun cleanly on the same anchors, from the
     # seeded table: reset, score, a week passes, monitor.

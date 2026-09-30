@@ -33,9 +33,12 @@ GITEA_PORT = $(or $(SHOWCASE_GITEA_PORT),3305)
 WOODPECKER_PORT = $(or $(SHOWCASE_WOODPECKER_PORT),8305)
 ZOT_PORT = $(or $(SHOWCASE_ZOT_PORT),15000)
 AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
+# Where `make clone` puts the walkthrough's two working copies: outside the
+# mbt checkout, so a clone never lands inside the repo that describes it.
+SHOWCASE_WORK ?= $(HOME)/showcase-work
 
 .PHONY: help image workspace up seed down clean urls demo score monitor outcomes \
-  inject-drift reset ci
+  inject-drift reset ci clone protect
 .DEFAULT_GOAL := help
 
 # The one lake table's size (bootstrap/churn_panel.py): `default` keeps every
@@ -49,6 +52,8 @@ help:
 	@echo "  make seed          (re)write the lake table; SCALE=huge for ~1.6M rows x 320 columns"
 	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
 	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
+	@echo "  make clone         clone the churn repo as mbtops (ops/) and mbtds (ds/) into SHOWCASE_WORK"
+	@echo "  make protect       CODEOWNERS + branch protection: promotions need mbtops' approval"
 	@echo "  make score         score the newest cohort with the production champion, push metrics"
 	@echo "  make outcomes      a week passes: the newest cohort's labels land in the table"
 	@echo "  make monitor       ground-truth monitoring at the pinned anchor"
@@ -131,6 +136,30 @@ ci:
 	echo "  Gitea        http://localhost:$(GITEA_PORT)  (mbtops / mbtops-showcase-password)"; \
 	echo "  Woodpecker   http://localhost:$(WOODPECKER_PORT)  (click login, use the Gitea account)"; \
 	echo "  Repo         http://localhost:$(GITEA_PORT)/mbt-showcase/churn"
+
+# The walkthrough's two working copies (docs/showcase-walkthrough.md step 3):
+# ops/ as the platform owner, ds/ as the data scientist. Credentials ride in
+# the remote URL - throwaway demo logins, so this is the lab's only honest
+# option - and each clone commits under its own persona. An existing clone is
+# left alone.
+clone:
+	@set -euo pipefail; mkdir -p $(SHOWCASE_WORK); \
+	for spec in ops:mbtops:mbtops-showcase-password ds:mbtds:mbtds-showcase-password; do \
+	  IFS=: read -r dir user pass <<< "$$spec"; dest=$(SHOWCASE_WORK)/$$dir; \
+	  if [ -d "$$dest/.git" ]; then echo "  $$dest already cloned; skipping"; continue; fi; \
+	  git clone -q "http://$$user:$$pass@localhost:$(GITEA_PORT)/mbt-showcase/churn.git" "$$dest"; \
+	  git -C "$$dest" config user.name "$$user"; \
+	  git -C "$$dest" config user.email "$$user@example.com"; \
+	  echo "  $$dest  (as $$user)"; \
+	done
+
+# Put promotions under review (walkthrough step 8): CODEOWNERS gives
+# promotions.yml to mbtops, and main's protection rule lets only mbtops push
+# it, requires one approval from mbtops per merge, and blocks the Gitea
+# administrator override. Safe to re-run.
+protect:
+	@cd $(REPO_ROOT) && uv run python examples/showcase/scripts/ci_bootstrap.py protect \
+	  --gitea-url http://localhost:$(GITEA_PORT)
 
 down:
 	$(COMPOSE) down -v --remove-orphans

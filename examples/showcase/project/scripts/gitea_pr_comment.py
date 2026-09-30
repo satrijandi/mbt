@@ -56,8 +56,10 @@ def build_body() -> str:
 
     if not results:
         return body + (
-            "No `run_results.json` produced - the build failed before execution. "
-            "Check the pipeline logs.\n"
+            "No `run_results.json` produced: mbt never executed. Either an earlier "
+            "step failed (lint-promotions rejects an unpinned `promotions.yml` "
+            "entry) or the build failed before running a node. The failing step's "
+            "log in Woodpecker says which.\n"
         )
 
     nodes = results.get("results", [])

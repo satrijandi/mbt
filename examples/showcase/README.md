@@ -5,6 +5,7 @@ The data is ONE big table that already lives in the data lake - `s3://mbt-lake/c
 Around it: SeaweedFS is the S3 data lake and artifact store, MLflow (over HTTP) is the tracking server and model registry, a standalone Spark cluster does dataset pushdown and in-executor H2O (sparkling) AutoML training, JupyterLab is the DS workbench, Gitea + Woodpecker run the state-diff CI loop with PR comments and gate-classified alerts, Zot holds the digest-pinned deployable unit and its oras provenance artifacts, Airflow (fed by git-sync from the Gitea `deploy` repo) schedules retrain/score/monitor runs of that unit, and Prometheus + Grafana observe production scoring through the Pushgateway spec documented in the tutorial.
 
 The design of record is [DESIGN.md](DESIGN.md).
+To follow it hands-on - every command, what you should see after it, and every wrong turn with its fix - use the [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/).
 
 Everything mbt-related runs inside ONE runner image (Jupyter kernel, Spark master/worker, MLflow server, every `mbt` invocation), which makes ADR-19 `env_digest` verification hold by construction.
 
@@ -44,6 +45,8 @@ cd examples/showcase
 make up        # build the runner image (first build 10-15 min), boot, generate the lake table
 make demo      # the whole lifecycle, narrated (build dev -> build prod -> promote -> score -> outcomes -> monitor)
 make ci        # seed Gitea + Woodpecker + the deploy repo: org, repos, OAuth app, activation
+make clone     # clone the churn repo as mbtops (ops/) and mbtds (ds/) into ~/showcase-work
+make protect   # CODEOWNERS + branch protection: promotions need mbtops' approval
 make down      # stop and remove containers, volumes, and the network (the workspace survives)
 make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/workspace)
 ```
@@ -87,6 +90,8 @@ What does grow with width is every full read of the table: mbt materializes ever
 ## The CI loop (make ci)
 
 `make ci` seeds Gitea with the `mbt-showcase/churn` repo (the project source, `.woodpecker/` pipelines included), creates the OAuth app, re-ups Woodpecker with the real credentials, and activates the repo - all headless (the first Woodpecker API token is minted by a scripted OAuth dance against the host-published ports - the exact flow a browser performs, thanks to Woodpecker's split-horizon URL config in the compose file).
+The [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/) is the step-by-step version of this section.
+`make ci` sets up no branch protection; `make clone` gives each persona a working copy that can push, and `make protect` makes promotions a reviewed decision.
 Then work like a user would: log into Woodpecker at `http://localhost:8305` with the Gitea account (`mbtops`/`mbtops-showcase-password`), clone `http://localhost:3305/mbt-showcase/churn`, push to main (prod-build trains the state-modified subgraph on the shared registry and republishes the `mbt-state` baseline), or open a PR (pr-check lints promotions.yml, state-diffs against the published baseline, slim-builds only `state:modified+` on the throwaway `ci` target, and posts the update-in-place `mbt build report` comment).
 One known cosmetic seam: Woodpecker's "repository" deep-links point at the in-network Gitea URL (`gitea:3000`), because that URL must stay resolvable by the CI step containers - use the printed `localhost` Gitea URL instead.
 Exit-code fidelity survives Woodpecker's binary pass/fail: `scripts/run_mbt.sh` records mbt's 1-vs-2 verdict in `target/ci_exit_class` and classifies the alert it curls to webhook-sink - exit 2 (quality) notifies the failing spec's `owner`, anything else pages on-call.
@@ -125,9 +130,9 @@ The modules (repo-root `tests/`) share one isolated compose project per session,
 - `test_showcase_k3d.py` (extra gate: `MBT_LIVE_SHOWCASE_K3D=1`, local-only) - ArgoCD core in a k3d cluster on the compose network syncs the deploy repo's `k8s/`: the CronJob lands pinned to the baked digest, an insecure-HTTP pull from zot runs the unit, a digest bump rolls the spec, and selfHeal recreates a deleted CronJob.
 - `test_showcase_lifecycle.py` - the narrative: dev build from the s3a lake registering to HTTP MLflow with S3 artifacts, sparkling training on the actual cluster, gate-verified GitOps promotion with pinned-replay idempotency and the unpinned-replay refusal, run-time champion resolution, prediction-store idempotency (same anchor overwrites, new anchor partitions), and ground-truth monitoring from the same table (the run waits while the cohort's labels are NULL, evaluates exactly once after they land, and a realized-gate breach exits 2, never 1).
 - `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules loaded, Grafana healthy, and `MbtShiftBreach` entering pending/firing on injected shift.
-- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, ci + the browser login its output instructs, reset, score, outcomes, monitor, inject-drift + recovery, down, a re-stage over the previous run's output, clean), so these documented commands cannot drift from the tested harness silently.
+- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, ci + the browser login its output instructs, clone + a push from each clone, protect + the direct push it refuses, reset, score, outcomes, monitor, inject-drift + recovery, down, a re-stage over the previous run's output, clean), so these documented commands cannot drift from the tested harness silently.
 
-Three hermetic modules keep the showcase honest in the ordinary fast suite, where the gated modules above only skip: `test_showcase_gates.py` (every gated module keeps its opt-in gate, and opting in without docker fails loudly), `test_showcase_image_pins.py` (the runner image's hand pins and extras closure agree with the declared metadata), and `test_showcase_panel.py` (the table generator is deterministic and its label, drift and reset semantics hold; every node reads the one table; ground truth joins on key and cohort; training never reaches the open cohort; every string feature is declared categorical).
+Four hermetic modules keep the showcase honest in the ordinary fast suite, where the gated modules above only skip: `test_showcase_gates.py` (every gated module keeps its opt-in gate, and opting in without docker fails loudly), `test_showcase_image_pins.py` (the runner image's hand pins and extras closure agree with the declared metadata), and `test_showcase_panel.py` (the table generator is deterministic and its label, drift and reset semantics hold; every node reads the one table; ground truth joins on key and cohort; training never reaches the open cohort; every string feature is declared categorical), and `test_showcase_walkthrough.py` (the [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/)'s accounts, ports, anchors and make targets match the stack).
 
 ## Deviations from the scaffold defaults (documented, deliberate)
 

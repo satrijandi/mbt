@@ -12,12 +12,15 @@ driven through CI, scheduling, and monitoring on a docker stack.
 From the repo root (the fixture's `profiles.yml` lives in the project dir, all local, sqlite MLflow):
 
 ```bash
-uv run mbt build --project-dir tests/fixtures/churn_demo
+uv run mbt build --anchor 2026-06-30T00:00:00Z --project-dir tests/fixtures/churn_demo
 uv run mbt docs generate --project-dir tests/fixtures/churn_demo
 uv run mbt promote --model churn_classifier --to production --project-dir tests/fixtures/churn_demo
-uv run mbt score --project-dir tests/fixtures/churn_demo
-uv run mbt monitor --project-dir tests/fixtures/churn_demo
+uv run mbt score --anchor 2026-06-30T00:00:00Z --project-dir tests/fixtures/churn_demo
+uv run mbt monitor --anchor 2026-07-31T00:00:00Z --project-dir tests/fixtures/churn_demo
 ```
+
+The anchors are pinned because the data is fixed-dated (it ends in June 2026) and the windows are relative: without `--anchor` they resolve against today and the build fails with `split 'test' materialized 0 rows`.
+Monitoring runs a month later so the scored run is past its 14-day ground-truth maturity; at the scoring anchor it finds `0 matured prediction runs to evaluate`.
 
 The pre-deploy flow (ADR-30) trains `churn_classifier_oot` with April held back, then re-checks it once May and June have labels, and promotes only on a passing verdict:
 

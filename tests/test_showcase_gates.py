@@ -28,6 +28,7 @@ HERMETIC = frozenset(
         "test_showcase_gates",
         "test_showcase_image_pins",
         "test_showcase_panel",
+        "test_showcase_walkthrough",
     }
 )
 
