@@ -35,6 +35,35 @@ def test_select_feature_columns_empty_selection_errors() -> None:
         select_feature_columns(["a", "b", "y"], spec, None)
 
 
+def test_select_feature_columns_rejects_an_include_entry_matching_nothing() -> None:
+    """A typo'd name in an explicit feature list used to drop that feature
+    silently and train on the rest; it must fail loudly instead."""
+    spec = minimal_model_spec(features={"include": ["a", "bb", "c*"]})
+    with pytest.raises(ConfigError, match=r"does not have: bb, c\*") as info:
+        select_feature_columns(["a", "b", "y"], spec, None)
+    hint = info.value.hint or ""
+    assert "the dataset's columns: a, b, y" in hint
+
+
+def test_unmatched_include_hint_suggests_close_names_on_a_wide_table() -> None:
+    """A wide table's full column list would bury the answer; name the
+    closest columns and only count the rest."""
+    columns = ["txn_cnt_30d", "txn_amt_sum_30d", *(f"f{i:04d}" for i in range(48)), "y"]
+    spec = minimal_model_spec(features={"include": ["txn_count_30d", "zzz"]})
+    with pytest.raises(ConfigError) as info:
+        select_feature_columns(columns, spec, None)
+    hint = info.value.hint or ""
+    assert "did you mean: 'txn_count_30d' -> txn_cnt_30d" in hint
+    assert "'zzz'" not in hint
+    assert "(the dataset has 51 columns)" in hint
+    assert "f0047" not in hint
+
+
+def test_select_feature_columns_tolerates_an_exclude_entry_matching_nothing() -> None:
+    spec = minimal_model_spec(features={"include": ["*"], "exclude": ["gone"]})
+    assert select_feature_columns(["a", "b", "y"], spec, None) == ["a", "b"]
+
+
 def test_read_with_explicit_columns() -> None:
     spec = minimal_model_spec()
     base = _LocatableHandle({"train": _table()}, label_column="y")

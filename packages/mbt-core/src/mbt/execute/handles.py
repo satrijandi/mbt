@@ -14,6 +14,7 @@ carves, each walk-forward fold, and scoring) goes through one code path, and
 Spark and H2O see treated data without knowing the feature exists.
 """
 
+import difflib
 from collections.abc import Callable
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -41,7 +42,23 @@ def select_feature_columns(
     spec: ModelSpec,
     time_column: str | None,
 ) -> list[str]:
-    """Apply include/exclude globs; target and time column never count as features."""
+    """Apply include/exclude globs; target and time column never count as features.
+
+    An include entry that matches no column at all is an error, never a
+    silent narrowing: a typo'd name in a reviewed feature list would
+    otherwise train a model on one feature fewer and pass every gate.
+    """
+    unmatched = [
+        pattern
+        for pattern in spec.features.include
+        if not any(fnmatchcase(c, pattern) for c in columns)
+    ]
+    if unmatched:
+        raise ConfigError(
+            f"features.include of model {spec.name!r} names column(s) the dataset "
+            f"does not have: {', '.join(unmatched)}",
+            hint=_unmatched_include_hint(unmatched, columns),
+        )
     never = {spec.target}
     if time_column:
         never.add(time_column)
@@ -62,6 +79,27 @@ def select_feature_columns(
             ),
         )
     return features
+
+
+#: Up to this many columns, the hint lists them all; a wide table gets the
+#: closest names only, since hundreds of columns would bury the answer.
+_HINT_MAX_COLUMNS = 20
+
+
+def _unmatched_include_hint(unmatched: list[str], columns: list[str]) -> str:
+    hint = "every include entry must match at least one column after transform_features"
+    guesses = [
+        f"{pattern!r} -> {', '.join(close)}"
+        for pattern in unmatched
+        if (close := difflib.get_close_matches(pattern, columns, n=3))
+    ]
+    if guesses:
+        hint += f"; did you mean: {'; '.join(guesses)}"
+    if len(columns) <= _HINT_MAX_COLUMNS:
+        hint += f"; the dataset's columns: {', '.join(columns)}"
+    else:
+        hint += f" (the dataset has {len(columns)} columns)"
+    return hint
 
 
 class TrainingSplitView:

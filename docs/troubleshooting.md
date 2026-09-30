@@ -541,6 +541,27 @@ Omit the key and mbt infers categoricals from dtype exactly as before; write it 
 `categorical: []` is the right spelling for "this model has no categoricals" and will keep failing until that is actually true.
 Declared `evaluation.slices` are not features, so a string slice column never triggers this.
 
+### `features.include of model '<name>' names column(s) the dataset does not have`
+
+**Symptom (hard error, exit 1, during the training job):**
+
+```text
+[2/2] ERROR model model.churn_demo.churn_classifier in 1.88s -
+      features.include of model 'churn_classifier' names column(s) the
+      dataset does not have: monthly_usgae
+      hint: every include entry must match at least one column after
+      transform_features; did you mean: 'monthly_usgae' -> monthly_usage;
+      the dataset's columns: user_id, snapshot_date, is_active, tenure_days,
+      monthly_usage, support_tickets, plan_type, weekly_logins,
+      signup_channel, account_status, churned_90d, upgraded_90d
+```
+
+**Why:** every entry in `features.include` - a literal name or a glob - must match at least one column the dataset delivers (after `transform_features`).
+An entry that matches nothing is almost always a typo, and before this check it was dropped silently: the model trained on one feature fewer, passed its gates, and registered, with nothing in the PR comment to say so.
+`features.exclude` stays lenient, because excluding a column that is not there is harmless.
+
+**Fix:** correct the spelling - the hint names the closest columns, and lists them all when the table has 20 or fewer - or remove the entry if the column is really gone upstream.
+
 ### `feature treatment names column(s) the model does not consume`
 
 **Symptom (hard error, exit 1, during the training job):**

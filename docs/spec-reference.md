@@ -484,7 +484,7 @@ models:
     dataset: ref('churn_training_set')
     target: churned_90d             # must equal the dataset's label.column
     features:
-      include: ["*"]                # globs over post-hook columns
+      include: ["*"]                # globs over post-hook columns; each must match one
       exclude: [user_id, email]     # target + time column always excluded
       # numeric columns pass through; string columns train as native
       # categoricals in the tree adapters (unseen levels become missing).
