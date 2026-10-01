@@ -45,6 +45,7 @@ cd examples/showcase
 make up        # build the runner image (first build 10-15 min), boot, generate the lake table
 make demo      # the whole lifecycle, narrated (build dev -> build prod -> promote -> score -> outcomes -> monitor)
 make ci        # seed Gitea + Woodpecker + the deploy repo: org, repos, OAuth app, activation
+make lifecycle # the same lifecycle as scheduled Airflow DAG runs of the pinned unit (runs make ci if needed)
 make clone     # clone the churn repo as mbtops (ops/) and mbtds (ds/) into ~/showcase-work
 make protect   # CODEOWNERS + branch protection: promotions need mbtops' approval
 make down      # stop and remove containers, volumes, and the network (the workspace survives)
@@ -52,6 +53,10 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 ```
 
 After `make ci`, pushing to main runs prod-build end to end: economy build, `mbt-state` baseline publish, deployable-unit bake to Zot (digest-pinned in the deploy repo), and oras provenance push; git-sync feeds the deploy repo's DAGs into Airflow, where `mbt_retrain`/`mbt_score`/`mbt_monitor` run the pinned unit on demand.
+
+`make lifecycle` is that loop in one command, and the answer to "does the scheduled side really run?".
+Where `make demo` runs mbt by hand inside JupyterLab, nothing here does: it bakes the first deployable unit if none is pinned yet (a commit on main, so Woodpecker's prod-build bakes it and pins its digest in the deploy repo), waits for Airflow to register the DAGs, then triggers and waits for each run in turn - `mbt_retrain` (prod target: cluster pushdown + sparkling H2O, from the pinned unit), the gate-verified promotion of what it registered, `mbt_score`, `mbt_monitor` while the newest cohort's labels are still NULL (it waits), the outcomes landing, and `mbt_monitor` again, which evaluates.
+Each step prints its Airflow run URL and the tail of the task log, which is mbt's own output from inside the unit; any run that does not end `success` stops the target with exit 1.
 
 `make up` prints every UI URL with its login (`make urls` re-prints them); a bare `make` lists the targets.
 
@@ -115,7 +120,7 @@ MBT_LIVE_SHOWCASE=1 MBT_LIVE_SHOWCASE_K3D=1 uv run pytest -q tests/test_showcase
 | Tier | Gate | Wall time (10-core laptop, image already built) | Runs in CI |
 |---|---|---|---|
 | main | `MBT_LIVE_SHOWCASE=1` | ~21 min | nightly, `live.yml` |
-| runbook | + `MBT_LIVE_SHOWCASE_MAKE=1` | ~6 min | nightly, after the main tier |
+| runbook | + `MBT_LIVE_SHOWCASE_MAKE=1` | ~15 min | nightly, after the main tier |
 | k3d + ArgoCD | + `MBT_LIVE_SHOWCASE_K3D=1` | 6-8 min | never - this is its only coverage |
 
 The first run builds the runner image (10-15 minutes) and the harness rebuilds it whenever package sources, `uv.lock` or the image inputs have moved since, so budget for that on top.
@@ -130,7 +135,7 @@ The modules (repo-root `tests/`) share one isolated compose project per session,
 - `test_showcase_k3d.py` (extra gate: `MBT_LIVE_SHOWCASE_K3D=1`, local-only) - ArgoCD core in a k3d cluster on the compose network syncs the deploy repo's `k8s/`: the CronJob lands pinned to the baked digest, an insecure-HTTP pull from zot runs the unit, a digest bump rolls the spec, and selfHeal recreates a deleted CronJob.
 - `test_showcase_lifecycle.py` - the narrative: dev build from the s3a lake registering to HTTP MLflow with S3 artifacts, sparkling training on the actual cluster, gate-verified GitOps promotion with pinned-replay idempotency and the unpinned-replay refusal, run-time champion resolution, prediction-store idempotency (same anchor overwrites, new anchor partitions), and ground-truth monitoring from the same table (the run waits while the cohort's labels are NULL, evaluates exactly once after they land, and a realized-gate breach exits 2, never 1).
 - `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules loaded, Grafana healthy, and `MbtShiftBreach` entering pending/firing on injected shift.
-- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, ci + the browser login its output instructs, clone + a push from each clone, protect + the direct push it refuses, reset, score, outcomes, monitor, inject-drift + recovery, down, a re-stage over the previous run's output, clean), so these documented commands cannot drift from the tested harness silently.
+- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, ci + the browser login its output instructs, clone + a push from each clone, protect + the direct push it refuses, lifecycle and its DAG runs, reset, score, outcomes, monitor, inject-drift + recovery, down, a re-stage over the previous run's output, clean), so these documented commands cannot drift from the tested harness silently.
 
 Four hermetic modules keep the showcase honest in the ordinary fast suite, where the gated modules above only skip: `test_showcase_gates.py` (every gated module keeps its opt-in gate, and opting in without docker fails loudly), `test_showcase_image_pins.py` (the runner image's hand pins and extras closure agree with the declared metadata), and `test_showcase_panel.py` (the table generator is deterministic and its label, drift and reset semantics hold; every node reads the one table; ground truth joins on key and cohort; training never reaches the open cohort; every string feature is declared categorical), and `test_showcase_walkthrough.py` (the [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/)'s accounts, ports, anchors and make targets match the stack).
 

@@ -50,6 +50,7 @@ cd examples/showcase
 make up        # build the runner image (first build 10-15 min), boot, generate the lake table
 make demo      # the whole lifecycle, narrated: build dev -> build prod -> promote -> score -> outcomes -> monitor
 make ci        # seed Gitea + Woodpecker: org, churn repo, OAuth app, repo activation
+make lifecycle # the same lifecycle as scheduled Airflow DAG runs: retrain -> promote -> score -> monitor
 make clone     # a working copy per persona, able to push: ~/showcase-work/ops and ds
 make protect   # CODEOWNERS + branch protection: promotions need the owner's approval
 make down      # stop and remove containers, volumes, and the network (the workspace survives)
@@ -59,6 +60,7 @@ make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/wor
 `make up` prints every UI URL with its login (JupyterLab, MLflow, Spark, the SeaweedFS lake browser, Grafana, Prometheus, Gitea, Woodpecker, Zot, Airflow).
 Start where a data scientist would: open JupyterLab and run `project/notebooks/ds_inner_loop.ipynb` top to bottom - it looks at the lake table, builds on the dev target, analyzes the run artifacts, and experiments on a hash-sampled slice without touching the committed specs; the notebook ends where the PR begins, and the make targets below are the platform side of the same story.
 `make ci` seeds the CI loop headlessly; then log into Woodpecker from the browser with the Gitea account (the compose file gives Woodpecker split-horizon URLs so the OAuth dance works from the host), clone the printed repo URL, and open a PR - Woodpecker runs the state-diff check and posts the mbt build report comment, and merges to main bake the deployable unit, pin its digest in the deploy repo, and feed the Airflow DAGs via git-sync.
+`make lifecycle` runs that scheduled side end to end in one command: it bakes the first deployable unit if none is pinned, then triggers and waits for the `mbt_retrain`, `mbt_score` and `mbt_monitor` DAG runs (with the promotion and the outcomes landing in between), each executing mbt inside the unit pinned by digest, and prints every run's Airflow URL and task log.
 `make score`, `make outcomes` and `make monitor` also work standalone, with the same pinned anchors as the demo.
 `make inject-drift` poisons the newest cohort: `mbt score` exits 2, the pushed breach fires the `MbtShiftBreach` alert in Prometheus, and `make reset score` recovers.
 The [walkthrough](showcase-walkthrough.md) takes you through all of it step by step - every command, what you should see, and every wrong turn with its fix.

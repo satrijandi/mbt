@@ -1,6 +1,6 @@
 """The runbook itself, exercised (SHOW-18): drive the README golden path
 through `make` exactly as a human would - up, demo, ci, clone, protect,
-score, outcomes, monitor, inject-drift + recovery, down, clean.
+lifecycle, score, outcomes, monitor, inject-drift + recovery, down, clean.
 
 Every other module tests the platform through its own harness; this one
 tests that the COMMANDS THE README TELLS A HUMAN TO TYPE still work, so the
@@ -237,6 +237,30 @@ def test_runbook_golden_path(runbook) -> None:
     refused = _git(ds, "push", "origin", "main", check=False)
     assert refused.returncode != 0
     assert "protected branch" in refused.stderr, refused.stderr
+
+    # The scheduled lifecycle: no unit is pinned yet (the pushes above were
+    # branches), so the target pushes to main as the owner - allowed past the
+    # protection rule - bakes the first unit, then runs every DAG in the
+    # pinned unit: retrain, score, monitor before and after the outcomes.
+    runner.make("lifecycle", timeout=3600)
+    deploy = requests.get(
+        f"http://localhost:{gitea_port}/mbt-showcase/deploy/raw/branch/main/images.env",
+        timeout=30,
+    )
+    assert "@sha256:" in deploy.text, deploy.text
+    af = f"http://localhost:{runner.env['SHOWCASE_AIRFLOW_PORT']}"
+    af_token = requests.post(
+        f"{af}/auth/token", json={"username": "admin", "password": "admin"}, timeout=60
+    ).json()["access_token"]
+    for dag_id, runs in (("mbt_retrain", 1), ("mbt_score", 1), ("mbt_monitor", 2)):
+        payload = requests.get(
+            f"{af}/api/v2/dags/{dag_id}/dagRuns",
+            headers={"Authorization": f"Bearer {af_token}"},
+            timeout=60,
+        ).json()
+        states = [run["state"] for run in payload["dag_runs"]]
+        assert states == ["success"] * runs, (dag_id, states)
+    assert list((ws / "predictions" / "retention_scores").glob("*/ground_truth.marker.json"))
 
     # The standalone targets rerun cleanly on the same anchors, from the
     # seeded table: reset, score, a week passes, monitor.

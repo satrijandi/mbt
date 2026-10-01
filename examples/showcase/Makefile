@@ -37,7 +37,7 @@ AIRFLOW_PORT = $(or $(SHOWCASE_AIRFLOW_PORT),8280)
 # mbt checkout, so a clone never lands inside the repo that describes it.
 SHOWCASE_WORK ?= $(HOME)/showcase-work
 
-.PHONY: help image workspace up seed down clean urls demo score monitor outcomes \
+.PHONY: help image workspace up seed down clean urls demo lifecycle score monitor outcomes \
   inject-drift reset ci clone protect
 .DEFAULT_GOAL := help
 
@@ -52,6 +52,8 @@ help:
 	@echo "  make seed          (re)write the lake table; SCALE=huge for ~1.6M rows x 320 columns"
 	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
 	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
+	@echo "  make lifecycle     the same lifecycle as scheduled Airflow DAG runs of the pinned unit"
+	@echo "                     (runs make ci first if needed; retrain -> promote -> score -> monitor)"
 	@echo "  make clone         clone the churn repo as mbtops (ops/) and mbtds (ds/) into SHOWCASE_WORK"
 	@echo "  make protect       CODEOWNERS + branch protection: promotions need mbtops' approval"
 	@echo "  make score         score the newest cohort with the production champion, push metrics"
@@ -198,6 +200,42 @@ demo:
 	@echo ""
 	@echo "Predictions: $(SHOWCASE_WORKSPACE)/predictions/retention_scores/"
 	@$(MAKE) urls
+
+# The same lifecycle the way production runs it: nothing by hand in Jupyter.
+# Woodpecker's prod-build bakes the deployable unit and pins its digest in the
+# deploy repo, git-sync hands the deploy repo's DAGs to Airflow, and every
+# retrain, score and monitor below is an Airflow DAG run executing mbt inside
+# that pinned unit (scripts/lifecycle.py triggers each run, waits for it, and
+# prints its task log and Airflow URL). Promotion stays a registry event, never
+# a deploy (ADR-20): the score run after it serves the new champion from the
+# same unit. `make ci` runs first when the forge has not been seeded yet.
+LIFECYCLE := cd $(REPO_ROOT) && uv run python examples/showcase/scripts/lifecycle.py
+AIRFLOW_URL = http://localhost:$(AIRFLOW_PORT)
+
+lifecycle:
+	@curl -fsS -o /dev/null http://localhost:$(GITEA_PORT)/api/v1/repos/mbt-showcase/churn 2>/dev/null \
+	  || $(MAKE) ci
+	@echo "==> [1/8] Deployable unit: prod-build baked and pinned by digest, DAGs live in Airflow"
+	@$(LIFECYCLE) unit --gitea-url http://localhost:$(GITEA_PORT) \
+	  --woodpecker-url http://localhost:$(WOODPECKER_PORT) --airflow-url $(AIRFLOW_URL)
+	@echo "==> [2/8] The newest cohort as seeded: its outcome week is still open, labels NULL"
+	$(PANEL) reset
+	@echo "==> [3/8] Airflow mbt_retrain: mbt build --target prod in the unit (cluster + sparkling H2O)"
+	@$(LIFECYCLE) run mbt_retrain --airflow-url $(AIRFLOW_URL)
+	@echo "==> [4/8] Gate-verified promotion of the retrained staging champion (a registry event)"
+	$(EXEC) mbt promote --model churn_automl --to production
+	@echo "==> [5/8] Airflow mbt_score: the newest cohort, scored by the run-time production champion"
+	@$(LIFECYCLE) run mbt_score --airflow-url $(AIRFLOW_URL)
+	@echo "==> [6/8] Airflow mbt_monitor before the outcomes land: nothing matured, so it waits"
+	@$(LIFECYCLE) run mbt_monitor --airflow-url $(AIRFLOW_URL)
+	@echo "==> [7/8] A week passes: the newest cohort's outcomes land in the same table"
+	$(PANEL) land-outcomes
+	@echo "==> [8/8] Airflow mbt_monitor: realized metrics and gates against the landed labels"
+	@$(LIFECYCLE) run mbt_monitor --airflow-url $(AIRFLOW_URL)
+	@echo ""
+	@echo "  Airflow DAG runs  $(AIRFLOW_URL)/dags  (admin / admin)"
+	@echo "  Predictions       $(SHOWCASE_WORKSPACE)/predictions/retention_scores/"
+	@echo "  Grafana           http://localhost:$${SHOWCASE_GRAFANA_PORT:-3390}  (mbt Model Health)"
 
 score:
 	$(EXEC) mbt score --target batch --anchor $(ANCHOR)
