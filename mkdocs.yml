@@ -38,6 +38,7 @@ nav:
       - Naming conventions: naming-conventions.md
       - Showcase: showcase.md
       - Showcase walkthrough: showcase-walkthrough.md
+      - Showcase lifecycle on Airflow: showcase-lifecycle.md
       - Troubleshooting: troubleshooting.md
   - Reference:
       - Spec reference: spec-reference.md

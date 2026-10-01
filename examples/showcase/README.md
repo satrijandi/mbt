@@ -57,6 +57,7 @@ After `make ci`, pushing to main runs prod-build end to end: economy build, `mbt
 `make lifecycle` is that loop in one command, and the answer to "does the scheduled side really run?".
 Where `make demo` runs mbt by hand inside JupyterLab, nothing here does: it bakes the first deployable unit if none is pinned yet (a commit on main, so Woodpecker's prod-build bakes it and pins its digest in the deploy repo), waits for Airflow to register the DAGs, then triggers and waits for each run in turn - `mbt_retrain` (prod target: cluster pushdown + sparkling H2O, from the pinned unit), the gate-verified promotion of what it registered, `mbt_score`, `mbt_monitor` while the newest cohort's labels are still NULL (it waits), the outcomes landing, and `mbt_monitor` again, which evaluates.
 Each step prints its Airflow run URL and the tail of the task log, which is mbt's own output from inside the unit; any run that does not end `success` stops the target with exit 1.
+[Showcase lifecycle on Airflow](https://satrijandi.github.io/mbt/showcase-lifecycle/) is the step-by-step page: how to reproduce it from a clean slate, what each step runs and proves, the output to expect, and which alarming-looking lines are harmless.
 
 `make up` prints every UI URL with its login (`make urls` re-prints them); a bare `make` lists the targets.
 
