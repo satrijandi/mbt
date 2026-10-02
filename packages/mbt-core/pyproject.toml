@@ -56,7 +56,12 @@ dependencies = [
     "duckdb>=1.2",
     "pyarrow>=23.0.1",  # 23.0.1 clears PYSEC-2026-113 (15.0 also carries PYSEC-2024-161)
     "PyYAML>=6.0",
-    "packaging>=23.0",
+    # 23.1, not 23.0: every virtualenv since 21.14.0 requires packaging>=23.1,
+    # and once virtualenv 21.14.5 (2026-10-02, pulled in by pre-commit)
+    # tipped the floors resolution onto it, 23.0 stopped being the version
+    # the floors job installs. Nothing in mbt needs 23.1; it is the lowest
+    # version the job can still test.
+    "packaging>=23.1",
 ]
 
 [project.urls]
