@@ -1158,6 +1158,56 @@ Whether it happens depends only on how full docker's disk is, which is why the s
 **Fix:** the showcase's compose file now pins `-master.volumeSizeLimitMB=64 -volume.max=100`, which seats every collection at any free-disk level (`tests/test_showcase_image_pins.py` holds it there); pull that change and recreate the stack with `make down && make up`, because a running SeaweedFS keeps the flags it booted with.
 For any other SeaweedFS, set the same two flags, or free docker disk space (`docker system df` shows what is reclaimable).
 
+### `ReadTimeout ... Read timed out. (read timeout=60)` fails a showcase DAG task before mbt runs
+
+**Symptom (hard error, exit 1):** a `make lifecycle` step's DAG task fails without any mbt output, because the unit container never started:
+
+```text
+--- mbt_monitor.monitor try 1 (failed) ---
+Task failed with exception
+  ReadTimeout: UnixHTTPConnectionPool(host='localhost', port=None): Read timed out. (read timeout=60)
+  ReadTimeoutError: UnixHTTPConnectionPool(host='localhost', port=None): Read timed out. (read timeout=60)
+  TimeoutError: timed out
+```
+
+When the retry hits it too, the step ends with `<dag> run <run id> ended failed: <airflow url>` and `make` reports `Error 1`.
+Before the fix below, `make lifecycle` printed only `Task failed with exception`, with no cause.
+
+**Why:** every showcase DAG task starts the pinned unit through the Docker API (`run_in_unit` in `deploy/dags/showcase_dag_utils.py`), and docker-py gives up on any API call after 60 seconds by default.
+With Spark, H2O, Airflow, Woodpecker and the rest of the stack sharing one Docker Desktop or OrbStack VM, creating the container sometimes takes longer than that, so the task failed on the client side while the daemon was still working.
+The task retries once, so it fails the run only when both tries are slow, which is why the same stack usually passes.
+
+**Fix:** `run_in_unit` now builds its client with `docker.from_env(timeout=600)`.
+The DAGs reach Airflow through the deploy repo that `make ci` seeds, so a running stack keeps the old DAG code; recreate it with `make down && make up` and then run `make lifecycle`.
+
+### The showcase's first prod-build ends `killed` and `make lifecycle` stops at step 1
+
+**Symptom (hard error, exit 1):** step 1 of `make lifecycle` pushes to main and finds the prod-build pipeline, then stops before any DAG runs.
+Before the fix below, the script crashed while polling Woodpecker:
+
+```text
+    prod-build pipeline #1: http://localhost:8305/repos/1/pipeline/1
+Traceback (most recent call last):
+  ...
+requests.exceptions.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+make: *** [lifecycle] Error 1
+```
+
+The pipeline then shows `killed` in Woodpecker, with only its `clone` step done, and the deploy repo's `images.env` keeps an empty `IMAGE=`.
+`docker logs mbt-showcase-woodpecker-agent-1` names the cause:
+
+```text
+{"level":"error","repo":"mbt-showcase/churn","pipeline":"1","workflow_id":"1","error":"backoff: permanent error (last error: rpc error: code = Unknown desc = database is locked)","message":"failed to extend workflow lease"}
+{"level":"error","repo":"mbt-showcase/churn","pipeline":"1","workflow_id":"1","error":"backoff: permanent error (last error: rpc error: code = Unknown desc = queue: task expired)","message":"server returned unexpected err while waiting for workflow to finish run"}
+```
+
+**Why:** Woodpecker keeps its state in SQLite, and its default datasource fails a write as soon as the file is busy.
+While the bake loads the stack, the agent's periodic lease extensions failed with `database is locked`; the lease expired, and the server killed the workflow.
+The same lock made the pipelines API answer with a non-JSON error body, which the polling script did not survive.
+
+**Fix:** the showcase's compose file now sets `WOODPECKER_DATABASE_DATASOURCE` with `_busy_timeout=30000&_journal_mode=WAL`, so a contended write waits and reads no longer block the lease writes, and `make lifecycle` treats a failed pipelines poll as transient and polls again.
+A running Woodpecker keeps the datasource it booted with, so recreate the stack with `make down && make up`.
+
 ## Reading the event log
 
 ### Informational event lines

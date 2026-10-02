@@ -212,3 +212,5 @@ Every DAG step prints a few lines that look alarming and are not:
 
 A real failure ends the target: the failing step prints `<dag> run <run id> ended failed: <airflow url>` and `make` reports `Error 1`.
 The task log printed just above it is the evidence; the full log is at that URL.
+A task that fails with a hard error is retried once, and the log shows every attempt: a `try 1 (failed)` followed by a `try 2 (success)` is a step that recovered, and the run is green.
+Each failed attempt prints its exception under `Task failed with exception`; the [troubleshooting runbook](troubleshooting.md#readtimeout-read-timed-out-read-timeout60-fails-a-showcase-dag-task-before-mbt-runs) covers the one seen so far.

@@ -51,7 +51,11 @@ def run_in_unit(mbt_args: list[str], *, alert_class_2_owner: bool = True) -> Non
         "MBT_PUSHGATEWAY=http://pushgateway:9091 python3 scripts/push_metrics.py . || true; "
         "exit $rc"
     )
-    client = docker.from_env()
+    # docker-py's default 60s API timeout is shorter than a container create
+    # can take on a busy daemon (Spark + H2O + the rest of the stack in one
+    # Docker Desktop/OrbStack VM): the create timed out client-side and the
+    # task failed before mbt ran. wait() below sets its own, longer timeout.
+    client = docker.from_env(timeout=600)
     container = client.containers.run(
         conf["IMAGE"],
         ["bash", "-c", wrapped],

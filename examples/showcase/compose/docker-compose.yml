@@ -203,6 +203,13 @@ services:
       WOODPECKER_ADMIN: mbtops
       WOODPECKER_GITEA: "true"
       WOODPECKER_GITEA_URL: http://gitea:3000
+      # The default sqlite datasource fails a write the moment the file is
+      # busy. Under the stack's load (a bake running Spark beside Airflow)
+      # the agent's workflow-lease extensions failed with "database is
+      # locked", the lease expired, and the server KILLED the prod-build
+      # mid-bake. WAL lets the UI/API reads run beside the lease writes, and
+      # the busy timeout makes a contended write wait instead of erroring.
+      WOODPECKER_DATABASE_DATASOURCE: /var/lib/woodpecker/woodpecker.sqlite?_busy_timeout=30000&_journal_mode=WAL
       # Placeholders until ci_bootstrap.py creates the OAuth app and the
       # stack re-ups this service with the real values (env change =>
       # compose recreates it; its sqlite state is per-session anyway).

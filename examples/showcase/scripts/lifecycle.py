@@ -62,6 +62,22 @@ def pinned_image(gitea_url: str) -> str:
     return ""
 
 
+def event_text(event: object) -> str:
+    """One task-log event as text, with the exception chain if it has one.
+
+    Airflow 3 serves each log line as a structured event (or a plain string).
+    A failure's message is just ``Task failed with exception``; the exception
+    itself rides in ``error_detail``, which printing ``event`` alone drops -
+    so a failed run printed no cause at all.
+    """
+    if not isinstance(event, dict):
+        return str(event)
+    text = str(event.get("event", event))
+    for exc in event.get("error_detail") or []:
+        text += f"\n  {exc.get('exc_type')}: {exc.get('exc_value')}"
+    return text
+
+
 def mbt_output(lines: Iterable[str]) -> list[str]:
     """The task log minus Airflow's framing and Spark's console progress bars.
 
@@ -73,7 +89,7 @@ def mbt_output(lines: Iterable[str]) -> list[str]:
     kept: list[str] = []
     in_group = False
     for raw in lines:
-        for line in raw.split("\r"):
+        for line in raw.replace("\r", "\n").split("\n"):
             if line.startswith("::group::"):
                 in_group = True
             elif line.startswith("::endgroup::"):
@@ -86,6 +102,28 @@ def mbt_output(lines: Iterable[str]) -> list[str]:
             ):
                 kept.append(line)
     return kept
+
+
+def list_pipelines(woodpecker_url: str, repo_id: int, headers: dict) -> list[dict] | None:
+    """The repo's Woodpecker pipelines, or None when this poll got no answer.
+
+    Woodpecker's SQLite store locks under the stack's load while a pipeline
+    starts ("database is locked" in its log), and the API then answers with a
+    non-JSON error body. That is a transient for a poll, not a failed bake:
+    calling ``.json()`` on it unguarded crashed `make lifecycle` mid-build.
+    """
+    try:
+        resp = requests.get(
+            f"{woodpecker_url}/api/repos/{repo_id}/pipelines", headers=headers, timeout=30
+        )
+        if resp.ok:
+            return resp.json() or []
+        reason = f"HTTP {resp.status_code}: {resp.text.strip()[:200]}"
+    except (requests.ConnectionError, requests.Timeout, ValueError) as exc:
+        # ValueError covers requests' JSONDecodeError on a 2xx non-JSON body.
+        reason = f"{type(exc).__name__}: {exc}"
+    say(f"Woodpecker did not list pipelines ({reason}); polling again")
+    return None
 
 
 class Airflow:
@@ -143,20 +181,18 @@ class Airflow:
         tis = self.api("GET", f"/dags/{dag_id}/dagRuns/{encoded}/taskInstances")
         chunks = []
         for ti in tis["task_instances"]:
-            for attempt in range(1, (ti["try_number"] or 1) + 1):
+            base = f"/dags/{dag_id}/dagRuns/{encoded}/taskInstances/{ti['task_id']}"
+            # Each attempt's own state: the task instance's is the latest
+            # try's, which labelled a failed-then-retried try 1 "success".
+            tries = self.api("GET", f"{base}/tries")["task_instances"]
+            for attempt in sorted(tries, key=lambda t: t["try_number"]):
+                number = attempt["try_number"]
                 # v2 serves structured log events: each content item is a
                 # StructuredLogMessage dict (or a plain string).
-                payload = self.api(
-                    "GET",
-                    f"/dags/{dag_id}/dagRuns/{encoded}/taskInstances/{ti['task_id']}"
-                    f"/logs/{attempt}?full_content=true",
-                )
-                lines = mbt_output(
-                    event.get("event", str(event)) if isinstance(event, dict) else str(event)
-                    for event in payload["content"]
-                )
+                payload = self.api("GET", f"{base}/logs/{number}?full_content=true")
+                lines = mbt_output(event_text(event) for event in payload["content"])
                 chunks.append(
-                    f"--- {dag_id}.{ti['task_id']} try {attempt} ({ti['state']}) ---\n"
+                    f"--- {dag_id}.{ti['task_id']} try {number} ({attempt['state']}) ---\n"
                     + "\n".join(lines)
                 )
         return "\n".join(chunks)
@@ -176,15 +212,14 @@ def phase_unit(args: argparse.Namespace) -> int:
         if not lookup.ok:
             raise SystemExit(f"{ORG}/{REPO} is not active on Woodpecker - run `make ci` first")
         repo_id = lookup.json()["id"]
-        seen = {
-            p["number"]
-            for p in requests.get(
-                f"{args.woodpecker_url}/api/repos/{repo_id}/pipelines",
-                headers=wp,
-                timeout=30,
-            ).json()
-            or []
-        }
+        end = time.time() + args.timeout
+        listed = list_pipelines(args.woodpecker_url, repo_id, wp)
+        while listed is None:
+            if time.time() >= end:
+                raise SystemExit("Woodpecker never listed the churn repo's pipelines")
+            time.sleep(10)
+            listed = list_pipelines(args.woodpecker_url, repo_id, wp)
+        seen = {p["number"] for p in listed}
 
         # A commit on main IS what a merge produces; the contents API makes
         # one without a working copy.
@@ -210,16 +245,8 @@ def phase_unit(args: argparse.Namespace) -> int:
         pipeline = None
         end = time.time() + args.timeout
         while time.time() < end:
-            fresh = [
-                p
-                for p in requests.get(
-                    f"{args.woodpecker_url}/api/repos/{repo_id}/pipelines",
-                    headers=wp,
-                    timeout=30,
-                ).json()
-                or []
-                if p["number"] not in seen and p["event"] == "push"
-            ]
+            listed = list_pipelines(args.woodpecker_url, repo_id, wp) or []
+            fresh = [p for p in listed if p["number"] not in seen and p["event"] == "push"]
             if fresh:
                 newest = max(fresh, key=lambda p: p["number"])
                 if pipeline is None:
