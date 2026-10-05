@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-lightgbm"
-version = "0.1.0"
+version = "0.2.0"
 description = "LightGBM training adapter for mbt (the extensibility proof)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
+    "mbt-adapter-base[metrics]>=0.2.0,<0.3",
     # 4.4 was the first release with macOS arm64 wheels; 4.6 is the first
     # without PYSEC-2024-231, and the floors audit gates on that.
     "lightgbm>=4.6",

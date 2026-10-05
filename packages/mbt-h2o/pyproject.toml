@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-h2o"
-version = "0.1.0"
+version = "0.2.0"
 description = "H2O AutoML training adapter for mbt (local backend + optional Sparkling Water)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
+    "mbt-adapter-base[metrics]>=0.2.0,<0.3",
     # Ceiling, not a stale pin. h2o 3.46.0.12 (2026-08-12) moved MOJO export
     # behind H2O-3 Secure, its commercial tier: `download_mojo` now raises
     # unconditionally via h2o/enterprise.py, and that is precisely what this

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-sklearn"
-version = "0.1.0"
+version = "0.2.0"
 description = "scikit-learn training adapter for mbt"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,7 +27,7 @@ dependencies = [
     # [metrics] already pulls scikit-learn, so this adapter adds no new
     # dependency to an mbt install that computes metrics at all - which is
     # every install. The floor is the same 1.5 (clears PYSEC-2024-110).
-    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
+    "mbt-adapter-base[metrics]>=0.2.0,<0.3",
     "scikit-learn>=1.5",
     "numpy>=1.26",
     # Declared even though scikit-learn already requires it: this adapter

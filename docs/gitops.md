@@ -124,10 +124,10 @@ the numerics stack (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb,
 xgboost, mlflow) to exact versions:
 
 ```text
-mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-adapter-base
-mbt-core @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-core
-mbt-xgboost @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-xgboost
-mbt-mlflow @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-mlflow
+mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-adapter-base
+mbt-core @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-core
+mbt-xgboost @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-xgboost
+mbt-mlflow @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-mlflow
 ```
 
 This keeps the training environment from floating, so the manifest's
@@ -142,4 +142,4 @@ transitive dependencies still float - a hash-verified lock needs mbt on PyPI.
     The mbt repo's `release.yml` builds that tag's wheels (and, once Trusted
     Publishing is configured, publishes them to PyPI) when a version tag is
     pushed. Once mbt is on PyPI you can switch the pins to plain versions
-    (`mbt-core==0.1.0`) and set `PIP_INDEX_URL` if an internal index serves them.
+    (`mbt-core==0.2.0`) and set `PIP_INDEX_URL` if an internal index serves them.

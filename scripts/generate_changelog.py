@@ -61,6 +61,16 @@ _DEFAULT_IMPACT = (
 #: judgement in this file that git cannot answer.
 RETRAINING_IMPACT: dict[str, str] = {
     "v0.1.0": "None - first release, so there is no prior manifest to diff against.",
+    "v0.2.0": (
+        "Full retrain, and some specs need editing first. Every model's config hash "
+        "changes (the spec models gained fields; ADR-7), so the first `state:modified` "
+        "build after upgrading retrains everything. A dataset that used `inputs:` "
+        "(multi-table joins, ADR-16/22/25) no longer parses: ADR-29 moved the join "
+        "upstream, so build the joined relation in your warehouse or dbt and point "
+        "`source:` at it. Parse now also rejects a train or validation window that "
+        "overlaps the test window and a YAML file with a duplicate key, and a build "
+        "rejects a `features.include` entry that matches no column."
+    ),
 }
 
 

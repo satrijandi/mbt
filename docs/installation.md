@@ -14,7 +14,7 @@ You install the engine plus the adapters your project names in `profiles.yml` an
 ## Choose an install path
 
 !!! note "mbt is not on PyPI yet"
-    The v0.1.0 release is published as a GitHub release with wheels attached, and PyPI publication is pending.
+    The v0.2.0 release is published as a GitHub release with wheels attached, and PyPI publication is pending.
     Until it lands, install from a release tag or from a source checkout.
     Once it does, every command below becomes a plain `pip install mbt-core mbt-xgboost mbt-mlflow`.
 
@@ -25,16 +25,16 @@ Pin every mbt package you use to the same tag, **including `mbt-adapter-base`**:
 
 ```bash
 pip install \
-  "mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-adapter-base" \
-  "mbt-core @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-core" \
-  "mbt-xgboost @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-xgboost" \
-  "mbt-mlflow @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-mlflow"
+  "mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-adapter-base" \
+  "mbt-core @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-core" \
+  "mbt-xgboost @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-xgboost" \
+  "mbt-mlflow @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-mlflow"
 ```
 
-Leave out the `mbt-adapter-base` line and pip stops with `No matching distribution found for mbt-adapter-base<0.2,>=0.1.0`.
+Leave out the `mbt-adapter-base` line and pip stops with `No matching distribution found for mbt-adapter-base<0.3,>=0.2.0`.
 
 A tag can be moved on GitHub.
-Where that matters, replace `@v0.1.0` with the commit SHA it points at; a SHA is immutable.
+Where that matters, replace `@v0.2.0` with the commit SHA it points at; a SHA is immutable.
 
 ### From a source checkout (trying mbt, contributing)
 
@@ -80,12 +80,12 @@ The scaffold's default (`mbt init`) uses the local data and compute adapters tha
 | `mbt-xgboost[onnx]` | ONNX export for programmatic callers of the adapter. `mbt build` always stores the native format |
 | `mbt-adapter-base[compliance]` | The adapter compliance test suite, for [adapter authors](adapter-authoring.md) |
 
-Extras attach to the same reference form, for example `"mbt-core[s3] @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=packages/mbt-core"`.
+Extras attach to the same reference form, for example `"mbt-core[s3] @ git+https://github.com/satrijandi/mbt@v0.2.0#subdirectory=packages/mbt-core"`.
 
 ## Verify the install
 
 ```bash
-mbt --version        # prints: mbt 0.1.0
+mbt --version        # prints: mbt 0.2.0
 mbt init demo && cd demo
 python scripts/generate_sample_data.py
 mbt parse            # exits 0: specs valid, adapters importable

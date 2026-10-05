@@ -10,10 +10,58 @@ next `state:modified` build retrains everything (ADR-7). Read that line before
 upgrading a project with expensive models.
 
 
-## Unreleased
+## v0.2.0 - 2026-10-05
 
-**Retraining impact:** Not yet assessed - assume a full retrain on the next `state:modified` build (ADR-7) until a maintainer records otherwise here.
+**Retraining impact:** Full retrain, and some specs need editing first. Every model's config hash changes (the spec models gained fields; ADR-7), so the first `state:modified` build after upgrading retrains everything. A dataset that used `inputs:` (multi-table joins, ADR-16/22/25) no longer parses: ADR-29 moved the join upstream, so build the joined relation in your warehouse or dbt and point `source:` at it. Parse now also rejects a train or validation window that overlaps the test window and a YAML file with a duplicate key, and a build rejects a `features.include` entry that matches no column.
 
+- FEEDBACK v6: mbt let overlapping splits, duplicate keys and empty selections through, and gates no test sat on
+- A virtualenv release moved the floors job off packaging 23.0
+- make lifecycle failed intermittently on Docker and Woodpecker timeouts, and printed no cause
+- make lifecycle had no page saying how to reproduce it or which of its output is harmless
+- The urllib3 bump left the runner image's extras closure pinning 2.7.0
+- Seven urllib3 and virtualenv advisories landed overnight and turned the security job red
+- The showcase scheduled retrain, score and monitor DAGs that no make target ever ran Asked to watch the retrain, score and monitor DAGs run, the showcase had no way to do it: `make demo` runs mbt by hand inside the jupyterlab container, and the only thing that ever triggered mbt_retrain, mbt_score or mbt_monitor was test_showcase_scheduling. On a fresh `make up` + `make ci` the DAGs sit in Airflow with no deployable unit pinned (images.env's IMAGE is empty until a push to main bakes one), so even a manual trigger would fail with "images.env has no IMAGE pin yet".
+- Ten PyJWT advisories landed overnight and turned the security job red
+- The showcase had a reference, a design and a test tier, but no page a user could follow
+- A typo in a model's feature list trained it on one feature fewer and every check passed
+- The showcase labelled a cohort whose outcome week had not happened yet and held an October population that does not exist
+- The showcase modelled a monthly cadence when the story to tell is a weekly model with a 7-day label
+- The showcase had grown fourteen lake tables and six targets around a lifecycle that needs one table
+- Policy kept living above the seams, so three adapters wrote out the same build and a target var could move a value past every check
+- Four review cycles asked whether mbt does the right things, and none asked whether its modules are the right shape
+- The cluster build trained a model, then went looking for it in a different H2O cluster
+- A training run said nothing about whether the model still held up after its test window
+- Every model upload in `make demo` failed because SeaweedFS sized itself by how full the docker disk was
+- Following the quickstart word for word failed at `mbt score`, and the docs had drifted in a dozen more places
+- `LOAN_APPLY_PROPENSITY_V1_0_0` does not say where the project name ends
+- The showcase never read the object store at score time, and called that a Spark limitation
+- A pyspark CVE published against the 3.5.2 floor, and only the floors job could see it
+- The warehouse plane needed a privilege the operator's role does not have
+- Three showcase breaks from ADR-29 that no tier I ran could see
+- The floors job caught an arrow call that only exists above the duckdb floor
+- The DS primer still taught the join mbt no longer does
+- Delete the join: 2,300 lines that three adapters each had to reimplement
+- The showcase restated the whole join in its scoring spec, with a comment warning what happens if it drifts
+- Moving the join upstream would have made a new feature column look exactly like a data refresh
+- The champion recorded exactly which columns it was fit on, and nothing ever read it back
+- Counting the actions still on Node 20 by reading runs.using said seven, and the real answer was ten
+- The runner was already forcing our pinned actions onto Node 24, and saying so on every run
+- The wide probe declared three of its five string columns, and only the nightly live tier could tell
+- The CI mbt stamps into every project died at its second step, and no test had ever cloned one
+- Retrain a model and MLflow showed two runs with one name, in an experiment called mbt
+- Time-anchored features had one answer in mbt, and it was to throw them away
+- The floors job found a real advisory, and the fix was already in the lock
+- Training and serving runs shared one MLflow experiment, so it filled with operations
+- The quickstart's first model failed its own gate, for every new user
+- A notebook landed unformatted, and lint-type has gone red on every push since
+- The warehouse plane had a make target but no lab bench
+- Write down how work lands on main, since the push itself checks nothing
+- A padded SNOWFLAKE_SCHEMA seeded twelve tables, then said it does not exist
+- Point .gitignore back at the artifacts this repo actually produces
+- The upstream tier was reporting my missing tags as an upstream break
+- Retire the v3 review to design-history, leaving the repo root to root documents
+- Give the changelog guards the git history they read, and stop asserting a file that moves every commit
+- Work through the FEEDBACK_v3 review end to end: every finding closed, verified, and documented
 - Answer two new advisories, and stop matching them by one spelling
 - Stop discovering editor checkpoint copies of specs
 - Compare the image closure against the committed lock, not the working tree

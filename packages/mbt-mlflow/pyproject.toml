@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-mlflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "MLflow tracking and registry adapters for mbt"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-adapter-base>=0.1.0,<0.2",
+    "mbt-adapter-base>=0.2.0,<0.3",
     # 2.16 was the first release importable in setuptools-free environments
     # (older ones import pkg_resources), and use_aliases=false still covers old
     # servers - but 2.16 carries ~30 advisories, so the floor is the first

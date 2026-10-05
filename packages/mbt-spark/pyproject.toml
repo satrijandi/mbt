@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-spark"
-version = "0.1.0"
+version = "0.2.0"
 description = "Spark adapters for mbt: lakehouse data, cluster compute, SparkML training"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,8 +27,8 @@ dependencies = [
     # [metrics] carries numpy + scikit-learn: Calibrator.fit imports sklearn and
     # _scores imports numpy, so a bare mbt-adapter-base crashes a standalone
     # `pip install mbt-spark` + `calibration:` with ModuleNotFoundError (F7).
-    "mbt-adapter-base[metrics]>=0.1.0,<0.2",
-    "mbt-core>=0.1.0,<0.2",  # compute adapter forwards job events through the bus
+    "mbt-adapter-base[metrics]>=0.2.0,<0.3",
+    "mbt-core>=0.2.0,<0.3",  # compute adapter forwards job events through the bus
     # Both majors are e2e-tested; the ceiling tracks what CI has validated.
     # The Spark-3.5 pin for Sparkling Water lives in mbt-h2o[sparkling] (ADR-17).
     #

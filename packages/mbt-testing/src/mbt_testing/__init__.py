@@ -11,7 +11,7 @@ from mbt_testing.adapters import (
 )
 from mbt_testing.data import InMemoryDataAdapter, InMemoryDataError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "FakeModel",

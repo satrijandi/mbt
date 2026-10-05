@@ -10,7 +10,7 @@ The packages are not on PyPI yet, so the quickest start is a source checkout, wh
 ```bash
 git clone https://github.com/satrijandi/mbt && cd mbt
 uv sync && source .venv/bin/activate     # puts `mbt` on PATH
-mbt --version                            # mbt 0.1.0
+mbt --version                            # mbt 0.2.0
 ```
 
 Python 3.11 through 3.14 are supported.

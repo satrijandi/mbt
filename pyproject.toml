@@ -1,6 +1,6 @@
 [project]
 name = "mbt-workspace"
-version = "0.1.0"
+version = "0.2.0"
 description = "Workspace root for the mbt monorepo (not published)"
 requires-python = ">=3.11"
 
