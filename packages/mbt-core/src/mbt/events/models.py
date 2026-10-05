@@ -249,6 +249,26 @@ class RunFinished(Event):
         )
 
 
+class CommandFailed(Event):
+    """The error a command exits with, as a JSON line (FEEDBACK v6 B-2).
+
+    Emitted only under ``--log-format json``. In text mode the CLI prints the
+    familiar ``Error: ... / hint: ...`` block instead, so that output is
+    unchanged; in JSON mode that block was the one plain-text line left in a
+    stream a strict consumer has to parse to the end.
+    """
+
+    level: Level = "error"
+    message: str = ""
+    resource: str | None = None
+    path: str | None = None
+    hint: str | None = None
+    exit_code: int = 1
+
+    def human(self) -> str:
+        return f"Error: {self.message}"
+
+
 class JobLine(Event):
     """A raw line forwarded from a training-job subprocess."""
 
@@ -265,6 +285,7 @@ __all__ = [
     "ArtifactRegistered",
     "AutoResolved",
     "CheckEvaluated",
+    "CommandFailed",
     "CompileCompleted",
     "CompileStarted",
     "DatasetMaterialized",

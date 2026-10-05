@@ -249,3 +249,21 @@ def test_register_retries_a_transient_registry_lock(
     version = registry.register(artifact, "m", {"mbt.gates_passed": "true"})
     assert version.version == "1"  # registered despite the first lock
     assert len(calls) == 2  # one locked attempt, one success
+
+
+def test_a_fresh_store_does_not_print_its_schema_setup(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """FEEDBACK v6 B-2: creating a new sqlite store printed two plain-text INFO
+    lines through mlflow's own stderr handler, so ``--log-format json`` was not
+    a JSON stream on the first run of every new environment."""
+    import logging
+
+    from mbt_mlflow.adapter import _STORE_SETUP_LOGGERS
+
+    for name in _STORE_SETUP_LOGGERS:  # as in a fresh process
+        logging.getLogger(name).setLevel(logging.NOTSET)
+    MlflowTracking({"uri": f"sqlite:///{tmp_path / 'fresh.db'}"}).prepare()
+    err = capfd.readouterr().err
+    assert "database tables" not in err, err
+    assert all(logging.getLogger(n).level == logging.WARNING for n in _STORE_SETUP_LOGGERS)

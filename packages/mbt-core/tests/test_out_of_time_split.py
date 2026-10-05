@@ -12,7 +12,15 @@ from exec_unit_helpers import DATASET_UID, make_training_job, recording_bus
 from mbt_testing.adapters import FakeTrainingAdapter
 from misc_unit_helpers import RecordingSink, make_node
 from parse_unit_helpers import error_messages
-from report_unit_helpers import MODEL_FILE, compile_demo, edit, model_evaluation, with_out_of_time
+from report_unit_helpers import (
+    DATASET_FILE,
+    MODEL_FILE,
+    SPLIT_BLOCK,
+    compile_demo,
+    edit,
+    model_evaluation,
+    with_out_of_time,
+)
 
 from mbt.adapters.local.data import LocalDataAdapter
 from mbt.adapters.registry import AdapterRegistry
@@ -62,6 +70,59 @@ def test_mixed_kind_overlap_is_caught_at_compile(
     # An absolute start orders against a relative test end only at an anchor.
     with_out_of_time(demo_project, after="2026-05-15:now")
     with pytest.raises(CompilationError, match="before the test window ends at 2026-06-01"):
+        compile_demo(demo_project, fake_registry)
+
+
+def _with_split(project: Path, split: str) -> None:
+    edit(project / DATASET_FILE, SPLIT_BLOCK, split)
+
+
+@pytest.mark.parametrize(
+    ("split", "field"),
+    [
+        ('train: "-180d:-20d"\n      test: "-28d:now"', "/split/train"),
+        (
+            'train: "-180d:-60d"\n      validation: "-70d:-40d"\n      test: "-60d:now"',
+            "/split/validation",
+        ),
+    ],
+)
+def test_a_split_sharing_rows_with_test_is_a_parse_error(
+    demo_project: Path, fake_registry: AdapterRegistry, split: str, field: str
+) -> None:
+    """FEEDBACK v6 A-2: the mirror of the after-test rule above. A two-character
+    edit put 101 rows in both train and test and every gate passed on them."""
+    _with_split(demo_project, split)
+    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
+    (issue,) = [
+        i for i in parsed.report.errors if "so the same rows would sit in both" in i.message
+    ]
+    assert issue.field_path == field
+
+
+@pytest.mark.parametrize(
+    "split",
+    [
+        'train: "-180d:-28d"\n      test: "-28d:now"',  # [start, end): touching is disjoint
+        # the embargo pulls the train tail clear of the test window
+        'train: "-180d:-20d"\n      test: "-28d:now"\n      embargo: "10d"',
+        # a validation window inside the train range is a documented layout
+        'train: "-180d:-28d"\n      validation: "-60d:-28d"\n      test: "-28d:now"',
+    ],
+)
+def test_disjoint_splits_parse_and_compile(
+    demo_project: Path, fake_registry: AdapterRegistry, split: str
+) -> None:
+    _with_split(demo_project, split)
+    compile_demo(demo_project, fake_registry)
+
+
+def test_mixed_kind_train_test_overlap_is_caught_at_compile(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    _with_split(demo_project, 'train: "2026-01-01:-20d"\n      test: "-28d:now"')
+    parse_project(demo_project, registry=fake_registry)  # parse cannot order it
+    with pytest.raises(CompilationError, match=r"split.train \(ends 2026-06-11T00:00:00Z\)"):
         compile_demo(demo_project, fake_registry)
 
 
@@ -368,3 +429,24 @@ def test_job_scores_only_the_declared_test_window(
     assert 0 < narrowed.num_rows < full
     oldest = min(narrowed.column("snapshot_date").to_pylist())
     assert oldest >= (TEST_ANCHOR - timedelta(days=7)).replace(tzinfo=None)
+
+
+def test_a_mixed_pair_that_only_overlaps_at_the_parse_anchor_waits_for_compile(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    # Ordered against the fixed parse anchor this pair overlaps, but an absolute
+    # bound against a relative one means nothing until the real anchor.
+    _with_split(demo_project, 'train: "1999-01-01:-20d"\n      test: "-28d:now"')
+    parse_project(demo_project, registry=fake_registry)
+    with pytest.raises(CompilationError, match=r"overlaps split\.test"):
+        compile_demo(demo_project, fake_registry)
+
+
+def test_an_embargo_that_eats_the_train_window_is_left_to_the_compiler(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    _with_split(demo_project, 'train: "-10d:-5d"\n      test: "-28d:now"\n      embargo: "8d"')
+    parsed = parse_project(demo_project, registry=fake_registry, raise_on_error=False)
+    assert not any("overlaps" in i.message for i in parsed.report.errors)
+    with pytest.raises(CompilationError, match="consumes the entire train window"):
+        compile_demo(demo_project, fake_registry)

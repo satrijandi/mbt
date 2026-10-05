@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from mbt.parsing.errors import ParseReport
 from mbt.utils import did_you_mean
+from mbt.yamlio import safe_load
 
 #: Top-level keys a resource YAML file may carry, mapped to resource type.
 TOP_LEVEL_KEYS = {
@@ -25,7 +26,7 @@ M = TypeVar("M", bound=BaseModel)
 def load_yaml_mapping(path: Path, rel: str, report: ParseReport) -> dict[str, Any] | None:
     """Load one YAML file as a mapping, collecting errors instead of raising."""
     try:
-        raw = yaml.safe_load(path.read_text())
+        raw = safe_load(path.read_text(), source=rel)
     except yaml.YAMLError as exc:
         report.error(f"invalid YAML: {exc}", file=rel)
         return None

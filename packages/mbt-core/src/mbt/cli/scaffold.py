@@ -9,9 +9,9 @@ from mbt.config.project import PROJECT_NAME_PATTERN
 from mbt.exceptions import ConfigError
 
 _TOKEN = "__PROJECT_NAME__"
-#: Stamped into the template's requirements pins so a scaffolded project
-#: reproduces the exact toolchain version that generated it (NFR-01).
-_VERSION_TOKEN = "__MBT_VERSION__"
+#: The git ref the template's requirements pin mbt to, so a scaffolded project
+#: reproduces the exact toolchain that generated it (NFR-01). See ``mbt_ref``.
+_REF_TOKEN = "__MBT_REF__"
 #: Replaced by exact `==` pins for the packages below, at the versions installed
 #: in the environment running `mbt init`.
 _PINS_TOKEN = "__PINNED_DEPS__"
@@ -44,6 +44,68 @@ _PINNED_PACKAGES = (
     "xgboost",
     "mlflow",
 )
+
+
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def mbt_ref(override: str | None = None) -> str:
+    """The git ref a scaffolded project's CI installs mbt from (FEEDBACK v6 A-1).
+
+    A release build pins its own tag, ``vX.Y.Z``. A development build
+    (``X.Y.Z.devN``) has no tag that contains its code: v0.1.0 pinned
+    ``v0.1.0`` for 95 commits after that tag was cut, so every project
+    scaffolded from ``main`` installed a release that could not read the
+    scaffold it shipped with. A development build therefore pins the COMMIT it
+    was installed from - ``direct_url.json``'s ``vcs_info`` for a
+    ``pip install git+...`` install, ``git rev-parse HEAD`` for an editable
+    checkout - and refuses to guess when it has neither.
+    """
+    if override:
+        return override
+    version = mbt.__version__
+    if ".dev" not in version:
+        return f"v{version}"
+    commit = _installed_commit()
+    if commit is None:
+        raise ConfigError(
+            f"this mbt is a development build ({version}) that was not installed from "
+            "git, so no tag or commit is known to contain its code",
+            hint="pass --mbt-ref <tag-or-commit> naming the mbt it should pin, or install "
+            "mbt from a release tag or a git checkout",
+        )
+    return commit
+
+
+def _installed_commit() -> str | None:
+    """The commit mbt-core was installed from, if the install recorded one."""
+    import json
+    import subprocess
+    from importlib.metadata import PackageNotFoundError, distribution
+    from urllib.parse import unquote, urlparse
+
+    try:
+        raw = distribution("mbt-core").read_text("direct_url.json")
+    except PackageNotFoundError:
+        return None
+    info = json.loads(raw) if raw else {}
+    commit = info.get("vcs_info", {}).get("commit_id")
+    if isinstance(commit, str) and _SHA_RE.fullmatch(commit):
+        return commit
+    url = info.get("url", "")
+    if not (info.get("dir_info", {}).get("editable") and url.startswith("file://")):
+        return None
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=unquote(urlparse(url).path),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return head if _SHA_RE.fullmatch(head) else None
 
 
 def _pinned_requirements() -> str:
@@ -88,7 +150,9 @@ def _walk(root: object, prefix: str = "") -> list[tuple[str, str]]:
     return out
 
 
-def scaffold_project(name: str, parent_dir: Path, *, home: Path | None = None) -> Path:
+def scaffold_project(
+    name: str, parent_dir: Path, *, home: Path | None = None, ref: str | None = None
+) -> Path:
     """Create a new project directory from the template; returns its path."""
     if not _NAME_RE.match(name):
         raise ConfigError(
@@ -104,6 +168,7 @@ def scaffold_project(name: str, parent_dir: Path, *, home: Path | None = None) -
         )
 
     template_root = files("mbt.cli") / "_scaffold"
+    pinned_ref = mbt_ref(ref)
     pins = _pinned_requirements()
     for rel, content in sorted(_walk(template_root)):
         parts = rel.split("/")
@@ -111,9 +176,7 @@ def scaffold_project(name: str, parent_dir: Path, *, home: Path | None = None) -
         target = destination.joinpath(*parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         rendered = (
-            content.replace(_TOKEN, name)
-            .replace(_VERSION_TOKEN, mbt.__version__)
-            .replace(_PINS_TOKEN, pins)
+            content.replace(_TOKEN, name).replace(_REF_TOKEN, pinned_ref).replace(_PINS_TOKEN, pins)
         )
         target.write_text(rendered)
 

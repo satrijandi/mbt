@@ -252,8 +252,27 @@ def test_wheels_install_and_run_the_quickstart(tmp_path: Path) -> None:
     home.mkdir()
     user_env = {**clean_env, "HOME": str(home)}
     mbt_cli = str(venv / "bin" / "mbt")
-    _run([mbt_cli, "init", "quickstart"], cwd=tmp_path, env=user_env)
+    if ".dev" in mbt.__version__:
+        # FEEDBACK v6 A-1: a development wheel records no commit, and no tag
+        # contains its code, so init must refuse to guess a pin...
+        refused = subprocess.run(
+            [mbt_cli, "init", "quickstart"],
+            cwd=tmp_path,
+            env=user_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert refused.returncode == 1, refused.stdout + refused.stderr
+        assert "--mbt-ref" in refused.stderr
+        # ...and take the one it is given
+        ref = "0123456789abcdef0123456789abcdef01234567"
+        _run([mbt_cli, "init", "quickstart", "--mbt-ref", ref], cwd=tmp_path, env=user_env)
+    else:
+        ref = f"v{mbt.__version__}"
+        _run([mbt_cli, "init", "quickstart"], cwd=tmp_path, env=user_env)
     project = tmp_path / "quickstart"
+    assert f"@{ref}#subdirectory=packages/mbt-core" in (project / "requirements.txt").read_text()
     assert (home / ".mbt" / "profiles.yml").is_file()  # scaffold shipped in the wheel
 
     _run(

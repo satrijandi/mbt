@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import mbt
 from mbt.exceptions import ConfigError
+from mbt.yamlio import safe_load
 
 PROJECT_FILE = "mbt_project.yml"
 
@@ -72,7 +73,7 @@ def load_project(project_dir: Path) -> ProjectConfig:
             hint="run inside an mbt project, pass --project-dir, or scaffold one with 'mbt init'",
         )
     try:
-        raw = yaml.safe_load(project_path.read_text()) or {}
+        raw = safe_load(project_path.read_text(), source=project_path) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {PROJECT_FILE}: {exc}", path=project_path) from exc
     except UnicodeDecodeError as exc:

@@ -83,6 +83,56 @@ def test_env_var_rendering_and_required_env(tmp_path: Path, monkeypatch) -> None
     assert loaded.target.artifact_store == "file:///from-env"
 
 
+def test_an_unset_variable_fails_only_the_targets_that_read_it(tmp_path: Path, monkeypatch) -> None:
+    """FEEDBACK v6 A-8: the scaffold's prod target reads ``env('MBT_DATA_ROOT')``
+    with no default, so prod fails loudly instead of training on whatever sits
+    in the checkout. The file renders as a whole, and that must not take
+    ``dev`` - which never reads the variable - down with it."""
+    monkeypatch.delenv("MBT_PROF_ROOT_ZZZ", raising=False)
+    write(
+        tmp_path / "profiles.yml",
+        """
+        demo:
+          target: dev
+          outputs:
+            dev:
+              data: {adapter: local, config: {root: .}}
+              tracking: {adapter: fake}
+              registry: {adapter: fake}
+              artifact_store: file:///a
+            prod:
+              data: {adapter: local, config: {root: "{{ env('MBT_PROF_ROOT_ZZZ') }}"}}
+              tracking: {adapter: fake}
+              registry: {adapter: fake}
+              artifact_store: file:///a
+              threads: "{{ env('MBT_PROF_THREADS_ZZZ', '2') | int }}"
+              vars: {regions: [eu, us]}
+        """,
+    )
+    assert load_profiles("demo", tmp_path).target.data.config == {"root": "."}
+    with pytest.raises(
+        ConfigError, match=r"'MBT_PROF_ROOT_ZZZ' referenced in profiles.yml is not set"
+    ):
+        load_profiles("demo", tmp_path, target_override="prod")
+    monkeypatch.setenv("MBT_PROF_ROOT_ZZZ", "/lake")
+    assert load_profiles("demo", tmp_path, target_override="prod").target.data.config == {
+        "root": "/lake"
+    }
+
+
+def test_an_unset_variable_choosing_the_target_fails_every_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("MBT_PROF_TARGET_ZZZ", raising=False)
+    write_profiles(tmp_path)
+    text = (tmp_path / "profiles.yml").read_text()
+    (tmp_path / "profiles.yml").write_text(
+        text.replace("target: dev", "target: \"{{ env('MBT_PROF_TARGET_ZZZ') }}\"")
+    )
+    with pytest.raises(ConfigError, match="MBT_PROF_TARGET_ZZZ"):
+        load_profiles("demo", tmp_path, target_override="dev")
+
+
 def test_env_rendering_tracks_required_env_without_tainting(tmp_path: Path, monkeypatch) -> None:
     """`env()` is a first-class profiles accessor, not a second-class one.
 

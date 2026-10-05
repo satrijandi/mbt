@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import networkx as nx
+import yaml
 from pydantic import BaseModel
 
 from mbt.adapters.registry import AdapterRegistry, get_registry
@@ -195,6 +196,9 @@ def parse_project(
         metrics=metrics,
         registry=registry,
         report=report,
+        broken=_broken_names(
+            raw_resources, {"dataset": datasets, "model": models, "scoring": scoring}, report
+        ),
     )
 
     # Every cross-resource invariant, from one list (A-3). The SAME list runs
@@ -269,6 +273,7 @@ def _discover_and_load(
         rel = str(path.relative_to(project_dir))
         raw = load_yaml_mapping(path, rel, report)
         if raw is None:
+            report.unreadable[rel] = _recoverable_names(path)
             continue
         check_top_level_keys(raw, rel, report)
         for key, resource_type in TOP_LEVEL_KEYS.items():
@@ -285,6 +290,50 @@ def _discover_and_load(
                     continue
                 out[resource_type].append((rel, index, entry))
     return out
+
+
+def _recoverable_names(path: Path) -> set[str]:
+    """The resource names in a file the loader rejected, where YAML can say.
+
+    A file refused for a duplicate key is otherwise well-formed, so its names
+    are still known; a file that is not YAML at all yields none.
+    """
+    from mbt.yamlio import safe_load
+
+    try:
+        raw = safe_load(path.read_text(), allow_duplicate_keys=True)
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return set()
+    if not isinstance(raw, dict):
+        return set()
+    return {
+        str(entry["name"])
+        for key in TOP_LEVEL_KEYS
+        if isinstance(raw.get(key), list)
+        for entry in raw[key]
+        if isinstance(entry, dict) and "name" in entry
+    }
+
+
+def _broken_names(
+    raw_resources: dict[str, list[tuple[str, int, dict[str, Any]]]],
+    parsed: dict[str, dict[str, Any]],
+    report: ParseReport,
+) -> set[str]:
+    """Names of resources that exist but already failed, with their own error.
+
+    A ref to one of them is not dangling: reporting it as "unknown" too made
+    one invalid model surface as two errors, the second one false (B-3).
+    """
+    broken = {name for names in report.unreadable.values() for name in names}
+    for kind, entries in raw_resources.items():
+        parsed_names = {res.name for res in parsed.get(kind, {}).values()}
+        broken |= {
+            str(raw["name"])
+            for _, _, raw in entries
+            if "name" in raw and str(raw["name"]) not in parsed_names
+        }
+    return broken
 
 
 # -- per-type parsing --------------------------------------------------------
@@ -617,7 +666,9 @@ def _link(
     metrics: dict[str, MetricSpec],
     registry: AdapterRegistry,
     report: ParseReport,
+    broken: set[str] | None = None,
 ) -> None:
+    broken = broken or set()
     dataset_by_name = {r.name: r for r in datasets.values()}
     model_by_name = {r.name: r for r in models.values()}
     scoring_by_name = {r.name: r for r in scoring.values()}
@@ -650,7 +701,9 @@ def _link(
         spec = model.spec
         assert isinstance(spec, ModelSpec)
         deps = []
-        dataset_res = _check_model_dataset_edge(spec, model, dataset_by_name, model_by_name, report)
+        dataset_res = _check_model_dataset_edge(
+            spec, model, dataset_by_name, model_by_name, report, broken
+        )
         if dataset_res is not None:
             deps.append(dataset_res.unique_id)
         for group, table in model.sources:
@@ -669,7 +722,7 @@ def _link(
         assert isinstance(sc_spec, ScoringSpec)
         deps = []
         model_res = _check_scoring_model_edge(
-            sc_spec, sc, model_by_name, dataset_by_name, scoring_by_name, report
+            sc_spec, sc, model_by_name, dataset_by_name, scoring_by_name, report, broken
         )
         if model_res is not None:
             deps.append(model_res.unique_id)
@@ -697,15 +750,27 @@ def _link(
                 or scoring_by_name.get(ref_name)
             )
             if resource is None:
+                if ref_name in broken:
+                    continue  # it exists, and its own error is reported above
                 report.error(
                     f"exposure references unknown resource ref('{ref_name}')",
                     file=exposure.path,
                     resource=exposure.unique_id,
                     field_path="/depends_on",
+                    hint=_unreadable_hint(None, report),
                 )
             else:
                 deps.append(resource.unique_id)
         exposure.depends_on = sorted(set(deps))
+
+
+def _unreadable_hint(hint: str | None, report: ParseReport) -> str | None:
+    """Point at a file that could not be read, when nothing in it could be named."""
+    unnamed = sorted(rel for rel, names in report.unreadable.items() if not names)
+    if not unnamed:
+        return hint
+    note = f"it may be declared in {', '.join(unnamed)}, which could not be read (above)"
+    return f"{hint}; {note}" if hint else note
 
 
 def _check_model_dataset_edge(
@@ -714,6 +779,7 @@ def _check_model_dataset_edge(
     dataset_by_name: dict[str, ParsedResource],
     model_by_name: dict[str, ParsedResource],
     report: ParseReport,
+    broken: set[str],
 ) -> ParsedResource | None:
     match = _REF_RE.match(spec.dataset)
     if match is None:
@@ -737,13 +803,15 @@ def _check_model_dataset_edge(
         return None
     dataset_res = dataset_by_name.get(ref_name)
     if dataset_res is None:
+        if ref_name in broken:
+            return None  # it exists, and its own error is reported above
         suggestion = did_you_mean(ref_name, sorted(dataset_by_name))
         report.error(
             f"model references unknown dataset ref('{ref_name}')",
             file=model.path,
             resource=model.unique_id,
             field_path="/dataset",
-            hint=f"did you mean {suggestion!r}?" if suggestion else None,
+            hint=_unreadable_hint(f"did you mean {suggestion!r}?" if suggestion else None, report),
         )
         return None
     # Extra refs beyond the dataset edge are rejected for clarity.
@@ -765,6 +833,7 @@ def _check_scoring_model_edge(
     dataset_by_name: dict[str, ParsedResource],
     scoring_by_name: dict[str, ParsedResource],
     report: ParseReport,
+    broken: set[str],
 ) -> ParsedResource | None:
     match = _REF_RE.match(spec.model)
     if match is None:
@@ -787,13 +856,15 @@ def _check_scoring_model_edge(
         return None
     model_res = model_by_name.get(ref_name)
     if model_res is None:
+        if ref_name in broken:
+            return None  # it exists, and its own error is reported above
         suggestion = did_you_mean(ref_name, sorted(model_by_name))
         report.error(
             f"scoring references unknown model ref('{ref_name}')",
             file=sc.path,
             resource=sc.unique_id,
             field_path="/model",
-            hint=f"did you mean {suggestion!r}?" if suggestion else None,
+            hint=_unreadable_hint(f"did you mean {suggestion!r}?" if suggestion else None, report),
         )
         return None
     for extra in sc.refs:

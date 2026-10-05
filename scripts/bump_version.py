@@ -13,6 +13,19 @@ It replaces the exact current-version string (read from the root
 once, so a stray dependency pin is never rewritten by accident. See
 CONTRIBUTING's "Releasing" section for the surrounding procedure (commit, then
 tag ``vX.Y.Z``).
+
+Two more things move in the same lockstep:
+
+- **Development versions.** ``0.3.0.dev0`` is accepted, and is what ``main``
+  carries between releases (FEEDBACK v6 A-1): ``mbt init`` stamps a release
+  build's tag into a scaffolded project's requirements, so a ``main`` that
+  still said ``0.1.0`` pinned every new project to a tag 95 commits behind the
+  scaffold it shipped. A ``.dev`` version pins the commit instead.
+- **The packages' pins on each other** (``mbt-adapter-base>=0.1.0,<0.2``).
+  They are rewritten to ``>=NEW,<NEXT_MINOR``. For a development version the
+  lower bound names the pre-release itself (``>=0.3.0.dev0,<0.4``): resolvers
+  admit a pre-release only into a range that names one, so that is what lets
+  the ``0.3.0.dev0`` packages satisfy each other.
 """
 
 import argparse
@@ -21,7 +34,9 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+VERSION_RE = re.compile(r"(?P<major>\d+)\.(?P<minor>\d+)\.\d+(?:\.dev\d+)?")
+#: A workspace package's pin on a sibling: "mbt-adapter-base[metrics]>=0.1.0,<0.2".
+_SIBLING_PIN = re.compile(r'"(mbt-[a-z0-9-]+(?:\[[^\]]*\])?)>=[^,"]+,<[^"]+"')
 
 
 def _replace_once(path: Path, old: str, new: str) -> Path:
@@ -40,8 +55,10 @@ def bump_version(root: Path, new_version: str) -> list[Path]:
     package ``__init__``). Raises ``ValueError`` on a malformed version, a
     no-op bump, or any file that does not carry the current version exactly once.
     """
-    if not VERSION_RE.fullmatch(new_version):
-        raise ValueError(f"expected an X.Y.Z version, got {new_version!r}")
+    match = VERSION_RE.fullmatch(new_version)
+    if not match:
+        raise ValueError(f"expected an X.Y.Z or X.Y.Z.devN version, got {new_version!r}")
+    next_minor = f"{match['major']}.{int(match['minor']) + 1}"
     root_pyproject = root / "pyproject.toml"
     current = tomllib.loads(root_pyproject.read_text())["project"]["version"]
     if current == new_version:
@@ -52,6 +69,11 @@ def bump_version(root: Path, new_version: str) -> list[Path]:
         _replace_once(pyproject, f'version = "{current}"', f'version = "{new_version}"')
         for pyproject in [root_pyproject, *package_pyprojects]
     ]
+    for pyproject in package_pyprojects:
+        text = pyproject.read_text()
+        pinned = _SIBLING_PIN.sub(rf'"\1>={new_version},<{next_minor}"', text)
+        if pinned != text:
+            pyproject.write_text(pinned)
     for pyproject in package_pyprojects:
         (init,) = (pyproject.parent / "src").glob("*/__init__.py")
         changed.append(
@@ -80,7 +102,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"bumped to {args.version} across {len(changed)} files:")
     for path in changed:
         print(f"  {path.relative_to(args.root)}")
-    print("\nnext: review the diff, run the suite, commit, then tag vX.Y.Z (see CONTRIBUTING).")
+    print(
+        "\nnext: `uv lock` (the lock records the workspace versions), review the diff, run "
+        "the suite, commit, then tag vX.Y.Z for a release (see CONTRIBUTING)."
+    )
     return 0
 
 

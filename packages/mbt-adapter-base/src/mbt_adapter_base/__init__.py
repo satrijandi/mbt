@@ -30,6 +30,7 @@ from mbt_adapter_base.interchange import (
     TrainingJob,
     TuningResult,
     ValidationIssue,
+    interrupted_job_result,
 )
 from mbt_adapter_base.materialization import (
     MaterializedDatasetHandle,
@@ -214,6 +215,7 @@ __all__ = [
     "TuningSpec",
     "ValidationIssue",
     "combine_snapshots",
+    "interrupted_job_result",
     "parse_time_offset",
     "retry_with_jitter",
     "write_materialization_metadata",

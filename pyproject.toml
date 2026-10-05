@@ -87,6 +87,13 @@ dev = [
     "pytest-cov>=5",
     "pip-audit>=2.7",
 ]
+# The nightly mutation tier (scripts/mutation_score.py, .github/workflows/
+# mutation.yml; FEEDBACK v6 C-1). A group of its own, not part of dev: no
+# suite imports it, so neither `uv sync` nor the floors job needs it.
+# 3.8: the first release whose source_paths/only_mutate config this uses.
+mutation = [
+    "mutmut>=3.8",
+]
 
 [tool.ruff]
 line-length = 100

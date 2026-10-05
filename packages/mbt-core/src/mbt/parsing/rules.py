@@ -29,7 +29,14 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from mbt.adapters.registry import AdapterRegistry
-from mbt.compile.windows import VALIDATION_ANCHOR, is_subrange, parse_window
+from mbt.compile.windows import (
+    VALIDATION_ANCHOR,
+    anchor_independent,
+    is_subrange,
+    overlapping_splits,
+    parse_window,
+    subtract_duration,
+)
 from mbt.config.tasks import get_task_schema
 from mbt.exceptions import ConfigError
 from mbt.parsing.errors import ParseReport
@@ -221,13 +228,13 @@ def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: Par
                 field_path=f"/split/{split_field}",
                 hint=exc.hint,
             )
+    _check_splits_disjoint(spec, parsed, rel, uid, report)
     test, after = parsed.get("test"), parsed.get(OUT_OF_TIME_SPLIT)
     if test is None or after is None:
         return
     # Anchor-independent only when both bounds are the same kind; a mixed
     # relative/absolute pair is ordered at compile time instead (ADR-30).
-    kinds = {test.end.kind, after.start.kind}
-    if not (kinds <= {"duration", "now"} or kinds == {"absolute"}):
+    if not anchor_independent(test.end, after.start):
         return
     if after.start.resolve(VALIDATION_ANCHOR) < test.end.resolve(VALIDATION_ANCHOR):
         report.error(
@@ -239,6 +246,52 @@ def _validate_dataset_windows(spec: DatasetSpec, rel: str, uid: str, report: Par
             hint="the after-test window must start where the test window ends, so no "
             "row the model was evaluated on is scored again as new",
         )
+
+
+def _check_splits_disjoint(
+    spec: DatasetSpec, parsed: dict[str, Any], rel: str, uid: str, report: ParseReport
+) -> None:
+    """No row may sit in the test split and in train or validation (FEEDBACK v6 A-2).
+
+    The mirror of the after-test rule above, which this check was missing for
+    years: ``train: "-180d:-20d"`` against ``test: "-28d:now"`` put 101 rows in
+    both splits and every gate passed on them. Checked here only when every
+    bound involved orders without an anchor; the compiler checks a mixed set
+    once the anchor resolves it. The train window is compared AFTER its
+    embargo, because the embargo is what decides which rows train.
+    """
+    resolved = {}
+    for split_field, window in parsed.items():
+        start, end = window.start.resolve(VALIDATION_ANCHOR), window.end.resolve(VALIDATION_ANCHOR)
+        if split_field == "train" and spec.split.embargo is not None:
+            end = subtract_duration(end, spec.split.embargo)
+        resolved[split_field] = (start, end)
+    for first, second in overlapping_splits(resolved):
+        pair = (parsed[first], parsed[second])
+        if not anchor_independent(*(b for w in pair for b in (w.start, w.end))):
+            continue  # a mixed pair only orders against the real anchor
+        if resolved[first][1] <= resolved[first][0]:
+            continue  # the embargo ate the window; the compiler reports that
+        report.error(
+            f"split.{first} {getattr(spec.split, first)!r} overlaps split.{second} "
+            f"{getattr(spec.split, second)!r}, so the same rows would sit in both",
+            file=rel,
+            resource=uid,
+            field_path=f"/split/{first}",
+            hint=split_overlap_hint(first, second),
+        )
+
+
+def split_overlap_hint(first: str, second: str) -> str:
+    """One hint for the parse-time and compile-time overlap errors."""
+    return (
+        f"end split.{first} where split.{second} starts (windows are [start, end), so "
+        f'train: "-180d:-28d" with test: "-28d:now" shares no row), or widen '
+        f"split.embargo until the {first} tail clears the {second} window"
+        if first == "train"
+        else f"end split.{first} where split.{second} starts, so the rows that steer "
+        f"early stopping and tuning are not the rows the gates judge"
+    )
 
 
 def _validate_split_protocol(spec: DatasetSpec, rel: str, uid: str, report: ParseReport) -> None:

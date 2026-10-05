@@ -644,6 +644,49 @@ def test_main_wraps_unexpected_errors_as_internal_error(
     assert "MBT_DEBUG=1" in err
 
 
+def test_a_failing_command_in_json_mode_ends_the_stream_with_a_json_line(
+    demo_project: Path,
+) -> None:
+    """FEEDBACK v6 B-2's mirror image: the exit error was the one plain-text
+    block left in a ``--log-format json`` stream, on every failing run."""
+    result = invoke(
+        ["build", "--project-dir", str(demo_project), "--select", "nope", "--log-format", "json"]
+    )
+    assert result.exit_code == 1, debug(result)
+    lines = [json.loads(line) for line in result.stderr.splitlines() if line.strip()]
+    failed = lines[-1]
+    assert failed["event"] == "CommandFailed" and failed["level"] == "error"
+    assert failed["message"] == "--select 'nope' matches no resource in this project"
+    assert failed["exit_code"] == 1 and failed["hint"].startswith("known resources:")
+    # text mode keeps the familiar block
+    text = invoke(["build", "--project-dir", str(demo_project), "--select", "nope"])
+    assert "Error: --select 'nope' matches no resource" in text.stderr
+
+
+def test_an_internal_error_in_json_mode_is_a_json_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mbt.cli import common
+    from mbt.cli import main as cli_main
+    from mbt.events import EventBus, JsonLinesSink, set_bus
+
+    def raise_unexpected(standalone_mode: bool = True) -> None:
+        set_bus(EventBus(sinks=[JsonLinesSink(stream=sys.stderr)]))
+        common.CONSOLE.json = True  # what --log-format json's setup_bus sets
+        raise ValueError("kaboom")
+
+    monkeypatch.delenv("MBT_DEBUG", raising=False)
+    monkeypatch.setattr(cli_main, "app", raise_unexpected)
+    monkeypatch.setattr(sys, "argv", ["mbt"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.main()
+    assert excinfo.value.code == 1
+    (line,) = capsys.readouterr().err.splitlines()
+    event = json.loads(line)
+    assert event["message"] == "Internal error: ValueError: kaboom"
+    assert "MBT_DEBUG=1" in event["hint"]
+
+
 def test_main_debug_env_reraises_unexpected_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     from mbt.cli import main as cli_main
 
@@ -665,3 +708,31 @@ def test_module_runs_main_when_executed(monkeypatch: pytest.MonkeyPatch) -> None
     with pytest.raises(SystemExit) as excinfo:
         runpy.run_module("mbt.cli.main", run_name="__main__")
     assert excinfo.value.code == 0
+
+
+def test_a_piped_table_keeps_its_node_ids_whole(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FEEDBACK v6 B-4: off a terminal Rich assumed 80 columns and printed
+    ``dataset.my_models.churn_tra...`` in exactly the CI logs these tables are
+    read in."""
+    from rich.table import Table
+
+    from mbt.cli.common import print_table
+
+    monkeypatch.delenv("COLUMNS", raising=False)
+    uid = "dataset.a_rather_long_project_name.a_rather_long_dataset_name_for_a_ci_log"
+    table = Table()
+    table.add_column("node")
+    table.add_column("detail")
+    table.add_row(uid, "pr_auc=0.4578  roc_auc=0.7789  -> a_rather_long_model_name v12")
+    print_table(table)
+    out = capsys.readouterr().out
+    assert uid in out and "…" not in out
+    assert max(len(line) for line in out.splitlines()) > 80
+
+
+def test_command_failed_reads_like_the_text_error() -> None:
+    from mbt.events.models import CommandFailed
+
+    assert CommandFailed(message="boom").human() == "Error: boom"

@@ -27,7 +27,7 @@ from mbt.dag.selector import SelectableNode, evaluate_selector
 from mbt.events import get_bus
 from mbt.events.models import ArtifactRegistered, LogMessage, NodeFinished, NodeStarted
 from mbt.events.node_log import NodeLogSink, combined_log, node_scope
-from mbt.exceptions import AdapterError, ConfigError, MbtError, StateError
+from mbt.exceptions import AdapterError, ConfigError, JobInterrupted, MbtError, StateError
 from mbt.quality.checks import SourceAccess, labeled_splits, run_checks, run_scoring_checks
 from mbt.quality.gates import all_gates_passed, evaluate_gates
 from mbt.quality.judgement import after_test_tags, gate_failure_summary, judge
@@ -205,10 +205,13 @@ class ExecutionContext:
         with self._job_handles_lock:
             self._active_job_handles.append(handle)
         try:
-            return cast(JobResult, self.compute.wait(handle))
+            result = cast(JobResult, self.compute.wait(handle))
         finally:
             with self._job_handles_lock:
                 self._active_job_handles.remove(handle)
+        if result.interrupted:
+            raise JobInterrupted(result.error or "interrupted")
+        return result
 
     def cancel_active_jobs(self) -> None:
         """Terminate in-flight job subprocesses (--fail-fast); best-effort.
@@ -316,6 +319,19 @@ def run_with_lifecycle(
             result = inner()
     except MbtError as exc:
         result = NodeResult(unique_id=uid, status="error", message=str(exc))
+    except JobInterrupted as exc:
+        bus.emit(
+            NodeFinished(
+                unique_id=uid,
+                resource_type=resource_type,
+                status="interrupted",
+                execution_time_s=time.monotonic() - started,
+                index=index,
+                total=ctx.total_nodes,
+                message=str(exc),
+            )
+        )
+        raise
     result.execution_time_s = time.monotonic() - started
     bus.emit(
         NodeFinished(

@@ -17,6 +17,7 @@ mbt [--version] <command> [options]
 | `0` | success | a build that trained, gated, and registered |
 | `1` | hard error: something is broken | an invalid spec, a missing file, an unloadable champion, a crashed job, a mistyped flag |
 | `2` | quality failure: the pipeline ran, and a verdict said no | a failing gate, check, data test, shift monitor, or realized-metric gate |
+| `130` | interrupted (Ctrl-C) | a training job in flight is reported `INTERRUPTED`, not `ERROR`, and keeps no debug payload |
 
 CI and schedulers should treat `1` as "page someone" and `2` as "review the model".
 A quality verdict is deterministic, so retrying an exit-2 run only reproduces it.
@@ -105,6 +106,8 @@ mbt build --select state:modified+ --state state/prod/latest.json
 ```
 
 `state:` methods need `--state`.
+A name, `tag:` or `resource_type:` atom that matches nothing in the project is an error (exit 1) with a did-you-mean, on `--select` and `--exclude` alike: a typo or a renamed tag must not turn a scheduled run into a green no-op.
+A selection that is legitimately empty still exits 0: `state:modified` when nothing changed, or an intersection of atoms that each match something but share nothing.
 Selection decides which models **train**; every dataset a selected model needs is materialized regardless, from cache when possible (ADR-13).
 
 ## Project setup
@@ -114,11 +117,13 @@ Selection decides which models **train**; every dataset a selected model needs i
 Scaffold a working project: example source, dataset, model, and scoring specs, `profiles.yml`, reference GitHub Actions workflows, pinned CI requirements, pre-commit and Renovate config, `CODEOWNERS`, and a sample-data generator.
 
 ```bash
-mbt init NAME [--project-dir PATH]
+mbt init NAME [--project-dir PATH] [--mbt-ref REF]
 ```
 
 `NAME` must start with a letter and contain only letters, digits, and underscores.
 The project is created in `NAME/` under `--project-dir`.
+Its `requirements.txt` pins the mbt packages to a git ref: the release tag (`vX.Y.Z`) of the mbt running `init`, or, for a development build (`X.Y.Z.devN`), the exact commit that build was installed from, because no tag contains a development build's code.
+A development build that recorded no commit (installed from a local wheel, say) refuses to guess; `--mbt-ref REF` names the tag or commit to pin explicitly, and overrides the default in every case.
 Its `profiles.yml` is also installed to `~/.mbt/profiles.yml`, for commands run outside the project: appended when that file already exists, and left alone when it already has a profile named `NAME`.
 See the [Quickstart](quickstart.md) for what to do next.
 

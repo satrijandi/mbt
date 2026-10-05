@@ -18,6 +18,7 @@ from mbt.exceptions import ConfigError, MbtError
 from mbt.execute.orchestrator import InvocationOptions
 from mbt.parsing import ParsedProject
 from mbt.secrets import redact
+from mbt.yamlio import safe_load
 
 err_console = Console(stderr=True, highlight=False)
 out_console = Console(highlight=False)
@@ -194,7 +195,7 @@ def parse_vars(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        value = yaml.safe_load(raw)
+        value = safe_load(raw, source="--vars")
     except yaml.YAMLError as exc:
         raise ConfigError(f"--vars is not valid YAML/JSON: {exc}") from exc
     if not isinstance(value, dict):
@@ -232,6 +233,7 @@ def setup_bus(ctx: CLIContext) -> None:
     import os
     import sys
 
+    CONSOLE.json = ctx.log_format == "json" and not ctx.quiet
     if ctx.quiet:
         sinks: list[Any] = [NullSink()]
     elif ctx.log_format == "json":
@@ -282,7 +284,33 @@ def _open_log_file(path: str | None) -> TextIO:
         ) from exc
 
 
+@dataclass
+class ConsoleMode:
+    """How stderr is being written for the running command."""
+
+    #: True while stderr is a JSON-lines stream (``--log-format json``), so the
+    #: exit error goes out as a ``CommandFailed`` event rather than as text.
+    json: bool = False
+
+
+CONSOLE = ConsoleMode()
+
+
 def fail(exc: MbtError) -> "typer.Exit":
+    if CONSOLE.json:
+        from mbt.events import get_bus
+        from mbt.events.models import CommandFailed
+
+        get_bus().emit(
+            CommandFailed(
+                message=exc.message,
+                resource=exc.resource,
+                path=None if exc.path is None else str(exc.path),
+                hint=exc.hint,
+                exit_code=exc.exit_code,
+            )
+        )
+        return typer.Exit(exc.exit_code)
     # Redact tainted secrets: the CLI error path is a serialization path too,
     # and AdapterError.wrap embeds raw underlying exceptions that can carry a
     # connection string or token (NFR-07 defense in depth, like the event/
@@ -344,4 +372,34 @@ def render_results_table(results: RunResults, ctx: CLIContext) -> None:
             f"{result.execution_time_s:.2f}s",
             detail,
         )
-    out_console.print(table)
+    print_table(table)
+
+
+#: Widest a non-terminal table may grow; past this a row is unreadable anyway.
+_MAX_PIPED_WIDTH = 400
+
+
+def print_table(table: Table) -> None:
+    """Print a table to stdout without truncating it where nobody can resize.
+
+    With stdout redirected - every CI log - Rich assumes 80 columns and cuts
+    node ids to ``dataset.my_models.churn_tra...`` (FEEDBACK v6 B-4), in the one
+    place these tables are most often read. Off a terminal, and unless COLUMNS
+    says otherwise, the table gets its natural width instead.
+    """
+    import os
+
+    if out_console.is_terminal or os.environ.get("COLUMNS"):
+        out_console.print(table)
+        return
+    from rich.measure import Measurement
+    from rich.segment import Segments
+
+    natural = Measurement.get(
+        out_console, out_console.options.update(max_width=_MAX_PIPED_WIDTH), table
+    ).maximum
+    width = max(out_console.width, min(natural, _MAX_PIPED_WIDTH))
+    # Rendered at that width, then printed through out_console unwrapped:
+    # Console.print clamps any width to the console's own.
+    lines = out_console.render_lines(table, out_console.options.update(width=width), new_lines=True)
+    out_console.print(Segments([seg for line in lines for seg in line]), soft_wrap=True, end="")

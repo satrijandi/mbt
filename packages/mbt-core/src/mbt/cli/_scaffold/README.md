@@ -37,18 +37,16 @@ mbt show churn_classifier
   schema names) go through `{{ env(...) }}` so they stay readable in logs.
   Never write a secret value into this file
 - `requirements.in` / `requirements.txt` - the CI install set: the four mbt
-  packages (mbt-adapter-base, mbt-core, mbt-xgboost, mbt-mlflow) at the release
-  tag `v__MBT_VERSION__`, plus the numerics stack
-  (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb, xgboost, mlflow) at the
-  exact versions the mbt install that scaffolded this project was running -
-  pinning mbt pins none of them, and they are what decides model numerics.
-  Their transitive dependencies still float and nothing is hash-verified; a real
-  lock (`uv pip compile --generate-hashes requirements.in -o requirements.txt`)
-  needs mbt on PyPI, because a git ref carries no wheel hash to record.
-  Until the `v__MBT_VERSION__` tag exists on the mbt repo,
-  `pip install -r requirements.txt` fails with
-  `git checkout -q v__MBT_VERSION__ did not run successfully` - the
-  requirements.txt header documents the pin-a-commit workaround
+  packages (mbt-adapter-base, mbt-core, mbt-xgboost, mbt-mlflow) at
+  `__MBT_REF__` (the release tag of the mbt that scaffolded this project, or
+  the exact commit when that mbt was a development build), plus the numerics
+  stack (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb, xgboost, mlflow)
+  at the exact versions the mbt install that scaffolded this project was
+  running - pinning mbt pins none of them, and they are what decides model
+  numerics. Their transitive dependencies still float and nothing is
+  hash-verified; a real lock
+  (`uv pip compile --generate-hashes requirements.in -o requirements.txt`)
+  needs mbt on PyPI, because a git ref carries no wheel hash to record
 - `.github/workflows/` - PR check, prod build, promotion, weekly + monthly
   retrain, daily scoring, weekly ground-truth monitor
 - `scripts/publish_state.sh` / `fetch_state.sh` - the durable prod-state
@@ -58,7 +56,21 @@ mbt show churn_classifier
 
 ## Repo settings this project assumes
 
-Two of them are not in any file here, so nothing in this tree can enforce them:
+None of these are in any file here, so nothing in this tree can enforce them:
+
+- **The repo variable `MBT_DATA_ROOT` points the prod target at real data.**
+  `profiles.yml`'s prod target reads `{{ env('MBT_DATA_ROOT') }}` with no
+  default, and the prod build, retrain, scoring and monitor workflows export
+  the variable from Settings -> Secrets and variables -> Actions -> Variables.
+  Until it is set every prod workflow fails with "environment variable
+  'MBT_DATA_ROOT' referenced in profiles.yml is not set" - on purpose: the
+  checkout only holds the sample data `pr_check.yml` generates, and a prod
+  model trained on it would register and score as if it were real. Point
+  `sources.yml` at your real tables (relative to that root) at the same time.
+- **The monthly retrain is off until the repo variable `MBT_MONTHLY_RETRAIN`
+  is `enabled`.** Tag a model `monthly` first: a selector that matches nothing
+  fails the run (exit 1) rather than retraining nothing behind a green
+  heartbeat.
 
 - **`CODEOWNERS` only binds once branch protection requires reviews.**
   On its own the file requests reviewers; it does not gate a merge. Turn on

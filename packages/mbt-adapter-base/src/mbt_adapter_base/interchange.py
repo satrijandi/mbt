@@ -397,6 +397,11 @@ class JobResult(_InterchangeModel):
     #: the log to the run that recorded the failure.
     tracking_run_id: str | None = None
     error: str | None = None
+    #: The job died of SIGINT - a user's Ctrl-C reaching the whole process
+    #: group - not of a fault (FEEDBACK v6 B-5). Core reports the node as
+    #: INTERRUPTED and re-raises the interrupt; there is nothing to reproduce,
+    #: so compute adapters drop the job payload instead of keeping it.
+    interrupted: bool = False
 
 
 class TestResult(_InterchangeModel):
@@ -441,3 +446,15 @@ TrialReportFn = Callable[[int, float], None]
 #: report=...)``; objectives accept the keyword and forward it to training
 #: adapters that expose ``train_with_report`` (optional, hasattr-based).
 TuningObjectiveFn = Callable[[dict[str, Any]], float]
+
+
+def interrupted_job_result(returncode: int | None) -> JobResult | None:
+    """The result for a job process that died of SIGINT, else None.
+
+    For compute adapters, which see the death only as a negative return code.
+    """
+    import signal
+
+    if returncode != -signal.SIGINT:
+        return None
+    return JobResult(status="error", interrupted=True, error="interrupted (SIGINT)")

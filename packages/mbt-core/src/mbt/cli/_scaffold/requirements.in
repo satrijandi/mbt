@@ -1,10 +1,10 @@
 # Direct toolchain dependencies for this project's CI workflows.
 #
-# The mbt packages are pinned to an mbt release tag, which is reproducible and
-# installable from a fresh checkout without a private index. A tag is MOVABLE
-# though, on GitHub included, so the immutable form is the commit SHA - swap
-# @v__MBT_VERSION__ for the SHA you scaffolded from when that matters (and it
-# is also the workaround until the tag exists; see requirements.txt's header).
+# The mbt packages are pinned to __MBT_REF__ - the mbt release tag that
+# scaffolded this project, or the exact commit when it was a development build -
+# which is reproducible and installable from a fresh checkout without a private
+# index. A tag is MOVABLE though, on GitHub included, so the immutable form is
+# the commit SHA - swap a tag for the SHA it points at when that matters.
 #
 # The block below pins the numerics stack at the exact versions the mbt install
 # that scaffolded this project was running. Pinning mbt alone pins none of them,
@@ -21,8 +21,8 @@
 # Once mbt is on PyPI, switch the four git refs to plain version pins and
 # regenerate the fully transitive, hash-verified lock:
 #   uv pip compile --generate-hashes requirements.in -o requirements.txt
-mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-adapter-base
-mbt-core @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-core
-mbt-xgboost @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-xgboost
-mbt-mlflow @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-mlflow
+mbt-adapter-base @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-adapter-base
+mbt-core @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-core
+mbt-xgboost @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-xgboost
+mbt-mlflow @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-mlflow
 __PINNED_DEPS__

@@ -64,6 +64,10 @@ the training-job subprocess, and both are recorded in the manifest's
 `required_env`. Neither ever stores its *value* in the manifest: the target
 config is kept unrendered.
 
+Without a default, an unset variable is an error, but only for the target that reads it.
+The scaffold's `prod` target reads `{{ env('MBT_DATA_ROOT') }}` with no default, so every `--target prod` command fails until it is set, while `dev`, which never reads it, is unaffected.
+A variable read outside `outputs:` (in `target:`, say) fails every target.
+
 **Pick deliberately.** Redaction is exact-substring, so it is unforgiving in
 both directions. Use `env_var()` for something that is not a secret and every
 occurrence of that string disappears from your logs, your `run_results.json`,
@@ -384,6 +388,13 @@ as `label.horizon`) reaches into the evaluation window cannot leak - set it to
 at least that horizon. It is applied in the compiler, so every data adapter
 gets the embargoed window; an embargo that consumes the whole train window is a
 compile error.
+
+**The test window shares no row with `train` or `validation`.**
+Every gate reads the test split, so a row that also trained the model, or steered its early stopping, flatters the number the gate judges.
+Windows are `[start, end)`, so `train: "-180d:-28d"` with `test: "-28d:now"` touches without overlapping and is fine; `train: "-180d:-20d"` puts eight days of rows in both and is an error.
+The train window is compared after its embargo, so widening `embargo` until the train tail clears the test window is a valid fix.
+Like the after-test rule below, parse rejects an overlap when every bound involved is relative (or every one absolute), and compile checks a mixed set once the anchor orders it.
+A `validation` window inside the train range is allowed.
 
 **The after-test window (`out_of_time`, temporal only, ADR-30)** holds the rows
 between the end of the test window and the anchor - the months a model's test

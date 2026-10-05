@@ -14,6 +14,7 @@ from core_helpers import write
 
 from mbt.cli.common import CLIContext
 from mbt.cli.inspect import clean_target_cmd, ls_cmd, show_cmd
+from mbt.dag.selector import SelectorError
 from mbt.exceptions import ConfigError
 
 ANCHOR = "2026-07-01T00:00:00Z"
@@ -118,7 +119,8 @@ def test_ls_returns_rows_with_tags_and_paths(tmp_path: Path) -> None:
 def test_ls_honours_tag_and_resource_type_selectors(tmp_path: Path) -> None:
     cli = CLIContext.enter(_project(tmp_path / "proj"))
     assert [r.name for r in ls_cmd(cli, select=["tag:core"], anchor=ANCHOR)] == ["panel"]
-    assert ls_cmd(cli, select=["tag:absent"], anchor=ANCHOR) == []
+    with pytest.raises(SelectorError, match="'tag:absent' matches no tag"):  # FEEDBACK v6 A-5
+        ls_cmd(cli, select=["tag:absent"], anchor=ANCHOR)
     types = {r.resource_type for r in ls_cmd(cli, select=["resource_type:source"], anchor=ANCHOR)}
     assert types == {"source"}
 

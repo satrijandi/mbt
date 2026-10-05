@@ -251,8 +251,26 @@ def test_duckdb_failure_becomes_an_adapter_error(tmp_path: Path) -> None:
     _write_rows(tmp_path)
     adapter = LocalDataAdapter({"root": str(tmp_path)})
     spec = _random_spec(filters=["no_such_column = 1"])
-    with pytest.raises(AdapterError, match="dataset build failed in DuckDB"):
+    with pytest.raises(AdapterError, match="dataset build failed in DuckDB") as info:
         adapter.build_dataset(spec, _ctx(adapter, _tables(), tmp_path / "target" / "bad"))
+    assert "check the dataset's filters" in (info.value.hint or "")  # a spec problem
+
+
+def test_the_spec_hint_is_kept_for_the_failures_a_spec_can_cause() -> None:
+    """FEEDBACK v6 B-1: a concurrent build's file lock and a quote in the path
+    were both reported as "check the dataset's filters"."""
+    import duckdb
+
+    from mbt.adapters.local.data import _duckdb_hint
+
+    con = duckdb.connect()
+    with pytest.raises(duckdb.Error) as parse_error:
+        con.execute("SELEC 1")
+    assert _duckdb_hint(parse_error.value, "spec hint") == "spec hint"
+    with pytest.raises(duckdb.Error) as io_error:
+        con.execute("SELECT * FROM read_parquet('/nonexistent/mbt/x.parquet')")
+    assert "could not read or write a file" in (_duckdb_hint(io_error.value, "spec hint") or "")
+    assert _duckdb_hint(duckdb.InvalidInputException("x"), "spec hint") is None
 
 
 def test_empty_temporal_split_is_an_error(tmp_path: Path) -> None:

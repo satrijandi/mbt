@@ -47,6 +47,7 @@ from mbt.execute.runners import (
 from mbt.execute.scheduler import execute_plan
 from mbt.quality.metrics import resolve_metric
 from mbt.quality.monitors import all_monitors_passed, evaluate_ground_truth_gates
+from mbt.state.lock import holds_target_lock
 from mbt_adapter_base import (
     ManifestNode,
     MetricSpec,
@@ -64,6 +65,7 @@ def _parse_ts(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+@holds_target_lock
 def run_monitor(opts: InvocationOptions, *, registry: AdapterRegistry | None = None) -> RunResults:
     """Evaluate matured prediction runs against arrived labels; never trains."""
     started_monotonic = time.monotonic()

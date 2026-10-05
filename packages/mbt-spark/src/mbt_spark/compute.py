@@ -23,7 +23,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from mbt_adapter_base import JobResult, TrainingJob
+from mbt_adapter_base import JobResult, TrainingJob, interrupted_job_result
 
 
 @dataclass
@@ -128,6 +128,11 @@ class SparkComputeAdapter:
             if result.status != "error":
                 shutil.rmtree(handle.job_path.parent, ignore_errors=True)
             return result
+        interrupted = interrupted_job_result(returncode)
+        if interrupted is not None:
+            # A user's Ctrl-C, not a fault: nothing to reproduce (B-5).
+            shutil.rmtree(handle.job_path.parent, ignore_errors=True)
+            return interrupted
         if handle.terminated_reason is not None:
             return JobResult(
                 status="error",

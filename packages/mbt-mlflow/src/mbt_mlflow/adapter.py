@@ -182,6 +182,22 @@ def _experiment_name(config: dict[str, Any]) -> str:
     return declared
 
 
+#: Loggers that announce a tracking store's schema setup at INFO, straight to
+#: stderr through mlflow's own handler (FEEDBACK v6 B-2). On the first run of
+#: every new environment they put "Creating initial MLflow database tables..."
+#: and "Updating database tables" between mbt's events, so ``--log-format
+#: json`` stopped being a JSON stream exactly when someone was setting it up.
+#: A migration that FAILS still raises, and warnings still surface.
+_STORE_SETUP_LOGGERS = ("mlflow.store.db.utils", "alembic")
+
+
+def _quiet_store_setup() -> None:
+    import logging
+
+    for name in _STORE_SETUP_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 class _MlflowBase:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
@@ -193,6 +209,8 @@ class _MlflowBase:
         if self._client is None:
             from mlflow.tracking import MlflowClient
 
+            # After the import: mlflow configures its loggers when imported.
+            _quiet_store_setup()
             self._client = MlflowClient(tracking_uri=self.uri, registry_uri=self.uri)
         return self._client
 

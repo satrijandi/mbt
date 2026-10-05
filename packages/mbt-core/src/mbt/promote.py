@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from mbt.events import get_bus
 from mbt.events.models import LogMessage, PromotionApplied
 from mbt.exceptions import ConfigError, StateError
+from mbt.yamlio import safe_load
 from mbt_adapter_base import (
     ModelVersion,
     Stage,
@@ -45,7 +46,7 @@ def load_promotions_file(path: Path) -> list[PromotionEntry]:
     if not path.is_file():
         raise ConfigError(f"promotions file not found: {path}")
     try:
-        payload = yaml.safe_load(path.read_text()) or {}
+        payload = safe_load(path.read_text(), source=path) or {}
         return PromotionsFile.model_validate(payload).promotions
     except (yaml.YAMLError, ValidationError) as exc:
         raise ConfigError(

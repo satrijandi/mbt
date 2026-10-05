@@ -29,7 +29,8 @@ def _fake_workspace(root: Path, version: str = "0.1.0") -> None:
         src.mkdir(parents=True)
         (root / "packages" / pkg / "pyproject.toml").write_text(
             f'[project]\nname = "{pkg}"\nversion = "{version}"\n'
-            'dependencies = ["numpy>=1.0"]\n'  # a version pin that must NOT be rewritten
+            'dependencies = ["numpy>=1.0",'  # a version pin that must NOT be rewritten
+            ' "mbt-adapter-base[metrics]>=0.1.0,<0.2"]\n'  # a sibling pin that MUST move
         )
         (src / "__init__.py").write_text(f'__version__ = "{version}"\n')
 
@@ -49,9 +50,32 @@ def test_bump_updates_every_version_string_in_lockstep(tmp_path: Path) -> None:
     assert "numpy>=1.0" in (tmp_path / "packages" / "mbt-core" / "pyproject.toml").read_text()
 
 
+def test_sibling_pins_move_with_the_version(tmp_path: Path) -> None:
+    _fake_workspace(tmp_path)
+    bump_version.bump_version(tmp_path, "0.2.0")
+    text = (tmp_path / "packages" / "mbt-core" / "pyproject.toml").read_text()
+    assert '"mbt-adapter-base[metrics]>=0.2.0,<0.3"' in text
+
+
+def test_a_development_version_pins_its_siblings_to_the_pre_release(tmp_path: Path) -> None:
+    """FEEDBACK v6 A-1: main carries X.Y.Z.devN between releases, so mbt init
+    pins the commit rather than a tag that does not contain the code."""
+    _fake_workspace(tmp_path, version="0.2.0")
+    (tmp_path / "packages" / "mbt-core" / "pyproject.toml").write_text(
+        '[project]\nname = "mbt-core"\nversion = "0.2.0"\n'
+        'dependencies = ["mbt-adapter-base>=0.2.0,<0.3"]\n'
+    )
+    bump_version.bump_version(tmp_path, "0.3.0.dev0")
+    core = tomllib.loads((tmp_path / "packages" / "mbt-core" / "pyproject.toml").read_text())
+    assert core["project"]["version"] == "0.3.0.dev0"
+    assert core["project"]["dependencies"] == ["mbt-adapter-base>=0.3.0.dev0,<0.4"]
+    init = tmp_path / "packages" / "mbt-core" / "src" / "mbt" / "__init__.py"
+    assert init.read_text() == '__version__ = "0.3.0.dev0"\n'
+
+
 def test_bump_rejects_malformed_version(tmp_path: Path) -> None:
     _fake_workspace(tmp_path)
-    with pytest.raises(ValueError, match=r"X\.Y\.Z"):
+    with pytest.raises(ValueError, match=r"X\.Y\.Z or X\.Y\.Z\.devN"):
         bump_version.bump_version(tmp_path, "v0.2")
 
 

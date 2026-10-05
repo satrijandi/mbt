@@ -70,6 +70,7 @@ def select_feature_columns(
     features = [
         c for c in included if not any(fnmatchcase(c, pattern) for pattern in spec.features.exclude)
     ]
+    _check_exclude_typos(spec, columns, features)
     if not features:
         raise ConfigError(
             f"feature selection left no columns for model {spec.name!r}",
@@ -79,6 +80,34 @@ def select_feature_columns(
             ),
         )
     return features
+
+
+def _check_exclude_typos(spec: ModelSpec, columns: list[str], features: list[str]) -> None:
+    """An exclude entry that misses by a typo is an error (FEEDBACK v6 A-3).
+
+    Exclude stays lenient where that is right: an entry naming a column that is
+    genuinely gone excludes nothing and costs nothing, so it is not an error.
+    The case that is NOT harmless is ``exclude: [user_idd]`` beside a
+    ``user_id`` column - the guard the reviewer read is not the guard that ran,
+    and the column it was written to keep out trains the model. So an entry
+    that matches no column but closely matches a column that would otherwise
+    be a FEATURE fails, with the same difflib match the include hint uses.
+    Globs are skipped: a wildcard pattern is not a misspelling of one name.
+    """
+    suspects = [
+        f"{pattern!r} (did you mean {', '.join(repr(c) for c in close)}?)"
+        for pattern in spec.features.exclude
+        if not any(char in pattern for char in "*?[")
+        and not any(fnmatchcase(c, pattern) for c in columns)
+        and (close := difflib.get_close_matches(pattern, features, n=3))
+    ]
+    if suspects:
+        raise ConfigError(
+            f"features.exclude of model {spec.name!r} names column(s) the dataset does "
+            f"not have, each close to a column that is being trained on: {'; '.join(suspects)}",
+            hint="fix the spelling so the column is really excluded, or remove the entry "
+            "if the column it named is gone",
+        )
 
 
 #: Up to this many columns, the hint lists them all; a wide table gets the

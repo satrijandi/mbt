@@ -162,6 +162,29 @@ def test_failing_gate_blocks_registration_exit_2(
     assert not (registry_dir / "churn_model.json").exists()
 
 
+def test_a_stability_breach_blocks_registration_with_every_gate_green(
+    demo_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """FEEDBACK v6 C-1, mutant J1: ``judge`` ANDs the gates with the declared
+    ``evaluation.stability`` monitors, and deleting the stability half survived
+    all 1853 fast tests - a model whose stability breached would register."""
+    from report_unit_helpers import MODEL_FILE, edit, reporting_project
+
+    reporting_project(demo_project)
+    edit(
+        demo_project / MODEL_FILE,
+        "prediction_shift: {method: psi, threshold: 50}",
+        "prediction_shift: {method: psi, threshold: 0.000001}",
+    )
+    results = invoke(demo_project, fake_registry)
+    assert results.exit_code() == 2
+    model = {r.unique_id: r for r in results.results}[MODEL]
+    assert model.gates and all(g.passed for g in model.gates)  # only stability said no
+    assert model.status == "gate_failed"
+    assert model.registration is None
+    assert not (demo_project / "target/fake_registry/churn_model.json").exists()
+
+
 def test_champion_challenger_gate(demo_project: Path, fake_registry: AdapterRegistry) -> None:
     # 1) bootstrap: champion gate passes with a warning when none exists
     model_yml = demo_project / "models/churn_model.yml"

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import mbt
-from mbt.cli.scaffold import scaffold_project
+from mbt.cli.scaffold import mbt_ref, scaffold_project
 from mbt.exceptions import ConfigError
 
 
@@ -23,8 +23,8 @@ def test_scaffold_creates_project_and_home_profiles(tmp_path: Path) -> None:
     assert "__PROJECT_NAME__" not in project_text
     assert "churn_models" in project_text
     pins = (destination / "requirements.in").read_text()
-    assert "__MBT_VERSION__" not in pins
-    assert mbt.__version__ in pins
+    assert "__MBT_REF__" not in pins
+    assert f"@{mbt_ref()}#subdirectory=packages/mbt-core" in pins
 
     # profiles installed into <home>/.mbt verbatim (TSD §18)
     home_profiles = home / ".mbt" / "profiles.yml"
@@ -106,3 +106,103 @@ def test_scaffold_pins_installed_packages_and_skips_absent_ones(
         assert f"duckdb=={version('duckdb')}" in pins
         assert "no-such-package-anywhere" not in pins
         assert "__PINNED_DEPS__" not in pins
+
+
+# -- the ref a scaffolded project pins (FEEDBACK v6 A-1) -----------------------------
+
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+class _Dist:
+    def __init__(self, direct_url: str | None) -> None:
+        self._direct_url = direct_url
+
+    def read_text(self, name: str) -> str | None:
+        assert name == "direct_url.json"
+        return self._direct_url
+
+
+def _installed(monkeypatch, version: str, direct_url: str | None) -> None:
+    import importlib.metadata
+
+    monkeypatch.setattr(mbt, "__version__", version)
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: _Dist(direct_url))
+
+
+def test_a_release_pins_its_own_tag(monkeypatch) -> None:
+    _installed(monkeypatch, "0.2.0", None)
+    assert mbt_ref() == "v0.2.0"
+
+
+def test_a_development_build_installed_from_git_pins_that_commit(monkeypatch) -> None:
+    """v0.1.0 pinned its tag for 95 commits after the tag was cut, so every
+    project scaffolded from main installed code that could not read its own
+    scaffold. A development build has no tag; it pins the commit instead."""
+    url = (
+        '{"url": "https://github.com/satrijandi/mbt", '
+        f'"vcs_info": {{"vcs": "git", "commit_id": "{SHA}"}}}}'
+    )
+    _installed(monkeypatch, "0.3.0.dev0", url)
+    assert mbt_ref() == SHA
+
+
+def test_an_editable_development_checkout_pins_its_head(monkeypatch, tmp_path: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=t@e",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    url = f'{{"url": "file://{tmp_path}", "dir_info": {{"editable": true}}}}'
+    _installed(monkeypatch, "0.3.0.dev0", url)
+    assert mbt_ref() == head
+
+
+@pytest.mark.parametrize(
+    "direct_url",
+    [
+        None,  # a plain wheel install records nothing
+        '{"url": "file:///tmp/mbt_core-0.3.0.dev0-py3-none-any.whl", "archive_info": {}}',
+        '{"url": "file:///nonexistent/checkout", "dir_info": {"editable": true}}',
+    ],
+)
+def test_a_development_build_with_no_known_commit_refuses_to_guess(
+    monkeypatch, direct_url: str | None
+) -> None:
+    _installed(monkeypatch, "0.3.0.dev0", direct_url)
+    with pytest.raises(ConfigError, match=r"development build \(0.3.0.dev0\)") as info:
+        mbt_ref()
+    assert "--mbt-ref" in (info.value.hint or "")
+    assert mbt_ref("v0.2.0") == "v0.2.0"  # the escape hatch
+
+
+def test_a_development_build_without_mbt_core_metadata_refuses_to_guess(monkeypatch) -> None:
+    import importlib.metadata
+
+    def missing(name: str) -> None:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(mbt, "__version__", "0.3.0.dev0")
+    monkeypatch.setattr(importlib.metadata, "distribution", missing)
+    with pytest.raises(ConfigError, match="development build"):
+        mbt_ref()

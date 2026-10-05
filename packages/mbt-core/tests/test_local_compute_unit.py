@@ -128,6 +128,24 @@ def test_wait_keeps_the_payload_dir_of_errored_jobs(
     assert job_path.parent.is_dir()  # kept for debugging
 
 
+def test_a_job_killed_by_ctrl_c_is_interrupted_and_leaves_no_payload(
+    tmp_path: Path, recording_bus: RecordingSink
+) -> None:
+    """FEEDBACK v6 B-5: Ctrl-C reaches the job's process group too, and its
+    death by SIGINT read as "exited with code -2 ... job payload kept at".
+    There is nothing to reproduce, so nothing is kept."""
+    import signal
+
+    job_path = _job_dir(tmp_path) / "job.json"
+    handle = LocalJobHandle(
+        job_id="local-int", process=_FakeProcess([], returncode=-signal.SIGINT), job_path=job_path
+    )
+    result = LocalComputeAdapter().wait(handle)
+    assert result.interrupted and result.status == "error"
+    assert result.error == "interrupted (SIGINT)"
+    assert not job_path.parent.exists()
+
+
 def test_wait_wraps_an_unreadable_result_file(tmp_path: Path, recording_bus: RecordingSink) -> None:
     job_path = tmp_path / "job.json"
     result_path_for(job_path).write_text('{"status": "success", "unknown_field": 1}')

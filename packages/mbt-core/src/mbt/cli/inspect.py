@@ -132,7 +132,11 @@ def clean_target_cmd(cli: "CLIContext") -> list[str]:
     notes: list[str] = []
     target_dir = cli.project_dir / "target"
     if target_dir.is_dir():
-        shutil.rmtree(target_dir)
+        from mbt.state.lock import target_lock
+
+        # Never delete a target/ another command is still writing (B-1).
+        with target_lock(cli.project_dir, "clean"):
+            shutil.rmtree(target_dir)
         notes.append(f"removed {target_dir}")
     else:
         notes.append(f"nothing to clean at {target_dir}")

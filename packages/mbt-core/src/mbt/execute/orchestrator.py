@@ -40,6 +40,7 @@ from mbt.execute.runners import (
 from mbt.execute.scheduler import execute_plan
 from mbt.parsing import ParsedProject, parse_project
 from mbt.state.diff import ManifestStateIndex, load_state
+from mbt.state.lock import holds_target_lock
 from mbt_adapter_base import (
     ModelSpec,
     ModelVersion,
@@ -326,6 +327,7 @@ def _emit_run_finished(command: str, run_results: RunResults) -> None:
     )
 
 
+@holds_target_lock
 def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = None) -> RunResults:
     """Execute run/build/test and write run_results.json (FR-RUN-04)."""
     started_monotonic = time.monotonic()
@@ -454,6 +456,7 @@ def require_scoring_capability(ctx: ExecutionContext) -> None:
 # -- mbt evaluate (FR-RUN-07, TSD §10.6) -------------------------------------------
 
 
+@holds_target_lock
 def run_evaluate(
     opts: InvocationOptions,
     *,

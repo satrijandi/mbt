@@ -25,7 +25,7 @@ permissions:
 jobs:
   ci:
     # Gate the release on the repo's real CI: a tag on a red commit must never
-    # publish broken, immutable wheels for all 10 packages (R2-1). Calling
+    # publish broken, immutable wheels for all 12 packages (R2-1). Calling
     # ci.yml via workflow_call - rather than re-declaring a subset of checks
     # here - keeps the gate honest: it is exactly what guards main, so it can
     # never silently drift from it.
@@ -98,7 +98,7 @@ jobs:
         if: vars.PYPI_TRUSTED_PUBLISHING == 'enabled'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33   # v1.14.2
         with:
-          # 10 wheels do not upload atomically; if a publish fails partway, a
+          # 12 wheels do not upload atomically; if a publish fails partway, a
           # re-run must skip the packages that already landed instead of
           # hard-failing on "file already exists". Makes the publish idempotent.
           skip-existing: true

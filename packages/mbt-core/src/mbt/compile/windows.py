@@ -154,8 +154,7 @@ def parse_window(expression: str) -> Window:
     )
     # Ordering is anchor-independent only when both bounds are relative or
     # both absolute; mixed windows are checked at compile time instead.
-    kinds = {window.start.kind, window.end.kind}
-    if kinds <= {"duration", "now"} or kinds == {"absolute"}:
+    if anchor_independent(window.start, window.end):
         window.resolve(VALIDATION_ANCHOR)
     return window
 
@@ -187,6 +186,45 @@ def _split_window(text: str, expression: str) -> tuple[str, str]:
         f"invalid window expression {expression!r}",
         hint="expected '<start>:<end>' with duration, 'now', or ISO bounds",
     )
+
+
+def anchor_independent(*bounds: WindowBound) -> bool:
+    """True when ``bounds`` order the same way against every anchor.
+
+    That holds when all of them are relative (a duration or ``now``) or all are
+    absolute. A mixed set only orders against a concrete anchor, so its checks
+    run at compile time instead of parse time.
+    """
+    kinds = {bound.kind for bound in bounds}
+    return kinds <= {"duration", "now"} or kinds == {"absolute"}
+
+
+#: Split pairs that may never share a row (A-2 of FEEDBACK v6). The test split
+#: is what every threshold gate and the champion gate's paired bootstrap judge,
+#: so a row it shares with the fit (``train``) or with early stopping and
+#: tuning (``validation``) flatters the number those gates read - the one
+#: direction a gate exists to prevent. ``validation`` against ``train`` is NOT
+#: listed: a validation window inside the train range is a documented layout.
+#: The after-test window has its own, stricter rule (it must FOLLOW test).
+DISJOINT_SPLITS: tuple[tuple[str, str], ...] = (("train", "test"), ("validation", "test"))
+
+
+def overlapping_splits(
+    resolved: dict[str, tuple[datetime, datetime]],
+) -> list[tuple[str, str]]:
+    """The ``DISJOINT_SPLITS`` pairs whose resolved ``[start, end)`` ranges meet.
+
+    ``resolved`` holds the windows rows are actually filtered by, so the train
+    entry must already carry its embargo: an embargo that pulls the train tail
+    clear of the test window is exactly how an overlap is meant to be fixed.
+    """
+    clashes = []
+    for first, second in DISJOINT_SPLITS:
+        if first in resolved and second in resolved:
+            (a_start, a_end), (b_start, b_end) = resolved[first], resolved[second]
+            if a_start < b_end and b_start < a_end:
+                clashes.append((first, second))
+    return clashes
 
 
 def is_subrange(inner: Window, outer: Window, anchor: datetime) -> bool:

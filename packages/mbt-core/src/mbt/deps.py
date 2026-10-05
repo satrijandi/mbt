@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from mbt.events import get_bus
 from mbt.events.models import LogMessage
 from mbt.exceptions import ConfigError
+from mbt.yamlio import safe_load
 
 PACKAGES_FILE = "packages.yml"
 
@@ -35,7 +36,7 @@ def load_packages(project_dir: Path) -> list[PackagePin]:
             hint="create one: packages: [{package: mbt-xgboost, version: '~=0.1'}]",
         )
     try:
-        payload = yaml.safe_load(path.read_text()) or {}
+        payload = safe_load(path.read_text(), source=path) or {}
         return PackagesFile.model_validate(payload).packages
     except (yaml.YAMLError, ValidationError) as exc:
         raise ConfigError(f"invalid {PACKAGES_FILE}: {exc}", path=path) from exc

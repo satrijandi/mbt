@@ -24,7 +24,7 @@ from mbt.artifacts.manifest import (
     ManifestSource,
 )
 from mbt.compile.hashing import config_hash, env_digest, env_freeze_digest, input_hash
-from mbt.compile.windows import format_ts, parse_window, subtract_duration
+from mbt.compile.windows import format_ts, overlapping_splits, parse_window, subtract_duration
 from mbt.config.profiles import LoadedProfiles
 from mbt.dag.graph import topological_order
 from mbt.events import get_bus
@@ -34,7 +34,7 @@ from mbt.gitinfo import collect_git_info
 from mbt.jinja.environment import ResolveContext, TargetContext
 from mbt.parsing.errors import ParseReport
 from mbt.parsing.project_parser import ParsedProject, ParsedResource, rule_context
-from mbt.parsing.rules import ResolvedTarget, run_rules
+from mbt.parsing.rules import ResolvedTarget, run_rules, split_overlap_hint
 from mbt.runtime import data_adapter as build_data_adapter
 from mbt_adapter_base import (
     OUT_OF_TIME_SPLIT,
@@ -311,6 +311,7 @@ def _resolve_dataset(
     resolved: dict[str, Any] = {}
     if spec.split.strategy is SplitStrategy.TEMPORAL:
         windows: dict[str, list[str]] = {}
+        bounds: dict[str, tuple[datetime, datetime]] = {}
         for split_name in ("train", "test", "validation", OUT_OF_TIME_SPLIT):
             expression = getattr(spec.split, split_name)
             if expression is None:
@@ -329,6 +330,8 @@ def _resolve_dataset(
                         path=res.path,
                     )
             windows[split_name] = [format_ts(start), format_ts(end)]
+            bounds[split_name] = (start, end)
+        _check_splits_disjoint(spec, bounds, res)
         resolved["windows"] = windows
         if spec.split.embargo is not None:
             # Thread the embargo *duration* (not just its already-applied window
@@ -336,6 +339,27 @@ def _resolve_dataset(
             # boundary too, not only the outer train/test split (R2-7/F6).
             resolved["embargo"] = spec.split.embargo
     return spec, spec.model_dump(mode="json"), resolved
+
+
+def _check_splits_disjoint(
+    spec: DatasetSpec, bounds: dict[str, tuple[datetime, datetime]], res: ParsedResource
+) -> None:
+    """The anchored half of the parse rule ``dataset.windows`` (FEEDBACK v6 A-2).
+
+    Parse can only order bounds of one kind; a relative train window against an
+    absolute test window is ordered here, on the embargoed bounds rows are
+    actually filtered by. Resolution runs before the compile-phase rules pass,
+    so this also catches a same-kind overlap that a target var introduced.
+    """
+    for first, second in overlapping_splits(bounds):
+        (_, first_end), (second_start, _) = bounds[first], bounds[second]
+        raise CompilationError(
+            f"split.{first} (ends {format_ts(first_end)}) overlaps split.{second} "
+            f"(starts {format_ts(second_start)}), so the same rows would sit in both",
+            resource=res.unique_id,
+            path=res.path,
+            hint=split_overlap_hint(first, second),
+        )
 
 
 def _check_out_of_time_follows_test(

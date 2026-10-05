@@ -77,3 +77,12 @@ class GateFailure(MbtError):
 
 class StateError(MbtError):
     """Unreadable or incompatible --state / --manifest references."""
+
+
+class JobInterrupted(KeyboardInterrupt):
+    """A job subprocess died of the user's Ctrl-C (FEEDBACK v6 B-5).
+
+    A ``KeyboardInterrupt``, so it unwinds the coordinator exactly as the
+    Ctrl-C that caused it does (exit 130), after the node's lifecycle has
+    reported it as INTERRUPTED rather than as an ERROR with a kept payload.
+    """

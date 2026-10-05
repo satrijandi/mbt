@@ -64,6 +64,27 @@ def test_select_feature_columns_tolerates_an_exclude_entry_matching_nothing() ->
     assert select_feature_columns(["a", "b", "y"], spec, None) == ["a", "b"]
 
 
+def test_an_exclude_typo_of_a_trained_column_is_an_error() -> None:
+    """FEEDBACK v6 A-3: ``exclude: [user_idd]`` trained on ``user_id``, the very
+    column the reviewed guard was written to keep out, and logged it at DEBUG."""
+    spec = minimal_model_spec(features={"include": ["*"], "exclude": ["user_idd", "gone"]})
+    with pytest.raises(ConfigError, match=r"'user_idd' \(did you mean 'user_id'\?\)") as info:
+        select_feature_columns(["user_id", "tenure", "y"], spec, None)
+    assert "gone" not in info.value.message  # no near match: still lenient
+
+
+@pytest.mark.parametrize(
+    "exclude",
+    [
+        ["user_idd", "user_id"],  # the close column is excluded anyway
+        ["user_i*"],  # a glob is not a misspelling of one name
+    ],
+)
+def test_an_exclude_near_miss_that_trains_nothing_extra_is_tolerated(exclude) -> None:
+    spec = minimal_model_spec(features={"include": ["*"], "exclude": exclude})
+    assert select_feature_columns(["user_id", "tenure", "y"], spec, None) == ["tenure"]
+
+
 def test_read_with_explicit_columns() -> None:
     spec = minimal_model_spec()
     base = _LocatableHandle({"train": _table()}, label_column="y")

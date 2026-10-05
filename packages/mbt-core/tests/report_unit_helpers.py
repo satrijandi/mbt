@@ -22,11 +22,13 @@ def edit(path: Path, old: str, new: str) -> None:
 
 
 def with_out_of_time(project: Path, *, test: str = "-60d:-30d", after: str = "-30d:now") -> None:
-    """Give the demo dataset an after-test window."""
+    """Give the demo dataset an after-test window; train ends where test starts,
+    because a train window reaching into test is a parse error (FEEDBACK v6 A-2)."""
+    test_start = test.split(":", 1)[0]
     edit(
         project / DATASET_FILE,
         SPLIT_BLOCK,
-        f'train: "-180d:-60d"\n      test: "{test}"\n      out_of_time: "{after}"',
+        f'train: "-180d:{test_start}"\n      test: "{test}"\n      out_of_time: "{after}"',
     )
 
 

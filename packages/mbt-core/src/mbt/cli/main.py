@@ -26,6 +26,7 @@ from mbt.cli.common import (
     out_console,
     parse_anchor,
     parse_vars,
+    print_table,
     print_warnings,
     render_results_table,
 )
@@ -201,6 +202,15 @@ def init(
         ),
     ],
     project_dir: ProjectDirOpt = Path("."),
+    mbt_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--mbt-ref",
+            help="Git ref (tag or commit) the project's requirements pin mbt to. "
+            "Default: this mbt's release tag, or for a development build the "
+            "commit it was installed from.",
+        ),
+    ] = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -212,7 +222,7 @@ def init(
     cli = CLIContext.enter(
         project_dir, log_format=log_format, quiet=quiet, verbose=verbose, chdir=False
     )
-    destination = scaffold_project(name, cli.project_dir)
+    destination = scaffold_project(name, cli.project_dir, ref=mbt_ref)
     # soft_wrap: a path is the thing a user copies out of this line, and a
     # hard-inserted newline would split it (FEEDBACK v3 E-5, as in ConsoleSink)
     out_console.print(f"Created [bold]{destination}[/bold]", soft_wrap=True)
@@ -401,8 +411,11 @@ def compile(
 ) -> None:
     """Resolve Jinja + profiles + snapshots into target/manifest.json."""
     cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    from mbt.state.lock import target_lock
+
     path = cli.project_dir / "target" / "manifest.json"
-    cli.compile(anchor=anchor, deep_snapshot=deep_snapshot, write_to=path)
+    with target_lock(cli.project_dir, "compile"):
+        cli.compile(anchor=anchor, deep_snapshot=deep_snapshot, write_to=path)
     out_console.print(f"wrote {path}", soft_wrap=True)
 
 
@@ -615,7 +628,7 @@ def predictions_ls(
             _mark(run.matured),
             _mark(run.evaluated),
         )
-    out_console.print(table)
+    print_table(table)
 
 
 @predictions_app.command("show")
@@ -861,7 +874,7 @@ def ls(
         table.add_column("path")
         for row in listed:
             table.add_row(row.unique_id, row.resource_type, ", ".join(row.tags), row.path)
-        out_console.print(table)
+        print_table(table)
 
 
 @app.command()
@@ -942,7 +955,7 @@ def state_diff(
     table.add_column("components")
     for entry in (*diff.added, *diff.removed, *diff.modified):
         table.add_row(entry.change, entry.unique_id, ", ".join(entry.components))
-    out_console.print(table)
+    print_table(table)
     if diff.env_changed:
         out_console.print(
             "[yellow]environment digest CHANGED[/yellow] - nodes are not marked "
@@ -991,7 +1004,10 @@ def docs_generate(
         cli.project_dir / "target" / "run_results.json",
         commands=("build", "run", "evaluate"),
     )
-    index = generate_docs(current, run_results, cli.project_dir / "target" / "docs")
+    from mbt.state.lock import target_lock
+
+    with target_lock(cli.project_dir, "docs generate"):
+        index = generate_docs(current, run_results, cli.project_dir / "target" / "docs")
     out_console.print(f"wrote {index}", soft_wrap=True)
 
 
@@ -1089,15 +1105,22 @@ def main() -> None:
         # re-raises so that report can capture the full traceback.
         if os.environ.get("MBT_DEBUG"):
             raise
+        from mbt.cli import common
         from mbt.secrets import redact
 
-        err_console.print(
-            f"[bold red]Internal error:[/bold red] {redact(f'{type(exc).__name__}: {exc}')}"
+        message = redact(f"{type(exc).__name__}: {exc}")
+        hint = (
+            "this is a bug in mbt; please report it with the command you ran. "
+            "Set MBT_DEBUG=1 to see the full traceback."
         )
-        err_console.print(
-            "  [yellow]hint:[/yellow] this is a bug in mbt; please report it with the "
-            "command you ran. Set MBT_DEBUG=1 to see the full traceback."
-        )
+        if common.CONSOLE.json:
+            from mbt.events import get_bus
+            from mbt.events.models import CommandFailed
+
+            get_bus().emit(CommandFailed(message=f"Internal error: {message}", hint=hint))
+            sys.exit(1)
+        err_console.print(f"[bold red]Internal error:[/bold red] {message}")
+        err_console.print(f"  [yellow]hint:[/yellow] {hint}")
         sys.exit(1)
 
 

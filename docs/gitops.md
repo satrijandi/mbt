@@ -32,6 +32,10 @@ snapshot ↔ model version.
    `mbt build --select tag:monthly` (the 1st) - freshness arrives as new
    snapshots; no orchestrator concept needed. Tag each model with the cadence
    it should retrain on; add more workflows (daily, quarterly) the same way.
+   A `--select` that matches no resource is an error (exit 1), so a renamed
+   tag fails the run instead of retraining nothing behind a green heartbeat.
+   That is why the monthly workflow ships switched off: tag a model `monthly`,
+   then set the repo variable `MBT_MONTHLY_RETRAIN` to `enabled`.
 5. **Scheduled scoring** (`scheduled_score.yml`): CI cron +
    `mbt score --target prod --select tag:daily` - each pipeline loads its
    model's current production champion from the registry, so promotions

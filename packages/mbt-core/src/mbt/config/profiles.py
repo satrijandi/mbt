@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mbt.exceptions import ConfigError
 from mbt.secrets import taint
+from mbt.yamlio import safe_load
 from mbt_adapter_base import (
     AdapterRef,
 )
@@ -85,11 +86,26 @@ def find_profiles_path(project_dir: Path, profiles_dir: Path | None) -> Path:
     )
 
 
+#: What an unset, default-less ``env()``/``env_var()`` renders as. Never seen
+#: by an adapter: ``_raise_for_unset_env`` fails the load first whenever the
+#: selected target (or the project block around it) references the variable.
+_UNSET_ENV = "__mbt_unset_env_{}__"
+
+
 def _render_profiles_text(
     text: str, path: Path, cli_vars: dict[str, Any], project_vars: dict[str, Any]
-) -> tuple[str, list[str]]:
-    """Render Jinja in profiles.yml; returns (rendered, env var names used)."""
+) -> tuple[str, list[str], dict[str, str]]:
+    """Render Jinja in profiles.yml.
+
+    Returns the rendered text, the env var names used, and the names that were
+    unset with no default (mapped to the function that read them). Those are
+    not an error yet: the whole file renders at once, so raising here made
+    ``prod``'s ``env('MBT_DATA_ROOT')`` break every ``dev`` command.
+    ``load_profiles`` raises for the ones the selected target actually reads
+    (FEEDBACK v6 A-8).
+    """
     used_env: list[str] = []
+    unset: dict[str, str] = {}
     _missing = object()
 
     def lookup_env(name: str, default: str | None, *, secret: bool) -> str:
@@ -97,12 +113,8 @@ def _render_profiles_text(
         value = os.environ.get(name, _missing)
         if value is _missing:
             if default is None:
-                fn = "env_var" if secret else "env"
-                raise ConfigError(
-                    f"environment variable {name!r} referenced in profiles.yml is not set",
-                    path=path,
-                    hint=f"export {name}=... or provide a default: {fn}('{name}', 'fallback')",
-                )
+                unset.setdefault(name, "env_var" if secret else "env")
+                return _UNSET_ENV.format(name)
             return default
         return taint(str(value)) if secret else str(value)
 
@@ -129,11 +141,66 @@ def _render_profiles_text(
     jinja_env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
     try:
         rendered = jinja_env.from_string(text).render(env_var=env_var, env=env, var=var)
-        return rendered, sorted(set(used_env))
+        return rendered, sorted(set(used_env)), unset
     except ConfigError:
         raise
     except jinja2.TemplateError as exc:
         raise ConfigError(f"invalid Jinja in profiles.yml: {exc}", path=path) from exc
+
+
+_ENV_CALL = r"\benv(?:_var)?\(\s*['\"]{}['\"]"
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in (*_strings(k), *_strings(v))]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return [value] if isinstance(value, str) else []
+
+
+def _raise_for_unset_env(
+    raw_file: dict[str, Any],
+    rendered_file: dict[str, Any],
+    project_name: str,
+    target_override: str | None,
+    unset: dict[str, str],
+    path: Path,
+) -> None:
+    """Fail for an unset, default-less variable the selected target reads.
+
+    Read off the UNRENDERED mapping, so a variable piped through a filter
+    (``env('T') | int``) is still caught. Everything in the project block
+    except the other targets counts as read: ``target: "{{ env('T') }}"``
+    decides which target runs at all. If the block cannot be read that way
+    (Jinja around the structure itself), every unset variable counts.
+    """
+    import re
+
+    raw_project = raw_file.get(project_name)
+    rendered_project = rendered_file.get(project_name)
+    relevant: Any = raw_file
+    if isinstance(raw_project, dict) and isinstance(rendered_project, dict):
+        target_name = target_override or rendered_project.get("target")
+        raw_outputs = raw_project.get("outputs")
+        if isinstance(target_name, str) and isinstance(raw_outputs, dict):
+            relevant = {key: value for key, value in raw_project.items() if key != "outputs"}
+            relevant["outputs"] = {target_name: raw_outputs.get(target_name)}
+    texts = _strings(relevant)
+    in_use = sorted(
+        name
+        for name in unset
+        if any(re.search(_ENV_CALL.format(re.escape(name)), text) for text in texts)
+    )
+    if in_use:
+        names = ", ".join(repr(name) for name in in_use)
+        noun, verb = ("variable", "is") if len(in_use) == 1 else ("variables", "are")
+        raise ConfigError(
+            f"environment {noun} {names} referenced in profiles.yml {verb} not set",
+            path=path,
+            hint=f"export {in_use[0]}=... or provide a default: "
+            f"{unset[in_use[0]]}('{in_use[0]}', 'fallback')",
+        )
 
 
 def load_profiles(
@@ -157,7 +224,7 @@ def load_profiles(
 
     def parse(source: str, label: str) -> dict[str, Any]:
         try:
-            data = yaml.safe_load(source) or {}
+            data = safe_load(source, source=f"{path} ({label})") or {}
         except yaml.YAMLError as exc:
             raise ConfigError(f"invalid YAML in {label} profiles.yml: {exc}", path=path) from exc
         if not isinstance(data, dict):
@@ -165,10 +232,14 @@ def load_profiles(
         return data
 
     raw_file = parse(text, "unrendered")
-    rendered_text, used_env = _render_profiles_text(
+    rendered_text, used_env, unset_env = _render_profiles_text(
         text, path, dict(cli_vars or {}), dict(project_vars or {})
     )
     rendered_file = parse(rendered_text, "rendered")
+    if unset_env:
+        _raise_for_unset_env(
+            raw_file, rendered_file, project_name, target_override, unset_env, path
+        )
 
     if project_name not in rendered_file:
         raise ConfigError(

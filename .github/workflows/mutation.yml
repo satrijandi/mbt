@@ -1,0 +1,76 @@
+# How many wrong programs the fast suite would let through (FEEDBACK v6 C-1).
+#
+# ci.yml enforces 100% line coverage, which proves every line ran - not that a
+# test would notice it being wrong. Measured by hand once, 10 of 20 mutants of
+# the gate, verdict and monitor code survived the whole fast suite, one of them
+# letting a model register despite a breached stability monitor. This tier
+# repeats that measurement every night with mutmut over the modules that decide
+# whether a model ships (scripts/mutation_score.py lists them).
+#
+# A ratchet, not a gate: the run fails only when a package has MORE surviving
+# mutants than scripts/mutation_baseline.json records. When it has fewer, the
+# job summary says so and the baseline should come down in a reviewed commit
+# (`uv run --group mutation python scripts/mutation_score.py --update-baseline`).
+name: Mutation score
+
+on:
+  schedule:
+    # After upstream.yml's 04:41 so the heavy nightly tiers do not overlap.
+    - cron: "53 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write   # the failure notice below; a red nightly nobody reads is not a detector
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
+        with:
+          python-version: "3.11"
+      - name: Install the locked workspace plus the mutation group
+        run: uv sync --group mutation
+      - name: Mutate, test, and compare against the baseline
+        run: uv run --group mutation python scripts/mutation_score.py
+
+      - name: Raise or update the tracking issue
+        # Same contract as upstream.yml and live.yml: one issue, commented on
+        # rather than duplicated, closed automatically when the score recovers.
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Mutation score regressed"
+          OUTCOME: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "Back at or under the baseline: $RUN_URL"
+            fi
+            exit 0
+          fi
+          body=$(printf '%s\n' \
+            "More mutants of the gate, verdict, monitor or metric code survived" \
+            "the fast suite than scripts/mutation_baseline.json allows." \
+            "" \
+            "Run (the job summary lists every survivor): $RUN_URL" \
+            "" \
+            "Triage: a new survivor is a comparison, branch or constant no test" \
+            "would notice changing. Add the test that kills it; only raise the" \
+            "baseline for a survivor that is equivalent by construction.")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi

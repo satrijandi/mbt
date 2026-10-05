@@ -3,6 +3,7 @@ uniform outputs (S1-06/07/08, S3-08, S5-07)."""
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -196,22 +197,28 @@ def test_scaffold_ci_installs_are_pinned(scaffold: Path) -> None:
         assert "pip install -r requirements.txt" in text, workflow.name
     for name in ("requirements.in", "requirements.txt"):
         pins = (scaffold / name).read_text()
-        assert "__MBT_VERSION__" not in pins, f"{name} kept the version token"
+        assert "__MBT_REF__" not in pins, f"{name} kept the ref token"
         assert "__PINNED_DEPS__" not in pins, f"{name} kept the dependency token"
         # mbt-adapter-base is in the set although no workflow imports it: the
         # other three depend on it and it is not on PyPI, so without its own
         # ref `pip install -r requirements.txt` stopped at "No matching
         # distribution found for mbt-adapter-base" - every scaffolded project's
         # CI died at the install step, tag or no tag.
+        refs = set(re.findall(r"@ git\+https://github\.com/satrijandi/mbt@([^#]+)#", pins))
+        (ref,) = refs
+        # FEEDBACK v6 A-1: either a release tag that IS this mbt, or a commit.
+        # A development build pinning the last release tag installed code that
+        # could not read the scaffold it shipped with, in every project's CI.
+        if ".dev" in mbt.__version__:
+            assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{name}: dev build pinned {ref!r}"
+        else:
+            assert ref == f"v{mbt.__version__}", f"{name}: release pinned {ref!r}"
         for package in ("mbt-adapter-base", "mbt-core", "mbt-xgboost", "mbt-mlflow"):
-            # Pinned to a release tag: reproducible and installable from a fresh
-            # checkout without a private index. (A tag is movable; the header
-            # says so and names the commit-SHA form.)
-            ref = (
+            line = (
                 f"{package} @ git+https://github.com/satrijandi/mbt"
-                f"@v{mbt.__version__}#subdirectory=packages/{package}"
+                f"@{ref}#subdirectory=packages/{package}"
             )
-            assert ref in pins, f"{name}: {package} not pinned to the release tag"
+            assert line in pins, f"{name}: {package} not pinned to {ref}"
         _assert_mbt_pins_are_closed(pins, name)
 
 
@@ -315,6 +322,11 @@ def test_scaffold_operational_guardrails(scaffold: Path) -> None:
     # challenger / no-promotion) semantics differ from a monitor breach.
     for retrain in ("scheduled_retrain.yml", "scheduled_retrain_monthly.yml"):
         assert "if: failure()" in (workflows_dir / retrain).read_text(), retrain
+    # A selector matching nothing is exit 1 (FEEDBACK v6 A-5), so the monthly
+    # retrain, shipped before any model is tagged `monthly`, is opt-in rather
+    # than a red run every month - or a green one that retrains nothing.
+    monthly = (workflows_dir / "scheduled_retrain_monthly.yml").read_text()
+    assert "if: vars.MBT_MONTHLY_RETRAIN == 'enabled'" in monthly
     prod = (workflows_dir / "prod_build.yml").read_text()
     assert "if: failure()" in prod and "MBT_ALERT_WEBHOOK" in prod
     # the baseline survives the runner on the mbt-state branch (FR-STATE-03)
@@ -486,7 +498,9 @@ def test_parse_error_exits_1_with_all_errors(scaffold: Path) -> None:
 
 
 @pytest.mark.e2e
-def test_scaffold_state_branch_loop_end_to_end(scaffold: Path) -> None:
+def test_scaffold_state_branch_loop_end_to_end(
+    scaffold: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The durable-state loop the reference workflows run, executed for real:
     prod build -> publish_state.sh -> mbt-state branch on origin ->
     fetch_state.sh -> state diff flags exactly the edited model (G3,
@@ -494,6 +508,10 @@ def test_scaffold_state_branch_loop_end_to_end(scaffold: Path) -> None:
     a fresh checkout (new mtimes, same bytes) must diff empty (ADR-11).
     No GitHub required: origin is a local bare repo."""
     import shutil
+
+    # The prod target has no data-root default (FEEDBACK v6 A-8); the workflows
+    # export the MBT_DATA_ROOT repo variable, and "." is the checkout itself.
+    monkeypatch.setenv("MBT_DATA_ROOT", ".")
 
     def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
@@ -613,7 +631,7 @@ def test_scaffold_state_branch_loop_end_to_end(scaffold: Path) -> None:
 
 @pytest.mark.e2e
 def test_project_dir_from_foreign_cwd_confines_writes_to_project(
-    scaffold: Path, tmp_path: Path
+    scaffold: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`mbt --project-dir X` invoked from an unrelated cwd must confine every
     write (target/, artifact store, sqlite registry) to the project, find the
@@ -623,6 +641,8 @@ def test_project_dir_from_foreign_cwd_confines_writes_to_project(
     job subprocesses always did."""
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
+    # Relative, on purpose: it must resolve against the project, not this cwd.
+    monkeypatch.setenv("MBT_DATA_ROOT", ".")
 
     def mbt_from_elsewhere(*args: str) -> subprocess.CompletedProcess[str]:
         proc = subprocess.run(

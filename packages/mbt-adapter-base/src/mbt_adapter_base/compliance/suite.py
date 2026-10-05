@@ -692,6 +692,11 @@ class PredictionStoreCompliance:
 # -- data adapters (A-1) ----------------------------------------------------
 
 
+#: The directory every data compliance case builds under: a quote, a space and
+#: a non-ASCII letter, the three things a path can carry into generated SQL.
+HOSTILE_DIR_NAME = "O'Brien team ü"
+
+
 @dataclass
 class ComplianceBuildContext:
     """A ``DataBuildContext`` for compliance runs, with plain fields."""
@@ -784,6 +789,12 @@ class DataAdapterCompliance:
     ) -> tuple[Any, Any, RecordingEvents]:
         from mbt_adapter_base.specs import DatasetSpec
 
+        # Every engine builds under a hostile path (FEEDBACK v6 A-6): the local
+        # adapter escaped the paths it READ but interpolated its four COPY ...
+        # TO targets raw, so a project under ~/O'Brien team/ failed every
+        # dataset build with a DuckDB parser error. Spaces passed already.
+        root = root / HOSTILE_DIR_NAME
+        root.mkdir(parents=True, exist_ok=True)
         adapter, source = self.make_adapter(root, tiny_source_rows(n_rows))
         uid = f"source.compliance.{source.name}"
         sink = events or RecordingEvents()

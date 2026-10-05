@@ -26,9 +26,20 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install project
+        # No generate_sample_data.py here: that is pr_check's dev data. The
+        # prod target reads real data from MBT_DATA_ROOT (next step).
+        run: pip install -r requirements.txt
+      - name: Point the prod target at the real data
+        # profiles.yml's prod target reads env('MBT_DATA_ROOT') with NO default,
+        # so a run without it fails loudly instead of training, registering and
+        # scoring whatever happens to sit in the checkout. Set the repo variable
+        # MBT_DATA_ROOT (README, "Repo settings this project assumes"). Exported
+        # only when set: GitHub renders an unset variable as an empty string,
+        # which would read as a real - empty - root.
+        env:
+          DATA_ROOT: ${{ vars.MBT_DATA_ROOT }}
         run: |
-          pip install -r requirements.txt
-          python scripts/generate_sample_data.py
+          if [ -n "$DATA_ROOT" ]; then echo "MBT_DATA_ROOT=$DATA_ROOT" >> "$GITHUB_ENV"; fi
       - name: Retrain weekly models (prod target)
         run: mbt build --target prod --select tag:weekly
       - name: Heartbeat on success

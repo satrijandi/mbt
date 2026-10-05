@@ -61,6 +61,32 @@ def _sql_str(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _duckdb_hint(exc: Exception, spec_hint: str) -> str | None:
+    """The hint for a failed build, only where it describes the failure (B-1).
+
+    The spec hint used to ride on every ``duckdb.Error``, so a file lock held by
+    a concurrent build and a quote in the project path were both reported as
+    "check the dataset's filters", which sent people to the one place the
+    problem was not. It fits the errors a spec can cause: SQL that does not
+    parse, a column that does not bind, a value that does not convert.
+    """
+    if isinstance(
+        exc,
+        duckdb.ParserException
+        | duckdb.BinderException
+        | duckdb.CatalogException
+        | duckdb.ConversionException
+        | duckdb.TypeMismatchException,
+    ):
+        return spec_hint
+    if isinstance(exc, duckdb.IOException):
+        return (
+            "DuckDB could not read or write a file under the data root: check the "
+            "path exists and is writable, and that no other process holds it"
+        )
+    return None
+
+
 class LocalDatasetHandle(MaterializedDatasetHandle):
     """The shared materialization handle, tagged with the local adapter."""
 
@@ -183,9 +209,10 @@ class LocalDataAdapter:
             raise AdapterError(
                 f"dataset build failed in DuckDB: {exc}",
                 resource=ctx.node.unique_id,
-                hint=(
+                hint=_duckdb_hint(
+                    exc,
                     "check the dataset's filters and split configuration against "
-                    "the relation's columns"
+                    "the relation's columns",
                 ),
             ) from exc
         finally:
@@ -341,7 +368,7 @@ class LocalDataAdapter:
             out = output_dir / f"{split}.parquet"
             con.execute(
                 f"COPY (SELECT * FROM mbt_base WHERE {time_sql} >= TIMESTAMP '{start_ts}' "
-                f"AND {time_sql} < TIMESTAMP '{end_ts}') TO '{out}' (FORMAT PARQUET)"
+                f"AND {time_sql} < TIMESTAMP '{end_ts}') TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
             written[split] = int(row[0]) if row else 0
@@ -383,7 +410,8 @@ class LocalDataAdapter:
                 upper = f"__mbt_rank < {hi}" if hi < 1.0 else f"__mbt_rank <= {hi}"
                 con.execute(
                     f"COPY (SELECT * EXCLUDE (__mbt_rank) FROM mbt_ranked "
-                    f"WHERE __mbt_rank >= {lo} AND {upper}) TO '{out}' (FORMAT PARQUET)"
+                    f"WHERE __mbt_rank >= {lo} AND {upper}) "
+                    f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
                 )
                 row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
                 written[split] = int(row[0]) if row else 0
@@ -397,7 +425,7 @@ class LocalDataAdapter:
             out = output_dir / f"{split}.parquet"
             con.execute(
                 f"COPY (SELECT * FROM mbt_base WHERE {bucket} >= {lo} AND {bucket} < {hi}) "
-                f"TO '{out}' (FORMAT PARQUET)"
+                f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
             written[split] = int(row[0]) if row else 0
@@ -423,14 +451,18 @@ class LocalDataAdapter:
                     f" WHERE {time_sql} >= TIMESTAMP '{_iso_to_sql_ts(start)}' "
                     f"AND {time_sql} < TIMESTAMP '{_iso_to_sql_ts(end)}'"
                 )
-            con.execute(f"COPY (SELECT * FROM mbt_base{where}) TO '{out}' (FORMAT PARQUET)")
+            con.execute(
+                f"COPY (SELECT * FROM mbt_base{where}) TO {_sql_str(str(out))} (FORMAT PARQUET)"
+            )
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
             return int(row[0]) if row else 0
         except duckdb.Error as exc:
             raise AdapterError(
                 f"scoring input build failed in DuckDB: {exc}",
                 resource=ctx.node.unique_id,
-                hint="check the input's filters, join keys, and window configuration",
+                hint=_duckdb_hint(
+                    exc, "check the input's filters, join keys, and window configuration"
+                ),
             ) from exc
         finally:
             con.close()

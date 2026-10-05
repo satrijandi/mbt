@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from mbt_adapter_base.interchange import BootstrapDelta
-from mbt_adapter_base.metrics import paired_bootstrap_delta
+from mbt_adapter_base.metrics import compute_metric, paired_bootstrap_delta
 from mbt_adapter_base.specs import MetricSpec
 
 AUC = MetricSpec(name="roc_auc", kind="builtin", greater_is_better=True)
@@ -55,6 +55,25 @@ def test_clear_improvement_has_positive_lower_bound() -> None:
     # lower-is-better metric: improvement is still oriented positive
     brier = _bootstrap(BRIER, y, strong, weak)
     assert brier.lower > 0
+
+
+def test_the_bound_is_the_one_sided_percentile_of_the_resampled_deltas() -> None:
+    """FEEDBACK v6 C-1: a two-sided quantile (``(1 - c) / 2``) still gave a
+    clear improvement a positive bound, so nothing noticed the gate getting
+    stricter than its declared confidence. Recompute the resamples and pin the
+    exact percentile, in both metric directions."""
+    y, strong, weak = _synthetic(300, seed=3)
+    for spec, sign in ((AUC, 1.0), (BRIER, -1.0)):
+        rng = np.random.default_rng(7)
+        deltas = []
+        for _ in range(200):
+            idx = rng.integers(0, 300, size=300)
+            if np.unique(y[idx]).size < 2:
+                continue
+            challenger = compute_metric(spec, y[idx], strong[idx])
+            champion = compute_metric(spec, y[idx], weak[idx])
+            deltas.append(sign * (challenger - champion))
+        assert _bootstrap(spec, y, strong, weak).lower == float(np.quantile(deltas, 0.05))
 
 
 def test_noise_advantage_is_not_significant() -> None:

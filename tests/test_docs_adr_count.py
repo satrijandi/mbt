@@ -109,3 +109,48 @@ def test_the_jvm_packages_are_outside_the_fast_suite_gate() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     fast = set(pyproject["tool"]["coverage"]["run"]["source_pkgs"])
     assert not fast & {"mbt_spark", "mbt_h2o"}, fast
+
+
+# -- the status page's other counts (FEEDBACK v6 D-1) ---------------------------------
+
+#: "12 publishable packages", "12 wheels", "all 12 packages" - and the spelled-
+#: out forms the release workflow and changelog script used ("Ten packages").
+_PACKAGE_CLAIM_RE = re.compile(
+    r"\b(\d+|ten|eleven|twelve|thirteen)\s+(?:publishable\s+)?(packages|wheels/sdists|wheels)\b",
+    re.IGNORECASE,
+)
+_WORDS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13}
+
+
+def test_package_counts_match_the_workspace() -> None:
+    """The status page said 11 publishable packages and release.yml said 10
+    wheels while ``packages/`` held 12, and CLAUDE.md asks that the page stay
+    exactly true. Every such claim is derived from the workspace now."""
+    actual = len(list((REPO_ROOT / "packages").glob("*/pyproject.toml")))
+    files = [
+        REPO_ROOT / "docs" / "v0.1-status.md",
+        REPO_ROOT / ".github" / "workflows" / "release.yml",
+        REPO_ROOT / "scripts" / "generate_changelog.py",
+        REPO_ROOT / "CONTRIBUTING.md",
+    ]
+    mismatches = []
+    for path in files:
+        for n, line in enumerate(path.read_text().splitlines(), start=1):
+            for claim in _PACKAGE_CLAIM_RE.finditer(line):
+                number, noun = claim.group(1).lower(), claim.group(2).lower()
+                stated = int(number) if number.isdigit() else _WORDS[number]
+                expected = 2 * actual if noun == "wheels/sdists" else actual  # one of each
+                if stated != expected:
+                    mismatches.append(
+                        f"{path.relative_to(REPO_ROOT)}:{n}: {claim.group(0)!r}, expected "
+                        f"{expected}"
+                    )
+    assert not mismatches, "stale package counts:\n" + "\n".join(mismatches)
+
+
+def test_the_status_page_states_no_exact_test_count() -> None:
+    """ "1699 tests (1611 fast, 88 e2e)" was stale within weeks: every commit
+    moves it, and no check could keep it true. The page states what the suite
+    covers and how that is enforced, not a number."""
+    page = (REPO_ROOT / "docs" / "v0.1-status.md").read_text()
+    assert not re.search(r"\b\d[\d,]*\s+(?:fast\s+|e2e\s+)?tests\b", page)

@@ -207,6 +207,47 @@ def evaluate_selector(
     return result
 
 
+def _check_atoms_resolve(selector: Selector, nodes: dict[str, SelectableNode], flag: str) -> None:
+    """Every name, tag and resource_type atom must name something in the project
+    (FEEDBACK v6 A-5).
+
+    ``mbt build --select churn_clasifier`` used to select 0 nodes and exit 0,
+    and the scaffold's scheduled scoring runs ``--select tag:daily`` then pings
+    a dead-man's switch on success: renaming the tag stopped scoring and kept
+    the heartbeat alive. An atom that resolves to no resource is a typo or a
+    rename, never an intent, so it is an error with the same did-you-mean the
+    parser gives.
+
+    Two empties stay legitimate, because the project gives them meaning:
+    ``state:`` atoms (nothing modified is the common, correct answer) and an
+    intersection of atoms that each match something but share nothing.
+    """
+    from mbt.utils import did_you_mean
+
+    for intersection in selector.union:
+        for atom in intersection:
+            if atom.body_method == "state" or _match_atom_base(atom, nodes, None):
+                continue
+            label = atom.body_value
+            if atom.body_method is None:
+                kind, candidates = "resource", sorted({n.name for n in nodes.values()})
+            elif atom.body_method == "tag":
+                kind = "tag"
+                candidates = sorted({t for n in nodes.values() for t in n.tags})
+                label = f"tag:{label}"
+            else:
+                kind = "resource_type"
+                candidates = sorted({n.resource_type for n in nodes.values()})
+                label = f"resource_type:{label}"
+            guess = did_you_mean(atom.body_value, candidates)
+            hint = f"did you mean {guess!r}? " if guess else ""
+            shown = ", ".join(candidates[:20]) + (" ..." if len(candidates) > 20 else "")
+            raise SelectorError(
+                f"{flag} {label!r} matches no {kind} in this project",
+                hint=f"{hint}known {kind}s: {shown or '(none)'}",
+            )
+
+
 def select_nodes(
     graph: "nx.DiGraph",
     nodes: dict[str, SelectableNode],
@@ -214,13 +255,21 @@ def select_nodes(
     exclude: Iterable[str] | None = None,
     state: StateIndex | None = None,
 ) -> set[str]:
-    """Full --select/--exclude evaluation (FR-DAG-04)."""
+    """Full --select/--exclude evaluation (FR-DAG-04).
+
+    An atom naming nothing in the project raises, on either flag: a mistyped
+    ``--exclude`` would otherwise run the very thing it was written to skip.
+    """
     select_text = " ".join(select) if select else ""
     if select_text.strip():
-        selected = evaluate_selector(select_text, graph, nodes, state)
+        parsed = parse_selector(select_text)
+        _check_atoms_resolve(parsed, nodes, "--select")
+        selected = evaluate_selector(parsed, graph, nodes, state)
     else:
         selected = set(nodes)
     exclude_text = " ".join(exclude) if exclude else ""
     if exclude_text.strip():
-        selected -= evaluate_selector(exclude_text, graph, nodes, state)
+        parsed = parse_selector(exclude_text)
+        _check_atoms_resolve(parsed, nodes, "--exclude")
+        selected -= evaluate_selector(parsed, graph, nodes, state)
     return selected & set(nodes)

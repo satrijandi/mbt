@@ -174,6 +174,63 @@ mbt refuses to pick one of the two names for you: silently honouring `model:` an
 **Fix:** replace the mapping with the single name you want, or delete the key and let the experiment default to the project name.
 A related error, `tracking config: experiment must be a name, got list`, means the value parsed as a YAML list - usually an unquoted string containing a comma.
 
+### `found duplicate key '<key>'; YAML would silently keep only this last value, so mbt refuses the file`
+
+**Symptom (parse error, exit 1; the same text from `promotions.yml`, `profiles.yml`, `mbt_project.yml`, `packages.yml` and `--vars`):**
+
+```text
+Error: parsing failed with 1 error(s):
+  - models/churn_classifier.yml: invalid YAML: while constructing a mapping (key
+'max_depth' first defined here)
+  in "models/churn_classifier.yml", line 18, column 7:
+          max_depth: 4
+          ^
+found duplicate key 'max_depth'; YAML would silently keep only this last value,
+so mbt refuses the file
+  in "models/churn_classifier.yml", line 19, column 7:
+          max_depth: 9
+          ^
+```
+
+**Why:** YAML parsers keep the last of two equal keys without a word, so the line a reviewer reads and the value that runs can differ.
+In `promotions.yml` that would let an approved `version: "3"` ship as the `version: "5"` written further down the same entry.
+Duplicates usually come from a merge resolution or a long spec edited in two places.
+mbt versions before v0.2.0 accepted them and used the last value.
+
+**Fix:** delete the line you did not mean; both are named with their line numbers.
+YAML merge keys (`<<: *defaults`) are unaffected: overriding a merged key is what a merge is for.
+
+### `split.train '<window>' overlaps split.test '<window>', so the same rows would sit in both`
+
+**Symptom (parse error, exit 1):**
+
+```text
+Error: parsing failed with 1 error(s):
+  - datasets/churn_training_set.yml  at /split/train: split.train '-180d:-20d'
+overlaps split.test '-28d:now', so the same rows would sit in both
+    hint: end split.train where split.test starts (windows are [start, end), so
+train: "-180d:-28d" with test: "-28d:now" shares no row), or widen split.embargo
+until the train tail clears the test window
+```
+
+When one bound is relative and the other absolute, the same check runs at compile time instead, once the anchor orders them:
+
+```text
+Error: split.train (ends 2026-09-14T00:00:00Z) overlaps split.test (starts
+2026-09-06T00:00:00Z), so the same rows would sit in both
+  resource: dataset.demo.churn_training_set
+  file: datasets/churn_training_set.yml
+```
+
+The same error names `split.validation` when a validation window reaches into the test window.
+
+**Why:** the test split is what every threshold gate and the champion gate's paired bootstrap judge.
+A row the model trained on (or early-stopped on) that also sits in the test split inflates that number in the model's favour, which is the one direction a gate exists to prevent.
+mbt versions before v0.2.0 accepted the overlap silently: a two-character edit put 101 rows in both splits of the scaffold's dataset, and the gate passed.
+
+**Fix:** end `train` where `test` starts; windows are half-open, so equal bounds share no row.
+Alternatively, set `split.embargo` long enough that the train window's tail, after the embargo is dropped, ends at or before the test window's start.
+
 ### `split.out_of_time '<window>' starts before the test window '<window>' ends`
 
 **Symptom (parse error, exit 1):**
@@ -253,6 +310,28 @@ The alternative is worse and is what this replaced: Spark used to prefer `identi
 ```text
 [TABLE_OR_VIEW_NOT_FOUND] The table or view `MBT_SHOWCASE_CHURN_OUTCOMES` cannot be found.
 ```
+
+### `--select '<selector>' matches no resource in this project`
+
+**Symptom (hard error, exit 1; the same for `--exclude`, and with `no tag` for a `tag:` selector):**
+
+```text
+Error: --select 'churn_clasifier' matches no resource in this project
+  hint: did you mean 'churn_classifier'? known resources: churn_classifier,
+churn_outcomes, churn_scoring, churn_training_set, scoring_batch, subscribers
+```
+
+```text
+Error: --select 'tag:nightly' matches no tag in this project
+  hint: known tags: churn, daily, weekly
+```
+
+**Why:** a selector that names nothing is a typo or a rename, never an intent.
+mbt versions before v0.2.0 selected zero nodes and exited 0, so renaming the scoring pipeline's tag from `daily` to `nightly` made the scaffold's `scheduled_score.yml` score nothing every day while its heartbeat reported success.
+A selection that is empty for a legitimate reason still exits 0: `state:modified` with nothing modified, or an intersection of atoms that each match something but share nothing.
+
+**Fix:** correct the name or tag (the hint lists what exists), or update the workflow that still uses the old one.
+For a workflow you ship before any resource carries its tag, gate the job off instead of relying on an empty run; the scaffold's `scheduled_retrain_monthly.yml` waits for the repo variable `MBT_MONTHLY_RETRAIN` to be `enabled`.
 
 ### A mistyped flag prints `No such option`
 
@@ -406,6 +485,28 @@ did not move.
 That is intended, and it is what makes a single-relation panel safe: without it
 the shape change would be invisible to both of mbt's hashes.
 
+### `another mbt command is already writing <project>/target`
+
+**Symptom (hard error, exit 1):**
+
+```text
+Error: another mbt command is already writing
+/home/ci/churn_models/target: pid 65957 (mbt build, started
+2026-10-04T10:44:06+00:00)
+  hint: wait for it to finish, or run this one from a separate checkout; the
+lock is released the moment that process exits, so a crashed run never leaves it
+behind
+```
+
+**Why:** every command that writes `target/` (`compile`, `build`, `run`, `test`, `score`, `evaluate`, `monitor`, `docs generate`, `clean`) holds a lock on `target/.mbt.lock` while it runs.
+Two commands writing one project's `target/` at once corrupt each other: mbt versions before v0.2.0 either failed one of them on a DuckDB file lock (misreported as a filter problem) or let both finish, with the last writer's `manifest.json` and `run_results.json` silently winning.
+This happens wherever a project directory is shared: cron or an Airflow worker on one host, or a developer building while a scheduled run is in flight.
+CI runners that check out a fresh copy per job never see it.
+
+**Fix:** let the named process finish, then re-run.
+To run two commands at the same time, give each its own checkout.
+The lock is an operating-system lock tied to the holding process, so there is never a stale lock to delete: if the named pid is gone, so is the lock.
+
 ### `Permission denied` reading `target/manifest.json` or `target/run_results.json`
 
 **Symptom (exit 1, from whatever reads the control file - a `--state` compile, `mbt docs`, a CI script, or your own tooling; captured from a real reproduction where a root container wrote the file and a uid-1001 host process read it):**
@@ -558,9 +659,28 @@ Declared `evaluation.slices` are not features, so a string slice column never tr
 
 **Why:** every entry in `features.include` - a literal name or a glob - must match at least one column the dataset delivers (after `transform_features`).
 An entry that matches nothing is almost always a typo, and before this check it was dropped silently: the model trained on one feature fewer, passed its gates, and registered, with nothing in the PR comment to say so.
-`features.exclude` stays lenient, because excluding a column that is not there is harmless.
+`features.exclude` stays lenient where that is true, because excluding a column that is genuinely gone is harmless; the next entry covers where it is not.
 
 **Fix:** correct the spelling - the hint names the closest columns, and lists them all when the table has 20 or fewer - or remove the entry if the column is really gone upstream.
+
+### `features.exclude of model '<name>' names column(s) the dataset does not have, each close to a column that is being trained on`
+
+**Symptom (hard error, exit 1, during the training job):**
+
+```text
+[2/2] ERROR model model.demo.churn_classifier in 1.94s -
+      features.exclude of model 'churn_classifier' names column(s) the
+      dataset does not have, each close to a column that is being trained
+      on: 'user_idd' (did you mean 'user_id'?)
+      hint: fix the spelling so the column is really excluded, or remove the
+      entry if the column it named is gone
+```
+
+**Why:** `features.exclude` is where leakage guards live, so a misspelled entry is worse than a misspelled include: the guard a reviewer reads is not the guard that runs, and the column it was written to keep out trains the model.
+An exclude entry that matches no column is still accepted when nothing in the dataset is close to it (the column is simply gone), and a glob is never treated as a misspelling.
+It fails only when the entry closely matches a column that would otherwise be a feature.
+
+**Fix:** correct the spelling, or remove the entry if the column it named really is gone upstream and the near match is a different column you mean to train on.
 
 ### `feature treatment names column(s) the model does not consume`
 

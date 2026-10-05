@@ -101,9 +101,16 @@ all twelve package `pyproject.toml`, and every package's `__init__.__version__`
 agree (it also checks each package declares `license = "Apache-2.0"` and ships a
 `LICENSE`), so it is the backstop if a version is ever edited by hand.
 
+It also moves the packages' pins on each other (`mbt-adapter-base>=0.2.0,<0.3`) and accepts a development version (`0.3.0.dev0`); run `uv lock` after it, because the lock records the workspace versions.
+
 After the bump lands green, tag the release commit `vX.Y.Z` - the scaffold pins
 projects to `git+https://github.com/satrijandi/mbt@vX.Y.Z`, so the tag is what
 makes a fresh `mbt init` project installable.
+
+**Then immediately bump `main` to the next development version** (`python scripts/bump_version.py 0.3.0.dev0`, `uv lock`, commit).
+`mbt init` stamps a release build's own tag into a new project's requirements, but no tag contains a development build's code, so a `.dev` version pins the exact commit it was installed from instead (`direct_url.json` for a `pip install git+...` install, `git rev-parse HEAD` for an editable checkout).
+Leaving `main` on the released version is what broke v0.1.0: for 95 commits every project scaffolded from `main` pinned `v0.1.0`, whose code could not read the scaffold it was installed for (FEEDBACK v6 A-1).
+`tests/test_cli_basics.py` holds the line: the scaffolded ref must be a commit SHA, or a tag equal to `__version__` with no `.dev` suffix.
 Pushing the tag runs `release.yml`, which re-runs the whole CI as a gate (it calls `ci.yml` via `workflow_call`) before it builds or publishes anything, so a tag on a red commit cannot ship broken wheels; the publish uses `skip-existing`, so re-running it after a partial upload is safe.
 Every wheel and sdist is attested with `actions/attest-build-provenance`, so an
 installer can verify where an artifact came from:
@@ -149,7 +156,7 @@ the check stable.
 ### Enabling the PyPI publish (one-time, maintainer-only)
 
 Until this is done a tag still produces a fully green run and a GitHub release
-with all 22 wheels/sdists attached - the publish step is skipped by an explicit
+with all 24 wheels/sdists attached - the publish step is skipped by an explicit
 opt-in gate rather than failing. That ordering is deliberate: an unconfigured
 Trusted Publisher fails `invalid-publisher`, and when the publish ran *before*
 the release step it took the GitHub release down with it.

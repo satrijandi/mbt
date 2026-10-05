@@ -6,7 +6,12 @@ name: mbt daily scoring
 on:
   schedule:
     - cron: "0 6 * * *"  # daily 06:00 UTC
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      anchor:
+        description: "ISO timestamp to run as of (default: today 06:00 UTC)"
+        required: false
+        default: ""
 
 permissions:
   contents: read   # least privilege at workflow scope; jobs opt up individually
@@ -21,20 +26,55 @@ jobs:
   score:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read   # the anchor step reads this run's created_at
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97   # v7.0.0
         with:
           python-version: "3.11"
       - name: Install project
+        # No generate_sample_data.py here: that is pr_check's dev data. The
+        # prod target reads real data from MBT_DATA_ROOT (next step).
+        run: pip install -r requirements.txt
+      - name: Point the prod target at the real data
+        # profiles.yml's prod target reads env('MBT_DATA_ROOT') with NO default,
+        # so a run without it fails loudly instead of training, registering and
+        # scoring whatever happens to sit in the checkout. Set the repo variable
+        # MBT_DATA_ROOT (README, "Repo settings this project assumes"). Exported
+        # only when set: GitHub renders an unset variable as an empty string,
+        # which would read as a real - empty - root.
+        env:
+          DATA_ROOT: ${{ vars.MBT_DATA_ROOT }}
         run: |
-          pip install -r requirements.txt
-          python scripts/generate_sample_data.py
+          if [ -n "$DATA_ROOT" ]; then echo "MBT_DATA_ROOT=$DATA_ROOT" >> "$GITHUB_ENV"; fi
+      - name: Pin the anchor to this run's scheduled slot
+        # Without --anchor every invocation compiles against "now": the window
+        # moves by seconds, ADR-21's run key (a hash of the resolved windows)
+        # changes, and GitHub's "Re-run jobs" writes the same day's work twice.
+        # A run's created_at survives a re-run, and truncating it to the cron's
+        # 06:00 UTC slot also absorbs GitHub's scheduling delay - keep the time
+        # here in step with the cron above. A manual dispatch may pass its own.
+        id: anchor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.anchor }}
+        run: |
+          if [ -n "$REQUESTED" ]; then
+            anchor="$REQUESTED"
+          else
+            created=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+            anchor="${created%%T*}T06:00:00Z"
+          fi
+          echo "anchor=$anchor" >> "$GITHUB_OUTPUT"
       - name: Score daily pipelines (prod target)
         id: mbt
+        env:
+          ANCHOR: ${{ steps.anchor.outputs.anchor }}
         run: |
           set +e
-          mbt score --target prod --select tag:daily --deep-snapshot
+          mbt score --target prod --select tag:daily --deep-snapshot --anchor "$ANCHOR"
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           # Exit 2 = a shift-monitor breach or input-check failure: a completed

@@ -4,7 +4,7 @@
     python scripts/generate_changelog.py            # rewrite CHANGELOG.md
     python scripts/generate_changelog.py --check    # fail if it is out of date
 
-Ten packages ship from this repo and there was nowhere for a consumer to read
+Twelve packages ship from this repo and there was nowhere for a consumer to read
 what changed between two of them (FEEDBACK v3 D-3). ``release.yml`` sets
 ``generate_release_notes: true``, which derives notes from merged pull
 requests - and this repo has none, so a release's notes came out empty.

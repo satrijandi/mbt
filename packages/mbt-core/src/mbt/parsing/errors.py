@@ -38,6 +38,10 @@ class ParseReport:
     """Accumulates issues across the whole parse pass."""
 
     issues: list[ParseIssue] = field(default_factory=list)
+    #: Files that could not be read at all (rel path -> the resource names that
+    #: could still be recovered from them), so a resource that refs one of
+    #: those names is not ALSO reported as dangling (FEEDBACK v6 B-3).
+    unreadable: dict[str, set[str]] = field(default_factory=dict)
 
     def error(
         self,

@@ -25,10 +25,13 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def cli_process_state() -> Iterator[None]:
+    from mbt.cli import common
+
     cwd = os.getcwd()
     yield
     os.chdir(cwd)
     set_bus(EventBus())
+    common.CONSOLE.json = False
 
 
 def invoke(args: list[str], **kwargs: Any) -> Result:

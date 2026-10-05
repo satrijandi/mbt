@@ -1,6 +1,6 @@
 """The generated changelog (FEEDBACK v3 D-3).
 
-Ten packages ship from this repo with `generate_release_notes: true` deriving
+Twelve packages ship from this repo with `generate_release_notes: true` deriving
 notes from merged pull requests - of which this repo has none, so a release's
 notes came out empty. The changelog is generated from git instead, which is why
 these tests are about the *generator's* invariants rather than the file's text:

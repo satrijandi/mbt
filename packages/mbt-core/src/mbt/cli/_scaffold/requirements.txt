@@ -4,16 +4,15 @@
 #
 # What this file pins, and what it does not:
 #
-#  - The four mbt packages are pinned to the release tag v__MBT_VERSION__.
+#  - The four mbt packages are pinned to __MBT_REF__: the release tag of the
+#    mbt that scaffolded this project, or - when that mbt was a development
+#    build, which no tag contains - the exact commit it was installed from.
 #    mbt-adapter-base is one of them because the other three depend on it and
 #    it is not on PyPI, so pip can only resolve it from a ref listed here.
 #    Reproducible AND installable straight from a fresh checkout, with no
 #    private index. Note that a git TAG is movable, on GitHub included; the
-#    immutable form is a commit SHA, so replace @v__MBT_VERSION__ with the SHA
-#    you scaffolded from wherever that distinction matters to you.
-#    The tag resolves once the matching vX.Y.Z release exists on the mbt repo -
-#    its release.yml builds that tag's wheels. Until it is cut, the install
-#    fails at "git checkout -q vX.Y.Z", and the SHA swap above is the stopgap.
+#    immutable form is a commit SHA, so replace a tag with the SHA it points
+#    at wherever that distinction matters to you.
 #  - The numerics stack below is pinned exactly, at the versions the mbt install
 #    that scaffolded this project was running. These decide model numerics, and
 #    pinning mbt pins none of them.
@@ -22,8 +21,8 @@
 #    has no wheel hash to record). Once it is published, switch the four refs
 #    to plain version pins (mbt-core==X.Y.Z) and generate the full lock:
 #      uv pip compile --generate-hashes requirements.in -o requirements.txt
-mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-adapter-base
-mbt-core @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-core
-mbt-xgboost @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-xgboost
-mbt-mlflow @ git+https://github.com/satrijandi/mbt@v__MBT_VERSION__#subdirectory=packages/mbt-mlflow
+mbt-adapter-base @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-adapter-base
+mbt-core @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-core
+mbt-xgboost @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-xgboost
+mbt-mlflow @ git+https://github.com/satrijandi/mbt@__MBT_REF__#subdirectory=packages/mbt-mlflow
 __PINNED_DEPS__

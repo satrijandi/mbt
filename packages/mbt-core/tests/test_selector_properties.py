@@ -1,10 +1,11 @@
 """Property-based selector algebra tests over random DAGs (S4-03, TSD §21)."""
 
 import networkx as nx
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from mbt.dag.selector import SelectableNode, evaluate_selector, select_nodes
+from mbt.dag.selector import SelectableNode, SelectorError, evaluate_selector, select_nodes
 
 _TAGS = ("alpha", "beta", "weekly")
 
@@ -71,6 +72,10 @@ def test_exclude_subtracts_exactly(dag) -> None:
     graph, nodes = dag
     everything = select_nodes(graph, nodes, None)
     models = evaluate_selector("resource_type:model", graph, nodes)
+    if not models:  # an exclude naming nothing is an error, not a no-op (A-5)
+        with pytest.raises(SelectorError):
+            select_nodes(graph, nodes, None, exclude=["resource_type:model"])
+        return
     remaining = select_nodes(graph, nodes, None, exclude=["resource_type:model"])
     assert remaining == everything - models
 
