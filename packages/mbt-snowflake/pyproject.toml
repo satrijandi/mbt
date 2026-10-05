@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-snowflake"
-version = "0.2.0"
+version = "0.3.0.dev0"
 description = "Snowflake data adapter for mbt: warehouse-native dataset construction"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-adapter-base>=0.2.0,<0.3",
+    "mbt-adapter-base>=0.3.0.dev0,<0.4",
     # 3.13.1 clears the connector's own advisories (PYSEC-2024-191,
     # PYSEC-2025-26/27/28), but everything below 4.4.0 caps pyOpenSSL, which
     # transitively strands cryptography on a vulnerable 46.0.x. 4.4.0 is the

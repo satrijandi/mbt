@@ -101,7 +101,7 @@ all twelve package `pyproject.toml`, and every package's `__init__.__version__`
 agree (it also checks each package declares `license = "Apache-2.0"` and ships a
 `LICENSE`), so it is the backstop if a version is ever edited by hand.
 
-It also moves the packages' pins on each other (`mbt-adapter-base>=0.2.0,<0.3`) and accepts a development version (`0.3.0.dev0`); run `uv lock` after it, because the lock records the workspace versions.
+It also moves the packages' pins on each other (`mbt-adapter-base>=0.2.0,<0.3`) and accepts a development version (`0.3.0.dev0`); run `uv lock` after it, because the lock records the workspace versions, and `UPDATE_GOLDEN=1 uv run pytest tests/test_golden_manifest.py`, because the golden manifest records `mbt_version`.
 
 After the bump lands green, tag the release commit `vX.Y.Z` - the scaffold pins
 projects to `git+https://github.com/satrijandi/mbt@vX.Y.Z`, so the tag is what

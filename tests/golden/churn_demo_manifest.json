@@ -48,7 +48,7 @@
       "dirty": false
     },
     "manifest_schema_version": 2,
-    "mbt_version": "0.2.0",
+    "mbt_version": "0.3.0.dev0",
     "project_name": "churn_demo",
     "target": "ci",
     "target_config": {

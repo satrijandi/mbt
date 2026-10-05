@@ -2,9 +2,10 @@
 
 mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-sklearn, mbt-mlflow, mbt-optuna, mbt-evidently, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/showcase`, repo-root `tests/` (E2E, golden, perf, live, plus `tests/fixtures/{churn_demo, revenue_demo}` - whole mbt projects the suite copies to tmp and drives through the real CLI, excluded from collection via `norecursedirs`), and `docs/` (mkdocs + ADRs).
 Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anything that looks odd.
-Whole-repo review cycles live in `design-history/reviews/` once closed (newest: `feedback-v5.md`); code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`, `FEEDBACK v3 A-1`, and v5's bare `A-1`/`B-4`/`C-2`/`D-2`), so do not delete them.
+Whole-repo review cycles live in `design-history/reviews/` once closed (newest: `feedback-v6.md`); code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`, `FEEDBACK v3 A-1`, v5's bare `A-1`/`B-4`/`C-2`/`D-2`, and `FEEDBACK v6 A-2`), so do not delete them.
 A cycle still in flight sits at the repo root as `FEEDBACK_v<n>.md` instead - findings plus a progress log, one appended entry per completed item (symptom, fix, verification, docs) - and moves into `reviews/` when that log closes.
 No cycle is in flight.
+v6 was a black-box review (the product run through the real CLI, and the suite measured by mutation); it is swept, and it added `mbt/yamlio.py` (the one YAML reader, which refuses duplicate keys - never call `yaml.safe_load` in package code), `mbt/state/lock.py` (one writer per `target/`), and the nightly mutation tier described below.
 v5 was the architecture review (module depth, seams, testability) plus a data-science addendum; it is swept, and the modules it created are the ones to read first when changing those areas: `mbt/execute/seeds.py` (the seed ladder), `mbt/parsing/rules.py` (the parser's invariants, which run at parse AND compile), `mbt/quality/judgement.py` (gates + stability + verdict), `mbt/execute/job_runtime.py`, `mbt/cli/inspect.py`, and `mbt_adapter_base/{base,capabilities,champion,events,errors}.py`.
 
 ## Verify (run all of these before calling work done)

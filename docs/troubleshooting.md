@@ -37,11 +37,28 @@ When an error says `Internal error`, re-run with `MBT_DEBUG=1` for the traceback
 ERROR: Failed to build 'mbt-core' when git checkout -q v0.1.0
 ```
 
-**Why:** the scaffold pins mbt to the release tag matching the mbt version that generated it (`mbt-core @ git+https://github.com/satrijandi/mbt@v0.1.0#...`), and no such tag exists on the mbt repository - typically because the project was scaffolded from a development build whose version has not been released yet.
-The pin is deliberate - a floating ref would invalidate the manifest's env digest - but it only resolves once the release exists.
+**Why:** the project pins mbt to a git tag that does not exist on the mbt repository.
+mbt up to v0.1.0 stamped the tag of its own version into every scaffold, including from development builds of `main`, where that tag was either missing or 95 commits older than the scaffold it was installed for (and `v0.1.0` itself crashes on typer >= 0.27).
+Since v0.2.0 a release build pins its own tag, which exists, and a development build (`X.Y.Z.devN`) pins the commit it was installed from instead.
 
-**Fix:** replace `@vX.Y.Z` in every mbt ref in `requirements.txt` (and `requirements.in`) with the commit SHA you installed mbt from - a SHA is just as immutable, so reproducibility is preserved - and re-run the install.
-Once that version is released (a tag on the repository, or packages on PyPI), restore the tag pin or switch to plain version pins per the file's header.
+**Fix:** re-scaffold with a current mbt, or replace `@vX.Y.Z` in every mbt ref in `requirements.txt` (and `requirements.in`) with a release tag that exists (`@v0.2.0`) or the commit SHA you installed mbt from - a SHA is just as immutable, so reproducibility is preserved - and re-run the install.
+
+### `this mbt is a development build (X.Y.Z.devN) that was not installed from git`
+
+**Symptom (`mbt init`, exit 1):**
+
+```text
+Error: this mbt is a development build (0.3.0.dev0) that was not installed from
+git, so no tag or commit is known to contain its code
+  hint: pass --mbt-ref <tag-or-commit> naming the mbt it should pin, or install
+mbt from a release tag or a git checkout
+```
+
+**Why:** a scaffolded project's CI installs mbt from a git ref, and `mbt init` has to choose it.
+A release build pins its own tag; a development build pins the commit it was installed from, read from the install record (`pip install git+...`) or from the checkout (`pip install -e`).
+A development build installed from a local wheel recorded neither, and guessing would pin code that is not the code you are running.
+
+**Fix:** pass the ref explicitly - `mbt init NAME --mbt-ref v0.2.0`, or `--mbt-ref <commit-sha>` for the commit the wheel was built from - or install mbt from a release tag or a git checkout.
 
 ### `No matching distribution found for mbt-adapter-base` installing a scaffolded project
 

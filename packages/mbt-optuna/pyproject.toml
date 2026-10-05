@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-optuna"
-version = "0.2.0"
+version = "0.3.0.dev0"
 description = "Optuna tuning engine for mbt"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-adapter-base>=0.2.0,<0.3",
+    "mbt-adapter-base>=0.3.0.dev0,<0.4",
     "optuna>=3.6",
 ]
 

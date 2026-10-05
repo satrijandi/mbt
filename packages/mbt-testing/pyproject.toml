@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-testing"
-version = "0.2.0"
+version = "0.3.0.dev0"
 description = "Fake, contract-conformant mbt adapters for testing mbt projects and mbt itself"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,8 +24,8 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-core>=0.2.0,<0.3",
-    "mbt-adapter-base>=0.2.0,<0.3",
+    "mbt-core>=0.3.0.dev0,<0.4",
+    "mbt-adapter-base>=0.3.0.dev0,<0.4",
 ]
 
 [project.urls]

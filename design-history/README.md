@@ -24,6 +24,8 @@ They carry the reasoning behind a large share of the current design, and several
 - `reviews/feedback-v4.md` - review 5, closed 2026-09-09. Finding IDs `A-1`-`E-1`; code comments cite them as `FEEDBACK B-1`, `FEEDBACK D-3`.
 - `reviews/feedback-v5.md` - review 6, closed 2026-09-23. Finding IDs `A-1`-`C-6` (architecture: module depth, seams, testability) plus a data-science addendum `D-1`-`D-5`; code comments cite them as `A-1`, `B-4`, `C-2`, `D-2`.
   Unlike the five cycles above it reviews the shape of the code rather than practice, which is why its findings are cited by the modules they created (`execute/seeds.py`, `parsing/rules.py`, `quality/judgement.py`, `mbt_adapter_base/{base,capabilities,champion,events,errors}.py`).
+- `reviews/feedback-v6.md` - review 7, closed 2026-10-05. Finding IDs `A-1`-`A-8`, `B-1`-`B-5`, `C-1`, `D-1`; code comments cite them as `FEEDBACK v6 A-2`.
+  A black-box review: every finding was reproduced through the real CLI or measured by mutating the source, and its A-1 fix was the v0.2.0 release.
 
 No review is in flight.
 A review in flight lives at the repo root as `FEEDBACK_v<n>.md` so it is impossible to miss, and moves here once its progress log is closed.

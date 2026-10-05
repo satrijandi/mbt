@@ -4,8 +4,7 @@ Review date: 2026-10-04, against `main` (`a5c2324`).
 Scope: the product as a user meets it, and the test suite as a mutant meets it.
 Findings closed in the five earlier cycles (`design-history/reviews/feedback-v1.md` through `-v5`) are not re-litigated.
 
-This file sits at the repo root while the sweep is in flight, per `design-history/README.md`.
-It moves to `design-history/reviews/feedback-v6.md` when the progress log at the bottom closes.
+Swept and closed 2026-10-05; the progress log at the bottom records every item.
 
 ## What this review is
 
@@ -412,6 +411,24 @@ When fixing one, it is worth asking where its mirror image is.
 One appended entry per completed item, carrying symptom, fix, verification and docs, per the shape the earlier cycles use.
 This file moves to `design-history/reviews/feedback-v6.md` when the log closes.
 
+### A-1 - v0.2.0 is cut, and main can no longer pin a release that does not contain it
+
+**Release.** `8001129` ("Bump version to 0.2.0") is tagged `v0.2.0` and pushed; `release.yml` re-ran the full CI as its gate, went green, and published the GitHub release with all 24 wheels and sdists attached (the PyPI step stays gated off, as before).
+The changelog section records the retraining impact the review asked every release to state: a full retrain, plus the spec edits ADR-29 requires of datasets that used `inputs:`.
+The release commit also needed `UPDATE_GOLDEN=1`, because the golden manifest records `mbt_version`; CONTRIBUTING's procedure now says so.
+
+**Making the mismatch impossible.** `main` is now `0.3.0.dev0`.
+`mbt init` (`cli/scaffold.mbt_ref`) pins a release build to its own tag and a `.dev` build to the commit it was installed from (`direct_url.json`'s `vcs_info.commit_id`, or `git rev-parse HEAD` for an editable checkout); with neither it refuses, and `--mbt-ref` names the ref explicitly.
+`scripts/bump_version.py` accepts `X.Y.Z.devN` and moves the packages' pins on each other (`mbt-adapter-base>=0.3.0.dev0,<0.4`), which it previously left at `<0.2` - a bump to 0.2.0 would have produced packages that could not install together.
+`tests/test_cli_basics.py` holds the review's line: the scaffolded ref is a 40-hex SHA, or a tag equal to `v{__version__}` with no `.dev`.
+The scaffold README's "until the tag exists" paragraph is gone, and the requirements headers describe both cases.
+
+**Verification.** From the pushed tag, in a clean Python 3.11 venv: `mbt --version` prints `mbt 0.2.0` and exits 0 (v0.1.0 raised `AttributeError` there on the same typer 0.27.2); `mbt init` pins `@v0.2.0`; that project's own `requirements.txt` installs, and `mbt build` trains, gates and registers - the exact sequence every scaffolded project's CI runs.
+On `0.3.0.dev0`, an editable checkout's `mbt init` pins its HEAD (`8001129...`), and a development wheel built from the tree refuses with the `--mbt-ref` hint, captured into the runbook.
+`test_cli_scaffold_unit.py` covers release, VCS install, editable checkout, and the three no-commit shapes; `test_wheel_install.py` now asserts the refusal and the override against a real wheel.
+
+**Docs.** `docs/installation.md`, `docs/quickstart.md` and `docs/gitops.md` point at v0.2.0; `docs/cli-reference.md` documents `--mbt-ref`; CONTRIBUTING's "Releasing" section requires the `.dev0` bump straight after a tag; the runbook's install entry says why the tag was missing, and a new entry covers the refusal.
+
 ### A-2 - a train or validation window that overlaps test is rejected
 
 **Symptom.** Reproduced on a fresh `mbt init` project: `train: "-180d:-20d"` against `test: "-28d:now"` parsed, built and registered, with 101 rows in both splits.
@@ -566,3 +583,21 @@ The harness's first attempt refused to run because the unmutated suite failed, w
 `tests/test_mutation_workflow.py` pins the ratchet, the targets, the baseline's coverage of them, and the workflow's wiring.
 
 **Docs.** `docs/v0.1-status.md`'s NFR-08 row states the mutation score beside the coverage figure; CLAUDE.md describes the tier and the boundary-test pattern.
+
+---
+
+## Closing verification
+
+The full CLAUDE.md battery, run on the sweep commit `3ef0d18` and again where later commits changed what it covers:
+
+- `uv run pytest -q -m "not e2e" --cov` - **1,940 passed, 51 skipped, coverage 100.00%**; again on the release commit after regenerating the golden manifest's `mbt_version`.
+- `uv run pytest -q -m e2e --timeout 1800` - **95 passed, 6 skipped** and 2 failures, both scaffold prod builds that relied on the `MBT_DATA_ROOT` default A-8 removed; the tests now set the variable as a project would, and re-ran green.
+- ruff, ruff format, strict mypy over all 12 packages (155 files), pre-commit, `mkdocs build --strict`, yamllint and the advisory audit - clean.
+- The mutation tier's first baseline: 2,741 of 3,292 mutants killed, 550 surviving.
+- GitHub at `8001129`: CI, CodeQL and release all green; v0.2.0 published.
+
+## What was deliberately not done
+
+- **A selector check for Python data tests.** A test file's `selector:` that matches nothing still binds to nothing silently (`execute/runners.DatasetRunner._binds`); A-5 covered the command-line selectors the review named.
+- **A warning when an editable checkout is dirty.** `mbt init` pins the checkout's HEAD, which does not include uncommitted changes; that is the honest commit to pin, and saying so on every `init` from a working tree would be noise.
+- **An `interrupted` node status in `run_results.json`.** B-5's INTERRUPTED is an event-level report followed by the exit-130 unwind that already happened; no results file is written on that path, so a new persisted status would have no writer.

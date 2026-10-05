@@ -2508,7 +2508,7 @@ wheels = [
 
 [[package]]
 name = "mbt-adapter-base"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-adapter-base" }
 dependencies = [
     { name = "pyarrow" },
@@ -2540,7 +2540,7 @@ provides-extras = ["metrics", "compliance"]
 
 [[package]]
 name = "mbt-core"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-core" }
 dependencies = [
     { name = "click" },
@@ -2590,7 +2590,7 @@ provides-extras = ["s3", "otel", "iceberg"]
 
 [[package]]
 name = "mbt-evidently"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-evidently" }
 dependencies = [
     { name = "evidently" },
@@ -2605,7 +2605,7 @@ requires-dist = [
 
 [[package]]
 name = "mbt-h2o"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-h2o" }
 dependencies = [
     { name = "h2o" },
@@ -2632,7 +2632,7 @@ provides-extras = ["sparkling"]
 
 [[package]]
 name = "mbt-lightgbm"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-lightgbm" }
 dependencies = [
     { name = "lightgbm" },
@@ -2650,7 +2650,7 @@ requires-dist = [
 
 [[package]]
 name = "mbt-mlflow"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-mlflow" }
 dependencies = [
     { name = "mbt-adapter-base" },
@@ -2665,7 +2665,7 @@ requires-dist = [
 
 [[package]]
 name = "mbt-optuna"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-optuna" }
 dependencies = [
     { name = "mbt-adapter-base" },
@@ -2680,7 +2680,7 @@ requires-dist = [
 
 [[package]]
 name = "mbt-sklearn"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-sklearn" }
 dependencies = [
     { name = "joblib" },
@@ -2700,7 +2700,7 @@ requires-dist = [
 
 [[package]]
 name = "mbt-snowflake"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-snowflake" }
 dependencies = [
     { name = "mbt-adapter-base" },
@@ -2722,7 +2722,7 @@ provides-extras = ["sso"]
 
 [[package]]
 name = "mbt-spark"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-spark" }
 dependencies = [
     { name = "mbt-adapter-base", extra = ["metrics"] },
@@ -2745,7 +2745,7 @@ requires-dist = [
 
 [[package]]
 name = "mbt-testing"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-testing" }
 dependencies = [
     { name = "mbt-adapter-base" },
@@ -2760,7 +2760,7 @@ requires-dist = [
 
 [[package]]
 name = "mbt-workspace"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -2833,7 +2833,7 @@ mutation = [{ name = "mutmut", specifier = ">=3.8" }]
 
 [[package]]
 name = "mbt-xgboost"
-version = "0.2.0"
+version = "0.3.0.dev0"
 source = { editable = "packages/mbt-xgboost" }
 dependencies = [
     { name = "mbt-adapter-base", extra = ["metrics"] },

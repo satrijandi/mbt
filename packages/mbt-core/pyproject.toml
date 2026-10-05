@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-core"
-version = "0.2.0"
+version = "0.3.0.dev0"
 description = "mbt: a declarative build tool for machine learning models (dbt for ML)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-adapter-base>=0.2.0,<0.3",
+    "mbt-adapter-base>=0.3.0.dev0,<0.4",
     # 0.16: first release that parses PEP 604 unions (Path | None) AND works
     # with click >= 8.2 (make_metavar signature change).
     "typer>=0.16",
