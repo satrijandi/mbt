@@ -35,7 +35,11 @@ dependencies = [
     # a floor inside that range means the floors job installs a client that
     # accepts any well-formed certificate. The lock already ships 4.7.2; only
     # the declared floor was exposed.
-    "snowflake-connector-python>=4.7.1",
+    # Raised 4.7.1 -> 4.7.3 for CVE-2026-86597 / GHSA-qqj6-54q6-cxv6: older
+    # drivers could write authentication tokens, query-result encryption keys
+    # and pre-signed URLs into diagnostic logs. mbt's coordinator and jobs log
+    # through this driver, so it is in the execute path; 4.7.3 is the fix.
+    "snowflake-connector-python>=4.7.3",
 ]
 
 [project.optional-dependencies]
@@ -43,7 +47,7 @@ dependencies = [
 # through keyring (its secure-local-storage extra, available since well
 # before our 3.7 floor). Without it client_store_temporary_credential is a
 # silent no-op and every connection re-prompts the browser.
-sso = ["snowflake-connector-python[secure-local-storage]>=4.7.1"]
+sso = ["snowflake-connector-python[secure-local-storage]>=4.7.3"]
 
 [project.urls]
 Homepage = "https://github.com/satrijandi/mbt"
