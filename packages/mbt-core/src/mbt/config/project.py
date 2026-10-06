@@ -55,7 +55,12 @@ def _check_version_requirement(specifier: str, project_path: Path) -> None:
             path=project_path,
             hint="use a PEP 440 specifier, e.g. '>=0.1,<0.2'",
         ) from exc
-    if Version(mbt.__version__) not in spec_set:
+    # prereleases=True, stated rather than left to packaging's default: main
+    # carries X.Y.Z.devN between releases (FEEDBACK v6 A-1), and whether
+    # ">=0.0.1" admits "0.3.0.dev0" by default changed between packaging 23.1
+    # (the declared floor: no) and 26 (yes). The floors job caught it.
+    # PEP 440 still keeps "<0.3" from admitting 0.3.0.dev0 either way.
+    if not spec_set.contains(Version(mbt.__version__), prereleases=True):
         raise ConfigError(
             f"this project requires mbt {specifier}, but mbt {mbt.__version__} is installed",
             path=project_path,

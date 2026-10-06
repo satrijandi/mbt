@@ -91,6 +91,28 @@ def test_require_mbt_version_satisfied(tmp_path: Path) -> None:
     assert load_project(tmp_path).require_mbt_version == ">=0.0.1"
 
 
+@pytest.mark.parametrize(
+    ("specifier", "satisfied"),
+    [(">=0.0.1", True), (">=0.2,<0.4", True), (">=0.3.0.dev0", True), ("<0.3", False)],
+)
+def test_a_development_build_is_judged_by_its_version_not_by_packaging_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, specifier: str, satisfied: bool
+) -> None:
+    """main carries X.Y.Z.devN between releases (FEEDBACK v6 A-1); whether a
+    plain range admits it by default changed between packaging 23.1 and 26, so
+    only the floors job saw ">=0.0.1" reject 0.3.0.dev0."""
+    monkeypatch.setattr(mbt, "__version__", "0.3.0.dev0")
+    write(
+        tmp_path / "mbt_project.yml",
+        f'name: demo\nversion: "1.0"\nrequire_mbt_version: "{specifier}"\n',
+    )
+    if satisfied:
+        assert load_project(tmp_path).require_mbt_version == specifier
+    else:
+        with pytest.raises(ConfigError, match=r"but mbt 0\.3\.0\.dev0 is installed"):
+            load_project(tmp_path)
+
+
 def test_require_mbt_version_invalid_specifier(tmp_path: Path) -> None:
     write(
         tmp_path / "mbt_project.yml",
