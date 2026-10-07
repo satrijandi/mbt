@@ -307,10 +307,12 @@ class TrainingJob(_InterchangeModel):
     node: ManifestNode
     #: Score mode: the referenced model's manifest node (hooks path, ModelSpec).
     model_node: ManifestNode | None = None
-    #: Score mode: the champion's own exported model spec, read back from the
-    #: artifact it was registered with (ADR-28). Authoritative over
-    #: ``model_node.config``, which is whatever the working tree says today.
-    #: None only for a champion registered before mbt exported one.
+    #: The champion's own exported model spec, read back from the artifact it
+    #: was registered with (ADR-28). Score and check modes run it in place of
+    #: ``model_node.config``, which is whatever the working tree says today;
+    #: train and evaluate modes score the champion gate's champion through it
+    #: (ADR-9), not through the challenger's feature selection. None for no
+    #: champion, or one registered before mbt exported an inference config.
     champion_spec: dict[str, Any] | None = None
     #: Score mode: the exact feature columns, in order, the champion was fit on
     #: (ADR-28's ``resolved.feature_columns``). The manifest cannot answer this

@@ -502,6 +502,21 @@ class ModelRunner:
             )
         return champion, stage
 
+    def _champion_inference(self, champion: ModelVersion | None) -> dict[str, Any]:
+        """The champion's own spec and fitted feature columns (ADR-28), so the
+        champion gate scores it through what it was trained on, not through
+        the challenger's feature selection (ADR-9). Empty for no champion, and
+        for one registered before mbt exported an inference config - which the
+        job then scores through the challenger's view, as it always did."""
+        if champion is None or not has_inference_config(champion.tags):
+            return {}
+        document = read_inference_config(self.ctx, champion)
+        resolved = document.get("resolved") or {}
+        return {
+            "champion_spec": document["spec"],
+            "champion_feature_columns": resolved.get("feature_columns"),
+        }
+
     def _assemble_job(
         self,
         node: ManifestNode,
@@ -818,7 +833,9 @@ class ModelRunner:
         metric_specs = self._metric_specs(spec, node)
         champion, _stage = self._champion(spec, node)
 
-        job = self._assemble_job(node, spec, metric_specs, champion)
+        job = self._assemble_job(
+            node, spec, metric_specs, champion, **self._champion_inference(champion)
+        )
         job_result = self.ctx.run_job(job)
 
         if job_result.status == "error" or job_result.metrics is None:
@@ -883,13 +900,15 @@ class ModelRunner:
             and champion.artifact is not None
             and champion.artifact.uri == artifact.uri
         )
+        compared = None if is_champion else champion
         job = self._assemble_job(
             node,
             spec,
             metric_specs,
-            None if is_champion else champion,
+            compared,
             mode="evaluate",
             artifact=artifact,
+            **self._champion_inference(compared),
         )
         job_result = self.ctx.run_job(job)
         gates: list[GateResult] = []

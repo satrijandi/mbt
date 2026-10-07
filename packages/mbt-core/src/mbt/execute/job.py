@@ -278,6 +278,36 @@ def _prepare(job: TrainingJob) -> JobRuntime:
     if getattr(adapter, "data_access", "arrow") == "path":
         handle = _materialize_for_path_adapter(transformed, spec)
 
+    # The champion gate re-scores the champion on the challenger's test rows
+    # (ADR-9), but through the CHAMPION's own spec and the exact columns it was
+    # fit on (ADR-28), as scoring does. Through the challenger's handle, a
+    # champion whose features the challenger dropped was scored with those
+    # columns missing - H2O reads them as all-NA - so a worse challenger beat
+    # a crippled champion and was staged.
+    champion_handle: Any = handle
+    if job.champion is not None and job.champion_spec is not None and not checking:
+        champion_spec = ModelSpec.model_validate(job.champion_spec)
+
+        def champion_hook_ctx(split: str) -> HookContext:
+            return HookContext(
+                spec=champion_spec,
+                profile=base_profile,
+                split=split,
+                logger=HookEventSink(get_bus()),
+            )
+
+        champion_view = TransformedDatasetHandle(
+            base_handle,
+            champion_spec,
+            hooks,
+            champion_hook_ctx,
+            time_column,
+            pinned_features=job.champion_feature_columns,
+        )
+        champion_handle = champion_view
+        if getattr(adapter, "data_access", "arrow") == "path":
+            champion_handle = _materialize_for_path_adapter(champion_view, champion_spec)
+
     return JobRuntime(
         job=job,
         spec=spec,
@@ -292,6 +322,7 @@ def _prepare(job: TrainingJob) -> JobRuntime:
         hook_specs=[m for m in job.metric_specs if m.kind == "hook"],
         ctx=ctx,
         store=artifact_store_for(job.artifact_store, run_prefix=_store_prefix(job)),
+        champion_handle=champion_handle,
     )
 
 
@@ -303,12 +334,16 @@ def _store_prefix(job: TrainingJob) -> str:
 
 
 def _metrics_for(
-    runtime: JobRuntime, model: Any, split: str, *, with_slices: bool
+    runtime: JobRuntime, model: Any, split: str, *, with_slices: bool, handle: Any = None
 ) -> MetricResults:
-    """Builtin metrics via the adapter, hook metrics via predict + hooks."""
+    """Builtin metrics via the adapter, hook metrics via predict + hooks.
+
+    ``handle`` is what the model reads; the challenger's by default, the
+    champion's own view for the champion gate."""
+    handle = runtime.handle if handle is None else handle
     slices = runtime.spec.evaluation.slices if with_slices else []
     results: MetricResults = runtime.adapter.evaluate(
-        model, runtime.handle, split, runtime.builtin_specs, slices=slices or None
+        model, handle, split, runtime.builtin_specs, slices=slices or None
     )
     if runtime.hook_specs:
         if runtime.hooks is None or not runtime.hooks.has_custom_metrics:
@@ -316,7 +351,7 @@ def _metrics_for(
                 "hook metrics declared but hooks.py exposes no custom_metrics",
                 resource=runtime.job.node.unique_id,
             )
-        predictions: pa.Table = runtime.adapter.predict(model, runtime.handle, split)
+        predictions: pa.Table = runtime.adapter.predict(model, handle, split)
         hook_ctx = HookContext(
             spec=runtime.spec,
             profile=runtime.base_profile,
@@ -542,7 +577,14 @@ def _champion_delta_bounds(
     if not gates:
         return {}
     challenger_table = runtime.adapter.predict(challenger, runtime.handle, "test")
-    champion_table = runtime.adapter.predict(champion, runtime.handle, "test")
+    champion_table = runtime.adapter.predict(champion, runtime.champion_handle, "test")
+    if champion_table.num_rows != challenger_table.num_rows:
+        raise ConfigError(
+            f"the champion scored {champion_table.num_rows} test row(s) and the challenger "
+            f"{challenger_table.num_rows}; a paired comparison needs the same rows",
+            resource=runtime.job.node.unique_id,
+            hint="a hooks.py that filters rows must filter the same rows for every model",
+        )
     y_true = challenger_table.column(spec.target).to_numpy(zero_copy_only=False).astype("float64")
     challenger_scores = challenger_table.column("prediction").to_numpy(zero_copy_only=False)
     champion_scores = champion_table.column("prediction").to_numpy(zero_copy_only=False)
@@ -1215,7 +1257,9 @@ def _run_train(runtime: JobRuntime, tracking: Any, run_handle: Any) -> JobResult
     delta_bounds: dict[str, BootstrapDelta] = {}
     if job.champion is not None:
         champion_model = runtime.adapter.load(job.champion, runtime.store)
-        champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
+        champion_metrics = _metrics_for(
+            runtime, champion_model, "test", with_slices=True, handle=runtime.champion_handle
+        )
         _detail(
             runtime, "champion on the same test split: " + _metric_line(champion_metrics.metrics)
         )
@@ -1507,7 +1551,9 @@ def _run_evaluate(runtime: JobRuntime) -> JobResult:
     delta_bounds: dict[str, BootstrapDelta] = {}
     if job.champion is not None:
         champion_model = runtime.adapter.load(job.champion, runtime.store)
-        champion_metrics = _metrics_for(runtime, champion_model, "test", with_slices=True)
+        champion_metrics = _metrics_for(
+            runtime, champion_model, "test", with_slices=True, handle=runtime.champion_handle
+        )
         delta_bounds = _champion_delta_bounds(runtime, model, champion_model)
     return JobResult(
         status="success",

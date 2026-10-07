@@ -187,4 +187,5 @@ def make_inline_runtime(
         hook_specs=hook_specs or [],
         ctx=None,
         store=None,
+        champion_handle=transformed,
     )

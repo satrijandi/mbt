@@ -451,6 +451,33 @@ def test_champion_delta_bounds_without_confidence_gates() -> None:
     assert _champion_delta_bounds(runtime, object(), object()) == {}
 
 
+def test_champion_delta_bounds_refuse_unpaired_rows() -> None:
+    """The paired bootstrap resamples row i of both models together; a champion
+    view that holds different rows would pair unrelated predictions."""
+    spec = minimal_model_spec(
+        target="y",
+        evaluation={
+            "protocol": {"split": "temporal"},
+            "metrics": ["pr_auc"],
+            "gates": [{"metric": "pr_auc", "compare_to": "production"}],
+        },
+    )
+
+    class Scorer:
+        def predict(self, model: object, handle: object, split: str) -> pa.Table:
+            table = handle.read(split)  # type: ignore[attr-defined]
+            return table.append_column("prediction", pa.array([0.5] * table.num_rows))
+
+    runtime = make_inline_runtime(
+        _tables(), spec, adapter=Scorer(), builtin_specs=[MetricSpec(name="pr_auc")]
+    )
+    longer = dict(_tables())
+    longer["test"] = pa.table({"x": [1.0, 2.0, 3.0], "y": [0, 1, 1]})
+    runtime.champion_handle = make_inline_runtime(longer, spec).handle
+    with pytest.raises(ConfigError, match="the champion scored 3 test row"):
+        _champion_delta_bounds(runtime, object(), object())
+
+
 # -- implicit validation carve (TSD §13.5, ADR-8) ------------------------------------
 
 
@@ -1595,3 +1622,100 @@ def test_tuning_collects_the_trials_rounds_when_the_final_fit_cannot_stop_early(
     assert shipped < 400, "the final fit must not train every declared round"
     assert "early_stopping_rounds" not in tuned.hyperparameters
     assert any("median of 2 tuning trial(s)" in m for m in sink.messages())
+
+
+@pytest.mark.parametrize("mode", ["train", "evaluate"])
+def test_the_champion_gate_scores_the_champion_on_its_own_features(
+    demo_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """ADR-9 re-scores the champion on the challenger's test rows - through the
+    CHAMPION's spec and fitted columns (ADR-28). Through the challenger's view,
+    a champion whose features the challenger dropped was scored without them
+    (H2O reads a missing column as all-NA), so a worse challenger beat a
+    crippled champion and was staged - found on the showcase, where a
+    challenger without the activity features passed a paired-bootstrap gate."""
+    _, job = make_training_job(demo_project, fake_registry)
+    trained = run_job(job)
+    assert trained.status == "success", trained.error
+
+    seen: list[tuple[str, frozenset[str]]] = []
+    evaluate, predict = FakeTrainingAdapter.evaluate, FakeTrainingAdapter.predict
+
+    def record(kind: str, data: object, split: str) -> None:
+        if split == "test":
+            seen.append((kind, frozenset(data.read(split).column_names)))  # type: ignore[attr-defined]
+
+    def recording_evaluate(self, model, data, split, metrics, slices=None):  # type: ignore[no-untyped-def]
+        record("evaluate", data, split)
+        return evaluate(self, model, data, split, metrics, slices)
+
+    def recording_predict(self, model, data, split):  # type: ignore[no-untyped-def]
+        record("predict", data, split)
+        return predict(self, model, data, split)
+
+    monkeypatch.setattr(FakeTrainingAdapter, "evaluate", recording_evaluate)
+    monkeypatch.setattr(FakeTrainingAdapter, "predict", recording_predict)
+
+    champion_spec = dict(job.node.config)
+    narrowed = dict(job.node.config)
+    narrowed["features"] = {"include": ["tenure_days"]}
+    challenger_node = job.node.model_copy(update={"config": narrowed})
+    gated = dict(narrowed)
+    gated["evaluation"] = {
+        **narrowed["evaluation"],
+        "gates": [{"metric": "pr_auc", "compare_to": "production", "min_delta": 0.0}],
+    }
+    result = run_job(
+        job.model_copy(
+            update={
+                "mode": mode,
+                "node": challenger_node.model_copy(update={"config": gated}),
+                "artifact": trained.artifact if mode == "evaluate" else None,
+                "champion": trained.artifact,
+                "champion_spec": champion_spec,
+                "champion_feature_columns": ["tenure_days", "monthly_usage", "plan_type"],
+                "tracking": None,
+            }
+        )
+    )
+    assert result.status == "success", result.error
+    views = {columns for _, columns in seen}
+    challenger_view = next(c for c in views if "monthly_usage" not in c)
+    champion_view = next(c for c in views if "monthly_usage" in c)
+    assert "tenure_days" in challenger_view
+    assert {"tenure_days", "monthly_usage", "plan_type"} <= champion_view
+    # The paired bootstrap scored the champion through its own view too.
+    assert ("predict", champion_view) in seen
+    assert result.champion_delta_bounds
+
+
+def test_the_champion_view_hands_hooks_the_champion_spec_and_materializes_for_path_adapters(
+    demo_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mbt.execute.handles import TransformedDatasetHandle
+
+    _, job = make_training_job(demo_project, fake_registry)
+    trained = run_job(job)
+    assert trained.status == "success", trained.error
+    champion_spec = {**job.node.config, "description": "the champion's own spec"}
+    gated = job.model_copy(
+        update={
+            "champion": trained.artifact,
+            "champion_spec": champion_spec,
+            "champion_feature_columns": ["tenure_days", "monthly_usage"],
+        }
+    )
+
+    runtime = _prepare(gated)
+    assert isinstance(runtime.champion_handle, TransformedDatasetHandle)
+    assert runtime.champion_handle is not runtime.handle
+    hook_ctx = runtime.champion_handle._hook_ctx_factory("test")
+    assert hook_ctx.spec.description == "the champion's own spec"
+
+    monkeypatch.setattr(FakeTrainingAdapter, "data_access", "path")
+    runtime = _prepare(gated)
+    assert not isinstance(runtime.champion_handle, TransformedDatasetHandle)
+    assert set(runtime.champion_handle.read("test").column_names) >= {
+        "tenure_days",
+        "monthly_usage",
+    }

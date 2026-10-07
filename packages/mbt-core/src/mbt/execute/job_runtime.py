@@ -45,6 +45,11 @@ class JobRuntime:
     hook_specs: list[MetricSpec]
     ctx: RunContext
     store: Any
+    #: What the champion gate scores the champion through: the champion's own
+    #: spec and fitted feature columns over the same base splits (ADR-9,
+    #: ADR-28). The challenger's ``handle`` when the champion was registered
+    #: without an inference config, or when there is no champion.
+    champion_handle: Any = None
 
 
 __all__ = ["JobRuntime"]
