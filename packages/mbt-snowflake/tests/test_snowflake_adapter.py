@@ -528,8 +528,7 @@ def test_key_hash_requires_a_non_empty_key() -> None:
 def test_base_relation_single_source_is_the_table_ref() -> None:
     spec = _spec(sample_key=["customer_id"])
     assert base_relation(spec, {PANEL_UID: "ANALYTICS.GOLD.CHURN_PANEL"}) == (
-        "ANALYTICS.GOLD.CHURN_PANEL",
-        [],
+        "ANALYTICS.GOLD.CHURN_PANEL"
     )
 
 

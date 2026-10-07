@@ -1,17 +1,17 @@
 {
   "adapter_versions": {
     "evidently": {
-      "contract": "1.2",
+      "contract": "1.3",
       "package": "mbt-evidently",
       "version": "<version>"
     },
     "local": {
-      "contract": "1.2",
+      "contract": "1.3",
       "package": "mbt-core",
       "version": "<version>"
     },
     "xgboost": {
-      "contract": "1.2",
+      "contract": "1.3",
       "package": "mbt-xgboost",
       "version": "<version>"
     }

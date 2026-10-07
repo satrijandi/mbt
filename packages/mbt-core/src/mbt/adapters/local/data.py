@@ -41,6 +41,7 @@ from mbt_adapter_base.materialization import (
     build_dataset_materialization,
     build_scoring_materialization,
     combine_snapshots,
+    projected_columns,
     split_fractions,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore
@@ -201,10 +202,12 @@ class LocalDataAdapter:
         """One DuckDB query per split over the dataset's single relation."""
         con = _connect_duckdb(output_dir, ctx.build_parallelism)
         try:
-            self._create_base_view(con, spec.source, ctx, spec.filters, spec.sample_key_columns)
+            select = self._create_base_view(
+                con, spec.source, ctx, spec.filters, spec.sample_key_columns
+            )
             if spec.split.strategy is SplitStrategy.TEMPORAL:
-                return self._write_temporal_splits(con, spec, ctx, output_dir)
-            return self._write_random_splits(con, spec, ctx, output_dir)
+                return self._write_temporal_splits(con, spec, ctx, output_dir, select)
+            return self._write_random_splits(con, spec, ctx, output_dir, select)
         except duckdb.Error as exc:
             raise AdapterError(
                 f"dataset build failed in DuckDB: {exc}",
@@ -337,7 +340,11 @@ class LocalDataAdapter:
         ctx: DataBuildContext,
         filters: list[str],
         sample_keys: list[str],
-    ) -> None:
+    ) -> str:
+        """Create ``mbt_base`` (every column, filtered and sampled) and return
+        the SELECT list the output queries write: ``*``, or the ``ctx.columns``
+        projection, applied last so split windows can still read their time
+        column."""
         relation = self._table_relation(ctx, source_uid)
         where: list[str] = [f"({f})" for f in filters]
         # The shared recipe validates the fraction before any engine call
@@ -351,6 +358,11 @@ class LocalDataAdapter:
             where.append(f"({digest} % {SAMPLE_MODULUS}) < {threshold}")
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
         con.execute(f"CREATE TEMP VIEW mbt_base AS SELECT * FROM {relation}{where_sql}")
+        if ctx.columns is None:
+            return "*"
+        described = con.execute("DESCRIBE SELECT * FROM mbt_base").fetchall()
+        projected = projected_columns(self, ctx, ctx.columns, [row[0] for row in described])
+        return ", ".join(_quote(c) for c in projected)
 
     def _write_temporal_splits(
         self,
@@ -358,6 +370,7 @@ class LocalDataAdapter:
         spec: DatasetSpec,
         ctx: DataBuildContext,
         output_dir: Path,
+        select: str,
     ) -> dict[str, int]:
         assert spec.split.time_column is not None
         time_sql = f"CAST({_quote(spec.split.time_column)} AS TIMESTAMP)"
@@ -367,7 +380,7 @@ class LocalDataAdapter:
             end_ts = _iso_to_sql_ts(end)
             out = output_dir / f"{split}.parquet"
             con.execute(
-                f"COPY (SELECT * FROM mbt_base WHERE {time_sql} >= TIMESTAMP '{start_ts}' "
+                f"COPY (SELECT {select} FROM mbt_base WHERE {time_sql} >= TIMESTAMP '{start_ts}' "
                 f"AND {time_sql} < TIMESTAMP '{end_ts}') TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
@@ -380,6 +393,7 @@ class LocalDataAdapter:
         spec: DatasetSpec,
         ctx: DataBuildContext,
         output_dir: Path,
+        select: str,
     ) -> dict[str, int]:
         """Random splits as stable hash-bucket ranges, exactly as the warehouse
         adapters compute them (F19): membership is a pure function of the key,
@@ -405,11 +419,12 @@ class LocalDataAdapter:
             con.execute(
                 f"CREATE TEMP VIEW mbt_ranked AS SELECT *, {rank} AS __mbt_rank FROM mbt_base"
             )
+            ranked_select = "* EXCLUDE (__mbt_rank)" if select == "*" else select
             for split, lo, hi in bounds:
                 out = output_dir / f"{split}.parquet"
                 upper = f"__mbt_rank < {hi}" if hi < 1.0 else f"__mbt_rank <= {hi}"
                 con.execute(
-                    f"COPY (SELECT * EXCLUDE (__mbt_rank) FROM mbt_ranked "
+                    f"COPY (SELECT {ranked_select} FROM mbt_ranked "
                     f"WHERE __mbt_rank >= {lo} AND {upper}) "
                     f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
                 )
@@ -424,7 +439,7 @@ class LocalDataAdapter:
         for split, lo, hi in bucket_ranges(fractions):
             out = output_dir / f"{split}.parquet"
             con.execute(
-                f"COPY (SELECT * FROM mbt_base WHERE {bucket} >= {lo} AND {bucket} < {hi}) "
+                f"COPY (SELECT {select} FROM mbt_base WHERE {bucket} >= {lo} AND {bucket} < {hi}) "
                 f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
@@ -442,7 +457,9 @@ class LocalDataAdapter:
         """One DuckDB query over the unlabeled batch's single relation."""
         con = _connect_duckdb(out.parent, ctx.build_parallelism)
         try:
-            self._create_base_view(con, spec.source, ctx, spec.filters, spec.sample_key_columns)
+            select = self._create_base_view(
+                con, spec.source, ctx, spec.filters, spec.sample_key_columns
+            )
             where = ""
             if spec.time_column is not None and "score" in ctx.resolved_windows:
                 start, end = ctx.resolved_windows["score"]
@@ -452,7 +469,8 @@ class LocalDataAdapter:
                     f"AND {time_sql} < TIMESTAMP '{_iso_to_sql_ts(end)}'"
                 )
             con.execute(
-                f"COPY (SELECT * FROM mbt_base{where}) TO {_sql_str(str(out))} (FORMAT PARQUET)"
+                f"COPY (SELECT {select} FROM mbt_base{where}) "
+                f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
             row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
             return int(row[0]) if row else 0

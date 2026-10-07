@@ -21,7 +21,7 @@ from airflow.sdk import DAG, task
 # DAG processor imports files under the resolved worktree path, where the
 # symlinked dags folder is NOT on sys.path - anchor sibling imports here.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from showcase_dag_utils import ANCHOR, run_in_unit
+from showcase_dag_utils import anchor_arg, run_in_unit
 
 with DAG(
     dag_id="mbt_retrain",
@@ -29,23 +29,15 @@ with DAG(
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    params={"anchor": ANCHOR, "select": "+churn_automl"},
+    params={"anchor": "", "select": "+churn_automl"},
 ) as dag:
 
     @task(retries=1, retry_delay=timedelta(seconds=5))
     def retrain(**context) -> None:
         params = context["params"]
         run_in_unit(
-            [
-                "mbt",
-                "build",
-                "--target",
-                "prod",
-                "--select",
-                params["select"],
-                "--anchor",
-                params["anchor"],
-            ]
+            ["mbt", "build", "--target", "prod", "--select", params["select"]],
+            anchor=anchor_arg(params["anchor"]),
         )
 
     retrain()

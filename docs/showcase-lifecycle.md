@@ -37,7 +37,7 @@ Builds the runner image if needed (the one image that holds mbt, Spark, H2O and 
 It takes about 3 minutes and ends with every UI URL, the last of them:
 
 ```text
-  Airflow       http://localhost:8280 (admin / admin; DAGs appear after make ci)
+  Airflow       http://localhost:8280 (started by make ci: admin / admin)
 ```
 
 ## 3. Optional: the hand-driven demo
@@ -46,7 +46,7 @@ It takes about 3 minutes and ends with every UI URL, the last of them:
 make demo
 ```
 
-The same lifecycle by hand inside JupyterLab, with no Airflow: dev build, prod build, promote, score, monitor, land outcomes, monitor.
+The same lifecycle by hand inside JupyterLab, with no Airflow: dev build, prod build, promote, a weaker challenger the champion gate refuses, score, monitor, land outcomes, monitor.
 Skip it if you only want the scheduled side.
 Running it first is a harder test for the next step: it leaves a production champion behind, so the lifecycle's retrained model has to beat it at the champion gate before it can be promoted.
 
@@ -56,7 +56,7 @@ Running it first is a harder test for the next step: it leaves a production cham
 make lifecycle; echo "exit: $?"
 ```
 
-It takes about 7 minutes on a fresh stack, most of it the first unit bake, and about 3.5 minutes on a rerun.
+It takes about 7 minutes on a fresh stack, most of it the first unit bake and the reviewed promotion's two pipelines (5.5 minutes measured on 2026-10-07 with `make ci` already done), and less on a rerun.
 Each DAG step prints the run's Airflow URL, its state changes, and the tail of the task log, which is mbt's own output from inside the pinned unit.
 If any DAG run ends in anything but `success`, `make` stops there with exit 1.
 
@@ -66,7 +66,7 @@ If any DAG run ends in anything but `success`, `make` stops there with exit 1.
 | 1. Deployable unit | the first prod-build bakes and pins the unit; Airflow registers the DAGs | the DAGs have a pinned unit to run |
 | 2. Reset | the newest cohort goes back to as-seeded, labels empty | every run starts from the same data |
 | 3. `mbt_retrain` | `mbt build --target prod` in the unit: cluster pushdown, AutoML, gates, registration | retraining runs on a schedule |
-| 4. Promote | `mbt promote` moves the `production` alias | promotion is a registry event, not a deploy |
+| 4. Promote | `make protect`, then a `promotions.yml` PR from `mbtds`, approved and merged by `mbtops`, whose promote pipeline runs `mbt promote --from-file` | production changes only through review, and promotion is a registry event, not a deploy |
 | 5. `mbt_score` | `mbt score --target batch` with the run-time champion | scoring serves the new champion without a redeploy |
 | 6. `mbt_monitor` | ground-truth monitoring before the labels exist | monitoring waits instead of failing |
 | 7. Outcomes land | the newest cohort's labels are written | a week has passed |
@@ -121,12 +121,22 @@ A model that passes is registered and moves the `staging` alias.
 ### 4. Promote
 
 ```text
-==> [4/8] Gate-verified promotion of the retrained staging champion (a registry event)
-promoted churn_automl v4 -> production
+==> [4/8] Governed promotion: mbtds opens a promotions.yml PR, mbtops approves, CI promotes
+committed CODEOWNERS: promotions.yml @mbtops
+protected main
+    mbtds pins churn_automl v5 for production in promotions.yml on promote-churn_automl-v5-1791353838
+    mbtds opened PR #1: http://localhost:3305/mbt-showcase/churn/pulls/1
+    pr-check pipeline #3: http://localhost:8305/repos/1/pipeline/3
+    mbtops (the code owner of promotions.yml) approves and merges PR #1
+    promote pipeline #4: http://localhost:8305/repos/1/pipeline/4
+    production now serves churn_automl v5: a registry event, the unit unchanged
 ```
 
-`mbt promote` checks that the staging version passed its gates and moves the `production` alias to it.
+Nothing here is done by hand, and nothing skips the team's rules.
+`make protect` puts `promotions.yml` under review (CODEOWNERS, and a rule on `main` that only `mbtops` may approve and that binds administrators too).
+The data scientist `mbtds` pins the version the retrain staged in a `promotions.yml` PR; pr-check lints it (an unpinned entry fails) and state-diffs it (nothing to retrain); `mbtops`, the code owner, approves and merges it; and the merge's promote pipeline runs `mbt promote --from-file promotions.yml`, which checks again that the version passed its gates before it moves the `production` alias.
 Nothing is redeployed: the unit and the deploy repo stay exactly as they were, and the next scoring run picks the new champion up on its own.
+If the staged version already serves production, the step says so and opens no PR.
 
 ### 5. Score
 
@@ -196,7 +206,7 @@ make lifecycle; echo "exit: $?"
 ```
 
 Step 1 now reports `deployable unit already pinned` and skips the bake.
-The retrain registers the next version, which must pass the paired champion gate against the one you just promoted, and the rest repeats on the same data.
+The retrain registers the next version, which must pass the paired champion gate against the one you just promoted, the promotion opens a second reviewed PR, and the rest repeats on the same data.
 
 ## Output that is not an error
 

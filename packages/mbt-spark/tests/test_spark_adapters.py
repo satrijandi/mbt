@@ -103,6 +103,7 @@ class FakeBuildContext:
         self.sample_fraction = sample_fraction
         self.deep_snapshot = False
         self.output_dir = output_dir
+        self.columns: tuple[str, ...] | None = None
         # The real BuildContext always carries a live sink; capture so
         # success-path emits (row counts) have somewhere to go.
         self.events = _CapturingSink()

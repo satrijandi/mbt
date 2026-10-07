@@ -50,9 +50,16 @@ models:
       gates:
         - metric: pr_auc
           threshold: "{{ var('pr_auc_floor') }}"
+        # Non-inferiority, judged on the paired-bootstrap lower bound (ADR-18):
+        # a retrain may replace production only if it is, at 95% confidence,
+        # no more than 0.02 PR-AUC worse on the same test rows. A weekly
+        # refresh that is merely as good as the champion is the point of
+        # retraining weekly; requiring it to be credibly BETTER (min_delta
+        # 0.0) refused every refresh the showcase ran, while a model that
+        # lost its activity features sits at -0.16 and is still refused.
         - metric: pr_auc
           compare_to: production
-          min_delta: 0.0
+          min_delta: -0.02
 
     registration:
       name: churn_automl

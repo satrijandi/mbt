@@ -14,6 +14,8 @@ from e2e_utils import DEMO_ANCHOR, run_mbt
 import mbt
 
 SCAFFOLD = Path(mbt.__file__).resolve().parent / "cli" / "_scaffold"
+GITHUB_WORKFLOWS = SCAFFOLD / "_forges" / "github" / "files" / ".github" / "workflows"
+GITEA_PIPELINES = SCAFFOLD / "_forges" / "gitea" / "files" / ".woodpecker"
 
 
 def _scaffold_var(name: str) -> object:
@@ -277,7 +279,7 @@ def test_docs_enumerate_the_workflows_that_actually_ship() -> None:
     """
     from e2e_utils import REPO_ROOT
 
-    shipped = {p.stem for p in (SCAFFOLD / ".github" / "workflows").glob("*.yml")}
+    shipped = {p.stem for p in GITHUB_WORKFLOWS.glob("*.yml")}
     tutorial = (REPO_ROOT / "docs" / "tutorial.md").read_text()
     for name in shipped:
         assert f"`{name}`" in tutorial, f"docs/tutorial.md does not mention {name}"
@@ -288,13 +290,21 @@ def test_docs_enumerate_the_workflows_that_actually_ship() -> None:
     )
 
 
-def test_scaffold_readme_says_codeowners_needs_branch_protection() -> None:
+@pytest.mark.parametrize("forge", ["github", "gitea"])
+def test_scaffold_readme_says_codeowners_needs_branch_protection(
+    forge: str, tmp_path: Path
+) -> None:
     """CODEOWNERS requests reviewers; it does not gate a merge until branch
     protection requires reviews. Shipping the file without saying so implies a
-    review gate the reference project will not actually have (FEEDBACK C-3)."""
-    readme = (SCAFFOLD / "README.md").read_text()
+    review gate the reference project will not actually have (FEEDBACK C-3) -
+    on either forge."""
+    from mbt.cli.scaffold import scaffold_project
+
+    project = scaffold_project("readme_probe", tmp_path, home=tmp_path, ref="v0.0.0", forge=forge)
+    readme = (project / "README.md").read_text()
     assert "CODEOWNERS` only binds once branch protection requires reviews" in readme
     assert "signed commits" in readme
+    assert "__FORGE" not in readme
 
 
 def test_scaffold_operational_guardrails(scaffold: Path) -> None:
@@ -801,3 +811,189 @@ def test_state_selector_without_state_flag_fails_loudly(scaffold: Path) -> None:
         expect_exit=1,
     )
     assert "--state" in failed.stderr
+
+
+# -- mbt init --forge gitea: Woodpecker CI for a Gitea or Forgejo repo ----------------
+
+GITEA_SECRETS = {"gitea_token", "mbt_data_root", "mbt_alert_webhook", "mbt_heartbeat_url"}
+
+
+@pytest.fixture()
+def gitea_scaffold(tmp_path: Path) -> Path:
+    from mbt.cli.scaffold import scaffold_project
+
+    return scaffold_project("gitea_quickstart", tmp_path, home=tmp_path, forge="gitea")
+
+
+def test_gitea_scaffold_ships_woodpecker_pipelines_instead_of_github(gitea_scaffold: Path) -> None:
+    shipped_github = {p.stem for p in GITHUB_WORKFLOWS.glob("*.yml")}
+    pipelines = {p.stem for p in (gitea_scaffold / ".woodpecker").glob("*.yml")}
+    # One pipeline per reference workflow, same names: the two forges ship
+    # the same CI, so a doc naming one names the other.
+    assert pipelines == shipped_github
+    for expected in (
+        "scripts/gitea_pr_comment.py",
+        "scripts/ci_git_remote.sh",
+        "scripts/ci_notify.sh",
+        "scripts/publish_state.sh",
+        "scripts/fetch_state.sh",
+        "renovate.json",
+        "CODEOWNERS",
+    ):
+        assert (gitea_scaffold / expected).is_file(), expected
+    assert not (gitea_scaffold / ".github").exists()
+    assert not (gitea_scaffold / "scripts" / "pr_comment.js").exists()
+    assert "pinGitHubActionDigests" not in (gitea_scaffold / "renovate.json").read_text()
+    run_mbt(["parse"], gitea_scaffold)
+
+
+def _gitea_pipelines(project: Path) -> list[tuple[Path, dict]]:
+    import yaml
+
+    return [
+        (path, yaml.safe_load(path.read_text()))
+        for path in sorted((project / ".woodpecker").glob("*.yml"))
+    ]
+
+
+def test_gitea_pipelines_pin_images_and_installs_and_never_splice_variables(
+    gitea_scaffold: Path,
+) -> None:
+    """The Woodpecker twin of the GitHub workflow guards: every step image is
+    on an immutable digest, every install is the pinned requirements file, and
+    no shell variable is written in Woodpecker's own `${VAR}` substitution
+    syntax - Woodpecker rewrites those before bash runs, so `${MBT_ANCHOR:-x}`
+    would silently become the literal default."""
+    readme = (gitea_scaffold / "README.md").read_text()
+    for path, spec in _gitea_pipelines(gitea_scaffold):
+        assert spec["when"], path.name
+        for step in spec["steps"]:
+            assert re.search(r"@sha256:[0-9a-f]{64}$", step["image"]), (path.name, step["image"])
+            secrets = {
+                value["from_secret"]
+                for value in (step.get("environment") or {}).values()
+                if isinstance(value, dict)
+            }
+            assert secrets <= GITEA_SECRETS, (path.name, secrets - GITEA_SECRETS)
+            for secret in secrets:
+                assert f"`{secret}`" in readme, f"README never tells you to create {secret}"
+            script = "\n".join(step["commands"])
+            assert not re.search(r"(?<!\$)\$\{", script), (path.name, step["name"])
+            for line in script.splitlines():
+                if "pip install" in line:
+                    assert line.strip() == "- pip install -r requirements.txt" or (
+                        line.strip() == "pip install -r requirements.txt"
+                    ), (path.name, line)
+        for condition in spec["when"]:
+            if condition.get("event") == "cron":
+                assert f"`{condition['cron']}`" in readme, condition["cron"]
+
+
+def test_gitea_pr_comment_renders_the_build_report(
+    gitea_scaffold: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.util
+
+    module_spec = importlib.util.spec_from_file_location(
+        "gitea_pr_comment_probe", gitea_scaffold / "scripts" / "gitea_pr_comment.py"
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    comment = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(comment)
+
+    work = tmp_path / "pr"
+    (work / "target").mkdir(parents=True)
+    monkeypatch.chdir(work)
+    assert "the build failed before execution" in comment.build_body()
+    (work / "target" / "run_results.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"target": "dev", "command": "build", "selector": "state:modified+"},
+                "results": [
+                    {
+                        "unique_id": "model.quickstart.churn_classifier",
+                        "status": "gate_failed",
+                        "execution_time_s": 12.5,
+                        "gates": [
+                            {
+                                "kind": "threshold",
+                                "metric": "pr_auc",
+                                "expected": 0.3,
+                                "actual": 0.21,
+                                "passed": False,
+                            },
+                            {
+                                "kind": "champion",
+                                "metric": "pr_auc",
+                                "champion_version": "3",
+                                "champion_value": 0.25,
+                                "actual": 0.21,
+                                "actual_delta": -0.04,
+                                "min_delta": 0.0,
+                                "passed": False,
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    (work / "target" / "state_diff.json").write_text(
+        json.dumps(
+            {
+                "modified": [
+                    {"unique_id": "model.quickstart.churn_classifier", "components": ["config"]}
+                ],
+                "added": [],
+            }
+        )
+    )
+    body = comment.build_body()
+    assert body.startswith(comment.MARKER)
+    assert "modified: `model.quickstart.churn_classifier` (config)" in body
+    assert "| pr_auc | champion (v3 = 0.2500) | 0.2100 | -0.0400 >= 0.0 | **FAIL** |" in body
+    assert "1 node(s) failed - registration blocked" in body
+
+
+def test_gitea_ci_scripts_wire_the_token_and_honour_disabled(
+    gitea_scaffold: Path, tmp_path
+) -> None:
+    scripts = gitea_scaffold / "scripts"
+    repo = tmp_path / "clone"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "http://x/y.git"], check=True
+    )
+    env = {
+        **os.environ,
+        "GITEA_TOKEN": "s3cret",
+        "CI_FORGE_URL": "http://gitea:3000/",
+        "CI_REPO": "org/churn",
+    }
+    wired = subprocess.run(
+        ["bash", str(scripts / "ci_git_remote.sh")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert wired.returncode == 0, wired.stderr
+    assert "s3cret" not in wired.stdout
+    url = subprocess.run(
+        ["git", "-C", str(repo), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert url == "http://ci:s3cret@gitea:3000/org/churn.git"
+
+    for signal, variable in (("heartbeat", "MBT_HEARTBEAT_URL"), ("alert", "MBT_ALERT_WEBHOOK")):
+        quiet = subprocess.run(
+            ["bash", str(scripts / "ci_notify.sh"), signal, "text"],
+            env={**os.environ, variable: "disabled"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert quiet.returncode == 0 and "disabled; skipping" in quiet.stdout, quiet

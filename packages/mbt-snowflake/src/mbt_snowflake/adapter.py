@@ -41,6 +41,7 @@ from mbt_adapter_base.materialization import (
     build_dataset_materialization,
     build_scoring_materialization,
     combine_snapshots,
+    projected_columns,
 )
 from mbt_adapter_base.predictions import LocalPredictionStore, resolve_predictions_root
 from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
@@ -307,15 +308,30 @@ class SnowflakeDataAdapter:
         where: list[str] = [f"({f})" for f in spec.filters]
         if ctx.sample_fraction < 1.0:
             where.append(sampling_predicate(spec.sample_key_columns, ctx.sample_fraction))
+        relation = base_relation(spec, table_refs)
+        columns = self._projection(relation, ctx)
         try:
-            relation, exclude = base_relation(spec, table_refs)
-            queries = split_queries(spec, relation, where, ctx.resolved_windows, exclude)
+            queries = split_queries(spec, relation, where, ctx.resolved_windows, columns)
         except SnowflakeSQLError as exc:
             raise SnowflakeAdapterError(str(exc)) from exc
         return {
             split: self._stream_query_to_parquet(sql, output_dir / f"{split}.parquet")
             for split, sql in queries.items()
         }
+
+    def _projection(self, relation: str, ctx: DataBuildContext) -> list[str] | None:
+        """Resolve the ``ctx.columns`` hint against the relation's own column
+        order; a zero-row SELECT returns the schema and scans nothing."""
+        if ctx.columns is None:
+            return None
+        cursor = self._execute_cursor(f"SELECT * FROM {relation} LIMIT 0")
+        try:
+            names = [str(column[0]) for column in cursor.description]
+        finally:
+            cursor.close()
+        if self.normalize_case:
+            names = [name.lower() for name in names]
+        return projected_columns(self, ctx, ctx.columns, names)
 
     # -- source-level checks (F2/F21) -----------------------------------------
 
@@ -451,8 +467,9 @@ class SnowflakeDataAdapter:
             where.append(sampling_predicate(keys, ctx.sample_fraction))
 
         window = ctx.resolved_windows.get("score") if spec.time_column is not None else None
+        columns = self._projection(table_refs[spec.source], ctx)
         try:
-            sql = scoring_query(spec, table_refs, where, window)
+            sql = scoring_query(spec, table_refs, where, window, columns)
         except SnowflakeSQLError as exc:
             raise SnowflakeAdapterError(str(exc)) from exc
         return self._stream_query_to_parquet(sql, out)

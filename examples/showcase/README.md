@@ -2,7 +2,24 @@
 
 A laptop-runnable reference environment that demonstrates mbt end to end on real services instead of local stand-ins.
 The data is ONE big table that already lives in the data lake - `s3://mbt-lake/churn_panel`, one row per customer per week, holding the population flag, every feature, and the label - and everything the showcase trains, scores, and monitors reads that table.
-Around it: SeaweedFS is the S3 data lake and artifact store, MLflow (over HTTP) is the tracking server and model registry, a standalone Spark cluster does dataset pushdown and in-executor H2O (sparkling) AutoML training, JupyterLab is the DS workbench, Gitea + Woodpecker run the state-diff CI loop with PR comments and gate-classified alerts, Zot holds the digest-pinned deployable unit and its oras provenance artifacts, Airflow (fed by git-sync from the Gitea `deploy` repo) schedules retrain/score/monitor runs of that unit, and Prometheus + Grafana observe production scoring through the Pushgateway spec documented in the tutorial.
+Around it, in four groups that start only when something needs them:
+
+```text
+core + dev   SeaweedFS (S3 lake + artifact store) - MLflow (tracking + registry) - JupyterLab (the DS workbench)
+spark        a standalone Spark cluster: dataset pushdown, in-executor H2O (sparkling) AutoML training
+obs          Pushgateway -> Prometheus -> Grafana, Alertmanager -> the alert inbox (webhook-sink)
+ci           Gitea + Woodpecker (state-diff CI, PR comments, gate-classified alerts) - Zot (the digest-pinned unit + provenance)
+orch         Airflow, fed by git-sync from the Gitea `deploy` repo: retrain/score/monitor runs of that unit
+```
+
+```text
+  DS (JupyterLab) --PR--> Gitea --webhook--> Woodpecker --bake--> Zot --digest--> deploy repo --git-sync--> Airflow
+        |                                       |                                                          |
+        +------ mbt build/score/monitor --------+----------- one runner image, one lake table ------------+
+                     |                 |                                                    |
+                SeaweedFS lake    MLflow registry                       Pushgateway -> Prometheus -> Grafana
+                                                                                      \-> Alertmanager -> alert inbox
+```
 
 The design of record is [DESIGN.md](DESIGN.md).
 To follow it hands-on - every command, what you should see after it, and every wrong turn with its fix - use the [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/).
@@ -21,20 +38,24 @@ f0000 .. fNNNN                columns no model uses - the "huge" knob
 is_churn                      churned in the following 7 days; NULL where nobody knows yet
 ```
 
-The cohorts are weekly - every Monday from 2026-08-03 to 2026-09-28, the table as it stands on 2026-09-28 - and so is the model: it predicts churn in the 7 days after a cohort, and that label matures 7 days later.
-A cohort is labelled only once its outcome week has closed: 2026-09-21's closed on 2026-09-28, while 2026-09-28's runs to 2026-10-05, so it is the one open cohort. There is no October cohort; that population does not exist yet.
+The cohorts are weekly - every Monday from 2026-08-03 to the lake's as-of date - and so is the model: it predicts churn in the 7 days after a cohort, and that label matures 7 days later.
+`make seed` writes the table as it stood on 2026-09-28: 2026-09-21's outcome week closed that day, while 2026-09-28's runs to 2026-10-05, so the newest cohort is the one open cohort, and there is no October cohort because that population does not exist yet.
+Time moves with `make advance-week`: the newest cohort's outcomes land and the next Monday's cohort arrives, still open.
+It refuses to move past today's date, because a cohort from the future describes a population that does not exist yet; `FUTURE=1` simulates such weeks anyway, and says so.
+The lake's newest cohort is its clock: every anchor - the Makefile's, the Woodpecker pipelines', the Airflow DAGs', the notebook's - is derived from it by `project/scripts/lake_anchor.py` (the day after the newest cohort to build and score, ten days later to monitor), so they all follow when the lake moves, and `make anchors` prints them.
 The project reads the table three ways, and they differ only in which rows they take:
 
 | Reader | Spec | Rows |
 |---|---|---|
-| Training set | `datasets/churn_training.yml` | active customers, a month of training (08-03 .. 08-24), the 08-31 cohort embargoed (7d, the label horizon), and September's labelled weeks for testing (09-07 .. 09-21) |
-| Scoring input | `scoring/retention_scoring.yml` `input:` | active customers in the newest cohort (2026-09-28, the `7d` window at the pinned anchor), whose label is still NULL |
+| Training set | `datasets/churn_training.yml` | active customers, a month of training, one cohort embargoed (7d, the label horizon), and the three labelled weeks before the newest cohort for testing - as seeded, 08-03 .. 08-24, then 08-31 embargoed, then 09-07 .. 09-21; the windows are relative to the anchor, so each week trains on the newer month |
+| Scoring input | `scoring/retention_scoring.yml` `input:` | active customers in the newest cohort (the `7d` window at the lake's anchor; 2026-09-28 as seeded), whose label is still NULL |
 | Ground truth | `scoring/retention_scoring.yml` `ground_truth:` | the same cohort's `is_churn`, once its outcomes land, joined on `(customer_id, inference_date)` |
 
 The models name the 16 columns they train on; the rest of the width never reaches them.
 Nothing is committed under the showcase: `make seed` generates the table deterministically (`bootstrap/churn_panel.py`) straight into the lake, and `make seed SCALE=huge` writes the realistic shape through the same code.
 
-Only the newest cohort ever changes after seeding, and always as a partition rewrite under new file names: `make outcomes` lands its labels (a week has passed), `make inject-drift` poisons its features, and `make reset` puts it back byte for byte.
+Only the newest cohort ever changes after it lands, and always as a partition rewrite under new file names: `make outcomes` lands its labels (its outcome week closed), `make inject-drift` poisons its features, and `make reset` puts it back byte for byte.
+`make advance-week` labels the newest cohort and writes the next one; every earlier cohort keeps its exact bytes, and `make seed` takes the lake back to 2026-09-28.
 
 ## Run it
 
@@ -42,20 +63,27 @@ Requirements: docker with ~10GB of RAM to spare (see [Knobs](#knobs) for the mea
 
 ```bash
 cd examples/showcase
-make up        # build the runner image (first build 10-15 min), boot, generate the lake table
-make demo      # the whole lifecycle, narrated (build dev -> build prod -> promote -> score -> outcomes -> monitor)
-make ci        # seed Gitea + Woodpecker + the deploy repo: org, repos, OAuth app, activation
-make lifecycle # the same lifecycle as scheduled Airflow DAG runs of the pinned unit (runs make ci if needed)
-make clone     # clone the churn repo as mbtops (ops/) and mbtds (ds/) into ~/showcase-work
-make protect   # CODEOWNERS + branch protection: promotions need mbtops' approval
-make down      # stop and remove containers, volumes, and the network (the workspace survives)
-make clean     # down, then also remove the workspace (~/.cache/mbt-showcase/workspace)
+make doctor       # preflight: docker memory and disk, the socket group, ports, leftover networks
+make up           # get the runner image, boot the data/ML core + observability, generate the lake table
+make demo         # the whole lifecycle, narrated (build dev -> build prod -> promote -> a refused challenger -> score -> outcomes -> monitor)
+make week         # a week passes, then the week's operations: monitor, retrain, promote, score
+make ci           # boot Gitea + Woodpecker + Airflow, seed the repos, OAuth app, activation
+make lifecycle    # the same lifecycle as scheduled Airflow DAG runs of the pinned unit (runs make ci if needed)
+make clone        # clone the churn repo as mbtops (ops/) and mbtds (ds/) into ~/showcase-work
+make protect      # CODEOWNERS + branch protection: promotions need mbtops' approval
+make down         # stop and remove containers, volumes, and the network (the workspace survives)
+make clean        # down, then also remove the workspace (~/.cache/mbt-showcase/workspace)
 ```
+
+`make up` starts only what the data scientist's loop needs - the lake, MLflow, JupyterLab, the Spark cluster and observability - so it runs on a smaller machine; the forge (`ci`) and the scheduler it feeds (`orch`) start with `make ci`.
+It runs `make doctor` first, which fails fast on the problems that otherwise surface twenty minutes in: a docker VM whose disk is nearly full (it once corrupted Airflow's database), a host port another process holds, or a network endpoint that outlived its container (`make doctor FIX=1` removes that one).
+The runner image comes prebuilt when it can: `make up` pulls `ghcr.io/satrijandi/mbt-showcase-runner` at the content hash of this checkout (published for every commit on main that changes what goes into it) and builds locally only when nothing is published for that hash - after a local edit to a package, say.
 
 After `make ci`, pushing to main runs prod-build end to end: economy build, `mbt-state` baseline publish, deployable-unit bake to Zot (digest-pinned in the deploy repo), and oras provenance push; git-sync feeds the deploy repo's DAGs into Airflow, where `mbt_retrain`/`mbt_score`/`mbt_monitor` run the pinned unit on demand.
 
 `make lifecycle` is that loop in one command, and the answer to "does the scheduled side really run?".
-Where `make demo` runs mbt by hand inside JupyterLab, nothing here does: it bakes the first deployable unit if none is pinned yet (a commit on main, so Woodpecker's prod-build bakes it and pins its digest in the deploy repo), waits for Airflow to register the DAGs, then triggers and waits for each run in turn - `mbt_retrain` (prod target: cluster pushdown + sparkling H2O, from the pinned unit), the gate-verified promotion of what it registered, `mbt_score`, `mbt_monitor` while the newest cohort's labels are still NULL (it waits), the outcomes landing, and `mbt_monitor` again, which evaluates.
+Where `make demo` runs mbt by hand inside JupyterLab, nothing here does: it bakes the first deployable unit if none is pinned yet (a commit on main, so Woodpecker's prod-build bakes it and pins its digest in the deploy repo), waits for Airflow to register the DAGs, then triggers and waits for each run in turn - `mbt_retrain` (prod target: cluster pushdown + sparkling H2O, from the pinned unit), the governed promotion of what it registered, `mbt_score`, `mbt_monitor` while the newest cohort's labels are still NULL (it waits), the outcomes landing, and `mbt_monitor` again, which evaluates.
+The promotion goes the way the team's rules say it must: `make protect` puts `promotions.yml` under review, `mbtds` pins the staged version in a `promotions.yml` PR, pr-check lints and state-diffs it, `mbtops` - the code owner - approves and merges, and the merge's promote pipeline runs `mbt promote --from-file`, which re-verifies the gates before it moves the alias.
 Each step prints its Airflow run URL and the tail of the task log, which is mbt's own output from inside the unit; any run that does not end `success` stops the target with exit 1.
 [Showcase lifecycle on Airflow](https://satrijandi.github.io/mbt/showcase-lifecycle/) is the step-by-step page: how to reproduce it from a clean slate, what each step runs and proves, the output to expect, and which alarming-looking lines are harmless.
 
@@ -70,12 +98,27 @@ After `make demo`, look at:
 - **MLflow**: registered `churn_automl` versions, the `production` alias set by the promotion, and one experiment named after the project, `churn_lake` (ADR-28). It holds training runs only - named `<run_id>-<model>`, carrying metrics, `mbt.*` provenance tags, and an `inference_config.json` document describing exactly what was trained. `mbt score` and `mbt monitor` log nothing here; their records are in the prediction store, read with `mbt predictions ls` / `show`.
 - **Lake browser** (SeaweedFS filer UI, no login): the table under `/buckets/mbt-lake/churn_panel/` and the model artifacts mbt stores (the MOJOs and model files MLflow only points at) under `/buckets/mbt-artifacts/`.
   The raw S3 API port accepts signed requests only (`mbtadmin`/`mbtsecret`), so a bare browser GET there returns `AccessDenied` by design - browse through the filer UI instead.
-- **Grafana** (`admin`/`admin`): the "mbt Model Health" dashboard - gate margins, realized metrics, shift-vs-threshold, node durations.
+- **Grafana** (`admin`/`admin`): the "mbt Model Health" dashboard - gate margins, realized metrics, shift-vs-threshold, node durations. After a few `make week` runs these are time series rather than single points.
+- **The refused challenger** (demo step 4): a working copy drops the eight activity features and retrains on the shared registry; the champion gate re-scores production's model on the challenger's own test split, the paired-bootstrap lower bound of the PR-AUC delta comes out below zero, `mbt build` exits 2, nothing is staged, and production keeps serving the version it served. `make challenger` replays it on its own.
 - **Predictions** on disk under `~/.cache/mbt-showcase/workspace/predictions/retention_scores/<run_key>/`.
 - The demo's two monitor steps: the first runs before the cohort's outcomes exist and evaluates nothing ("no matured labels joined ... will retry"), the second runs after the demo lands the outcomes (the same step as `make outcomes`) and evaluates the run exactly once.
-- `make inject-drift` then Grafana/Prometheus: the newest cohort is poisoned, `mbt score` exits 2 (mbt enforces), and the pushed breach fires the `MbtShiftBreach` alert in Prometheus (observability observes; no Alertmanager is wired, so the alert is visible rather than delivered). `make reset score` recovers.
+- `make inject-drift` then Grafana/Prometheus: the newest cohort is poisoned, `mbt score` exits 2 (mbt enforces), the pushed breach fires the `MbtShiftBreach` alert in Prometheus (observability observes), and Alertmanager delivers it to the alert inbox (`http://localhost:9309/requests`) on the owner route - the same inbox CI's exit-code wrapper posts to, routed by the same rule: a quality verdict notifies the owner, a dead schedule pages on-call. `make reset score` recovers.
 
-`make score`, `make outcomes` and `make monitor` also work standalone, with the same pinned anchors as the demo: score the newest cohort with the production champion, land its outcomes, evaluate them.
+`make score`, `make outcomes` and `make monitor` also work standalone, at the lake's anchors like the demo: score the newest cohort with the production champion, land its outcomes, evaluate them.
+
+## A few weeks of operations (make week)
+
+`make demo` is one week; `make week` is the next one, and running it repeatedly is how the showcase shows a weekly model living over time:
+
+1. `make advance-week` - the outcome week closes, so last week's cohort is labelled, and the next Monday's cohort arrives;
+2. `mbt monitor` - last week's predictions meet their outcomes and are graded, exactly once;
+3. `mbt build --target dev` - the weekly retrain, on the newer month (the split windows are relative to the lake's anchor);
+4. `mbt promote` - the newest staged version takes production, if the retrain's champion gate let it be staged; a refused retrain (exit 2) leaves the champion in place, and the step says so;
+5. `mbt score` - the new cohort, scored by whatever holds production.
+
+Each step pushes metrics, so Grafana's gate-margin, realized-metric and shift panels grow a point per week.
+The lake stops at today's date; `make week FUTURE=1` simulates the weeks after it, and the generator prints that it is doing so.
+`make seed` puts the lake back to 2026-09-28; the registry, predictions and metrics keep their history.
 
 ## Scale
 
@@ -90,7 +133,8 @@ The default table is small so every recipe stays quick; `SCALE=huge` reseeds it 
 `huge` is the biggest shape the stack is sized for - SeaweedFS's capacity is pinned at 6.4GB and the artifact bucket shares it - so a production-sized table (millions of rows by thousands of columns) wants a bigger lake, not a bigger knob.
 Two levers keep it tractable, and both are the spec's, not the showcase's:
 the models read 16 named columns, so the noise width costs I/O but never training time, and `sample_key: customer_id` hash-samples whole customers in the source query - `--vars '{sample_fraction: 0.1}'` trains on a coherent tenth, and smaller fractions are subsets of larger ones.
-What does grow with width is every full read of the table: mbt materializes every column of the relation into a dataset's splits and selects the models' columns afterwards, and `mbt monitor` reads the whole table to take its join keys and label - at `huge`, each monitor run that evaluates spends between two and three minutes on it.
+What still grows with width is a dataset build: mbt materializes every column of the relation into the splits and the models select theirs afterwards, on purpose - the champion gate re-scores the production model on the challenger's test split, and that model may read a column the current spec no longer names.
+`mbt monitor` reads only the join keys and the label (the data adapter pushes the projection into the scan), where it used to read the whole table to take those three columns.
 `--customers`, `--noise-columns` and `--rows-per-file` on `bootstrap/churn_panel.py seed` set any shape in between.
 
 ## The CI loop (make ci)
@@ -99,8 +143,11 @@ What does grow with width is every full read of the table: mbt materializes ever
 The [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/) is the step-by-step version of this section.
 `make ci` sets up no branch protection; `make clone` gives each persona a working copy that can push, and `make protect` makes promotions a reviewed decision.
 Then work like a user would: log into Woodpecker at `http://localhost:8305` with the Gitea account (`mbtops`/`mbtops-showcase-password`), clone `http://localhost:3305/mbt-showcase/churn`, push to main (prod-build trains the state-modified subgraph on the shared registry and republishes the `mbt-state` baseline), or open a PR (pr-check lints promotions.yml, state-diffs against the published baseline, slim-builds only `state:modified+` on the throwaway `ci` target, and posts the update-in-place `mbt build report` comment).
-One known cosmetic seam: Woodpecker's "repository" deep-links point at the in-network Gitea URL (`gitea:3000`), because that URL must stay resolvable by the CI step containers - use the printed `localhost` Gitea URL instead.
-Exit-code fidelity survives Woodpecker's binary pass/fail: `scripts/run_mbt.sh` records mbt's 1-vs-2 verdict in `target/ci_exit_class` and classifies the alert it curls to webhook-sink - exit 2 (quality) notifies the failing spec's `owner`, anything else pages on-call.
+Gitea's own URL is the browser-facing `localhost` one, so every link it hands out - in Woodpecker, in push hints, on PR pages - opens from your machine; the pipelines clone from the in-network `gitea:3000` instead, through each pipeline's `clone:` block.
+Woodpecker keeps its database in a volume, so re-running `make ci` keeps the pipeline history and the repo's activation.
+
+**Which training runs where.** Two different builds train models, on purpose: a push to main runs prod-build on the `dev` target - Spark `local[2]` and the shared registry, inside a Woodpecker step container - because that is the merge economy check (train what changed, publish the baseline, bake the unit); the scheduled `mbt_retrain` DAG trains on the `prod` target - the Spark cluster with H2O inside its executors - from the baked unit.
+So a merged change is registered by the CI build, and the weekly production retrain is the cluster one; both register into the same registry, and both are judged by the same gates.Exit-code fidelity survives Woodpecker's binary pass/fail: `scripts/run_mbt.sh` records mbt's 1-vs-2 verdict in `target/ci_exit_class` and classifies the alert it curls to webhook-sink - exit 2 (quality) notifies the failing spec's `owner`, anything else pages on-call.
 
 ## The E2E test tier (the honest version of the demo)
 
@@ -114,15 +161,15 @@ MBT_LIVE_SHOWCASE=1 uv run pytest -q -m live_showcase --timeout 3600 -rA
 # the runbook tier: the README's make targets, on a second isolated stack
 MBT_LIVE_SHOWCASE=1 MBT_LIVE_SHOWCASE_MAKE=1 uv run pytest -q tests/test_showcase_make.py --timeout 3600 -rA
 
-# the k3d + ArgoCD tier (needs k3d and kubectl; local-only)
+# the k3d + ArgoCD tier (needs k3d and kubectl)
 MBT_LIVE_SHOWCASE=1 MBT_LIVE_SHOWCASE_K3D=1 uv run pytest -q tests/test_showcase_k3d.py --timeout 3600 -rA
 ```
 
-| Tier | Gate | Wall time (10-core laptop, image already built) | Runs in CI |
+| Tier | Gate | Wall time (10-core laptop, image already built; measured 2026-10-07) | Runs in CI |
 |---|---|---|---|
-| main | `MBT_LIVE_SHOWCASE=1` | ~21 min | nightly, `live.yml` |
-| runbook | + `MBT_LIVE_SHOWCASE_MAKE=1` | ~15 min | nightly, after the main tier |
-| k3d + ArgoCD | + `MBT_LIVE_SHOWCASE_K3D=1` | 6-8 min | never - this is its only coverage |
+| main | `MBT_LIVE_SHOWCASE=1` | ~18 min | nightly, `live.yml` |
+| runbook | + `MBT_LIVE_SHOWCASE_MAKE=1` | ~12 min | nightly, after the main tier |
+| k3d + ArgoCD | + `MBT_LIVE_SHOWCASE_K3D=1` | ~8 min | nightly, after the runbook tier (k3d installed pinned) |
 
 The first run builds the runner image (10-15 minutes) and the harness rebuilds it whenever package sources, `uv.lock` or the image inputs have moved since, so budget for that on top.
 `MBT_SHOWCASE_KEEP=1` leaves a session's stack running for a post-mortem instead of tearing it down.
@@ -133,26 +180,27 @@ The modules (repo-root `tests/`) share one isolated compose project per session,
 - `test_showcase_ci.py` - the Woodpecker loop driven exactly as a user would (git pushes and PRs against Gitea): the browser OAuth login works from the host (driven headlessly for the non-admin persona, first consent included), the first push honors `fetch_state.sh` exit 3 and full-builds (and bakes the first deployable unit), a no-change merge trains nothing yet republishes an identical baseline (and re-bakes nothing - the digest pin is untouched), a one-gate-edit PR slim-builds exactly the edited model (no dataset churn across fresh clones - URI snapshot stability), merging it retrains only that model (and pins a fresh unit), an impossible gate fails the pipeline with mbt's exit 2 classified as a quality failure (the PR comment shows `gate_failed`, the shared registry is untouched, webhook-sink records exactly one owner-classified alert), and promotions.yml is governed: branch protection + CODEOWNERS reject the unauthorized direct push, the owner-approved merge runs the promote pipeline, and the production alias moves with the deploy repo byte-identical.
 - `test_showcase_provenance.py` - the deployable unit reproduces: the oras provenance artifact is byte-identical to the mbt-state baseline of the same run and secret-free, `mbt run --manifest` inside the pulled unit reproduces metrics (xgboost exactly, H2O within its documented 0.02 tier), and a tampered environment is refused with exit 1 (`--allow-env-mismatch` downgrades to a warning).
 - `test_showcase_scheduling.py` - Airflow runs the pinned unit: the retrain DAG builds on the prod target (cluster pushdown from a scheduled container), two score DAG runs straddling a promotion serve different champions while the deploy repo HEAD and digest stay byte-identical (the ADR-20 inversion), and monitor exit codes route correctly (a realized-gate breach fails on try 1 with no retry; a hard error consumes a retry).
-- `test_showcase_k3d.py` (extra gate: `MBT_LIVE_SHOWCASE_K3D=1`, local-only) - ArgoCD core in a k3d cluster on the compose network syncs the deploy repo's `k8s/`: the CronJob lands pinned to the baked digest, an insecure-HTTP pull from zot runs the unit, a digest bump rolls the spec, and selfHeal recreates a deleted CronJob.
+- `test_showcase_k3d.py` (extra gate: `MBT_LIVE_SHOWCASE_K3D=1`, its own nightly step) - ArgoCD core in a k3d cluster on the compose network syncs the deploy repo's `k8s/`: the CronJob lands pinned to the baked digest, an insecure-HTTP pull from zot runs the unit, a digest bump rolls the spec, and selfHeal recreates a deleted CronJob.
 - `test_showcase_lifecycle.py` - the narrative: dev build from the s3a lake registering to HTTP MLflow with S3 artifacts, sparkling training on the actual cluster, gate-verified GitOps promotion with pinned-replay idempotency and the unpinned-replay refusal, run-time champion resolution, prediction-store idempotency (same anchor overwrites, new anchor partitions), and ground-truth monitoring from the same table (the run waits while the cohort's labels are NULL, evaluates exactly once after they land, and a realized-gate breach exits 2, never 1).
-- `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules loaded, Grafana healthy, and `MbtShiftBreach` entering pending/firing on injected shift.
-- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (up, demo, ci + the browser login its output instructs, clone + a push from each clone, protect + the direct push it refuses, lifecycle and its DAG runs, reset, score, outcomes, monitor, inject-drift + recovery, down, a re-stage over the previous run's output, clean), so these documented commands cannot drift from the tested harness silently.
+- `test_showcase_obs.py` - run_results -> push_metrics.py -> Pushgateway -> Prometheus, the four canonical alert rules loaded, Grafana healthy, `MbtShiftBreach` entering pending/firing on injected shift, and Alertmanager delivering it to the alert inbox on the owner route.
+- `test_showcase_make.py` (extra gate: `MBT_LIVE_SHOWCASE_MAKE=1`, run in its own pytest invocation - it boots a second full stack) - the runbook itself: the README golden path driven through `make` on an isolated `SHOWCASE_PROJECT` (doctor, up, demo with its refused challenger, ci + the browser login its output instructs, clone + a push from each clone, protect + the direct push it refuses, lifecycle and its DAG runs - its promotion a reviewed PR from `mbtds`, merged, with production on the version it pinned - reset, score, outcomes, monitor, inject-drift + recovery, a week of operations, down, a re-stage over the previous run's output, clean), so these documented commands cannot drift from the tested harness silently.
 
-Four hermetic modules keep the showcase honest in the ordinary fast suite, where the gated modules above only skip: `test_showcase_gates.py` (every gated module keeps its opt-in gate, and opting in without docker fails loudly), `test_showcase_image_pins.py` (the runner image's hand pins and extras closure agree with the declared metadata), and `test_showcase_panel.py` (the table generator is deterministic and its label, drift and reset semantics hold; every node reads the one table; ground truth joins on key and cohort; training never reaches the open cohort; every string feature is declared categorical), and `test_showcase_walkthrough.py` (the [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/)'s accounts, ports, anchors and make targets match the stack).
+Four hermetic modules keep the showcase honest in the ordinary fast suite, where the gated modules above only skip: `test_showcase_gates.py` (every gated module keeps its opt-in gate, and opting in without docker fails loudly), `test_showcase_image_pins.py` (the runner image's hand pins and extras closure agree with the declared metadata), and `test_showcase_panel.py` (the table generator is deterministic and its label, drift, reset and advance semantics hold - a week passing labels the newest cohort, adds the next and leaves every earlier byte alone, and never passes today unless told to; the anchor is derived from the lake, and no file pins one; at every week the dataset trains a month, tests three labelled weeks and never reaches the open cohort, and scoring reads exactly the newest; every node reads the one table; ground truth joins on key and cohort; every string feature is declared categorical), and `test_showcase_walkthrough.py` (the [walkthrough](https://satrijandi.github.io/mbt/showcase-walkthrough/)'s accounts, ports, anchors and make targets match the stack).
 
 ## Deviations from the scaffold defaults (documented, deliberate)
 
 - **No `--deep-snapshot` anywhere**: it would be a no-op. The table lives in the object store, so `SparkDataAdapter.snapshot_id` takes its URI branch and hashes the `df.inputFiles()` listing, which is checkout-mtime-independent already - deep and shallow produce the same token. ADR-11's fresh-checkout problem is a local-path problem. The "one token scheme per pipeline" rule is therefore satisfied with the spark scheme on both the baseline-publish and PR-diff sides, so the `.woodpecker/` pipelines pass no `--deep-snapshot` either (unlike the GitHub scaffold). The flip side: the table's files are immutable, and every change to it is a new file name.
 - **Scoring and monitoring run on their own cluster-free `batch` target**: Spark `local[2]` straight off the lake, with champion MOJOs in a local H2O JVM by design - the cluster is train-time only.
-- **Anchors are pinned constants** (`2026-09-29T00:00:00Z`, the day after the newest Monday cohort; monitor at `2026-10-09T00:00:00Z`, past the 7d maturity) matching the seeded cohorts - wall-clock anchors over fixed-date data rot into empty windows. The monitor anchor is deliberately later than the table's as-of date: it pairs with `make outcomes`, which is the week passing. The `.woodpecker/` pipelines pin the same anchor, which also makes same-source rebuilds byte-identical (`generated_at == anchor`, ADR-19).
+- **Anchors come from the data, never the clock**: `project/scripts/lake_anchor.py` reads the lake's newest cohort and answers the day after it (`2026-09-29T00:00:00Z` as seeded) to build and score, ten days later (`2026-10-09T00:00:00Z`) to monitor, past the 7d maturity. Wall-clock anchors over this data would rot into empty windows; data anchors follow `make advance-week`, and an unmoved lake gives the same anchor every time, which keeps same-source rebuilds byte-identical (`generated_at == anchor`, ADR-19). The monitor anchor is deliberately later than the table's as-of date: it pairs with `make outcomes`, which is the outcome week closing.
 - **PR builds use the `ci` target**: a per-run sqlite MLflow and a workspace-local artifact store, so green PRs never register versions or re-point the shared `staging` alias; champion gates render "none (bootstrap)" in PR comments. The merge-time prod-build targets `dev` (spark local[2] + the SHARED registry): cluster/sparkling training from CI step containers is P3 deployable-unit territory, and the cluster path is proven live by the lifecycle tier.
 - **One table serves training, scoring and ground truth**, where ADR-29 recommends a label-free serving twin. It is safe here because a model's target is never among its features, the prediction store never copies the label, and ground truth joins on `(customer_id, inference_date)` and treats a NULL label as not yet landed.
 - The SeaweedFS buckets are created without any TTL/retention: nothing protects champion objects server-side, so retention rules would silently break champion gates and scoring.
+- **The weekly retrain is judged by a non-inferiority gate**: `min_delta: -0.02` on the paired-bootstrap lower bound of the PR-AUC delta, so a retrain replaces production only if it is, at 95% confidence, no more than 0.02 worse on the same test rows. With `min_delta: 0.0` a retrain had to be credibly *better*, and every weekly refresh the showcase ran was refused (lower bounds -0.009, -0.046, -0.025); the challenger without its activity features sits at -0.16 and is refused either way. `make week` therefore sometimes promotes and sometimes keeps the champion, and says which.
 - **Demo-tier security postures, on purpose**: the Woodpecker agent mounts the docker socket, committed demo S3 credentials, a wide-open Gitea, and tokens flowing through `make ci` output. This is a laptop lab, not a hardening reference.
 
 ## Knobs
 
-See `.env.example` for host ports (defaults dodge common squatters), S3 credentials, workspace location, the runner image tag, and `DOCKER_SOCK_GID` (the docker-socket group airflow-scheduler joins to run DAG tasks; the Makefile and the test harness ask the daemon via `scripts/docker_sock_gid.sh`, since it differs per runtime - 0 on Docker Desktop and OrbStack, a `docker` group on Rancher Desktop and native Linux).
+See `.env.example` for host ports (defaults dodge common squatters; `make doctor` checks them), S3 credentials, workspace location, the runner image tag, and `DOCKER_SOCK_GID` (the docker-socket group airflow-scheduler joins to run DAG tasks; the Makefile and the test harness ask the daemon via `scripts/docker_sock_gid.sh`, since it differs per runtime - 0 on Docker Desktop and OrbStack, a `docker` group on Rancher Desktop and native Linux).
 `SCALE` on `make seed` sizes the lake table ([Scale](#scale)).
 RAM guardrails are config, not prose: 1 Spark worker (4 cores / 4g) in the compose file, `spark.cores.max` and executor memory (1-2g) per session and `h2o_max_mem: 1G` on the local-H2O targets in `profiles.yml`, `WOODPECKER_MAX_WORKFLOWS=1`, Airflow on LocalExecutor.
 Measured on a 10-core OrbStack machine, summing `docker stats` every few seconds across the stack's containers through a full main-tier run at the default `SCALE`: median 1.1GB, 90th percentile 1.9GB, highest sample 3.0GB.

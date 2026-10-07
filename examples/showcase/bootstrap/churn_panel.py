@@ -6,8 +6,8 @@ wide table in the lake, the way a gold-layer customer snapshot usually does:
     s3://mbt-lake/churn_panel/<inference_date>-<state>-<chunk>.parquet
 
 One row per customer per weekly ``inference_date``, every Monday from
-2026-08-03 to 2026-09-28 (9 cohorts), as the lake stands on its as-of date
-2026-09-28, carrying
+2026-08-03 to the lake's as-of date - 2026-09-28 (9 cohorts) as seeded, one
+week later per ``advance`` - carrying
 
     customer_id, inference_date   the natural key
     is_active                     the population flag: churned customers keep
@@ -21,29 +21,41 @@ One row per customer per weekly ``inference_date``, every Monday from
                                   inference_date; NULL where there is no
                                   outcome to know: inactive rows, and any
                                   cohort whose outcome week has not closed by
-                                  the as-of date - on 2026-09-28 that is the
-                                  newest one, 2026-09-28 itself
+                                  the as-of date - which is always the newest
+                                  one, the as-of date itself
 
 Nothing about it is committed: ``seed`` synthesizes it deterministically
 (fixed seed) straight into the lake. Scale is a knob, not a fork -
 ``--scale huge`` is ~1.1M rows x ~320 columns through exactly the same code,
 generated and written one chunk at a time so memory stays bounded.
 
-The newest cohort (2026-09-28) is the scoring batch, and it is the only part
-of the table that changes after seeding. Each change rewrites that cohort
-under NEW file names and then deletes the old ones, never in place: Spark
-pins an object-store source by its file LISTING, so an in-place rewrite would
-change the data under a pinned manifest without changing its snapshot.
+The lake's clock is its newest cohort: the as-of date IS the newest
+``inference_date`` in the listing, so the table carries its own time and every
+anchor derives from it (project/scripts/lake_anchor.py). The newest cohort is
+the scoring batch, and only it changes after it lands. Each change rewrites
+that cohort under NEW file names and then deletes the old ones, never in
+place: Spark pins an object-store source by its file LISTING, so an in-place
+rewrite would change the data under a pinned manifest without changing its
+snapshot.
 
-    seed           write every cohort; the ones whose outcome week is still
-                   open on the as-of date "open" (label NULL)
-    land-outcomes  a week passed: rewrite the newest cohort with its labels
+    seed           write the cohorts up to 2026-09-28; the ones whose outcome
+                   week is still open on that date "open" (label NULL), and
+                   remove any later cohort an advance added
+    land-outcomes  the newest cohort's outcome week closed: rewrite it with
+                   its labels
     inject-drift   rewrite the newest cohort with numeric features x3, which
                    breaches the scoring monitors' PSI threshold
     reset          rewrite the newest cohort "open" again (undoes both)
+    advance        a week passes: the newest cohort's outcomes land and the
+                   next Monday's cohort arrives, open. It refuses to pass the
+                   real calendar unless told to simulate the future, because a
+                   cohort dated after today describes a population that does
+                   not exist yet
 
 ``reset`` restores the exact seeded file names and bytes, so the source
-snapshot pinned before a change is valid again afterwards.
+snapshot pinned before a change is valid again afterwards. The simulation is
+one sequential random stream, so an advanced cohort is the same whenever and
+however often it is generated, and advancing never changes an earlier one.
 
 Buckets are created WITHOUT any TTL/retention configuration on purpose: mbt
 clean refuses s3:// artifact stores and nothing protects champion objects
@@ -59,7 +71,7 @@ import json
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -74,16 +86,28 @@ TABLE = "churn_panel"
 DEFAULT_LAKE = f"s3://{LAKE_BUCKET}/{TABLE}"
 
 SEED = 20260717
-#: The weekly cohorts: every Monday from 2026-08-03 to 2026-09-28. There is no
-#: October cohort: that population does not exist yet on the as-of date.
-COHORTS = [datetime(2026, 8, 3) + timedelta(weeks=week) for week in range(9)]
-NEWEST = COHORTS[-1]
-#: The day the lake is a snapshot of, and the label's outcome window (the
+FIRST_COHORT = datetime(2026, 8, 3)
+CADENCE = timedelta(weeks=1)
+#: The day ``seed`` writes the lake as of, and the label's outcome window (the
 #: dataset's label.horizon). A cohort's is_churn is known only once its whole
-#: outcome week has passed by AS_OF: 2026-09-21's closed on 2026-09-28, so it
-#: is labelled; 2026-09-28's closes on 2026-10-05, so it is open.
+#: outcome week has passed by the as-of date: 2026-09-21's closed on
+#: 2026-09-28, so it is labelled; 2026-09-28's closes on 2026-10-05, so it is
+#: open. ``advance`` moves the lake's as-of date a week at a time.
 AS_OF = datetime(2026, 9, 28)
 LABEL_HORIZON = timedelta(days=7)
+
+
+def cohorts_until(as_of: datetime) -> list[datetime]:
+    """Every Monday cohort from the first up to and including ``as_of``. There
+    is never a later one: that population does not exist yet on the as-of
+    date."""
+    weeks = (as_of - FIRST_COHORT) // CADENCE
+    return [FIRST_COHORT + week * CADENCE for week in range(weeks + 1)]
+
+
+#: The cohorts as seeded: every Monday from 2026-08-03 to 2026-09-28.
+COHORTS = cohorts_until(AS_OF)
+NEWEST = COHORTS[-1]
 
 #: name -> (customers, noise columns). The default keeps the live tier fast;
 #: huge is the biggest shape the stack is sized for - SeaweedFS's capacity is
@@ -102,9 +126,9 @@ UNSHIFTED = {"customer_id", "inference_date", "is_active", "is_churn", "contract
 META_KEY = b"churn_panel"
 
 
-def outcome_known(when: datetime) -> bool:
+def outcome_known(when: datetime, as_of: datetime = AS_OF) -> bool:
     """Whether a cohort's outcome week has closed by the as-of date."""
-    return when + LABEL_HORIZON <= AS_OF
+    return when + LABEL_HORIZON <= as_of
 
 
 REGIONS = np.array(["north", "south", "east", "west", "central"])
@@ -199,12 +223,28 @@ class Cohort:
     churned: np.ndarray
 
 
-def simulate(customers: int) -> Iterator[Cohort]:
-    """Yield the weekly cohorts in order, deterministically.
+def _draw_customers(rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
+    """Static attributes for ``n`` customers, in the stream's fixed order."""
+    return {
+        "age_years": rng.integers(18, 75, n),
+        "region": REGIONS[rng.integers(0, len(REGIONS), n)],
+        "income_band": INCOME_BANDS[rng.integers(0, len(INCOME_BANDS), n)],
+        "plan_tier": PLAN_TIERS[rng.integers(0, len(PLAN_TIERS), n)],
+        "top_category": TOP_CATEGORIES[rng.integers(0, len(TOP_CATEGORIES), n)],
+        "contract_code": rng.integers(0, 4, n).astype(np.int8),
+        "household_size": rng.integers(1, 6, n),
+        "login_base": np.clip(rng.normal(16.0, 7.0, n), 0.5, 30.0),
+        "txn_base": np.clip(rng.normal(28.0, 14.0, n), 1.0, 120.0),
+    }
 
-    Replaying the whole simulation is how the newest cohort is rebuilt on its
-    own: the signal columns are cheap (a handful of vectors per week) and the
-    random stream is a pure function of the seed, so every replay agrees.
+
+def simulate(customers: int, until: datetime = AS_OF) -> Iterator[Cohort]:
+    """Yield the weekly cohorts up to ``until`` in order, deterministically.
+
+    Replaying the whole simulation is how one cohort is rebuilt on its own:
+    the signal columns are cheap (a handful of vectors per week) and the
+    random stream is a pure function of the seed, so every replay agrees -
+    and a replay to a later ``until`` yields the earlier cohorts unchanged.
     """
     rng = np.random.default_rng(SEED)
     # The pool is bigger than the starting base: every week ~6% fresh
@@ -212,27 +252,39 @@ def simulate(customers: int) -> Iterator[Cohort]:
     # survivor culling would leave only low-hazard customers and the newest
     # cohort would carry almost no discriminable signal.
     pool = customers * 2
-    customer_id = np.arange(pool, dtype=np.int64)
-    age_years = rng.integers(18, 75, pool)
-    region = REGIONS[rng.integers(0, len(REGIONS), pool)]
-    income_band = INCOME_BANDS[rng.integers(0, len(INCOME_BANDS), pool)]
-    plan_tier = PLAN_TIERS[rng.integers(0, len(PLAN_TIERS), pool)]
-    top_category = TOP_CATEGORIES[rng.integers(0, len(TOP_CATEGORIES), pool)]
-    contract_code = rng.integers(0, 4, pool).astype(np.int8)
-    household_size = rng.integers(1, 6, pool)
-    login_base = np.clip(rng.normal(16.0, 7.0, pool), 0.5, 30.0)
-    txn_base = np.clip(rng.normal(28.0, 14.0, pool), 1.0, 120.0)
+    attributes = _draw_customers(rng, pool)
 
     in_book = np.zeros(pool, dtype=bool)
     active = np.zeros(pool, dtype=bool)
     in_book[:customers] = active[:customers] = True
     next_joiner = customers
     joiners_per_week = int(customers * 0.06)
-    for index, when in enumerate(COHORTS):
+    for index, when in enumerate(cohorts_until(until)):
         if index > 0:
+            if next_joiner + joiners_per_week > in_book.size:
+                # Advanced past what the seeded pool covers (about 16 weeks):
+                # grow it from a stream of its own, so the main stream - and
+                # with it every cohort generated so far - stays untouched.
+                extra = _draw_customers(np.random.default_rng([SEED, in_book.size]), customers)
+                attributes = {
+                    name: np.concatenate([column, extra[name]])
+                    for name, column in attributes.items()
+                }
+                in_book = np.concatenate([in_book, np.zeros(customers, dtype=bool)])
+                active = np.concatenate([active, np.zeros(customers, dtype=bool)])
             fresh = slice(next_joiner, next_joiner + joiners_per_week)
             in_book[fresh] = active[fresh] = True
             next_joiner += joiners_per_week
+        customer_id = np.arange(in_book.size, dtype=np.int64)
+        age_years = attributes["age_years"]
+        region = attributes["region"]
+        income_band = attributes["income_band"]
+        plan_tier = attributes["plan_tier"]
+        top_category = attributes["top_category"]
+        contract_code = attributes["contract_code"]
+        household_size = attributes["household_size"]
+        login_base = attributes["login_base"]
+        txn_base = attributes["txn_base"]
         idx = np.flatnonzero(in_book)
         live = active[idx]
         n = idx.size
@@ -399,9 +451,16 @@ class Lake:
         else:
             self._s3.delete_object(Bucket=self.bucket, Key=self.prefix + name)
 
+    def as_of(self) -> datetime:
+        """The lake's clock: its newest cohort's ``inference_date``."""
+        dates = {name[:10] for name in self.names()}
+        if not dates:
+            raise SystemExit(f"{self.location} holds no seeded {TABLE} table - run `seed` first")
+        return datetime.strptime(max(dates), "%Y-%m-%d")
+
     def params(self) -> Params:
         """The parameters the table was seeded with, from a file's footer."""
-        names = [n for n in self.names() if n.startswith(f"{COHORTS[0]:%Y-%m-%d}-")]
+        names = [n for n in self.names() if n.startswith(f"{FIRST_COHORT:%Y-%m-%d}-")]
         if not names:
             raise SystemExit(f"{self.location} holds no seeded {TABLE} table - run `seed` first")
         if self._s3 is None:
@@ -449,14 +508,46 @@ def seed(lake: Lake, params: Params) -> None:
     )
 
 
-def rewrite_newest(lake: Lake, state: str) -> None:
-    params = lake.params()
-    newest = next(c for c in simulate(params.customers) if c.when == NEWEST)
-    before = [n for n in lake.names() if n.startswith(f"{NEWEST:%Y-%m-%d}-")]
-    written = _write_cohort(lake, newest, params, state)
+def _rewrite(lake: Lake, cohort: Cohort, params: Params, state: str) -> None:
+    before = [n for n in lake.names() if n.startswith(f"{cohort.when:%Y-%m-%d}-")]
+    written = _write_cohort(lake, cohort, params, state)
     # Put first, then delete: a reader never sees the cohort missing.
     for name in sorted(set(before) - set(written)):
         lake.delete(name)
+
+
+def rewrite_newest(lake: Lake, state: str) -> None:
+    params = lake.params()
+    as_of = lake.as_of()
+    *_, newest = simulate(params.customers, until=as_of)
+    _rewrite(lake, newest, params, state)
+
+
+def advance(lake: Lake, weeks: int, *, simulate_future: bool, today: datetime) -> None:
+    """Move the lake's clock ``weeks`` Mondays forward, one week at a time.
+
+    Each week the newest cohort's outcome week closes, so it is rewritten with
+    its labels, and the next Monday's cohort lands open. A cohort dated after
+    ``today`` would describe a population that does not exist yet, so that
+    needs ``simulate_future`` - the showcase is honest about which weeks have
+    happened.
+    """
+    params = lake.params()
+    as_of = lake.as_of()
+    target = as_of + weeks * CADENCE
+    if target > today and not simulate_future:
+        raise SystemExit(
+            f"advancing {weeks} week(s) moves the lake to {target:%Y-%m-%d}, after today "
+            f"({today:%Y-%m-%d}): that cohort has not happened yet. Pass --simulate-future "
+            "(make advance-week FUTURE=1) to simulate it anyway."
+        )
+    for cohort in simulate(params.customers, until=target):
+        if as_of <= cohort.when < target:
+            _rewrite(lake, cohort, params, "matured")
+        elif cohort.when == target:
+            _rewrite(lake, cohort, params, "open")
+    future = " (simulated: after today)" if target > today else ""
+    print(f"advanced {lake.location} to {target:%Y-%m-%d}{future}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -476,6 +567,18 @@ def main(argv: list[str] | None = None) -> int:
         ("reset", "rewrite the newest cohort open again"),
     ):
         sub.add_parser(name, help=text)
+    advance_cmd = sub.add_parser(
+        "advance", help="a week passes: label the newest cohort, land the next one open"
+    )
+    advance_cmd.add_argument("--weeks", type=int, default=1)
+    advance_cmd.add_argument(
+        "--simulate-future",
+        action="store_true",
+        help="allow cohorts dated after today (a simulated future)",
+    )
+    advance_cmd.add_argument(
+        "--today", type=datetime.fromisoformat, help="the real date (default: today, UTC)"
+    )
     args = parser.parse_args(argv)
 
     lake = Lake(args.lake)
@@ -489,6 +592,11 @@ def main(argv: list[str] | None = None) -> int:
                 rows_per_file=args.rows_per_file,
             ),
         )
+    elif args.command == "advance":
+        if args.weeks < 1:
+            parser.error("--weeks must be at least 1")
+        today = args.today or datetime.now(UTC).replace(tzinfo=None)
+        advance(lake, args.weeks, simulate_future=args.simulate_future, today=today)
     else:
         state = {"land-outcomes": "matured", "inject-drift": "drifted", "reset": "open"}
         rewrite_newest(lake, state[args.command])

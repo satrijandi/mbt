@@ -736,3 +736,11 @@ def test_command_failed_reads_like_the_text_error() -> None:
     from mbt.events.models import CommandFailed
 
     assert CommandFailed(message="boom").human() == "Error: boom"
+
+
+def test_init_refuses_an_unknown_forge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    result = invoke(["init", "myproj", "--forge", "bitbucket", "--project-dir", str(tmp_path)])
+    assert result.exit_code == 1, debug(result)
+    assert "unknown forge 'bitbucket'" in result.stderr
+    assert not (tmp_path / "myproj").exists()

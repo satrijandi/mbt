@@ -20,7 +20,7 @@ from airflow.sdk import DAG, task
 # DAG processor imports files under the resolved worktree path, where the
 # symlinked dags folder is NOT on sys.path - anchor sibling imports here.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from showcase_dag_utils import MONITOR_ANCHOR, run_in_unit
+from showcase_dag_utils import anchor_arg, run_in_unit
 
 with DAG(
     dag_id="mbt_monitor",
@@ -28,22 +28,15 @@ with DAG(
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    params={"anchor": MONITOR_ANCHOR, "vars": "", "target": "batch"},
+    params={"anchor": "", "vars": "", "target": "batch"},
 ) as dag:
 
     @task(retries=1, retry_delay=timedelta(seconds=5))
     def monitor(**context) -> None:
         params = context["params"]
-        args = [
-            "mbt",
-            "monitor",
-            "--target",
-            params["target"],
-            "--anchor",
-            params["anchor"],
-        ]
+        args = ["mbt", "monitor", "--target", params["target"]]
         if params["vars"]:
             args += ["--vars", params["vars"]]
-        run_in_unit(args)
+        run_in_unit(args, anchor=anchor_arg(params["anchor"], monitor=True))
 
     monitor()

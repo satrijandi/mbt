@@ -12,7 +12,7 @@ What does get updated in place is a record's account of what has shipped, so tha
 
 | Subsystem | Read |
 |---|---|
-| Adapter boundary and interchange | [1](0001-arrow-interchange.md), [2](0002-local-adapters-in-core.md), [14](0014-plugin-import-hygiene.md), [15](0015-contract-refinements.md), [17](0017-jvm-adapters-and-path-data-access.md) |
+| Adapter boundary and interchange | [1](0001-arrow-interchange.md), [2](0002-local-adapters-in-core.md), [14](0014-plugin-import-hygiene.md), [15](0015-contract-refinements.md), [17](0017-jvm-adapters-and-path-data-access.md), [31](0031-projection-hint-and-full-width-datasets.md) |
 | Execution | [3](0003-coordinator-job-split.md) |
 | Identity and reproducibility | [4](0004-two-hashes.md), [5](0005-profiles-excluded-from-hashes.md), [12](0012-window-expressions-and-anchor.md), [19](0019-env-freeze-digest-and-manifest-verification.md) |
 | Selection, state, and datasets | [7](0007-env-digest-not-modifying.md), [11](0011-snapshot-mtime-listing.md), [13](0013-upstream-datasets-auto-materialize.md), [29](0029-single-relation-datasets.md) |
@@ -40,7 +40,7 @@ What does get updated in place is a record's account of what has shipped, so tha
 | [12](0012-window-expressions-and-anchor.md) | Window expressions are hashed; one anchor pins their resolution | accepted |
 | [13](0013-upstream-datasets-auto-materialize.md) | Required upstream datasets auto-materialize; selection governs training | accepted |
 | [14](0014-plugin-import-hygiene.md) | Plugin modules and parameter models import no ML framework | accepted |
-| [15](0015-contract-refinements.md) | Contract refinements beyond the original design sketch | accepted, amended by [29](0029-single-relation-datasets.md) |
+| [15](0015-contract-refinements.md) | Contract refinements beyond the original design sketch | accepted, amended by [29](0029-single-relation-datasets.md) and [31](0031-projection-hint-and-full-width-datasets.md) |
 | [16](0016-multi-table-inputs-and-key-sampling.md) | Multi-table dataset inputs, key-based sampling, warehouse adapters | superseded by [29](0029-single-relation-datasets.md) |
 | [17](0017-jvm-adapters-and-path-data-access.md) | JVM-backed adapters (Spark, H2O) and path data access | accepted |
 | [18](0018-paired-bootstrap-champion-gates.md) | Champion gates decide on a paired-bootstrap lower bound | accepted |
@@ -56,6 +56,7 @@ What does get updated in place is a record's account of what has shipped, so tha
 | [28](0028-mlflow-training-only-and-champion-carried-config.md) | Tracking is training-only, runs are timestamped, and the champion carries its inference config | accepted, amended by [30](0030-training-report-and-after-test-window.md) |
 | [29](0029-single-relation-datasets.md) | A dataset reads exactly one relation; the join belongs to dbt | accepted |
 | [30](0030-training-report-and-after-test-window.md) | The training report: an after-test window, same-slot periods, and stability judged against the test set | accepted |
+| [31](0031-projection-hint-and-full-width-datasets.md) | Reads take a column projection hint; dataset builds stay full-width | accepted |
 
 ## Writing a new ADR
 

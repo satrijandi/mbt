@@ -1,8 +1,8 @@
 # mbt showcase: full-stack docker reference environment + E2E test tier (design)
 
 Status: IMPLEMENTED.
-P1 (runner image + data/ML core), P2 (Gitea + Woodpecker CI loop incl. branch protection + CODEOWNERS on promotions.yml), P3 (Zot deployable unit + oras provenance), P4 (Airflow + git-sync CD + the scoring/promotion/monitoring plane), P5 (observability) and P6 (k3d + ArgoCD, local-only behind its own `MBT_LIVE_SHOWCASE_K3D` gate) are implemented and covered by the `live_showcase` test tier; see README.md for what runs today.
-On 2026-09-23 the data model was collapsed to ONE lake table (section 4); section 11 records what that retired.
+P1 (runner image + data/ML core), P2 (Gitea + Woodpecker CI loop incl. branch protection + CODEOWNERS on promotions.yml), P3 (Zot deployable unit + oras provenance), P4 (Airflow + git-sync CD + the scoring/promotion/monitoring plane), P5 (observability) and P6 (k3d + ArgoCD, behind its own `MBT_LIVE_SHOWCASE_K3D` gate and its own nightly step) are implemented and covered by the `live_showcase` test tier; see README.md for what runs today.
+On 2026-09-23 the data model was collapsed to ONE lake table (section 4); section 11 records what that retired, and what the 2026-10-07 round added (time that moves, a refused challenger, the governed lifecycle promotion, alert delivery).
 
 This document started as the design and is kept as the design of record: where the implementation deliberately scoped something differently, the sections below say what was built, not what was first proposed.
 
@@ -16,7 +16,7 @@ The test catalog (section 8) maps onto these gated modules, all in repo-root `te
 | `test_showcase_obs.py` | SHOW-14 | - |
 | `test_showcase_provenance.py` | SHOW-08/09 | - |
 | `test_showcase_scheduling.py` | SHOW-11 strong form, SHOW-13 routing | - |
-| `test_showcase_k3d.py` | SHOW-16 | `MBT_LIVE_SHOWCASE_K3D=1` (local-only) |
+| `test_showcase_k3d.py` | SHOW-16 | `MBT_LIVE_SHOWCASE_K3D=1` (own pytest invocation, own nightly step) |
 | `test_showcase_make.py` | SHOW-18 | `MBT_LIVE_SHOWCASE_MAKE=1` (own pytest invocation) |
 
 Hermetic modules guard the showcase from the ordinary fast suite, because `-m e2e` excludes the live tier and `-m "not e2e"` deselects it: `tests/test_showcase_gates.py` (SHOW-15: every gated module keeps its gate), `tests/test_showcase_image_pins.py` (the runner image's hand pins, the extras closure, the S3 credentials, SeaweedFS capacity) and `tests/test_showcase_panel.py` (the lake table's generator and the project's use of it).
@@ -28,8 +28,7 @@ pr-check builds on the `ci` target and the merge-time prod-build on `dev` (spark
 Baking is gated on "this merge retrained something": docker layer digests embed mtimes, so an unconditional bake would mint a new digest per merge and break the ADR-20 "promotion deploys nothing" claim.
 SHOW-05's "exactly one modified node" reads as "exactly the edited model (config) plus its downstream scoring node (upstream)" - scoring depends_on its model, so the lineage flag is correct behavior.
 Zot is addressed two ways for one digest: the docker daemon pushes/pulls via the published localhost port (insecure-by-default, verified on Docker Desktop for macOS, OrbStack and the Linux CI runner), while in-network consumers (oras, k3d) use zot:5000.
-Alert routing stops at Prometheus: the four rules evaluate there and the tests read `ALERTS` through its API, and no Alertmanager or Grafana contact point is provisioned (section 7).
-The only webhook traffic is the CI exit-code classifier's.
+Alerts are delivered: the four rules evaluate in Prometheus, Alertmanager routes them by severity into webhook-sink - the same inbox the CI exit-code classifier posts to - and the tests read both `ALERTS` and the delivered payload (section 7).
 
 ## 1. Purpose and personas
 
@@ -86,7 +85,7 @@ Every image is pinned to an exact version; `compose/docker-compose.yml` is the s
 |---|---|---|
 | runner (built, not run) | `mbt-showcase-runner:dev`, built on the host by `scripts/build_image.sh` from a digest-pinned `python:3.11-slim-bookworm` + OpenJDK 17 JRE + the workspace wheels (`mbt-core[s3]`, `mbt-h2o[sparkling]`, `mbt-spark`, `mbt-xgboost`, `mbt-mlflow`) with third-party pins from `uv.lock` + pyspark 3.5.8 (its bundled jars are `SPARK_HOME`) + hadoop-aws 3.3.4 and the matching AWS SDK bundle + jupyterlab from the committed `image-extras.txt` closure | Universal environment; env_digest identity by construction. A content-hash label rebuilds it whenever package sources, `uv.lock`, or the image inputs move |
 | gitea | `gitea/gitea:1.27.3-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
-| woodpecker server + agent | `woodpeckerci/woodpecker-*:v3.18.1` | CI: pr-check, prod-build, promote pipelines; agent mounts the docker socket; repo marked trusted so the bake step may mount that socket; split-horizon URLs (public WOODPECKER_HOST + forge OAuth host, in-network webhook host) so the Gitea OAuth login works from a host browser |
+| woodpecker server + agent | `woodpeckerci/woodpecker-*:v3.18.1` | CI: pr-check, prod-build, promote pipelines; agent mounts the docker socket; repo marked trusted so the bake step may mount that socket; split-horizon URLs (public WOODPECKER_HOST + forge OAuth host, in-network webhook host) so the Gitea OAuth login works from a host browser; its sqlite database on a volume, so `make ci` re-runs keep the pipeline history |
 | seaweedfs | `chrislusf/seaweedfs:4.47` (`weed server -s3`, 64MB volumes under a fixed 100-volume ceiling, section 9) | S3-compatible object store: `mbt-lake` bucket (the one table, read via s3a://) and `mbt-artifacts` bucket (the artifact store under `churn_lake`); the filer UI is published for humans to browse the lake |
 | spark-master, spark-worker | runner image running `spark-class ...Master` / `...Worker` (1 worker, 4 cores, 4g) | Standalone cluster: pushdown reads/sampling/windows + sparkling H2O training |
 | mlflow | runner image (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode); champion source of truth |
@@ -94,8 +93,9 @@ Every image is pinned to an exact version; `compose/docker-compose.yml` is the s
 | airflow | `apache/airflow:3.3.1` (init + api-server + scheduler + dag-processor), **LocalExecutor + `postgres:18.6-alpine`** (sqlite forces SequentialExecutor; invalid with LocalExecutor) + `git-sync:v4.7.1` sidecar | Runs the retrain/score/monitor DAGs on demand; tasks drive the docker SDK to run the pinned digest from the deploy repo's `images.env` |
 | zot | `ghcr.io/project-zot/zot:v2.1.16` (v2.1.17+ breaks multi-GB pushes on slow disks, zot#4140) | OCI registry: baked deployable units (`mbt/churn`) and oras-pushed `manifest.json`/`run_results.json` provenance artifacts (`mbt/churn/provenance`) |
 | prometheus + pushgateway | `prom/prometheus:v3.13.3`, `prom/pushgateway:v1.11.3` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) and the four alert rules |
+| alertmanager | `prom/alertmanager:v0.34.1` | Delivers firing alerts to webhook-sink by severity: `page` to `/alert/on-call`, `notify` to `/alert/owner` (section 7) |
 | grafana | `grafana/grafana:13.1.5` | File-provisioned Prometheus datasource + the "mbt Model Health" dashboard (gate margins, realized metrics, shift vs threshold, node durations) |
-| webhook-sink | ~60-line python recorder with `GET /requests` | Records the alerts `scripts/run_mbt.sh` posts to `MBT_ALERT_WEBHOOK`; human-readable in demos, assertable in tests |
+| webhook-sink | ~60-line python recorder with `GET /requests` (the `obs` profile) | The one alert inbox: records the alerts `scripts/run_mbt.sh` posts to `MBT_ALERT_WEBHOOK` and the ones Alertmanager delivers; human-readable in demos, assertable in tests |
 | bootstrap (host + one-shot scripts) | `scripts/ci_bootstrap.py` on the host; `bootstrap/churn_panel.py` in the runner | `make ci`: Gitea users, org, repos, token, OAuth app, deploy repo, Woodpecker login + repo activation + secrets. `make seed`: buckets (no TTL/retention, section 9) and the generated lake table. The image is built by `make image` |
 
 ## 4. The demo project and its one table
@@ -106,23 +106,26 @@ An `mbt init`-derived `churn_lake` project, source-of-truth at `examples/showcas
 
 The whole data model is one table that is assumed to already exist in the lake, the way a gold-layer customer snapshot usually does: `s3://mbt-lake/churn_panel/*.parquet`.
 
-- One row per customer per weekly `inference_date`: every Monday from 2026-08-03 to 2026-09-28 (9 cohorts), the lake as it stands on its as-of date 2026-09-28. There is no October cohort: that population does not exist yet.
+- One row per customer per weekly `inference_date`: every Monday from 2026-08-03 to the lake's as-of date - 2026-09-28 (9 cohorts) as seeded, a week later per `advance`. There is never a cohort after the as-of date: that population does not exist yet.
   The model is weekly: it predicts churn in the 7 days after a cohort, and that label matures 7 days later.
 - `customer_id` + `inference_date` are the natural key (the dataset's `unique` check asserts it).
 - `is_active` is the population: a churned customer keeps its rows, marked inactive, so the dataset and the scoring input both select the population with a filter.
 - 16 named features (demographic, login, transaction), among them the numeric-coded `contract_code` (int8, 0 = month-to-month ... 3 = two-year) whose churn effect is deliberately non-monotone, and four string categoricals.
 - `f0000 .. fNNNN`: pure-noise columns, the "huge" knob. A real lake table carries hundreds of columns no model uses; the models name the 16 they read.
-- `is_churn`: churned during the 7 days after `inference_date`. NULL where no outcome is known - on inactive rows, and on any cohort whose outcome week has not closed by the as-of date (`outcome_known` in the generator); on 2026-09-28 that is only the newest cohort, whose week runs to 2026-10-05.
+- `is_churn`: churned during the 7 days after `inference_date`. NULL where no outcome is known - on inactive rows, and on any cohort whose outcome week has not closed by the as-of date (`outcome_known` in the generator); that is always exactly the newest cohort (on 2026-09-28, the one whose week runs to 2026-10-05).
 
 Nothing about it is committed.
 `bootstrap/churn_panel.py` synthesizes it deterministically (fixed seed) straight into the lake at `make seed`, at whatever scale is asked for (`SCALE=huge` is the realistic lake shape through the same code, generated and uploaded one bounded chunk at a time).
 One parquet file per cohort (chunked by `--rows-per-file`), named `<inference_date>-<state>-<chunk>.parquet`.
 
-The newest cohort is the only part that changes after seeding, and each change is a partition rewrite under NEW file names followed by deleting the old ones:
+The newest cohort is the only part that changes after it lands, and each change is a partition rewrite under NEW file names followed by deleting the old ones:
 
-- `land-outcomes` (`make outcomes`): a week passed, the cohort's `is_churn` is filled.
+- `land-outcomes` (`make outcomes`): its outcome week closed, the cohort's `is_churn` is filled.
 - `inject-drift` (`make inject-drift`): numeric features x3, which breaches the scoring node's PSI monitors.
 - `reset` (`make reset`): the cohort as seeded - byte-identical files under the seeded names.
+- `advance` (`make advance-week`, `WEEKS=n`): a week passes - the newest cohort is labelled and the next Monday's cohort lands open. The simulation is one sequential random stream, so an advanced cohort is the same whenever it is generated and every earlier cohort keeps its bytes; past the seeded customer pool (about 16 weeks) the book grows from a stream of its own, so the main stream is never disturbed. It refuses to move the as-of date past today unless `--simulate-future` (`FUTURE=1`) asks for it, and says so when it does: a cohort from after today describes a population that does not exist yet, the same honesty that keeps an open cohort's label NULL. `seed` takes an advanced lake back to 2026-09-28, removing the later cohorts.
+
+The as-of date lives in the data, not in any config: it IS the newest `inference_date` in the listing (section 4.6).
 
 Never in place, and that is load-bearing: for an object-store source the spark adapter pins a snapshot by hashing the table's file LISTING, so an in-place rewrite would change the data under a pinned manifest without changing its snapshot.
 Because `reset` restores the exact seeded names and bytes, a snapshot pinned before a change is valid again afterwards, which is what lets the test modules share one stack.
@@ -138,16 +141,17 @@ Naming them is the reviewed decision: a column arriving upstream can never start
 
 ### 4.3 The dataset
 
-`datasets/churn_training.yml` is a slice of the one table: `filters: ["is_active = true"]`, `label: {column: is_churn, horizon: 7d}`, `sample_key: customer_id`, and a temporal split with explicit cohort boundaries (train `2026-08-03:2026-09-07`, test `2026-09-07:2026-09-28`, `embargo: 7d`).
-That is a month of training and September's labelled weeks for testing: the embargo trims the train window's last week, so training reads August's four cohorts (08-03 .. 08-24), the 08-31 cohort is the gap, and the test split is 09-07 .. 09-21 (three cohorts; 09-28 is still open).
-Both windows end before the newest cohort (09-28), so no row with an unknown outcome is ever a training or test example.
+`datasets/churn_training.yml` is a slice of the one table: `filters: ["is_active = true"]`, `label: {column: is_churn, horizon: 7d}`, `sample_key: customer_id`, and a temporal split relative to the anchor (train `-57d:-22d`, test `-22d:-1d`, `embargo: 7d`).
+That is a month of training and the three labelled weeks before the newest cohort for testing: the embargo trims the train window's last week, so at the seeded anchor training reads August's four cohorts (08-03 .. 08-24), the 08-31 cohort is the gap, and the test split is 09-07 .. 09-21 (09-28 is still open).
+Both windows end before the newest cohort, so no row with an unknown outcome is ever a training or test example - at every week, because the anchor is the day after the newest cohort (`test_showcase_panel.py` checks the windows at several weeks).
+Relative windows are what make a weekly retrain train on the newer month; they were explicit dates while the lake could not move.
 It declares no `columns:` panel contract on purpose: the table's width is a scale knob, so an enumerated list would go stale with every reseed, and the models' include lists carry the review burden instead.
 
 ### 4.4 Scoring resource
 
 `scoring/retention_scoring.yml`: `model: churn_automl`, `stage: production`, and every row source is the same table.
 
-- The input reads `churn_panel` with the same population filter and `window: "7d"` (the last week), which at the pinned anchor - the day after the newest cohort lands - is exactly that cohort, and stays so for any anchor up to six days later.
+- The input reads `churn_panel` with the same population filter and `window: "7d"` (the last week), which at the lake's anchor - the day after the newest cohort lands - is exactly that cohort, and stays so for any anchor up to six days later.
   The table's `is_churn` column is harmless there: a model's target is never one of its features, and the prediction store keeps only `output.columns`, the join keys, and the prediction.
 - `ground_truth.label.source` is the same table, joined on `[customer_id, inference_date]`.
   The time column is required: `customer_id` alone matches every cohort a customer was ever in, grading this week's prediction against old outcomes.
@@ -172,29 +176,35 @@ Note: boto3's env chain is the only S3 endpoint mechanism (nothing in mbt parses
 
 ### 4.6 Anchors (the determinism spine)
 
-Every pipeline, DAG, and test pins anchors to constants: `ANCHOR=2026-09-29T00:00:00Z` (the Tuesday after the newest Monday cohort) for build and score, `MONITOR_ANCHOR=2026-10-09T00:00:00Z` (past the 7d maturity of every score the tier runs) for monitor.
-The monitor anchor is later than the table's as-of date (2026-09-28) on purpose: it is only meaningful after `land-outcomes`, which stands for the scored cohort's outcome week passing.
-Wall-clock anchors over fixed-date data are a time bomb: relative windows resolve empty within weeks and every unpinned pipeline rots into `split ... materialized 0 rows`.
-Airflow DAGs therefore take `--anchor` from the deploy repo (`showcase_dag_utils.py`, overridable per run through the DAG's `anchor` param), never from `{{ ts }}`.
-Anchor time travel is also what makes monitoring demoable today: `mbt monitor --anchor <maturity+>` evaluates immediately once the outcomes have landed; re-running with the same anchor evaluates nothing (exactly-once proof).
-The `.woodpecker/` pipelines pin the same `ANCHOR`, which also makes same-source rebuilds byte-identical manifests (`generated_at == anchor`, ADR-19).
+Every anchor derives from the DATA: `project/scripts/lake_anchor.py` lists the lake and answers the day after its newest cohort for build and score (`2026-09-29T00:00:00Z` as seeded, the Tuesday after the newest Monday cohort), and ten days later for monitor (`2026-10-09T00:00:00Z`, past the 7d maturity of every score the tier runs).
+The Makefile (lazily, once per make run), the `.woodpecker/` pipelines (a command before compile), the Airflow DAGs (their `anchor` param left empty resolves inside the unit at run time; set it to pin one), the k3d CronJob and the notebook all call it - one definition, so nothing can score an empty window after the lake moves, and the hermetic tier fails if any showcase file pins an anchor literal.
+The monitor anchor is later than the table's as-of date on purpose: it is only meaningful after `land-outcomes`, which stands for the scored cohort's outcome week closing.
+Wall-clock anchors over this data would be a time bomb: relative windows would resolve empty within weeks and every pipeline would rot into `split ... materialized 0 rows`. Constant anchors were the first answer, and froze the story at one week; data anchors keep the determinism and let time move.
+An unmoved lake gives the same anchor every time, which keeps same-source rebuilds byte-identical manifests (`generated_at == anchor`, ADR-19); a moved lake changes both the anchor and the snapshot, so a state diff flags the datasets and the next build retrains on the new month.
+Anchor time travel is also what makes monitoring demoable: `mbt monitor --anchor <maturity+>` evaluates immediately once the outcomes have landed; re-running with the same anchor evaluates nothing (exactly-once proof).
 
 ## 5. Golden path (the demo narrative)
 
-1. `make up`: build (or reuse) the runner image, stage the workspace, `docker compose up -d --wait`, generate the lake table; the terminal prints every UI URL.
+1. `make up`: `make doctor` (docker memory and disk, the socket group, ports, leftover networks), pull the prebuilt runner image for this checkout's content hash or build it, stage the workspace, start the `core spark dev obs` profiles, generate the lake table; the terminal prints every UI URL. `make ci` starts the `ci` and `orch` profiles (the forge, and the scheduler the deploy repo feeds).
 2. **DS inner loop**: open `project/notebooks/ds_inner_loop.ipynb` in JupyterLab - look at the lake table (reading only the columns asked about), review the YAML, `mbt build --target dev`, analyze the run artifacts, try a hash-sampled what-if with `--vars`. (`make demo` step 1 is the same `mbt build --target dev` over both models.)
 3. **DS scales out**: `mbt build --target prod`; pushdown sampling runs on the cluster and sparkling H2O trains inside the executors (Spark UI shows the apps); models register and the `staging` alias moves.
+   **A weaker challenger is refused** (`make demo` step 4, `make challenger`): a working copy drops the eight activity features and retrains on the shared registry; the champion gate re-scores production's model on the challenger's test split, the paired-bootstrap lower bound of the PR-AUC delta is negative, `mbt build` exits 2, nothing is staged, and production is untouched.
 4. **PR** (after `make ci`): push a branch, open a Gitea PR; Woodpecker pr-check lints `promotions.yml`, runs parse, compile, `fetch_state.sh` (exit 3 = bootstrap), `state diff --output json`, slim build `--select state:modified+ --state ...` under the `ci` target, then posts the update-in-place `<!-- mbt-pr-comment -->` comment via Gitea's API showing exactly the modified nodes and their gates.
 5. **Merge**: prod-build runs the economy build on `dev`, publishes the manifest to `refs/heads/mbt-state` (`publish_state.sh` is pure git plumbing and works against Gitea unchanged), and - when the merge retrained something or no unit exists yet - bakes the deployable unit (`FROM` the exact runner tag + project + `target/manifest.json` compiled inside that same image), pushes it to Zot, oras-pushes `manifest.json`+`run_results.json` as provenance artifacts (manifests are secret-free by construction), and commits the new digest to the deploy repo.
 6. **CD**: git-sync reconciles the deploy repo into Airflow; rollback is `git revert` (the optional k3d tier has ArgoCD sync the same repo's `k8s/` CronJob).
 7. **Schedules**: the DAGs run the pinned unit - `mbt_retrain` (`mbt build --target prod`), `mbt_score` (`mbt score --target batch`) and `mbt_monitor` (`mbt monitor --target batch`). They are manual-trigger (`schedule=None`) so demos and tests stay deterministic. Exit 1 retries then pages on-call, exit 2 never retries and notifies the model owner (per the tutorial's routing rule); the task pushes metrics regardless of outcome.
-8. **Promotion**: a PR edits `promotions.yml` (version always pinned); CODEOWNERS + branch protection gate the merge; the promote pipeline runs `mbt promote --from-file`; the next score run serves the new champion with zero redeploy, image digest and deploy repo byte-identical before and after (the ADR-20 inversion, asserted).
+8. **Promotion**: a PR edits `promotions.yml` (version always pinned); CODEOWNERS + branch protection gate the merge; the promote pipeline runs `mbt promote --from-file`; the next score run serves the new champion with zero redeploy, image digest and deploy repo byte-identical before and after (the ADR-20 inversion, asserted). `make lifecycle` takes this path for its promotion (`lifecycle.py promote`: `make protect`, the `mbtds` PR, pr-check, the `mbtops` approval and merge, the promote pipeline), so the scheduled lifecycle runs nothing by hand.
 9. **Outcomes land**: `mbt monitor` first finds the scored cohort's labels still NULL and waits; `make outcomes` rewrites the cohort with its labels, and the next monitor run evaluates it exactly once.
-10. **Monitoring pays off**: `make inject-drift` poisons the newest cohort, `mbt score` exits 2 (`monitor_failed`), and the pushed `mbt_shift_value >= mbt_shift_threshold` puts the `MbtShiftBreach` rule into pending and then firing in Prometheus; `make reset score` recovers. The `MbtScheduleStale` rule watches `push_time_seconds` for the one failure no in-band mechanism can catch, a schedule that silently stopped.
+10. **Monitoring pays off**: `make inject-drift` poisons the newest cohort, `mbt score` exits 2 (`monitor_failed`), and the pushed `mbt_shift_value >= mbt_shift_threshold` puts the `MbtShiftBreach` rule into pending and then firing in Prometheus, and Alertmanager delivers it to the owner route of the alert inbox; `make reset score` recovers. The `MbtScheduleStale` rule watches `push_time_seconds` for the one failure no in-band mechanism can catch, a schedule that silently stopped, and pages on-call.
+11. **Weeks pass** (`make week`, repeatable): `advance` labels last week's cohort and lands the next, `mbt monitor` grades last week's predictions, the weekly retrain trains on the newer month and meets the champion gate, the newest staged version is promoted, and the new cohort is scored - so the dashboard's panels become time series.
 
 ## 6. CI design (Woodpecker)
 
-Pipelines live in `.woodpecker/` of the project repo (authored fresh; the GitHub scaffold under `_scaffold/.github/` stays untouched, so `tests/test_cli_basics.py` is unaffected).
+Pipelines live in `.woodpecker/` of the project repo.
+They were authored here first and proved the port; `mbt init --forge gitea` now ships the general version of the same CI to any project (open question 3), while these keep the showcase's own needs - the runner image, the trusted bake step, the deploy repo.
+
+- **Two URLs for one Gitea**: Gitea's `ROOT_URL` is the browser-facing `http://localhost:3305/`, so every link it hands out (Woodpecker's repository and avatar links, push hints, PR pages) opens from the host; a step container cannot reach that address, so each pipeline's `clone:` block points plugin-git's `remote` at `http://gitea:3000/${CI_REPO}.git`, and the scripts name `gitea:3000` themselves. Before, ROOT_URL was the in-network address and every link Woodpecker showed was dead from the host. The override names the fully qualified `docker.io/woodpeckerci/plugin-git` image, which Woodpecker trusts as a clone plugin; even so it gets no credentials for a PRIVATE repo, because Woodpecker writes the netrc for the clone URL's host (now `localhost`), so the showcase's repos stay public.
+- **Anchor**: each executing step runs `scripts/lake_anchor.py` before it compiles (section 4.6).
 
 - **Exit-code fidelity**: Woodpecker collapses any nonzero exit to "failed", erasing mbt's 1-vs-2 contract.
   Every `mbt build` and `mbt promote` invocation in the pipelines runs through `scripts/run_mbt.sh`: capture code, write `target/ci_exit_class` (`0 ok` / `1 hard-error` / `2 quality-failure`), on failure POST a classified alert to `MBT_ALERT_WEBHOOK` (2-second curl timeout; 1 pages on-call, 2 notifies the failing spec's owner), push metrics best-effort (`push_metrics.py` uses a 5-second timeout and warns and exits 0 when the Pushgateway is away, so observability can never fail a pipeline), re-exit with the original code.
@@ -217,8 +227,8 @@ Every mbt surface is a batch job that exits, so there is no live scrape target; 
 - Metric names: `mbt_node_success`, `mbt_node_duration_seconds`, `mbt_test_metric{metric=}`, `mbt_realized_metric{metric=}`, `mbt_gate_passed`, `mbt_gate_margin{kind=threshold|champion|ground_truth}` (signed headroom, so alert rules never duplicate spec thresholds), `mbt_shift_value{monitor=,subject=,measure=}`, `mbt_shift_threshold`.
 - The four canonical alert rules, in `compose/prometheus/rules.yml`: `MbtGateFailed`, `MbtScheduleStale`, `MbtGateNearBreach` (margin below 0.02) and `MbtShiftBreach` (`for: 10s`). The staleness window is a fixed 30 minutes, so a demo can show it without waiting the tutorial's suggested 8 days.
 - Grafana: file-provisioned Prometheus datasource + one dashboard (Model Health: gate margins, realized metrics, shift vs threshold, node durations).
-- Routing is deliberately out of scope, as generic plumbing rather than an mbt differentiator (section 1): the rules evaluate in Prometheus and no Alertmanager or Grafana contact point is provisioned, so a firing alert is visible in the Prometheus UI and API but notifies no one. The owner-vs-on-call routing lesson is demonstrated where mbt's exit codes are - `run_mbt.sh`'s webhook classification in CI and `AirflowFailException` in the DAGs.
-- Tests assert via the Prometheus HTTP API - the four rules are loaded, and `ALERTS{alertname="MbtShiftBreach"}` appears (pending or firing) after an injected shift - never on notification delivery timing.
+- Delivery: Alertmanager (`compose/alertmanager/alertmanager.yml`) routes by the rules' `severity` label exactly as `run_mbt.sh` classifies a CI failure - `notify` (a quality verdict mbt already enforced) to webhook-sink's `/alert/owner`, `page` (a schedule that died) to `/alert/on-call` - so model alerts and CI alerts land in one inbox under one rule. It was first left out as generic plumbing; without it a firing alert notified no one, which undercut the owner-vs-on-call lesson the rest of the stack teaches. webhook-sink moved to the `obs` profile with it, so the inbox exists whether or not the forge does.
+- Tests assert via the Prometheus HTTP API - the four rules are loaded, and `ALERTS{alertname="MbtShiftBreach"}` appears (pending or firing) after an injected shift - and then that webhook-sink received the firing `MbtShiftBreach` on `/alert/owner`, polling with a deadline rather than asserting timing.
 
 ## 8. The E2E test tier (the answer to "what kinds of tests")
 
@@ -228,7 +238,7 @@ Every mbt surface is a batch job that exits, so there is no live scrape target; 
 - Modules split per concern and share ONE session-scoped stack (all six profiles; the `showcase_stack` fixture in `tests/conftest.py`), because booting the whole platform once per module would multiply its startup and seeding cost; unique basenames; helpers in `showcase_utils.py`. The k3d and make modules add their own gates, and the make module boots a second, isolated stack through the Makefile, so it runs in its own pytest invocation.
 - Compose project names are per-session (`mbt-show-<uuid8>`, and `mbt-make-<uuid8>` for the runbook tier) on free ephemeral ports; the `/workspace` bind mount is a pytest tmp dir; all other state lives in compose-project-scoped volumes (the repo-root session guard stays green); teardown is `down -v --remove-orphans` in a finally block, skipped only when `MBT_SHOWCASE_KEEP=1` asks to keep the stack for a post-mortem.
 - Failure evidence is dumped before teardown, because nothing survives it: `wait_pipeline` prints the logs of every non-successful Woodpecker step, `wait_dag_run` prints every failed Airflow task attempt, and a failed `compose up` or make target prints per-service log tails.
-- The nightly CI job lives in `live.yml` (schedule + manual dispatch, never PRs) on ubuntu-latest (macOS runners have no docker): the main tier, then the make runbook tier after the session stack is gone. The k3d module stays local-only.
+- The nightly CI job lives in `live.yml` (schedule + manual dispatch, never PRs) on ubuntu-latest (macOS runners have no docker): the main tier, then the make runbook tier after the session stack is gone, then the k3d tier after installing a pinned, checksummed k3d.
 
 ### Test catalog
 
@@ -249,16 +259,16 @@ Each row states what the tier ASSERTS today; nothing below is aspirational.
 | SHOW-11 | champion resolution | Two `mbt_score` DAG runs straddling a promotion serve different champions (the prediction sidecar's `model_version`) while the image digest and the deploy-repo HEAD stay byte-identical (promotion is a registry event, ADR-20/ADR-5) |
 | SHOW-12 | idempotency | A score at the anchor writes one `run_key` directory whose sidecar names the promoted version and a `scored_at` on the anchor date; the same anchor again leaves the same single directory (overwrite); a new anchor adds a second; every run directory carries `_SUCCESS` |
 | SHOW-13 | ground truth | From the same table: while the scored cohort's labels are NULL, `mbt monitor` at the maturity anchor evaluates nothing and says the labels have not joined; after `land-outcomes` it evaluates with `pr_auc > 0.2` and `roc_auc > 0.5`; the same anchor again evaluates "0 matured prediction runs" (exactly-once); a fresh prediction run monitored with an impossible realized floor (`--vars pr_auc_floor: 0.99`) exits 2 with `monitor_failed`. At the scheduler: that breach fails the `mbt_monitor` task on try 1 with no retry, a clean re-run then succeeds, and a hard error (nonexistent target) consumes the retry (`try_number == 2`) |
-| SHOW-14 | observability | After a scored run is pushed, Prometheus holds `mbt_node_success{command="score"}` for the scoring node and `mbt_shift_value{monitor="feature_shift"}`; all four rules are loaded; Grafana's health check passes; an injected shift makes `mbt score` exit 2 (`monitor_failed`), `mbt_shift_value >= mbt_shift_threshold` returns series, and `ALERTS{alertname="MbtShiftBreach"}` appears |
+| SHOW-14 | observability | After a scored run is pushed, Prometheus holds `mbt_node_success{command="score"}` for the scoring node and `mbt_shift_value{monitor="feature_shift"}`; all four rules are loaded; Grafana's health check passes; an injected shift makes `mbt score` exit 2 (`monitor_failed`), `mbt_shift_value >= mbt_shift_threshold` returns series, `ALERTS{alertname="MbtShiftBreach"}` appears, and Alertmanager delivers it, firing, to webhook-sink's owner route |
 | SHOW-15 | meta: collection hygiene | Every gated showcase module, discovered by filename rather than listed, keeps the opt-in skipif and the `live`/`live_showcase` marks; once opted in, a missing docker binary FAILS rather than skips (the double-gate contract). Runs in the fast suite, where a lost gate would otherwise boot a stack |
-| SHOW-16 | optional: CD fidelity | k3d tier only: ArgoCD syncs the deploy repo's `k8s/` CronJob pinned to the same digest CI wrote for Airflow; a pod pulls that unit from zot over insecure HTTP and runs `mbt --version`; a digest change pushed to the deploy repo rolls the CronJob; selfHeal recreates a deleted CronJob |
-| SHOW-18 | runbook fidelity | Extra gate `MBT_LIVE_SHOWCASE_MAKE=1`: the README golden path through `make` on an isolated `SHOWCASE_PROJECT` - up; demo (prediction runs exist and the monitor evaluated one after the outcomes landed); ci plus the repo page and the OAuth login its output instructs; reset, score, outcomes, monitor; inject-drift and recovery; down leaves no containers; `make workspace` re-stages over the previous run's root-owned output; clean removes the workspace |
+| SHOW-16 | CD fidelity | k3d tier (own nightly step): ArgoCD syncs the deploy repo's `k8s/` CronJob pinned to the same digest CI wrote for Airflow; a pod pulls that unit from zot over insecure HTTP and runs `mbt --version`; a digest change pushed to the deploy repo rolls the CronJob; selfHeal recreates a deleted CronJob |
+| SHOW-18 | runbook fidelity | Extra gate `MBT_LIVE_SHOWCASE_MAKE=1`: the README golden path through `make` on an isolated `SHOWCASE_PROJECT` - doctor; up; demo (prediction runs exist, the weaker challenger was refused, and the monitor evaluated one after the outcomes landed); ci plus the repo page and the OAuth login its output instructs; lifecycle, whose promotion is a merged `promotions.yml` PR by `mbtds` and whose pinned version serves production; reset, score, outcomes, monitor; inject-drift and recovery; a week of operations; down leaves no containers; `make workspace` re-stages over the previous run's root-owned output; clean removes the workspace |
 
 ## 9. Known constraints this design respects (do not "fix" silently)
 
 - Remote cluster is train-time only: evaluate/score load MOJOs in a local JVM by design; never promise cluster-side scoring. That is why scoring has its own cluster-free `batch` target.
 - The lake table's files are immutable (section 4.1). A change to the newest cohort writes new file names and deletes the old; rewriting a file in place would change data under a pinned snapshot without moving it.
-- Materialization is full-width: a dataset build writes every column of the table into its splits, and the models then read their 16. At `SCALE=huge` that makes every build, and every `mbt monitor` ground-truth read, scan the whole 2.9GB table; it is mbt's behavior rather than the showcase's (README "Scale" has the measured numbers).
+- Dataset materialization is full-width: a dataset build writes every column of the table into its splits, and the models then read their 16. It stays that way on purpose: the champion gate re-scores the production model on the challenger's test split (ADR-9), and that model may read a column the current spec has since dropped, so a dataset projected to the current specs could not evaluate it. `mbt monitor`'s label read is projected (data adapter contract 1.3: `DataBuildContext.columns`), because it selects the join keys and the label afterwards anyway; at `SCALE=huge` that read was two to three minutes of every evaluating monitor run.
 - `--manifest` reads local files only; the manifest travels baked inside the image (which is the design), while `--state` accepts s3:// URIs.
 - `mbt clean --artifacts-older-than` prunes file:// stores only and nothing protects champion objects server-side: **SeaweedFS buckets are created with no retention/TTL by the seed path** (`bootstrap/churn_panel.py`), not just documented.
 - SeaweedFS capacity is pinned in the compose command (`-master.volumeSizeLimitMB=64 -volume.max=100`), never left to its defaults. Those size volumes at 1GB and cap their count at free disk / volume size, while each bucket grows 7 volumes on first write, so on a docker disk with ~7GB free the lake bucket took every slot and every model upload failed with S3 `InternalError`. `tests/test_showcase_image_pins.py` holds the flags; `docs/troubleshooting.md` has the symptom.
@@ -288,17 +298,19 @@ examples/showcase/
                                # (constraints.txt is derived from uv.lock at build time,
                                #  by scripts/build_image.sh - it is not a committed file)
   compose/docker-compose.yml   # profiles: core, spark, dev, obs, ci, orch
-  compose/{seaweedfs,prometheus,grafana}/...
-  bootstrap/churn_panel.py     # the one lake table: seed, land-outcomes, inject-drift, reset
-  bootstrap/webhook_sink.py    # the CI alert recorder
-  scripts/                     # host-side: build_image.sh, lock_image_extras.sh, ci_bootstrap.py, docker_sock_gid.sh
+  compose/{seaweedfs,prometheus,alertmanager,grafana}/...
+  bootstrap/churn_panel.py     # the one lake table: seed, land-outcomes, inject-drift, reset, advance
+  bootstrap/weaker_challenger.py  # the challenger the champion gate refuses (make challenger)
+  bootstrap/webhook_sink.py    # the alert inbox: CI's classified alerts + Alertmanager's
+  scripts/                     # host-side: build_image.sh, lock_image_extras.sh, ci_bootstrap.py,
+                               #   docker_sock_gid.sh, doctor.py, lifecycle.py
   project/                     # the churn_lake mbt project (source of truth; pushed into Gitea)
     .woodpecker/{pr-check.yml,prod-build.yml,promote.yml}
     datasets/ models/ scoring/ sources.yml profiles.yml promotions.yml
     deploy/Dockerfile          # the deployable unit: runner image + project + compiled manifest
     notebooks/ds_inner_loop.ipynb  # the DS workbench narrative
     scripts/{run_mbt.sh,push_metrics.py,gitea_pr_comment.py,lint_promotions.py,
-             fetch_state.sh,publish_state.sh}
+             fetch_state.sh,publish_state.sh,lake_anchor.py}
   deploy/                      # the deploy repo source: images.env, dags/, k8s/ (for the k3d tier)
 tests/
   test_showcase_infra.py       # SHOW-01/02 + the registry-outage exit-1 contract
@@ -307,7 +319,7 @@ tests/
   test_showcase_provenance.py  # SHOW-08/09
   test_showcase_scheduling.py  # SHOW-11/13 at the scheduler
   test_showcase_obs.py         # SHOW-14
-  test_showcase_k3d.py         # SHOW-16 (extra gate, local-only)
+  test_showcase_k3d.py         # SHOW-16 (extra gate, own nightly step)
   test_showcase_make.py        # SHOW-18 (extra gate, own invocation)
   test_showcase_gates.py       # SHOW-15 (hermetic: fast suite)
   test_showcase_image_pins.py  # hermetic: runner image pins, extras closure, S3 credentials
@@ -322,7 +334,7 @@ tests/
 3. **P3 Deployable unit + provenance**: zot, bake + push, commit-time anchors, oras artifacts, the tamper provenance test. Tests SHOW-08..09.
 4. **P4 Scheduling + CD + promotion**: airflow + postgres + git-sync, deploy repo, DAGs with exit-code routing, the scoring plane, promotion flow. Tests SHOW-10..13.
 5. **P5 Observability + docs**: prometheus/pushgateway/grafana, dashboards, rules, drift injection; docs page in mkdocs nav; one exactly-true sentence in v0.1-status; nightly workflow. Tests SHOW-14..15.
-6. **P6 (optional) ArgoCD fidelity tier**: k3d + ArgoCD over the same deploy repo. Test SHOW-16, local-only.
+6. **P6 ArgoCD fidelity tier**: k3d + ArgoCD over the same deploy repo. Test SHOW-16, in its own invocation and its own nightly step.
 
 **The one-table simplification (2026-09-23).**
 Before it, the showcase ran three cadences over fourteen lake tables and six targets: a daily cadence on tables borrowed from `tests/fixtures/churn_demo`, a monthly cadence on a cluster-free DuckDB plane over a synced lake copy (SHOW-17), and a wide cadence whose five gold tables were joined upstream into two panels, with a feature-selection funnel and Evidently stability gates around it (SHOW-19/20).
@@ -336,8 +348,14 @@ The simplification also surfaced one mbt bug, fixed in core: a ground-truth join
 The one table's cadence moved from twelve month-start cohorts (2025-07 .. 2026-06, a one-month label, 14d maturity scored 28 days late) to a weekly model: nine Monday cohorts from 2026-08-03 to 2026-09-28 (the lake as of 2026-09-28, so no October cohort and only the newest cohort's label still open), a 7d label with 7d maturity, a month of training and September's three labelled weeks of testing, and a `7d` scoring window anchored the day after the newest cohort lands.
 The churn hazard, features and acquisition rate are unchanged per step, so the per-cohort churn rate (~9-12%) and every gate floor (`pr_auc_floor: 0.2`) keep their meaning; the hermetic `test_showcase_panel.py` pins the cadence, the split and the scoring window against the generator.
 
+**Time that moves, and the rest of the 2026-10-07 round.**
+A review of the showcase found it showed one frozen week, once: anchors were constants, the DAGs never ran on their own, every Grafana panel held a single point, and the seeded as-of date was already behind the real calendar.
+So the lake got a clock - its newest cohort - and `advance` to move it a week at a time (refusing to pass today unless told to simulate), every anchor derives from it through `lake_anchor.py`, the dataset's split windows became relative, and `make week` runs a week of operations.
+Around that: the demo shows the champion gate refusing a weaker challenger (the one thing mbt does that a generic stack does not was never shown saying no); `make lifecycle` promotes through the reviewed `promotions.yml` PR instead of `mbt promote` by hand; Alertmanager delivers alerts into the inbox CI already used; Woodpecker keeps its history across `make ci`; Gitea's links open from the host; `make up` starts only the core and observability, pulls a prebuilt runner image when one is published for the checkout, and runs `make doctor` first; the k3d tier runs nightly; and `mbt monitor` stopped reading the whole table to take three columns.
+The seeded bytes did not change: `seed` writes exactly what it wrote before, so every captured output in the docs stays true.
+
 ## 12. Open questions
 
 1. RESOLVED - Zot addressing: the docker daemon uses the published localhost port (insecure-by-default, no daemon config) and in-network consumers use `zot:5000`; see the implementation notes at the top.
-2. RESOLVED - the nightly CI job affords the whole main tier, sparkling modules included, plus the make runbook tier on ubuntu-latest (the job has a 120-minute timeout); only the k3d tier stays local-only.
-3. Whether to eventually ship `mbt init --forge gitea` scaffolding (Woodpecker pipelines + Gitea PR-comment script) upstream once the showcase proves the port; the showcase keeps them project-local until then.
+2. RESOLVED - the nightly CI job affords the whole main tier, sparkling modules included, plus the make runbook tier and, since 2026-10-07, the k3d tier on ubuntu-latest (the job has a 150-minute timeout).
+3. RESOLVED (2026-10-07) - `mbt init --forge gitea` ships it: the seven reference workflows as Woodpecker pipelines with the same names, `gitea_pr_comment.py`, and a README that lists the secrets and crons Woodpecker keeps outside the files. The showcase keeps its own `.woodpecker/`, which carries showcase-only steps (the runner image, the trusted bake, the deploy repo).

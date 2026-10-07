@@ -26,17 +26,19 @@ datasets:
     split:
       strategy: temporal
       time_column: inference_date
-      # Explicit weekly cohort boundaries (every inference_date is a Monday):
-      # a month of training and September's labelled weeks for testing. Both
-      # windows end before 2026-09-28, the newest cohort - its outcome week
-      # closes 2026-10-05, so its label is still NULL, and it is the one
-      # scoring reads - so no row with an unknown outcome is ever a training
-      # or test example.
-      #   train  2026-08-03 .. 2026-08-24   4 cohorts (August)
+      # Weekly cohort boundaries relative to the anchor, which is always the
+      # day after the lake's newest Monday cohort (scripts/lake_anchor.py), so
+      # a retrain after the lake advances a week trains on the newer month:
+      # a month of training and the three labelled weeks before the newest
+      # cohort for testing. Both windows end before the newest cohort - its
+      # outcome week is still open, its label NULL, and it is the one scoring
+      # reads - so no row with an unknown outcome is ever a training or test
+      # example. At the seeded anchor (2026-09-29):
+      #   train  2026-08-03 .. 2026-08-24   4 cohorts (anchor -57d .. -22d)
       #   gap    2026-08-31                 dropped by the embargo
-      #   test   2026-09-07 .. 2026-09-21   3 cohorts (September, labelled)
-      train: "2026-08-03:2026-09-07"
-      test: "2026-09-07:2026-09-28"
+      #   test   2026-09-07 .. 2026-09-21   3 cohorts (anchor -22d .. -1d)
+      train: "-57d:-22d"
+      test: "-22d:-1d"
       # At least the label horizon: it trims the train window's last 7 days,
       # so the last training cohort's outcome week never reaches the test
       # window.

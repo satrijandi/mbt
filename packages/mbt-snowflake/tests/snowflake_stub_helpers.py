@@ -134,3 +134,4 @@ class FakeBuildContext:
     # The real BuildContext always carries a live sink; default to a capturing
     # one so success-path emits (row counts) have somewhere to go.
     events: Any = field(default_factory=CapturingSink)
+    columns: tuple[str, ...] | None = None

@@ -398,13 +398,24 @@ def phase_post(args: argparse.Namespace) -> dict:
         "zot_push_repo": args.zot_ref or "localhost:15000/mbt/churn",
     }
     for name, value in secrets.items():
+        body = {"name": name, "value": value, "events": ["push", "pull_request"], "images": []}
         secret = requests.post(
             f"{args.woodpecker_url}/api/repos/{repo_id}/secrets",
-            json={"name": name, "value": value, "events": ["push", "pull_request"], "images": []},
+            json=body,
             headers=wp_headers,
             timeout=30,
         )
-        if not secret.ok and secret.status_code != 409:
+        if not secret.ok:
+            # Woodpecker's database outlives a `make ci` re-run (its volume),
+            # so the secret already exists - and v3 reports the duplicate as a
+            # 500, not a 409. Update it in place: this run minted a new token.
+            secret = requests.patch(
+                f"{args.woodpecker_url}/api/repos/{repo_id}/secrets/{name}",
+                json=body,
+                headers=wp_headers,
+                timeout=30,
+            )
+        if not secret.ok:
             raise SystemExit(f"secret {name} failed: {secret.status_code} {secret.text[:500]}")
 
     return {"woodpecker_token": woodpecker_token, "repo_id": repo_id}

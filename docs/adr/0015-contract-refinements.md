@@ -1,6 +1,6 @@
 # ADR-15: v0 contract refinements beyond the original TSD sketch
 
-**Status:** accepted, amended by [ADR-29](0029-single-relation-datasets.md) (§4, feature derivation)
+**Status:** accepted, amended by [ADR-29](0029-single-relation-datasets.md) (§4, feature derivation) and [ADR-31](0031-projection-hint-and-full-width-datasets.md) (the data build context's projection hint, contract 1.3)
 
 Refinements made while implementing, recorded per the global DoD:
 

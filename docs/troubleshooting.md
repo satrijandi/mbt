@@ -1199,6 +1199,21 @@ The run is deliberately NOT marked evaluated, so it retries on the next monitor 
 **Fix:** nothing, if labels are simply late - the next scheduled `mbt monitor` picks the run up.
 If it persists, check `ground_truth.join_key` against the label table's columns and verify the label pipeline delivers to the configured source.
 
+### `relation '<name>' lacks column(s): <columns> (this read asks for ...)`
+
+**Symptom (hard error, exit 1):** `mbt monitor` fails the scoring node when it reads the ground-truth labels:
+
+```text
+relation 'churn_outcomes' lacks column(s): churned (this read asks for user_id, churned)
+  resource: scoring.demo.churn_scoring
+  hint: check the column names the spec reads from this relation - for mbt monitor, a scoring node's ground_truth.join_key and label.column
+```
+
+**Why:** the label read asks the data adapter for exactly the join key(s) and the label column (a projection, so a wide label table is not read whole - [ADR-31](adr/0031-projection-hint-and-full-width-datasets.md)), and the relation has no column by one of those names.
+A data plugin built against contract 1.2 ignores the projection and reads every column; with one, the same mistake reports as `ground-truth label table lacks column(s): churned` instead.
+
+**Fix:** correct `ground_truth.join_key` or `ground_truth.label.column` in the scoring spec, or point `ground_truth.label.source` at the table that carries the labels.
+
 ### `mbt monitor` skips a run with `unparseable scored_at`
 
 **Symptom (exit 0, with a warning):**
@@ -1344,6 +1359,45 @@ The same lock made the pipelines API answer with a non-JSON error body, which th
 
 **Fix:** the showcase's compose file now sets `WOODPECKER_DATABASE_DATASOURCE` with `_busy_timeout=30000&_journal_mode=WAL`, so a contended write waits and reads no longer block the lease writes, and `make lifecycle` treats a failed pipelines poll as transient and polls again.
 A running Woodpecker keeps the datasource it booted with, so recreate the stack with `make down && make up`.
+
+### `failed to copy: ... no space left on device` building the showcase runner image
+
+**Symptom (the build fails, `make up` stops):**
+
+```text
+ERROR: failed to build: failed to solve: mount callback failed on /var/lib/docker/containerd/daemon/tmpmounts/containerd-mount1745890448: ... failed to create diff tar stream: failed to copy: .../site-packages/PIL/_imaging.cpython-311-aarch64-linux-gnu.so: write /var/lib/docker/containerd/daemon/io.containerd.content.v1.content/ingest/.../data: no space left on device
+```
+
+**Why:** the disk that fills is the docker VM's, not your Mac's.
+A runner image build needs room for the old image, the new one (about 6GB unpacked), the pip layer while it is written, and the build cache, all at once; with a running stack and older deployable units (`localhost:15000/mbt/churn:<sha>`, about 5.6GB each) beside them, a VM that looked roomy runs out halfway.
+The same full disk has also corrupted Airflow's database and failed every model upload into SeaweedFS (the `S3UploadFailedError` entry above).
+A build that does finish can leave the disk nearly full instead, and the failure then shows up in the next JVM to start - a cluster build dies with `PySparkRuntimeError()` and, above it:
+
+```text
+#  SIGBUS (0x7) at pc=0x0000ffff98a27d48, pid=863, tid=904
+# Problematic frame:
+# V  [libjvm.so+0xba7d48]  PerfLongVariant::sample()+0x28
+```
+
+(the JVM maps its performance counters onto a file in `/tmp`, and a write to a mapped file on a full disk is a SIGBUS).
+Measured on OrbStack, two runner-image rebuilds took the VM from 27GB free to 2GB, most of it build cache.
+
+**Fix:** run `make doctor` (`make up` runs it first): it knows when a build is coming - no runner image, or one whose content label is not this checkout's - and then wants about 25GB free, and it prints how much build cache is reclaimable.
+`docker builder prune --filter 'type!=exec.cachemount'` drops the layer cache but keeps the pip cache mount that makes the next build fast; also `docker rmi` old `localhost:15000/mbt/churn:*` units, or `make down` first, then `make up` again.
+
+### `advancing 1 week(s) moves the lake to ... that cohort has not happened yet`
+
+**Symptom (exit 1, the lake unchanged):**
+
+```text
+advancing 1 week(s) moves the lake to 2026-10-12, after today (2026-10-07): that cohort has not happened yet. Pass --simulate-future (make advance-week FUTURE=1) to simulate it anyway.
+```
+
+**Why:** `make advance-week` (and `make week`) move the showcase lake's clock a Monday at a time, and a cohort dated after today describes a population that does not exist yet - the same reason the newest cohort's label stays NULL until its outcome week closes.
+The generator refuses rather than quietly inventing the future.
+
+**Fix:** to watch several weeks go by, simulate them on purpose with `make advance-week FUTURE=1` or `make week FUTURE=1`; the generator prints `(simulated: after today)` for each.
+`make seed` puts the lake back to 2026-09-28.
 
 ## Reading the event log
 

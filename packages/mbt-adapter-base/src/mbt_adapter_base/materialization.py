@@ -251,6 +251,31 @@ def reference_split(key_values: "Sequence[str]", fractions: Mapping[str, float],
     )
 
 
+def projected_columns(
+    engine: DatasetBuildEngine,
+    ctx: "DataBuildContext",
+    wanted: "Sequence[str]",
+    available: "Sequence[str]",
+) -> list[str]:
+    """The columns to write under a ``ctx.columns`` hint, in the relation's order.
+
+    Every engine resolves the hint here, so a column the relation lacks fails
+    the same way on each, and each keeps the column order it would have
+    written unprojected.
+    """
+    missing = [c for c in wanted if c not in available]
+    if missing:
+        raise engine.build_failure(
+            f"relation {ctx.source.name!r} lacks column(s): {', '.join(missing)} "
+            f"(this read asks for {', '.join(wanted)})",
+            ctx=ctx,
+            hint="check the column names the spec reads from this relation - for mbt "
+            "monitor, a scoring node's ground_truth.join_key and label.column",
+        )
+    keep = set(wanted)
+    return [c for c in available if c in keep]
+
+
 def _report_split_counts(
     engine: DatasetBuildEngine, ctx: "DataBuildContext", written: Mapping[str, int]
 ) -> None:

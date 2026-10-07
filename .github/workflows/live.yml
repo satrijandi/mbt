@@ -60,11 +60,12 @@ jobs:
   # The docker-compose showcase stack (examples/showcase): builds the runner
   # image, boots SeaweedFS + MLflow + Spark + Gitea/Woodpecker + Zot +
   # Airflow + observability, and runs the lifecycle, CI-loop, provenance,
-  # and scheduling tiers. The k3d/ArgoCD module needs MBT_LIVE_SHOWCASE_K3D=1
-  # and stays local-only. No secrets needed - docker ships on ubuntu-latest.
+  # and scheduling tiers, then the runbook tier and the k3d + ArgoCD tier,
+  # each on a stack of its own. No secrets needed - docker ships on
+  # ubuntu-latest, and the k3d binary is fetched pinned and checksummed.
   showcase:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
@@ -87,6 +88,26 @@ jobs:
           MBT_LIVE_SHOWCASE: "1"
           MBT_LIVE_SHOWCASE_MAKE: "1"
         run: uv run pytest -q tests/test_showcase_make.py --timeout 3600 -rA
+      - name: Install k3d (pinned, checksummed)
+        # kubectl ships on ubuntu-latest; k3d does not. Until this step the
+        # CD-fidelity tier ran nowhere but a laptop, so nothing noticed when
+        # ArgoCD or k3s moved under it.
+        env:
+          K3D_VERSION: v5.9.0
+          K3D_SHA256: 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/k3d" \
+            "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/k3d-linux-amd64"
+          echo "$K3D_SHA256  $RUNNER_TEMP/k3d" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/k3d" /usr/local/bin/k3d
+          k3d version
+      - name: k3d + ArgoCD tier
+        # SHOW-16, after the runbook stack is gone: one more full stack plus
+        # a k3d node running ArgoCD core.
+        env:
+          MBT_LIVE_SHOWCASE: "1"
+          MBT_LIVE_SHOWCASE_K3D: "1"
+        run: uv run pytest -q tests/test_showcase_k3d.py --timeout 3600 -rA
       - name: Collect stack logs
         # A red 2-hour docker run without logs can only be debugged by
         # rerunning; grab every container's output while it is still up.

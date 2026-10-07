@@ -1,6 +1,7 @@
 """The runbook itself, exercised (SHOW-18): drive the README golden path
-through `make` exactly as a human would - up, demo, ci, clone, protect,
-lifecycle, score, outcomes, monitor, inject-drift + recovery, down, clean.
+through `make` exactly as a human would - doctor, up, demo (a refused
+challenger included), ci, clone, protect, lifecycle (its promotion a reviewed
+PR), score, outcomes, monitor, inject-drift + recovery, week, down, clean.
 
 Every other module tests the platform through its own harness; this one
 tests that the COMMANDS THE README TELLS A HUMAN TO TYPE still work, so the
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from showcase_utils import (
+    DS_USER,
     GITEA_PASSWORD,
     GITEA_USER,
     SHOWCASE_DIR,
@@ -48,6 +50,7 @@ PORT_VARS = (
     "SHOWCASE_SPARK_UI_PORT",
     "SHOWCASE_JUPYTER_PORT",
     "SHOWCASE_PUSHGW_PORT",
+    "SHOWCASE_ALERTMANAGER_PORT",
     "SHOWCASE_PROMETHEUS_PORT",
     "SHOWCASE_GRAFANA_PORT",
     "SHOWCASE_GITEA_PORT",
@@ -159,6 +162,7 @@ def test_runbook_golden_path(runbook) -> None:
     runner = runbook
     ws = runner.workspace
 
+    runner.make("doctor")
     runner.make("up")
     assert (ws / "project" / "mbt_project.yml").exists(), "workspace was not staged"
 
@@ -261,6 +265,19 @@ def test_runbook_golden_path(runbook) -> None:
         states = [run["state"] for run in payload["dag_runs"]]
         assert states == ["success"] * runs, (dag_id, states)
     assert list((ws / "predictions" / "retention_scores").glob("*/ground_truth.marker.json"))
+    # The promotion went the reviewed way: mbtds's promotions.yml PR, merged by
+    # the code owner, and the version it pins is the one production serves.
+    pulls = requests.get(f"{api}/pulls?state=closed", auth=auth, timeout=30).json()
+    promotion = next(p for p in pulls if p["title"].startswith("promote churn_automl v"))
+    assert promotion["merged"] and promotion["user"]["login"] == DS_USER, promotion
+    version = promotion["title"].rsplit("v", 1)[1]
+    mlflow = f"http://localhost:{runner.env['SHOWCASE_MLFLOW_PORT']}"
+    alias = requests.get(
+        f"{mlflow}/api/2.0/mlflow/registered-models/alias",
+        params={"name": "churn_automl", "alias": "production"},
+        timeout=30,
+    ).json()
+    assert alias["model_version"]["version"] == version, alias
 
     # The standalone targets rerun cleanly on the same anchors, from the
     # seeded table: reset, score, a week passes, monitor.
@@ -274,6 +291,11 @@ def test_runbook_golden_path(runbook) -> None:
     runner.make("inject-drift")
     runner.make("reset")
     runner.make("score")
+
+    # A week passes (the seeded 2026-09-28 lake moves to 2026-10-05, which
+    # has happened on any date this runs) and its operations run: monitor,
+    # the weekly retrain against the champion gate, promote-if-staged, score.
+    runner.make("week")
 
     runner.make("down")
     assert runner.containers() == [], "make down left containers behind"

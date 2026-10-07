@@ -1,0 +1,50 @@
+# The monthly companion to scheduled_retrain.yml, for slow-moving models. It
+# runs only once a `monthly-retrain` cron exists: tag a model `monthly` first.
+# A selector that matches no model is an error (exit 1), not a no-op -
+# otherwise a renamed tag would retrain nothing every month while the
+# heartbeat reported success.
+#
+# Runs from the repo's `monthly-retrain` cron (the 1st at 04:00 UTC: "0 4 1 * *"; README,
+# "Repo settings this project assumes"), or by hand: "Run pipeline" on main
+# with the pipeline variable MBT_SCHEDULE=monthly-retrain. Secrets: mbt_data_root,
+# mbt_heartbeat_url and mbt_alert_webhook (`disabled` turns either off).
+when:
+  - event: cron
+    cron: monthly-retrain
+  - event: manual
+    branch: main
+    evaluate: 'MBT_SCHEDULE == "monthly-retrain"'
+
+steps:
+  - name: retrain
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    environment:
+      MBT_DATA_ROOT:
+        from_secret: mbt_data_root
+    commands:
+      - pip install -r requirements.txt
+      - mbt build --target prod --select tag:monthly
+
+  - name: heartbeat
+    # Dead-man's-switch: ping a cron monitor (healthchecks.io, Cronitor, ...)
+    # so a schedule that silently stops - a deleted cron, an agent that is
+    # gone - is caught by the missing ping.
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    when:
+      - status: success
+    environment:
+      MBT_HEARTBEAT_URL:
+        from_secret: mbt_heartbeat_url
+    commands:
+      - bash scripts/ci_notify.sh heartbeat
+
+  - name: alert
+    # A silently failed scheduled retrain violates continuous training.
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    when:
+      - status: failure
+    environment:
+      MBT_ALERT_WEBHOOK:
+        from_secret: mbt_alert_webhook
+    commands:
+      - bash scripts/ci_notify.sh alert "mbt scheduled monthly retrain failed"

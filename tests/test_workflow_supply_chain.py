@@ -35,7 +35,14 @@ import mbt
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPO_WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 SCAFFOLD_WORKFLOWS = (
-    Path(mbt.__file__).resolve().parent / "cli" / "_scaffold" / ".github" / "workflows"
+    Path(mbt.__file__).resolve().parent
+    / "cli"
+    / "_scaffold"
+    / "_forges"
+    / "github"
+    / "files"
+    / ".github"
+    / "workflows"
 )
 
 WORKFLOWS = sorted(REPO_WORKFLOWS.glob("*.yml")) + sorted(SCAFFOLD_WORKFLOWS.glob("*.yml"))
@@ -49,7 +56,7 @@ _EXPRESSION = re.compile(r"\$\{\{")
 
 
 def _ids(paths: list[Path]) -> list[str]:
-    return [f"{p.parent.parent.parent.name}/{p.name}" for p in paths]
+    return [f"{'scaffold' if '_scaffold' in p.parts else 'repo'}/{p.name}" for p in paths]
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS, ids=_ids(WORKFLOWS))

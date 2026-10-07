@@ -2,7 +2,8 @@
 
 This is the hands-on companion to the [showcase](showcase.md): every command to type, what you should see after it, and where to look.
 Part 1 is the correct path, from an empty machine to a model scored in production and monitored against real outcomes.
-Part 2 is the wrong turns: each one's symptom, why it happens, and how to get back on the path.
+Part 2 goes past it: the champion gate refusing a weaker model, and the weekly model living through more weeks.
+Part 3 is the wrong turns: each one's symptom, why it happens, and how to get back on the path.
 
 Every command and every quoted output on this page was captured from a real run on a fresh stack; timings are from a 10-core laptop with the runner image already built.
 
@@ -21,7 +22,7 @@ The showcase has two people in it, and the walkthrough switches between them on 
 Airflow and Grafana have their own login, `admin` / `admin`.
 
 The data is synthetic and fixed-dated: nine weekly cohorts, every Monday from 2026-08-03 to 2026-09-28, where 2026-09-28 is the newest and its outcome week is still open.
-Every command below runs at a pinned anchor - `2026-09-29T00:00:00Z` to build and score, `2026-10-09T00:00:00Z` to monitor - so what you see matches this page whatever today's date is.
+Every command takes its anchor from that newest cohort - `2026-09-29T00:00:00Z` to build and score, `2026-10-09T00:00:00Z` to monitor - so what you see matches this page whatever today's date is, until you move the lake on with `make advance-week` (part 2).
 
 ## Part 1: the correct path
 
@@ -40,6 +41,8 @@ Every command below runs at a pinned anchor - `2026-09-29T00:00:00Z` to build an
 | [11](#11-monitor-against-real-outcomes) | `mbt_monitor`, `make outcomes`, `mbt_monitor` | realized metrics, evaluated exactly once |
 | [12](#12-break-it-on-purpose-and-recover) | `make inject-drift`, then `make reset score` | an alert fires and clears |
 | [13](#13-tear-down) | `make down` or `make clean` | back to an empty machine |
+| [14](#14-a-weaker-challenger-meets-the-champion-gate) | `make challenger` | the champion gate refuses a worse model; production is untouched |
+| [15](#15-a-week-passes) | `make week` | the lake moves on a week, and a week of operations runs |
 
 ### 1. Boot the stack
 
@@ -48,7 +51,9 @@ cd examples/showcase
 make up
 ```
 
-The first run builds the runner image (10-15 minutes); after that `make up` takes under a minute and a half.
+It first runs `make doctor`, which checks docker's memory and disk, the socket group Airflow needs, the ports, and leftover networks, and stops with the fix when something will not work.
+The runner image comes prebuilt from `ghcr.io/satrijandi/mbt-showcase-runner` when one is published for your checkout; otherwise the first run builds it (10-15 minutes), and after that `make up` takes under a minute and a half.
+It starts the lake, MLflow, JupyterLab, Spark and observability; Gitea, Woodpecker and Airflow start with `make ci` in step 2.
 It ends by generating the lake table and printing every URL:
 
 ```text
@@ -156,8 +161,7 @@ git commit -am "churn_baseline_xgb: max_depth 4 -> 5"
 git push -u origin deeper-xgb
 ```
 
-Gitea's reply includes a link to open the PR.
-It points at `http://gitea:3000/...`, the address containers use, which does not open from your machine; replace `gitea:3000` with `localhost:3305`, or open the repository in Gitea and use the banner it shows for the new branch.
+Gitea's reply includes a link to open the PR, on `http://localhost:3305/...`.
 On the comparison page click **New Pull Request**, then **Create Pull Request**.
 
 The pr-check pipeline takes about a minute.
@@ -251,7 +255,7 @@ Nothing was retrained and nothing was baked (`nothing retrained and a deployable
 ### 10. Score in production
 
 Open Airflow (http://localhost:8280, `admin` / `admin`), click **Dags**, then `mbt_score`, then **Trigger** at the top right.
-The dialog is pre-filled with the pinned `anchor`; click **Trigger** again.
+The dialog shows an empty `anchor`: left empty, the run takes the lake's own anchor (the day after its newest cohort) inside the unit; click **Trigger** again.
 The run takes about 40 seconds; the task log ends with:
 
 ```text
@@ -310,6 +314,11 @@ Scoring refuses the shifted batch with exit 2, the quality-failure code:
 ```
 
 In Prometheus (http://localhost:9490, **Alerts**) `MbtShiftBreach` goes pending within about 20 seconds and firing within about 30; in Grafana (http://localhost:3390, `admin` / `admin`) the **mbt Model Health** dashboard plots the shift against its threshold.
+Alertmanager then delivers it to the alert inbox, the same one CI's alerts land in; http://localhost:9309/requests shows it on the owner route, because a shift breach is a quality verdict for the model's owner rather than a page for on-call:
+
+```text
+/alert/owner firing [('MbtShiftBreach', 'notify'), ('MbtShiftBreach', 'notify'), ...]
+```
 Recover with:
 
 ```bash
@@ -331,7 +340,68 @@ This stops and removes the containers, their volumes and the network; the worksp
 `make clean` does the same and then removes the workspace too.
 After either, start again from step 1; the next `make up` reuses the runner image.
 
-## Part 2: wrong turns
+## Part 2: watch the gate say no, and let time pass
+
+Two things the correct path above never shows: the champion gate refusing a model, and the weekly model living through more than one week.
+Both run in `examples/showcase` on a stack where step 9 put a champion in production; the version numbers below are from one run and will differ on yours.
+
+### 14. A weaker challenger meets the champion gate
+
+```bash
+make challenger
+```
+
+A working copy drops the eight activity features from `churn_automl` and retrains on the shared registry.
+The champion gate scores the production model on the challenger's own test rows - through the production model's own features - and the challenger loses by far more than the gate allows:
+
+```text
+gate pr_auc (threshold): PASS - expected 0.2, got 0.2049
+gate pr_auc (champion): FAIL - paired bootstrap (1000 resamples):
+          delta lower bound -0.157604 at 95% confidence
+mbt build exited 2; production serves churn_automl v2
+the champion gate refused the weaker challenger; production is unchanged
+```
+
+The challenger still clears the absolute floor (0.2); it is the comparison with production that keeps it out.
+Nothing is staged, and the committed project is untouched (the copy lives under the workspace's `tmp/` and is removed).
+
+### 15. A week passes
+
+```bash
+make week
+```
+
+The lake moves on a week: the 2026-09-28 cohort's outcome week closes, so its labels land, and the 2026-10-05 cohort arrives, still open.
+Every anchor follows, because they all come from the newest cohort (`make anchors` prints them).
+Then the week's operations run in order - grade last week's predictions, retrain on the newer month, promote the retrain if its gates staged it, score the new cohort:
+
+```text
+advanced s3://mbt-lake/churn_panel to 2026-10-05
+==> [3/5] Weekly retrain on the newer month (champion gate vs production)
+          delta lower bound -0.008912 at 95% confidence
+==> [4/5] The retrain passed its gates and was staged: promote it
+promoted churn_automl v3 -> production
+```
+
+The champion gate is a non-inferiority gate (`min_delta: -0.02`): a retrain may replace production if it is, at 95% confidence, no more than 0.02 PR-AUC worse on the same rows.
+Some weeks it is not, and the step says so instead of failing:
+
+```text
+breach: pr_auc: challenger delta lower bound -0.0258 < required -0.02
+==> [4/5] The champion gate refused this week's retrain (exit 2): production keeps its champion
+```
+
+The lake will not move past today's date - a cohort from next week describes customers who do not exist yet:
+
+```text
+advancing 1 week(s) moves the lake to 2026-10-12, after today (2026-10-07): that cohort has not happened yet. Pass --simulate-future (make advance-week FUTURE=1) to simulate it anyway.
+```
+
+`make week FUTURE=1` simulates such weeks, and each says `(simulated: after today)`.
+Run it a few times and Grafana's panels become time series.
+`make seed` takes the lake back to 2026-09-28.
+
+## Part 3: wrong turns
 
 Each entry starts with the symptom as you will see it.
 
@@ -339,7 +409,6 @@ Each entry starts with the symptom as you will see it.
 |---|---|
 | step 3 | [`repository ... not found` cloning](#repository-not-found-cloning-the-repo) |
 | step 4 | [`could not read Username` or `Authentication failed` pushing](#authentication-failed-pushing) |
-| step 5 | [a broken avatar in Woodpecker, links to `gitea:3000`](#a-broken-avatar-and-gitea3000-links-in-woodpecker) |
 | step 6 | [the PR fails with `gate_failed`](#the-pr-fails-with-gate_failed) |
 | step 6 | [the PR fails: `features.include ... names column(s) the dataset does not have`](#the-pr-fails-with-a-feature-the-dataset-does-not-have) |
 | step 9 | [the PR fails at `lint-promotions`](#the-pr-fails-at-lint-promotions) |
@@ -350,7 +419,7 @@ Each entry starts with the symptom as you will see it.
 | step 10 | [`no champion of 'churn_automl' in stage 'production' to score with`](#no-champion-to-score-with) |
 | step 11 | [`mbt_monitor` failed on the first try and did not retry](#mbt_monitor-failed-and-did-not-retry) |
 | step 11 | [`mbt_monitor` failed twice](#mbt_monitor-failed-twice) |
-| any | [running `make ci` again emptied Woodpecker](#running-make-ci-again-emptied-woodpecker) |
+| any | [running `make ci` again logs everyone out of Woodpecker](#running-make-ci-again-logs-everyone-out-of-woodpecker) |
 
 ### `repository ... not found` cloning the repo
 
@@ -359,7 +428,7 @@ remote: Not found.
 fatal: repository 'http://localhost:3305/mbt-showcase/churn.git/' not found
 ```
 
-**Why:** the repository does not exist until `make ci` creates it; `make up` only starts an empty Gitea.
+**Why:** the repository does not exist until `make ci` creates it; `make up` does not start Gitea at all.
 
 **Fix:** run `make ci`, then clone again.
 
@@ -387,15 +456,6 @@ git remote set-url origin http://mbtops:mbtops-showcase-password@localhost:3305/
 ```
 
 On macOS, a wrong password you typed once may be saved in the keychain and offered again; remove it with `printf "protocol=http\nhost=localhost:3305\n\n" | git credential-osxkeychain erase`.
-
-### A broken avatar and `gitea:3000` links in Woodpecker
-
-**Why:** Gitea's own address is `http://gitea:3000`, because the CI containers must be able to reach it, and Woodpecker copies that address into avatar images and repository links.
-Your machine cannot resolve `gitea`.
-It is cosmetic: logins, pipelines and PR status all work.
-
-**Fix:** none needed; use http://localhost:3305 for Gitea.
-The same applies to the PR link Gitea prints when you push a branch.
 
 ### The PR fails with `gate_failed`
 
@@ -542,11 +602,11 @@ Here the DAG's `target` parameter names a target `profiles.yml` does not define.
 
 **Fix:** trigger again with a defined target; the scoring DAGs use `batch`.
 
-### Running `make ci` again emptied Woodpecker
+### Running `make ci` again logs everyone out of Woodpecker
 
-`make ci` prints `repo mbt-showcase/churn already seeded; skipping push` and finishes, but Woodpecker's pipeline history is gone and pipeline numbers start again at 1.
+`make ci` prints `repo mbt-showcase/churn already seeded; skipping push` and finishes; the pipeline history is all still there, but Woodpecker asks every account to log in again, and each sees Gitea's **Authorize Application** page once more.
 
-**Why:** Woodpecker keeps its data inside its own container, and `make ci` recreates that container with a new OAuth application.
-Gitea is untouched: repositories, branches, PRs, protection and the published baseline all survive, so the next push builds from the baseline as before.
+**Why:** each `make ci` creates a fresh OAuth application in Gitea and restarts Woodpecker on it, so earlier logins belong to the old application.
+Woodpecker's database lives in a volume, so pipelines, the repo's activation and its secrets survive (the `gitea_token` secret is updated to the token this run minted); Gitea is untouched.
 
-**Fix:** none needed, but everyone logs into Woodpecker again, and each account sees the **Authorize Application** page once more.
+**Fix:** none needed; log in again.

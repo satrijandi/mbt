@@ -4,9 +4,10 @@
 # PR comment. Exit-code fidelity comes from scripts/run_mbt.sh (Woodpecker
 # collapses any nonzero exit into "failed", erasing mbt's 1-vs-2 contract).
 #
-# The anchor is PINNED (DESIGN.md 4.5): the lake's seed data is fixed-dated,
-# so a wall-clock anchor would rot into empty training windows within weeks;
-# a fixed anchor also keeps same-source rebuilds byte-identical
+# The anchor comes from the DATA (DESIGN.md 4.6): scripts/lake_anchor.py
+# reads the lake's newest weekly cohort, so a wall-clock anchor can never rot
+# into empty training windows, the PR and the baseline agree whenever the lake
+# has not moved, and same-source rebuilds stay byte-identical
 # (generated_at == anchor, ADR-19).
 #
 # No --deep-snapshot anywhere in this project's build pipelines (a documented
@@ -17,6 +18,14 @@
 # both the baseline and diff sides.
 when:
   - event: pull_request
+
+# Gitea's ROOT_URL is the browser-facing localhost URL, which a step
+# container cannot reach; clone from the in-network address instead.
+clone:
+  git:
+    image: docker.io/woodpeckerci/plugin-git:2.10.0
+    settings:
+      remote: http://gitea:3000/${CI_REPO}.git
 
 steps:
   - name: lint-promotions
@@ -33,11 +42,11 @@ steps:
       AWS_SECRET_ACCESS_KEY: mbtsecret
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
-      SHOWCASE_ANCHOR: "2026-09-29T00:00:00Z"
       MBT_STATE_URI: state/prod/latest.json
       MBT_ALERT_WEBHOOK: http://webhook-sink:9099/alert
     commands:
       - mbt parse
+      - export SHOWCASE_ANCHOR="$(python3 scripts/lake_anchor.py)" && echo "anchor $SHOWCASE_ANCHOR"
       - mbt compile --target ci --anchor "$SHOWCASE_ANCHOR"
       - |
         set +e

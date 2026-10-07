@@ -25,11 +25,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SHOWCASE = REPO_ROOT / "examples" / "showcase"
 PROJECT = SHOWCASE / "project"
 GENERATOR = SHOWCASE / "bootstrap" / "churn_panel.py"
+LAKE_ANCHOR = PROJECT / "scripts" / "lake_anchor.py"
 SMALL = ["--customers", "60", "--noise-columns", "3"]
+#: A real date after the seeded as-of date, for the advance tests: they must
+#: not depend on the calendar the suite happens to run on.
+TODAY = ["--today", "2026-10-07"]
 
 
-def _generator():
-    spec = importlib.util.spec_from_file_location("showcase_churn_panel", GENERATOR)
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     # dataclasses resolve their module through sys.modules.
@@ -40,7 +44,12 @@ def _generator():
 
 @pytest.fixture(scope="module")
 def panel():
-    return _generator()
+    return _load(GENERATOR, "showcase_churn_panel")
+
+
+@pytest.fixture(scope="module")
+def lake_anchor():
+    return _load(LAKE_ANCHOR, "showcase_lake_anchor")
 
 
 def _seed(panel, lake: Path, *extra: str) -> Path:
@@ -139,6 +148,105 @@ def test_rewriting_an_unseeded_lake_fails_loudly(panel, tmp_path: Path) -> None:
         panel.main(["--lake", str(tmp_path / "empty"), "land-outcomes"])
 
 
+# -- time moves: advance ----------------------------------------------------------
+
+
+def _advance(panel, lake: Path, *extra: str) -> None:
+    assert panel.main(["--lake", str(lake), "advance", *extra]) == 0
+
+
+def test_a_week_passing_labels_the_newest_cohort_and_lands_the_next(panel, tmp_path) -> None:
+    lake = _seed(panel, tmp_path / "lake")
+    seeded = _files(lake)
+    _advance(panel, lake, *TODAY)
+
+    after = _files(lake)
+    newest = panel.NEWEST + timedelta(weeks=1)
+    assert set(after) - set(seeded) == {
+        f"{panel.NEWEST:%Y-%m-%d}-matured-000.parquet",
+        f"{newest:%Y-%m-%d}-open-000.parquet",
+    }
+    assert set(seeded) - set(after) == {f"{panel.NEWEST:%Y-%m-%d}-open-000.parquet"}
+    # Every cohort the advance did not touch keeps its exact bytes: moving the
+    # clock never rewrites history.
+    untouched = set(seeded) - {f"{panel.NEWEST:%Y-%m-%d}-open-000.parquet"}
+    assert all(after[name] == seeded[name] for name in untouched)
+
+    as_of = newest
+    for row in _rows(lake):
+        known = row["is_active"] and panel.outcome_known(row["inference_date"], as_of)
+        assert (row["is_churn"] is not None) == known, row
+    # The new cohort is the same one a full replay to that date generates.
+    replay = tmp_path / "replay"
+    _seed(panel, replay)
+    _advance(panel, replay, *TODAY)
+    assert _files(replay) == after
+
+
+def test_advancing_twice_equals_advancing_two_weeks(panel, tmp_path: Path) -> None:
+    one = _seed(panel, tmp_path / "one")
+    _advance(panel, one, "--simulate-future", *TODAY)
+    _advance(panel, one, "--simulate-future", *TODAY)
+    two = _seed(panel, tmp_path / "two")
+    _advance(panel, two, "--weeks", "2", "--simulate-future", *TODAY)
+    assert _files(one) == _files(two)
+
+
+def test_the_lake_never_passes_today_unless_told_to_simulate(panel, tmp_path: Path) -> None:
+    """A cohort dated after today describes a population that does not exist
+    yet - the same honesty that keeps an open cohort's label NULL."""
+    lake = _seed(panel, tmp_path / "lake")
+    before = _files(lake)
+    with pytest.raises(SystemExit, match="has not happened yet"):
+        panel.main(["--lake", str(lake), "advance", "--today", "2026-10-04"])
+    assert _files(lake) == before
+    _advance(panel, lake, "--today", "2026-10-05")  # the day the cohort lands
+    with pytest.raises(SystemExit, match="--simulate-future"):
+        panel.main(["--lake", str(lake), "advance", "--today", "2026-10-11"])
+
+
+def test_the_simulated_book_outlives_the_seeded_customer_pool(panel, tmp_path: Path) -> None:
+    """Joiners exhaust the seeded pool after about 16 weeks; past that the
+    book keeps growing from a stream of its own, with unique keys and churn
+    still in it."""
+    lake = _seed(panel, tmp_path / "lake")
+    _advance(panel, lake, "--weeks", "14", "--simulate-future", *TODAY)
+    newest = panel.NEWEST + timedelta(weeks=14)
+    rows = _rows(lake, f"{newest:%Y-%m-%d}-*.parquet")
+    previous = _rows(lake, f"{newest - timedelta(weeks=1):%Y-%m-%d}-*.parquet")
+    assert len(rows) > len(previous) > 0
+    assert len({row["customer_id"] for row in rows}) == len(rows)
+    assert {row["is_churn"] for row in previous if row["is_active"]} == {0, 1}
+
+
+def test_seed_takes_an_advanced_lake_back_to_the_seeded_week(panel, tmp_path: Path) -> None:
+    lake = _seed(panel, tmp_path / "lake")
+    seeded = _files(lake)
+    _advance(panel, lake, "--weeks", "3", "--simulate-future", *TODAY)
+    _seed(panel, lake)
+    assert _files(lake) == seeded
+
+
+# -- anchors come from the data ---------------------------------------------------
+
+
+def test_the_lake_anchor_is_the_day_after_its_newest_cohort(panel, lake_anchor, tmp_path) -> None:
+    lake = _seed(panel, tmp_path / "lake")
+    assert lake_anchor.anchor(str(lake)) == ANCHOR
+    assert lake_anchor.anchor(str(lake), monitor=True) == MONITOR_ANCHOR
+    _advance(panel, lake, *TODAY)
+    assert lake_anchor.anchor(str(lake)) == "2026-10-06T00:00:00Z"
+    assert lake_anchor.anchor(str(lake), monitor=True) == "2026-10-16T00:00:00Z"
+    # Outcomes landing and drift change the newest cohort's files, not its date.
+    assert panel.main(["--lake", str(lake), "inject-drift"]) == 0
+    assert lake_anchor.anchor(str(lake)) == "2026-10-06T00:00:00Z"
+
+
+def test_an_unseeded_lake_has_no_anchor(lake_anchor, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="seed the lake first"):
+        lake_anchor.anchor(str(tmp_path / "empty"))
+
+
 # -- the project reads it ---------------------------------------------------------
 
 
@@ -204,16 +312,20 @@ def test_only_cohorts_whose_outcome_week_closed_are_labelled(parsed, panel) -> N
     assert panel.outcome_known(datetime(2026, 9, 21))
 
 
-def _cohorts_in(panel, start: datetime, end: datetime) -> list[datetime]:
-    return [c for c in panel.COHORTS if start <= c.replace(tzinfo=UTC) < end]
+def _cohorts_in(cohorts: list[datetime], start: datetime, end: datetime) -> list[datetime]:
+    return [c for c in cohorts if start <= c.replace(tzinfo=UTC) < end]
+
+
+def _anchor_after(weeks: int) -> datetime:
+    """The lake's anchor once it has advanced ``weeks`` weeks past the seed."""
+    return datetime.fromisoformat(ANCHOR) + timedelta(weeks=weeks)
 
 
 def test_a_month_of_training_and_the_labelled_september_weeks_of_testing(parsed, panel) -> None:
-    """The weekly model's contract: a 7d label, embargoed by 7d, trained on
-    August's four Monday cohorts and tested on September's three labelled
-    ones (09-28 is still open). The windows
-    resolve the way the compiler resolves them (absolute bounds, the embargo
-    trimming the train window's tail)."""
+    """The weekly model's contract at the seeded anchor: a 7d label, embargoed
+    by 7d, trained on August's four Monday cohorts and tested on September's
+    three labelled ones (09-28 is still open). The windows resolve the way the
+    compiler resolves them (the embargo trimming the train window's tail)."""
     from mbt.compile.windows import parse_window, subtract_duration
 
     (dataset,) = parsed.datasets.values()
@@ -225,47 +337,73 @@ def test_a_month_of_training_and_the_labelled_september_weeks_of_testing(parsed,
 
     anchor = datetime.fromisoformat(ANCHOR)
     start, end = parse_window(str(split.train)).resolve(anchor)
-    train = _cohorts_in(panel, start, subtract_duration(end, split.embargo))
-    test = _cohorts_in(panel, *parse_window(str(split.test)).resolve(anchor))
+    train = _cohorts_in(panel.COHORTS, start, subtract_duration(end, split.embargo))
+    test = _cohorts_in(panel.COHORTS, *parse_window(str(split.test)).resolve(anchor))
     assert train == [datetime(2026, 8, d) for d in (3, 10, 17, 24)]
     assert test == [datetime(2026, 9, d) for d in (7, 14, 21)]
     assert all(panel.outcome_known(c) for c in train + test)
 
 
+@pytest.mark.parametrize("weeks", [0, 1, 2, 5])
+def test_every_week_trains_a_month_tests_three_weeks_and_scores_the_newest(
+    parsed, panel, weeks: int
+) -> None:
+    """Time moves (make advance-week) and the windows move with it: at every
+    lake anchor the dataset trains on four labelled cohorts, tests on the
+    three before the newest, never reaches the open cohort, and scoring reads
+    exactly the newest one - which monitoring then waits out."""
+    from mbt.compile.windows import parse_window, subtract_duration
+
+    (dataset,) = parsed.datasets.values()
+    (scoring,) = parsed.scoring.values()
+    split = dataset.spec.split
+    as_of = panel.NEWEST + timedelta(weeks=weeks)
+    cohorts = panel.cohorts_until(as_of)
+    anchor = _anchor_after(weeks)
+
+    start, end = parse_window(str(split.train)).resolve(anchor)
+    train = _cohorts_in(cohorts, start, subtract_duration(end, split.embargo))
+    test = _cohorts_in(cohorts, *parse_window(str(split.test)).resolve(anchor))
+    assert len(train) == 4 and len(test) == 3, (train, test)
+    assert max(train) + timedelta(weeks=2) == min(test), "one embargoed cohort between"
+    assert max(test) + timedelta(weeks=1) == as_of
+    assert all(panel.outcome_known(c, as_of) for c in train + test)
+    assert not panel.outcome_known(as_of, as_of)
+
+    window = parse_window(str(scoring.spec.input.window)).resolve(anchor)
+    assert _cohorts_in(cohorts, *window) == [as_of]
+    maturity = timedelta(days=int(scoring.spec.ground_truth.maturity.removesuffix("d")))
+    monitor_anchor = datetime.fromisoformat(MONITOR_ANCHOR) + timedelta(weeks=weeks)
+    assert anchor + maturity <= monitor_anchor
+
+
 @pytest.mark.parametrize("days_late", [0, 1, 2])
 def test_scoring_reads_exactly_the_newest_cohort(parsed, panel, days_late: int) -> None:
-    """At the pinned anchor and the later anchors the live tier scores at, the
+    """At the lake's anchor and the later anchors the live tier scores at, the
     input window is the newest (still unlabelled) cohort and nothing else."""
     from mbt.compile.windows import parse_window
 
     (scoring,) = parsed.scoring.values()
     anchor = datetime.fromisoformat(ANCHOR) + timedelta(days=days_late)
     window = parse_window(str(scoring.spec.input.window)).resolve(anchor)
-    assert _cohorts_in(panel, *window) == [panel.NEWEST]
+    assert _cohorts_in(panel.COHORTS, *window) == [panel.NEWEST]
     # Monitoring waits out the maturity for every one of those runs.
     maturity = timedelta(days=int(scoring.spec.ground_truth.maturity.removesuffix("d")))
     assert anchor + maturity <= datetime.fromisoformat(MONITOR_ANCHOR)
 
 
-def test_every_pinned_anchor_agrees() -> None:
-    """The Makefile, DAGs, CI pipelines, CronJob and notebook pin the same
-    anchors as the live tier; one stale copy scores an empty window."""
+def test_no_showcase_file_pins_an_anchor() -> None:
+    """Every anchor derives from the lake (scripts/lake_anchor.py): a date
+    literal in the Makefile, a DAG, a pipeline, the CronJob or the notebook
+    would score an empty window the first time the lake advances."""
     pinned = {
-        path.relative_to(SHOWCASE): set(re.findall(r"\d{4}-\d\d-\d\dT00:00:00Z", path.read_text()))
+        path.relative_to(SHOWCASE): sorted(set(re.findall(r"\d{4}-\d\d-\d\dT\d\d:\d\d", text)))
         for path in SHOWCASE.rglob("*")
-        if path.is_file() and path.suffix in {".py", ".yml", ".yaml", ".ipynb", ""}
+        if path.is_file()
+        and path.suffix in {".py", ".yml", ".yaml", ".ipynb", ".sh", ""}
+        and (text := path.read_text(errors="replace"))
     }
-    pinned = {path: found for path, found in pinned.items() if found}
-    assert pinned, "no pinned anchors found"
-    for path, found in pinned.items():
-        assert found <= {ANCHOR, MONITOR_ANCHOR}, (path, sorted(found))
-
-
-def test_training_never_reaches_the_open_cohort(parsed, panel) -> None:
-    (dataset,) = parsed.datasets.values()
-    for window in (dataset.spec.split.train, dataset.spec.split.test):
-        end = datetime.fromisoformat(str(window).split(":")[1])
-        assert end <= panel.NEWEST, f"{window} reaches the unlabelled cohort"
+    assert {path: found for path, found in pinned.items() if found} == {}
 
 
 def test_models_read_named_columns_and_declare_every_categorical(parsed, panel) -> None:

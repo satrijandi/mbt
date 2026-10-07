@@ -294,6 +294,9 @@ class BuildContext:
     #: The DAG pool size (F22): a data adapter divides its in-process compute
     #: budget (DuckDB cores/RAM) by this so concurrent builds do not oversubscribe.
     build_parallelism: int = 1
+    #: The projection hint (contract 1.3): the columns the caller reads, or
+    #: None for all of them.
+    columns: tuple[str, ...] | None = None
 
 
 def run_with_lifecycle(

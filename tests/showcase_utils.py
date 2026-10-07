@@ -116,6 +116,7 @@ class ComposeStack:
             "SHOWCASE_SPARK_UI_PORT": free_port(),
             "SHOWCASE_JUPYTER_PORT": free_port(),
             "SHOWCASE_PUSHGW_PORT": free_port(),
+            "SHOWCASE_ALERTMANAGER_PORT": free_port(),
             "SHOWCASE_PROMETHEUS_PORT": free_port(),
             "SHOWCASE_GRAFANA_PORT": free_port(),
             "SHOWCASE_GITEA_PORT": free_port(),

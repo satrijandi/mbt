@@ -12,6 +12,14 @@ when:
     branch: main
     path: promotions.yml
 
+# Gitea's ROOT_URL is the browser-facing localhost URL, which a step
+# container cannot reach; clone from the in-network address instead.
+clone:
+  git:
+    image: docker.io/woodpeckerci/plugin-git:2.10.0
+    settings:
+      remote: http://gitea:3000/${CI_REPO}.git
+
 steps:
   - name: promote
     image: mbt-showcase-runner:dev

@@ -1,0 +1,70 @@
+# mbt scheduled ground-truth monitoring on Woodpecker CI (ADR-21): evaluate
+# matured predictions against arrived labels; each prediction run is
+# evaluated exactly once (ledger markers in the prediction store).
+#
+# Runs from the repo's `weekly-monitor` cron (Mondays 07:00 UTC: "0 7 * * 1"; README,
+# "Repo settings this project assumes"), or by hand: "Run pipeline" on main
+# with the pipeline variable MBT_SCHEDULE=weekly-monitor. Secrets: mbt_data_root,
+# mbt_heartbeat_url and mbt_alert_webhook (`disabled` turns either off).
+when:
+  - event: cron
+    cron: weekly-monitor
+  - event: manual
+    branch: main
+    evaluate: 'MBT_SCHEDULE == "weekly-monitor"'
+
+steps:
+  - name: monitor
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    environment:
+      MBT_DATA_ROOT:
+        from_secret: mbt_data_root
+    commands:
+      - pip install -r requirements.txt
+      # Pin the anchor to this run's scheduled slot: without --anchor every
+      # invocation compiles against "now", the window moves by seconds,
+      # ADR-21's run key changes, and a restarted pipeline writes the same
+      # day's work twice. The pipeline's creation day at the cron's 07:00
+      # UTC slot absorbs scheduling delay - keep it in step with the cron. A
+      # manual run may pass its own as the MBT_ANCHOR pipeline variable.
+      - |
+        anchor="$${MBT_ANCHOR:-$(date -u -d "@$CI_PIPELINE_CREATED" +%Y-%m-%dT07:00:00Z)}"
+        echo "anchor $anchor"
+        set +e
+        mbt monitor --target prod --deep-snapshot --anchor "$anchor"
+        code=$?
+        set -e
+        mkdir -p target && echo "$code" > target/mbt_exit_code
+        # Exit 2 = a realized-metric gate failed: a completed run that reached a decision, NOT an
+        # outage. The heartbeat still pings (the schedule is alive) and the
+        # breach alert below fires; only a hard error (exit 1) fails this
+        # step and trips the dead-man's-switch (F11).
+        [ "$code" -eq 2 ] && exit 0
+        exit "$code"
+
+  - name: heartbeat
+    # Dead-man's-switch: a quality breach (exit 2) is a completed run, so it
+    # still pings; only exit 1 or a no-show trips the switch.
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    when:
+      - status: success
+    environment:
+      MBT_HEARTBEAT_URL:
+        from_secret: mbt_heartbeat_url
+    commands:
+      - bash scripts/ci_notify.sh heartbeat
+
+  - name: breach-alert
+    # Exit 2 hides a model underperforming in production. A hard error is left to the dead-man's-switch
+    # above, so it is not double-paged here (F11).
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    when:
+      - status: success
+    environment:
+      MBT_ALERT_WEBHOOK:
+        from_secret: mbt_alert_webhook
+    commands:
+      - |
+        if [ "$(cat target/mbt_exit_code)" = 2 ]; then
+          bash scripts/ci_notify.sh alert "mbt ground-truth monitor breach"
+        fi

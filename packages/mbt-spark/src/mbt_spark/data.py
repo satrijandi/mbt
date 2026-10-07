@@ -41,6 +41,7 @@ from mbt_adapter_base.materialization import (
     build_dataset_materialization,
     build_scoring_materialization,
     combine_snapshots,
+    projected_columns,
     split_fractions,
 )
 from mbt_adapter_base.protocols import DataBuildContext, SourceTableLike
@@ -345,7 +346,9 @@ class SparkDataAdapter:
                     f"{time_sql} >= to_timestamp('{_iso_to_ts(start)}') AND "
                     f"{time_sql} < to_timestamp('{_iso_to_ts(end)}')"
                 )
-                written[split] = self._write_one(frame, output_dir / f"{split}.parquet")
+                written[split] = self._write_one(
+                    self._project(frame, ctx), output_dir / f"{split}.parquet"
+                )
             return written
 
         # sample_key is required and validated non-empty on the spec (ADR-29).
@@ -354,8 +357,17 @@ class SparkDataAdapter:
         # rather than by three implementations mirroring each other (F19).
         for split, lo, hi in bucket_ranges(split_fractions(spec.split)):
             frame = base.filter(f"{bucket} >= {lo} AND {bucket} < {hi}")
-            written[split] = self._write_one(frame, output_dir / f"{split}.parquet")
+            written[split] = self._write_one(
+                self._project(frame, ctx), output_dir / f"{split}.parquet"
+            )
         return written
+
+    def _project(self, frame: "DataFrame", ctx: DataBuildContext) -> "DataFrame":
+        """Apply the ``ctx.columns`` hint last, after every filter has read the
+        whole relation; Spark prunes the unread columns out of the scan."""
+        if ctx.columns is None:
+            return frame
+        return frame.select(*projected_columns(self, ctx, ctx.columns, frame.columns))
 
     def _write_one(self, frame: "DataFrame", out: Path) -> int:
         """Write one split as a single parquet file (materializations are
@@ -434,7 +446,7 @@ class SparkDataAdapter:
                     f"{time_sql} >= to_timestamp('{_iso_to_ts(start)}') AND "
                     f"{time_sql} < to_timestamp('{_iso_to_ts(end)}')"
                 )
-        return self._write_one(base, out)
+        return self._write_one(self._project(base, ctx), out)
 
     def open_predictions(self, output: ScoringOutputSpec) -> "LocalPredictionStore":
         """Prediction store for a Spark scoring pipeline.

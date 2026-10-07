@@ -86,6 +86,7 @@ nav:
       - "ADR-28: Training-only tracking": adr/0028-mlflow-training-only-and-champion-carried-config.md
       - "ADR-29: Single-relation datasets": adr/0029-single-relation-datasets.md
       - "ADR-30: Training report and after-test window": adr/0030-training-report-and-after-test-window.md
+      - "ADR-31: Projection hint and full-width datasets": adr/0031-projection-hint-and-full-width-datasets.md
 
 markdown_extensions:
   - admonition

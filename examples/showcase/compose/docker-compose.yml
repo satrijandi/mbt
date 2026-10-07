@@ -162,12 +162,17 @@ services:
     environment:
       # Headless init: skip the web installer entirely.
       GITEA__security__INSTALL_LOCK: "true"
-      # In-network canonical URL: Woodpecker clones and comments via this.
-      GITEA__server__ROOT_URL: http://gitea:3000/
+      # The BROWSER-facing URL: every link Gitea hands out - repository and
+      # avatar links Woodpecker shows, push hints, PR pages - opens from the
+      # host. In-network consumers never use it: Woodpecker's API calls go to
+      # WOODPECKER_GITEA_URL, every pipeline clones from gitea:3000 through
+      # its `clone:` block (plugin-git's `remote`), and the scripts and
+      # git-sync name gitea:3000 themselves.
+      GITEA__server__ROOT_URL: http://localhost:${SHOWCASE_GITEA_PORT:-3305}/
       # Gitea >= 1.26 defaults to deriving public URLs from the request's
-      # Host header ("auto"), so a PR opened via the host-mapped port would
-      # put localhost:<hostport> clone URLs into the webhook payload - which
-      # Woodpecker's step containers cannot reach. Pin to ROOT_URL always.
+      # Host header ("auto"); a request arriving in-network as gitea:3000
+      # would then hand out links that do not open from the host. Pin to
+      # ROOT_URL always.
       GITEA__server__PUBLIC_URL_DETECTION: never
       # Gitea blocks webhooks to private addresses by default; Woodpecker is
       # exactly such a target on the compose network.
@@ -212,9 +217,15 @@ services:
       WOODPECKER_DATABASE_DATASOURCE: /var/lib/woodpecker/woodpecker.sqlite?_busy_timeout=30000&_journal_mode=WAL
       # Placeholders until ci_bootstrap.py creates the OAuth app and the
       # stack re-ups this service with the real values (env change =>
-      # compose recreates it; its sqlite state is per-session anyway).
+      # compose recreates it, keeping the volume below).
       WOODPECKER_GITEA_CLIENT: ${SHOWCASE_WOODPECKER_CLIENT:-pending-bootstrap}
       WOODPECKER_GITEA_SECRET: ${SHOWCASE_WOODPECKER_SECRET:-pending-bootstrap}
+    volumes:
+      # Pipeline history, the activated repo and its secrets outlive the
+      # force-recreate every `make ci` does; before this volume a second
+      # `make ci` wiped every pipeline and restarted the numbering at 1.
+      # `make down` (-v) still resets it together with Gitea.
+      - woodpecker-data:/var/lib/woodpecker
     ports:
       - "${SHOWCASE_WOODPECKER_PORT:-8305}:8000"
 
@@ -254,7 +265,10 @@ services:
 
   webhook-sink:
     image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
-    profiles: [ci]
+    # The one alert inbox: CI's exit-code wrapper curls it, and Alertmanager
+    # delivers model alerts to it. Observability's, so it runs whenever the
+    # alerts it receives can fire, forge or no forge.
+    profiles: [obs]
     command: python /workspace/bootstrap/webhook_sink.py
     volumes:
       - ${SHOWCASE_WORKSPACE:?set SHOWCASE_WORKSPACE to the shared workspace dir}:/workspace
@@ -393,6 +407,14 @@ services:
     ports:
       - "${SHOWCASE_PROMETHEUS_PORT:-9490}:9090"
 
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    profiles: [obs]
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "${SHOWCASE_ALERTMANAGER_PORT:-9493}:9093"
+
   grafana:
     image: grafana/grafana:13.1.5
     profiles: [obs]
@@ -409,5 +431,6 @@ services:
 volumes:
   seaweed-data:
   mlflow-data:
+  woodpecker-data:
   airflow-dags:
   airflow-logs:

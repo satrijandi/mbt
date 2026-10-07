@@ -282,6 +282,10 @@ def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: Scoring
             resource=node.unique_id,
             hint="recompile: the manifest and spec disagree",
         )
+    # Only the join key and the label: the label source is often the wide
+    # table the model trained on, and reading all of it to take a few columns
+    # cost minutes per monitor run on a few-hundred-column table.
+    needed = [*spec.ground_truth.join_columns, spec.ground_truth.label.column]
     label_node = node.model_copy(update={"snapshot_id": source.snapshot_id, "resolved": {}})
     key = materialization_key(label_node)
     build_ctx = BuildContext(
@@ -293,6 +297,7 @@ def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: Scoring
         deep_snapshot=ctx.manifest.metadata.deep_snapshot,
         output_dir=ctx.project_dir / "target" / "scoring_inputs" / f"{node.name}_labels" / key,
         events=_LabelReadEvents(get_bus()),
+        columns=tuple(dict.fromkeys(needed)),
     )
     handle = ctx.data_adapter.build_scoring_input(ScoringInputSpec(source=label_uid), build_ctx)
     table = handle.read("score")
@@ -302,7 +307,6 @@ def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: Scoring
             message=f"ground-truth labels: read {table.num_rows} row(s) from {label_uid}",
         )
     )
-    needed = [*spec.ground_truth.join_columns, spec.ground_truth.label.column]
     missing = [c for c in needed if c not in table.column_names]
     if missing:
         raise ConfigError(

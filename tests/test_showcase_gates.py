@@ -33,9 +33,9 @@ HERMETIC = frozenset(
 )
 
 #: Gated modules that carry a second opt-in on top of MBT_LIVE_SHOWCASE=1,
-#: and the variable their skip reason must name. Dropping one of these would
-#: put the k3d tier on the nightly path (no k3d there), or boot a second full
-#: stack beside the session one.
+#: and the variable their skip reason must name. Each boots a full stack of
+#: its own, so it runs in its own pytest invocation (live.yml gives each one a
+#: step); dropping the extra gate would boot it beside the session stack.
 EXTRA_GATES = {
     "test_showcase_k3d": "MBT_LIVE_SHOWCASE_K3D=1",
     "test_showcase_make": "MBT_LIVE_SHOWCASE_MAKE=1",

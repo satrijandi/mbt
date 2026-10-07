@@ -34,6 +34,7 @@ from mbt_adapter_base.materialization import (
     build_dataset_materialization,
     build_scoring_materialization,
     combine_snapshots,
+    projected_columns,
     reference_bucket,
     split_fractions,
 )
@@ -123,13 +124,14 @@ class InMemoryDataAdapter:
             assert spec.split.time_column is not None
             for split, (start, end) in sorted(ctx.resolved_windows.items()):
                 rows = _within_window(base, spec.split.time_column, start, end)
-                written[split] = _write(rows, output_dir / f"{split}.parquet")
+                written[split] = _write(self._project(rows, ctx), output_dir / f"{split}.parquet")
             return written
 
         buckets = _buckets(base, spec.sample_key_columns, salt=str(spec.split.seed or 0))
         for split, lo, hi in bucket_ranges(split_fractions(spec.split)):
             mask = [lo <= bucket < hi for bucket in buckets]
-            written[split] = _write(base.filter(pa.array(mask)), output_dir / f"{split}.parquet")
+            rows = base.filter(pa.array(mask))
+            written[split] = _write(self._project(rows, ctx), output_dir / f"{split}.parquet")
         return written
 
     def write_scoring_batch(self, spec: ScoringInputSpec, ctx: DataBuildContext, out: Path) -> int:
@@ -139,7 +141,13 @@ class InMemoryDataAdapter:
         window = ctx.resolved_windows.get("score")
         if spec.time_column is not None and window is not None:
             base = _within_window(base, spec.time_column, *window)
-        return _write(base, out)
+        return _write(self._project(base, ctx), out)
+
+    def _project(self, table: pa.Table, ctx: DataBuildContext) -> pa.Table:
+        """Honor the ``ctx.columns`` hint (contract 1.3), as a real engine does."""
+        if ctx.columns is None:
+            return table
+        return table.select(projected_columns(self, ctx, ctx.columns, table.column_names))
 
     def _base_table(
         self,

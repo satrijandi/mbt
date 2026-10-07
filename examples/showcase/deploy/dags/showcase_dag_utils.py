@@ -14,6 +14,11 @@ Exit-code fidelity at the scheduler (DESIGN.md section 5 step 7):
 
 The unit's digest and the session wiring come from ../images.env, committed
 in this repo: bumping IMAGE (or `git revert`) IS the deploy.
+
+Anchors come from the data: a DAG's `anchor` param left empty resolves, inside
+the unit at run time, to the lake's own anchor (scripts/lake_anchor.py - the
+day after its newest weekly cohort, or ten days later to monitor), so a run
+always targets the newest cohort. Set the param to pin one.
 """
 
 import shlex
@@ -22,9 +27,6 @@ from pathlib import Path
 from airflow.sdk.exceptions import AirflowException, AirflowFailException
 
 CONF_PATH = Path(__file__).resolve().parent.parent / "images.env"
-
-ANCHOR = "2026-09-29T00:00:00Z"
-MONITOR_ANCHOR = "2026-10-09T00:00:00Z"
 
 
 def load_conf() -> dict:
@@ -37,15 +39,26 @@ def load_conf() -> dict:
     return conf
 
 
-def run_in_unit(mbt_args: list[str], *, alert_class_2_owner: bool = True) -> None:
-    """Run one mbt command in the pinned unit; classify the exit code."""
+def anchor_arg(anchor: str, *, monitor: bool = False) -> str:
+    """Shell text for ``--anchor``: the pinned param, or the lake's own."""
+    if anchor:
+        return f"--anchor {shlex.quote(anchor)}"
+    flag = " --monitor" if monitor else ""
+    return f'--anchor "$(python3 scripts/lake_anchor.py{flag})"'
+
+
+def run_in_unit(mbt_args: list[str], *, anchor: str, alert_class_2_owner: bool = True) -> None:
+    """Run one mbt command in the pinned unit; classify the exit code.
+
+    ``anchor`` is shell text from ``anchor_arg``, appended unquoted so the
+    lake's anchor resolves inside the unit."""
     import docker
 
     conf = load_conf()
     if not conf.get("IMAGE"):
         raise AirflowException("images.env has no IMAGE pin yet - run a prod build first")
 
-    command = " ".join(shlex.quote(a) for a in mbt_args)
+    command = " ".join(shlex.quote(a) for a in mbt_args) + " " + anchor
     wrapped = (
         f"{command}; rc=$?; "
         "MBT_PUSHGATEWAY=http://pushgateway:9091 python3 scripts/push_metrics.py . || true; "

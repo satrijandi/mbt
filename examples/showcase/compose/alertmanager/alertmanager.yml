@@ -1,0 +1,28 @@
+# Delivery for the four mbt alert rules (compose/prometheus/rules.yml), into
+# the same webhook-sink the CI loop's exit-code wrapper curls. Severity picks
+# the audience exactly the way scripts/run_mbt.sh classifies a CI failure:
+#   page    -> /alert/on-call   the schedule died; a human must look now
+#   notify  -> /alert/owner     a quality verdict mbt already enforced
+# so a model alert and a CI alert land side by side, routed by one rule.
+#
+# Timings are demo-sized: a first notification within seconds of the alert
+# firing (group_wait), and a repeat only hours later.
+route:
+  receiver: owner
+  group_by: [alertname, node]
+  group_wait: 5s
+  group_interval: 30s
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="page"']
+      receiver: on-call
+
+receivers:
+  - name: owner
+    webhook_configs:
+      - url: http://webhook-sink:9099/alert/owner
+        send_resolved: true
+  - name: on-call
+    webhook_configs:
+      - url: http://webhook-sink:9099/alert/on-call
+        send_resolved: true

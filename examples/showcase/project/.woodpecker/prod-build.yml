@@ -1,7 +1,8 @@
 # mbt prod build on Woodpecker (DESIGN.md section 6): on every push to main,
 # build exactly the state-modified subgraph and publish the manifest as the
 # new baseline on the mbt-state branch. A no-change push trains nothing and
-# republishes a byte-identical manifest (fixed anchor => generated_at ==
+# republishes a byte-identical manifest (the anchor derives from the lake's
+# newest cohort, so an unmoved lake => the same anchor => generated_at ==
 # anchor => deterministic bytes, ADR-19).
 #
 # The merge build targets `dev` - spark local[2] + the SHARED MLflow
@@ -13,6 +14,14 @@ when:
   - event: push
     branch: main
 
+# Gitea's ROOT_URL is the browser-facing localhost URL, which a step
+# container cannot reach; clone from the in-network address instead.
+clone:
+  git:
+    image: docker.io/woodpeckerci/plugin-git:2.10.0
+    settings:
+      remote: http://gitea:3000/${CI_REPO}.git
+
 steps:
   - name: build
     image: mbt-showcase-runner:dev
@@ -21,11 +30,11 @@ steps:
       AWS_SECRET_ACCESS_KEY: mbtsecret
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
-      SHOWCASE_ANCHOR: "2026-09-29T00:00:00Z"
       MBT_STATE_URI: state/prod/latest.json
       MBT_ALERT_WEBHOOK: http://webhook-sink:9099/alert
     commands:
       - mbt parse
+      - export SHOWCASE_ANCHOR="$(python3 scripts/lake_anchor.py)" && echo "anchor $SHOWCASE_ANCHOR"
       - |
         set +e
         bash scripts/fetch_state.sh "$MBT_STATE_URI"

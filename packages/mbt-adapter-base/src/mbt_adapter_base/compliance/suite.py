@@ -710,6 +710,7 @@ class ComplianceBuildContext:
     output_dir: Path
     events: Any
     build_parallelism: int = 1
+    columns: tuple[str, ...] | None = None
 
 
 class RecordingEvents:
@@ -932,6 +933,47 @@ class DataAdapterCompliance:
                 }
             assert keys[0.5] < keys[1.0]
             assert keys[0.5]
+
+    def test_a_projection_writes_only_its_columns_in_relation_order(self) -> None:
+        """The ``columns`` hint (contract 1.3), on a dataset and a scoring batch.
+
+        The hint names ``label`` before ``row_id``; the relation has them the
+        other way round, and that order is what every engine must write, so a
+        projected read and a full one agree column for column. The temporal
+        split still windows on ``ts`` although ``ts`` is projected away.
+        """
+        from mbt_adapter_base.specs import ScoringInputSpec
+
+        windows = {
+            "train": ("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+            "test": ("2026-02-01T00:00:00Z", "2026-03-05T00:00:00Z"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, (spec, ctx), _ = self._build(Path(tmp), windows=windows)
+            ctx.columns = ("label", COMPLIANCE_SAMPLE_KEY)
+            handle = adapter.build_dataset(spec, ctx)
+            for split in ("train", "test"):
+                table = handle.read(split)
+                assert table.column_names == [COMPLIANCE_SAMPLE_KEY, "label"]
+                assert table.num_rows > 0
+
+            ctx.output_dir = Path(tmp) / "scoring"
+            batch = adapter.build_scoring_input(ScoringInputSpec(source=spec.source), ctx)
+            scored = batch.read("score")
+            assert scored.column_names == [COMPLIANCE_SAMPLE_KEY, "label"]
+            assert scored.num_rows == 200
+
+    def test_a_projection_naming_an_absent_column_fails_the_build(self) -> None:
+        import pytest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter, (spec, ctx), _ = self._build(Path(tmp))
+            ctx.columns = (COMPLIANCE_SAMPLE_KEY, "no_such_column")
+            # the engine's own error type, whatever it is
+            with pytest.raises(
+                Exception, match=r"relation .rows. lacks column\(s\): no_such_column"
+            ):
+                adapter.build_dataset(spec, ctx)
 
     def test_source_level_checks_are_available(self) -> None:
         """``count_source_duplicates`` and ``read_source_distinct`` are part of

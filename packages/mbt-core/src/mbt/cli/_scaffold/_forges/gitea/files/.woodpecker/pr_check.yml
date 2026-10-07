@@ -1,0 +1,54 @@
+# mbt reference PR check on Woodpecker CI (FR-STATE-04/05): parse -> compile
+# -> state diff -> build the modified subgraph on the dev target -> post a PR
+# comment. The Gitea/Forgejo twin of a GitHub project's pr_check.yml.
+#
+# Secrets (README, "Repo settings this project assumes"): gitea_token, added
+# with the pull_request event allowed.
+#
+# Woodpecker substitutes ${VAR} in this file before any shell sees it, so
+# every shell variable below is written $VAR or $${VAR}, never ${VAR}.
+when:
+  - event: pull_request
+    branch: main
+
+steps:
+  - name: build
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    environment:
+      # Where the prod baseline (mbt-state branch) materializes for --state.
+      # Real setups can point this straight at
+      # s3://<bucket>/mbt/<project>/prod/manifests/latest.json and drop the
+      # fetch (FR-STATE-03).
+      MBT_STATE_URI: state/prod/latest.json
+      GITEA_TOKEN:
+        from_secret: gitea_token
+    commands:
+      # The clone step's credentials do not outlive it; fetching the state
+      # branch of a private repo needs the token on the remote.
+      - bash scripts/ci_git_remote.sh
+      - pip install -r requirements.txt
+      - python scripts/generate_sample_data.py
+      - mbt parse
+      # --deep-snapshot everywhere in CI: fresh checkouts rewrite mtimes, so
+      # the default mtime snapshots would flag every dataset as modified on
+      # every run (ADR-11). One token scheme, both sides.
+      - mbt compile --target dev --deep-snapshot
+      - |
+        if bash scripts/fetch_state.sh "$MBT_STATE_URI"; then
+          mbt state diff --state "$MBT_STATE_URI" --deep-snapshot --output json > target/state_diff.json
+          cat target/state_diff.json
+          mbt build --target dev --deep-snapshot --select state:modified+ --state "$MBT_STATE_URI"
+        else
+          echo "No prod baseline yet; building everything (bootstrap)."
+          mbt build --target dev --deep-snapshot
+        fi
+
+  - name: comment
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    when:
+      - status: [success, failure]
+    environment:
+      GITEA_TOKEN:
+        from_secret: gitea_token
+    commands:
+      - python scripts/gitea_pr_comment.py

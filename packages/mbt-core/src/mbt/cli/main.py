@@ -211,6 +211,14 @@ def init(
             "commit it was installed from.",
         ),
     ] = None,
+    forge: Annotated[
+        str,
+        typer.Option(
+            "--forge",
+            help="Where the project's CI runs: github (GitHub Actions workflows) or "
+            "gitea (Woodpecker CI pipelines for a Gitea or Forgejo repo).",
+        ),
+    ] = "github",
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -222,7 +230,7 @@ def init(
     cli = CLIContext.enter(
         project_dir, log_format=log_format, quiet=quiet, verbose=verbose, chdir=False
     )
-    destination = scaffold_project(name, cli.project_dir, ref=mbt_ref)
+    destination = scaffold_project(name, cli.project_dir, ref=mbt_ref, forge=forge)
     # soft_wrap: a path is the thing a user copies out of this line, and a
     # hard-inserted newline would split it (FEEDBACK v3 E-5, as in ConsoleSink)
     out_console.print(f"Created [bold]{destination}[/bold]", soft_wrap=True)

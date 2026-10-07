@@ -38,7 +38,7 @@ git init && git add -A && git commit -m "mbt scaffold"
 ```
 
 **You get** a complete working project:
-example source/dataset/model/scoring specs, `profiles.yml` with `dev` and `prod` targets, an empty `promotions.yml`, seven GitHub workflows (`pr_check`, `prod_build`, `promote`, `scheduled_retrain`, `scheduled_retrain_monthly`, `scheduled_score`, `scheduled_monitor`), state-publishing scripts, a `requirements.txt` pinning mbt to its release tag and the numerics stack (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb, xgboost, mlflow) to the exact versions your mbt install is running, pre-commit config, and `CODEOWNERS`.
+example source/dataset/model/scoring specs, `profiles.yml` with `dev` and `prod` targets, an empty `promotions.yml`, seven GitHub workflows (`pr_check`, `prod_build`, `promote`, `scheduled_retrain`, `scheduled_retrain_monthly`, `scheduled_score`, `scheduled_monitor`) - or, with `--forge gitea`, the same seven as Woodpecker pipelines for a Gitea or Forgejo repo - state-publishing scripts, a `requirements.txt` pinning mbt to its release tag and the numerics stack (numpy, scipy, pandas, pyarrow, scikit-learn, duckdb, xgboost, mlflow) to the exact versions your mbt install is running, pre-commit config, and `CODEOWNERS`.
 That is a version-pinned install set, not a hash-verified lock: the pinned packages' own transitive dependencies still float, and a real `uv pip compile --generate-hashes` lock needs mbt on PyPI, because a git ref carries no wheel hash to record.
 `requirements.in` and the header of `requirements.txt` both spell out how to generate one once it is.
 

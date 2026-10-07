@@ -12,7 +12,7 @@ over unchanging physical layout.
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from mbt_adapter_base import DatasetSpec, ScoringInputSpec
@@ -84,14 +84,16 @@ def sampling_predicate(key_columns: list[str], fraction: float) -> str:
     return f"{key_hash_expr(key_columns)} < {threshold}"
 
 
-def base_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> tuple[str, list[str]]:
-    """FROM clause plus columns to project away afterwards.
+def base_relation(spec: DatasetSpec, table_refs: Mapping[str, str]) -> str:
+    """FROM clause for a dataset: one relation, whatever built it (ADR-29)."""
+    return table_refs[spec.source]
 
-    One relation, whatever built it (ADR-29). The second element is the
-    project-away list, kept because ``split_queries`` still takes it and the
-    scoring path shares the shape; nothing populates it today.
-    """
-    return table_refs[spec.source], []
+
+def select_list(columns: Sequence[str] | None) -> str:
+    """The SELECT list: every column, or the projected ones (contract 1.3)."""
+    if columns is None:
+        return "*"
+    return ", ".join(validate_column(c) for c in columns)
 
 
 def _iso_to_ntz(iso: str) -> str:
@@ -105,12 +107,12 @@ def split_queries(
     relation: str,
     where: list[str],
     resolved_windows: Mapping[str, tuple[str, str]],
-    exclude: list[str] | None = None,
+    columns: Sequence[str] | None = None,
 ) -> dict[str, str]:
     """One SELECT per split, filters/sampling/split predicates pushed down."""
     queries: dict[str, str] = {}
     base_where = list(where)
-    select = f"* EXCLUDE ({', '.join(exclude)})" if exclude else "*"
+    select = select_list(columns)
 
     if spec.split.strategy.value == "temporal":
         assert spec.split.time_column is not None
@@ -161,6 +163,7 @@ def scoring_query(
     table_refs: Mapping[str, str],
     where: list[str],
     window: tuple[str, str] | None,
+    columns: Sequence[str] | None = None,
 ) -> str:
     """One SELECT materializing the unlabeled scoring batch (ADR-20/23).
 
@@ -176,4 +179,4 @@ def scoring_query(
             f"{time_sql} < TO_TIMESTAMP_NTZ('{_iso_to_ntz(end)}')",
         ]
     clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
-    return f"SELECT * FROM {scoring_relation(spec, table_refs)}{clause}"
+    return f"SELECT {select_list(columns)} FROM {scoring_relation(spec, table_refs)}{clause}"

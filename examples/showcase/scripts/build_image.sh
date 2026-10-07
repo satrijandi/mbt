@@ -17,7 +17,16 @@
 # bare tag-existence check let week-old wheels pass as "the current build"
 # and every in-container mbt assertion silently tested old code.
 #
-# Usage: build_image.sh [--force]
+# Prebuilt: before building, it pulls ghcr.io/satrijandi/mbt-showcase-runner
+# at the same content hash, which .github/workflows/showcase-image.yml
+# publishes (amd64 + arm64) for every main commit that moves the hash. The
+# pull is accepted only when the pulled image carries that hash as its
+# content label; anything else falls back to the local build. A checkout
+# with local edits has a hash nobody published, so it always builds.
+# MBT_SHOWCASE_PULL=0 skips the pull; MBT_SHOWCASE_REMOTE_IMAGE points it
+# at another registry.
+#
+# Usage: build_image.sh [--force | --print-hash]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -25,6 +34,7 @@ RUNNER_DIR="$REPO_ROOT/examples/showcase/images/runner"
 CACHE_DIR="${MBT_SHOWCASE_CACHE:-$HOME/.cache/mbt-showcase}/build"
 IMAGE_TAG="${MBT_SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}"
 CONTENT_LABEL="mbt.showcase.content"
+REMOTE_IMAGE="${MBT_SHOWCASE_REMOTE_IMAGE:-ghcr.io/satrijandi/mbt-showcase-runner}"
 
 # Pins for the sparkling fork. h2o-pysparkling-3-5 3.46.0.6.post1 embeds the
 # H2O 3.46.0.6 backend; the h2o python client version must match it exactly.
@@ -62,12 +72,36 @@ print(digest.hexdigest()[:16])
 EOF
 )"
 
-existing_hash="$(docker image inspect --format '{{json .Config.Labels}}' "$IMAGE_TAG" 2>/dev/null \
-    | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('$CONTENT_LABEL',''))" 2>/dev/null \
-    || true)"
+if [ "${1:-}" = "--print-hash" ]; then
+    echo "$CONTENT_HASH"
+    exit 0
+fi
+
+content_label() {
+    docker image inspect --format '{{json .Config.Labels}}' "$1" 2>/dev/null \
+        | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('$CONTENT_LABEL',''))" 2>/dev/null \
+        || true
+}
+
+existing_hash="$(content_label "$IMAGE_TAG")"
 if [ "${1:-}" != "--force" ] && [ -n "$existing_hash" ] && [ "$existing_hash" = "$CONTENT_HASH" ]; then
     echo "image $IMAGE_TAG up to date (content $CONTENT_HASH; use --force to rebuild anyway)"
     exit 0
+fi
+
+if [ "${1:-}" != "--force" ] && [ "${MBT_SHOWCASE_PULL:-1}" != "0" ]; then
+    remote="$REMOTE_IMAGE:$CONTENT_HASH"
+    echo "==> trying the prebuilt $remote"
+    if docker pull --quiet "$remote" >/dev/null 2>&1; then
+        if [ "$(content_label "$remote")" = "$CONTENT_HASH" ]; then
+            docker tag "$remote" "$IMAGE_TAG"
+            echo "==> pulled $IMAGE_TAG (content $CONTENT_HASH) - no local build needed"
+            exit 0
+        fi
+        echo "    $remote does not carry content $CONTENT_HASH; building locally"
+    else
+        echo "    not published (local edits, or CI has not built this commit yet); building locally"
+    fi
 fi
 
 mkdir -p "$CACHE_DIR"
@@ -95,5 +129,6 @@ grep -vE '^(pyspark|h2o|h2o-pysparkling-3-5)==' "$CACHE_DIR/constraints-full.txt
 cp "$RUNNER_DIR/Dockerfile" "$RUNNER_DIR/entrypoint.sh" "$RUNNER_DIR/image-extras.txt" "$CACHE_DIR/"
 
 echo "==> docker build $IMAGE_TAG (content $CONTENT_HASH)"
-docker build -t "$IMAGE_TAG" --label "$CONTENT_LABEL=$CONTENT_HASH" "$CACHE_DIR"
+docker build -t "$IMAGE_TAG" --label "$CONTENT_LABEL=$CONTENT_HASH" \
+    --label "org.opencontainers.image.source=https://github.com/satrijandi/mbt" "$CACHE_DIR"
 echo "==> built $IMAGE_TAG"

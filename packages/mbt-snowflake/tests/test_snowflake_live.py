@@ -271,6 +271,7 @@ class BuildContext:
     deep_snapshot: bool
     output_dir: Path
     events: Any = None
+    columns: tuple[str, ...] | None = None
 
 
 def _dataset_spec(**overrides: Any) -> DatasetSpec:

@@ -1,0 +1,37 @@
+# mbt reference promotion on Woodpecker CI (FR-REG-03, FR-STATE-04): pure
+# GitOps via a reviewed promotions.yml change, or a manual run.
+#
+# A manual run ("Run pipeline" in Woodpecker, on main) takes its arguments as
+# pipeline variables: MBT_PROMOTE_MODEL, MBT_PROMOTE_TO (default production)
+# and optionally MBT_PROMOTE_VERSION (default: the version in staging). They
+# reach the shell as environment variables, never spliced into the script, so
+# a value like `1 --force` stays one argument. Woodpecker has no environment
+# approvals: anyone who can run a pipeline can promote by hand, which is why
+# the reviewed promotions.yml path is the one to use.
+when:
+  - event: push
+    branch: main
+    path: promotions.yml
+  - event: manual
+    branch: main
+    # Only a run that names a model: a manual run of a scheduled pipeline
+    # (MBT_SCHEDULE) must not start a promotion beside it.
+    evaluate: 'MBT_PROMOTE_MODEL != ""'
+
+steps:
+  - name: promote
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    commands:
+      - pip install -r requirements.txt
+      # `mbt promote` refuses a version whose pre-deploy check failed (mbt
+      # evaluate --out-of-time --gates, ADR-30); `require_oot_check` on a
+      # promotions.yml entry also refuses one that was never checked.
+      - |
+        if [ "$CI_PIPELINE_EVENT" != "manual" ]; then
+          mbt promote --from-file promotions.yml
+        elif [ -n "$${MBT_PROMOTE_VERSION:-}" ]; then
+          mbt promote --model "$MBT_PROMOTE_MODEL" --to "$${MBT_PROMOTE_TO:-production}" \
+            --version "$MBT_PROMOTE_VERSION"
+        else
+          mbt promote --model "$MBT_PROMOTE_MODEL" --to "$${MBT_PROMOTE_TO:-production}"
+        fi

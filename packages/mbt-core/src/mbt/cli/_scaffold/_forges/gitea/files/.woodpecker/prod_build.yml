@@ -1,0 +1,51 @@
+# mbt reference prod build on Woodpecker CI (FR-STATE-04): on a push to
+# main, build the modified subgraph against prod and publish the manifest as
+# the new baseline on the mbt-state branch.
+#
+# Secrets: gitea_token (pushes the state branch), mbt_data_root (the prod
+# target's data root), mbt_alert_webhook (`disabled` turns alerts off).
+when:
+  - event: push
+    branch: main
+
+steps:
+  - name: prod-build
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    environment:
+      MBT_STATE_URI: state/prod/latest.json
+      # profiles.yml's prod target reads env('MBT_DATA_ROOT') with NO default,
+      # so a run without it fails loudly instead of training, registering and
+      # scoring whatever happens to sit in the checkout. No
+      # generate_sample_data.py here: that is pr_check's dev data.
+      MBT_DATA_ROOT:
+        from_secret: mbt_data_root
+      GITEA_TOKEN:
+        from_secret: gitea_token
+    commands:
+      - bash scripts/ci_git_remote.sh
+      - pip install -r requirements.txt
+      # --deep-snapshot: the published baseline must use content-hash tokens,
+      # or the next fresh checkout's mtimes would flag every dataset as
+      # modified and retrain the world (ADR-11).
+      - |
+        if bash scripts/fetch_state.sh "$MBT_STATE_URI"; then
+          mbt build --target prod --deep-snapshot --select state:modified+ --state "$MBT_STATE_URI"
+        else
+          echo "No prod baseline yet; building everything (bootstrap)."
+          mbt build --target prod --deep-snapshot
+        fi
+      # Durable out of the box: an append-only mbt-state branch, outside
+      # main's branch protection, its history an audit trail of every
+      # published baseline. Real setups can swap both state steps for an s3
+      # layout instead.
+      - bash scripts/publish_state.sh target/manifest.json
+
+  - name: alert
+    image: python:3.11-bookworm@sha256:5887f265d8d44d8b4734d3658b21d668edf5aaf92e4945bc0c984afbfab105d3
+    when:
+      - status: failure
+    environment:
+      MBT_ALERT_WEBHOOK:
+        from_secret: mbt_alert_webhook
+    commands:
+      - bash scripts/ci_notify.sh alert "mbt prod build failed"

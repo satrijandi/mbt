@@ -114,16 +114,19 @@ Selection decides which models **train**; every dataset a selected model needs i
 
 ### `mbt init`
 
-Scaffold a working project: example source, dataset, model, and scoring specs, `profiles.yml`, reference GitHub Actions workflows, pinned CI requirements, pre-commit and Renovate config, `CODEOWNERS`, and a sample-data generator.
+Scaffold a working project: example source, dataset, model, and scoring specs, `profiles.yml`, reference CI (GitHub Actions workflows, or Woodpecker pipelines for Gitea), pinned CI requirements, pre-commit and Renovate config, `CODEOWNERS`, and a sample-data generator.
 
 ```bash
-mbt init NAME [--project-dir PATH] [--mbt-ref REF]
+mbt init NAME [--project-dir PATH] [--mbt-ref REF] [--forge github|gitea]
 ```
 
 `NAME` must start with a letter and contain only letters, digits, and underscores.
 The project is created in `NAME/` under `--project-dir`.
 Its `requirements.txt` pins the mbt packages to a git ref: the release tag (`vX.Y.Z`) of the mbt running `init`, or, for a development build (`X.Y.Z.devN`), the exact commit that build was installed from, because no tag contains a development build's code.
 A development build that recorded no commit (installed from a local wheel, say) refuses to guess; `--mbt-ref REF` names the tag or commit to pin explicitly, and overrides the default in every case.
+`--forge` picks where the project's CI runs; everything else in the project is the same either way.
+`github` (the default) ships seven GitHub Actions workflows under `.github/workflows/` and a `github-script` PR comment.
+`gitea` ships the same seven as Woodpecker CI pipelines under `.woodpecker/`, with the same names, for a Gitea or Forgejo repo: a stdlib-only `scripts/gitea_pr_comment.py` posts the PR report through the forge's API, and the README lists what Woodpecker keeps outside the files - the four secrets the pipelines name, and the crons that drive the scheduled ones.
 Its `profiles.yml` is also installed to `~/.mbt/profiles.yml`, for commands run outside the project: appended when that file already exists, and left alone when it already has a profile named `NAME`.
 See the [Quickstart](quickstart.md) for what to do next.
 

@@ -125,6 +125,25 @@ def test_label_table_missing_columns_is_a_node_error(
     assert "lacks column(s): churned" in (node.message or "")
 
 
+def test_a_label_table_missing_columns_is_caught_when_the_engine_ignores_the_projection(
+    gt_project: Path, fake_registry: AdapterRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 1.2 data plugin reads every column whatever ``ctx.columns`` says, so the
+    missing label surfaces in the monitor's own check, not the engine's."""
+    _build_and_promote(gt_project, fake_registry)
+    assert invoke(gt_project, fake_registry, "score").exit_code() == 0
+    labels_only_keys = pa.table({"user_id": list(range(120))})
+    pq.write_table(labels_only_keys, gt_project / "data" / "churn_outcomes" / "part-000.parquet")
+    monkeypatch.setattr(
+        "mbt.adapters.local.data.projected_columns",
+        lambda engine, ctx, wanted, available: list(available),
+    )
+    results = monitor(gt_project, fake_registry)
+    assert results.exit_code() == 1
+    node = _node(results)
+    assert "ground-truth label table lacks column(s): churned" in (node.message or "")
+
+
 def test_single_class_labels_are_retried_later(
     gt_project: Path, fake_registry: AdapterRegistry
 ) -> None:

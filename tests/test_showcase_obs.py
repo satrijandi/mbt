@@ -92,3 +92,24 @@ def test_injected_shift_breaches_and_alert_fires(showcase_stack) -> None:
     _wait_for(stack, "mbt_shift_value >= mbt_shift_threshold")
     firing = _wait_for(stack, 'ALERTS{alertname="MbtShiftBreach"}', deadline_s=120)
     assert firing, "MbtShiftBreach never entered pending/firing"
+
+    # ...and Alertmanager DELIVERS it: the firing alert lands in the same
+    # webhook-sink inbox CI alerts use, on the owner route (severity notify).
+    end = time.time() + 180
+    delivered: list = []
+    while time.time() < end and not delivered:
+        inbox = stack.http_json(f"{stack.webhook_url()}/requests")
+        delivered = [
+            entry
+            for entry in inbox
+            if entry["path"] == "/alert/owner"
+            and isinstance(entry["body"], dict)
+            and any(
+                alert["labels"].get("alertname") == "MbtShiftBreach"
+                for alert in entry["body"].get("alerts", [])
+            )
+        ]
+        if not delivered:
+            time.sleep(5)
+    assert delivered, "Alertmanager never delivered MbtShiftBreach to the alert inbox"
+    assert delivered[0]["body"]["status"] == "firing", delivered[0]

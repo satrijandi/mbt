@@ -125,6 +125,19 @@ def _pinned_requirements() -> str:
 #: reliably across build backends).
 _RENAMES = {"gitignore": ".gitignore"}
 
+#: The forges a project's CI can target. Everything but CI is forge-neutral:
+#: the template root holds the project, and ``_forges/<forge>/files`` is laid
+#: over it - GitHub Actions workflows and a github-script PR comment, or
+#: Woodpecker pipelines and a Gitea API PR comment. The two README fragments
+#: beside each overlay fill the README's forge-specific sections, so a Gitea
+#: project's README never tells its reader to open GitHub settings.
+FORGES = ("github", "gitea")
+_FORGES_DIR = "_forges"
+_README_FRAGMENTS = {
+    "__FORGE_CI_LAYOUT__": "ci_layout.md",
+    "__FORGE_REPO_SETTINGS__": "repo_settings.md",
+}
+
 #: Never copied into a scaffolded project, and never read.
 #:
 #: The template is *source*, so in an editable or checked-out install anything
@@ -143,7 +156,7 @@ def _walk(root: object, prefix: str = "") -> list[tuple[str, str]]:
     for entry in root.iterdir():  # type: ignore[attr-defined]
         rel = f"{prefix}{entry.name}"
         if entry.is_dir():
-            if entry.name not in _SKIP_DIRS:
+            if entry.name not in _SKIP_DIRS and rel != _FORGES_DIR:
                 out.extend(_walk(entry, prefix=f"{rel}/"))
         elif not entry.name.endswith(_SKIP_SUFFIXES):
             out.append((rel, entry.read_text()))
@@ -151,9 +164,19 @@ def _walk(root: object, prefix: str = "") -> list[tuple[str, str]]:
 
 
 def scaffold_project(
-    name: str, parent_dir: Path, *, home: Path | None = None, ref: str | None = None
+    name: str,
+    parent_dir: Path,
+    *,
+    home: Path | None = None,
+    ref: str | None = None,
+    forge: str = "github",
 ) -> Path:
     """Create a new project directory from the template; returns its path."""
+    if forge not in FORGES:
+        raise ConfigError(
+            f"unknown forge {forge!r}",
+            hint=f"choose one of: {', '.join(FORGES)}",
+        )
     if not _NAME_RE.match(name):
         raise ConfigError(
             f"invalid project name {name!r}",
@@ -168,9 +191,15 @@ def scaffold_project(
         )
 
     template_root = files("mbt.cli") / "_scaffold"
+    overlay = template_root / _FORGES_DIR / forge
+    fragments = {
+        token: (overlay / fragment).read_text().rstrip("\n")
+        for token, fragment in _README_FRAGMENTS.items()
+    }
     pinned_ref = mbt_ref(ref)
     pins = _pinned_requirements()
-    for rel, content in sorted(_walk(template_root)):
+    template = dict(_walk(template_root)) | dict(_walk(overlay / "files"))
+    for rel, content in sorted(template.items()):
         parts = rel.split("/")
         parts[-1] = _RENAMES.get(parts[-1], parts[-1])
         target = destination.joinpath(*parts)
@@ -178,6 +207,8 @@ def scaffold_project(
         rendered = (
             content.replace(_TOKEN, name).replace(_REF_TOKEN, pinned_ref).replace(_PINS_TOKEN, pins)
         )
+        for token, fragment in fragments.items():
+            rendered = rendered.replace(token, fragment)
         target.write_text(rendered)
 
     _install_home_profiles(name, destination, home=home)

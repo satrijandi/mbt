@@ -6,7 +6,9 @@ from enum import StrEnum
 #: Plugins declare the contract version they were built against; core accepts
 #: the same major with a minor less than or equal to its own.
 #: 1.2 (ADR-30) adds the optional ``reporting`` role; a 1.1 plugin still loads.
-CONTRACT_VERSION = "1.2"
+#: 1.3 adds ``DataBuildContext.columns``, a projection hint a data engine reads;
+#: a 1.2 plugin still loads and reads every column.
+CONTRACT_VERSION = "1.3"
 
 #: What ``{{ auto }}`` renders to in a spec. Hyperparameter values equal to
 #: this sentinel skip static validation and are resolved by the adapter's

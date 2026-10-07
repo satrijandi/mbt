@@ -278,3 +278,28 @@ def test_realized_metrics_land_in_the_ledger_not_the_tracker(
     assert "pr_auc" in recorded["metrics"]
     after = sorted(p.name for p in (monitored_project / "target/fake_tracking").glob("*.json"))
     assert after == tracked  # the training runs, and nothing new
+
+
+def test_the_label_read_takes_only_the_join_key_and_label(
+    monitored_project: Path, fake_registry: AdapterRegistry
+) -> None:
+    """A label source is often the wide table the model trained on; the
+    monitor reads its join key and label and nothing else (contract 1.3)."""
+    width = 40
+    table = pa.table(
+        {
+            "user_id": list(range(120)),
+            **{f"noise_{i:02d}": [float(i)] * 120 for i in range(width)},
+            "churned": [1 if i % 4 == 0 else 0 for i in range(120)],
+        }
+    )
+    pq.write_table(table, monitored_project / "data/churn_outcomes/part-000.parquet")
+    _build_and_promote(monitored_project, fake_registry)
+    _score(monitored_project, fake_registry)
+
+    results = monitor(monitored_project, fake_registry)
+    assert results.exit_code() == 0
+    (written,) = (monitored_project / "target/scoring_inputs").glob(
+        "churn_scoring_labels/*/score.parquet"
+    )
+    assert pq.read_schema(written).names == ["user_id", "churned"]

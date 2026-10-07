@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Renovate's woodpecker manager reads every step `image:` in .woodpecker, and docker:pinDigests keeps each one on an immutable digest.",
+    "A tag can be repointed at new code retroactively, and these pipelines hold the credentials that write your registry and your state branch.",
+    "Renovate maintains both halves once pinned: it bumps the tag and the @sha256 digest beside it in one reviewed PR. Renovate runs against Gitea and Forgejo as a self-hosted bot."
+  ],
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests"
+  ],
+  "pre-commit": {
+    "enabled": true
+  }
+}

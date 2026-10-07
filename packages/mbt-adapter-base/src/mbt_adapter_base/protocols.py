@@ -544,6 +544,20 @@ class DataBuildContext(Protocol):
         not each grab the whole machine (F22). Defaults to 1 (a lone build)."""
         ...
 
+    @property
+    def columns(self) -> tuple[str, ...] | None:
+        """The columns the caller will read, or None for every column (1.3).
+
+        A projection hint: when set, an engine writes only these columns, in
+        the relation's own order, so a read of a wide relation scans only what
+        the caller needs (``mbt monitor`` takes a join key and a label out of a
+        table hundreds of columns wide). Filters and sampling still see the
+        whole relation. A named column the relation lacks is a build failure
+        (``materialization.projected_columns``). Core sets it only where it
+        selects these columns afterwards anyway, so an engine that ignores it
+        stays correct and only reads more than it needs."""
+        ...
+
 
 @dataclass(frozen=True)
 class AdapterPlugin:
