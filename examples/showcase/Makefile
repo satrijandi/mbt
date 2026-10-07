@@ -19,14 +19,15 @@ export SHOWCASE_S3_PORT SHOWCASE_FILER_PORT SHOWCASE_MLFLOW_PORT SHOWCASE_SPARK_
 # join the project's default network, hence the derived SHOWCASE_NETWORK.
 export SHOWCASE_PROJECT ?= mbt-showcase
 export SHOWCASE_NETWORK ?= $(SHOWCASE_PROJECT)_default
-# Native Linux: /var/run/docker.sock is root:docker, so airflow-scheduler
-# must join that group to run DAG tasks. Docker Desktop resolves the mount
-# in its VM where the socket is group 0, and the host stat would be wrong -
-# hence the uname guard.
-export DOCKER_SOCK_GID ?= $(shell [ "$$(uname -s)" = Linux ] && stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)
-COMPOSE := docker compose -p $(SHOWCASE_PROJECT) -f $(SHOWCASE_DIR)/compose/docker-compose.yml \
+# The docker-socket group airflow-scheduler joins to run DAG tasks, as
+# containers see it - which differs per runtime (scripts/docker_sock_gid.sh
+# asks the daemon). Probed lazily and at most once per make run, only by
+# recipes that run compose, so `make help` never touches docker; set it in
+# the environment or .env to skip the probe.
+DOCKER_SOCK_GID ?= $(eval DOCKER_SOCK_GID := $(shell $(SHOWCASE_DIR)/scripts/docker_sock_gid.sh))$(DOCKER_SOCK_GID)
+COMPOSE = DOCKER_SOCK_GID=$(DOCKER_SOCK_GID) docker compose -p $(SHOWCASE_PROJECT) -f $(SHOWCASE_DIR)/compose/docker-compose.yml \
 	--profile core --profile spark --profile dev --profile obs --profile ci --profile orch
-EXEC := $(COMPOSE) exec -T --workdir /workspace/project jupyterlab
+EXEC = $(COMPOSE) exec -T --workdir /workspace/project jupyterlab
 ANCHOR := 2026-09-29T00:00:00Z
 MONITOR_ANCHOR := 2026-10-09T00:00:00Z
 GITEA_PORT = $(or $(SHOWCASE_GITEA_PORT),3305)
@@ -44,7 +45,7 @@ SHOWCASE_WORK ?= $(HOME)/showcase-work
 # The one lake table's size (bootstrap/churn_panel.py): `default` keeps every
 # recipe quick; `make seed SCALE=huge` reseeds ~1.6M rows x 320 columns (2.9GB).
 SCALE ?= default
-PANEL := $(EXEC) python /workspace/bootstrap/churn_panel.py
+PANEL = $(EXEC) python /workspace/bootstrap/churn_panel.py
 
 help:
 	@echo "mbt showcase (see README.md for the full runbook):"

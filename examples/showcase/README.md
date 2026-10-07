@@ -152,7 +152,7 @@ Four hermetic modules keep the showcase honest in the ordinary fast suite, where
 
 ## Knobs
 
-See `.env.example` for host ports (defaults dodge common squatters), S3 credentials, workspace location, the runner image tag, and `DOCKER_SOCK_GID` (the docker-socket group airflow-scheduler joins to run DAG tasks; the Makefile and the test harness probe it - 0 on Docker Desktop, the `docker` group on native Linux).
+See `.env.example` for host ports (defaults dodge common squatters), S3 credentials, workspace location, the runner image tag, and `DOCKER_SOCK_GID` (the docker-socket group airflow-scheduler joins to run DAG tasks; the Makefile and the test harness ask the daemon via `scripts/docker_sock_gid.sh`, since it differs per runtime - 0 on Docker Desktop and OrbStack, a `docker` group on Rancher Desktop and native Linux).
 `SCALE` on `make seed` sizes the lake table ([Scale](#scale)).
 RAM guardrails are config, not prose: 1 Spark worker (4 cores / 4g) in the compose file, `spark.cores.max` and executor memory (1-2g) per session and `h2o_max_mem: 1G` on the local-H2O targets in `profiles.yml`, `WOODPECKER_MAX_WORKFLOWS=1`, Airflow on LocalExecutor.
 Measured on a 10-core OrbStack machine, summing `docker stats` every few seconds across the stack's containers through a full main-tier run at the default `SCALE`: median 1.1GB, 90th percentile 1.9GB, highest sample 3.0GB.

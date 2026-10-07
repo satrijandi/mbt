@@ -291,7 +291,7 @@ examples/showcase/
   compose/{seaweedfs,prometheus,grafana}/...
   bootstrap/churn_panel.py     # the one lake table: seed, land-outcomes, inject-drift, reset
   bootstrap/webhook_sink.py    # the CI alert recorder
-  scripts/                     # host-side: build_image.sh, lock_image_extras.sh, ci_bootstrap.py
+  scripts/                     # host-side: build_image.sh, lock_image_extras.sh, ci_bootstrap.py, docker_sock_gid.sh
   project/                     # the churn_lake mbt project (source of truth; pushed into Gitea)
     .woodpecker/{pr-check.yml,prod-build.yml,promote.yml}
     datasets/ models/ scoring/ sources.yml profiles.yml promotions.yml

@@ -304,9 +304,10 @@ services:
     # The DAG tasks drive the docker daemon (LocalExecutor runs them
     # in-scheduler), and the image's airflow user must stay non-root (the
     # official entrypoint misbehaves under root with pip requirements), so
-    # the container joins the socket's owning group. That group is 0 on
-    # Docker Desktop's VM but the `docker` group on native Linux hosts -
-    # the Makefile and the test harness probe it (stat the socket).
+    # the container joins the socket's owning group. That group differs per
+    # runtime (0 on Docker Desktop and OrbStack, a `docker` group on Rancher
+    # Desktop and native Linux); the Makefile and the test harness ask the
+    # daemon via scripts/docker_sock_gid.sh.
     group_add: ["${DOCKER_SOCK_GID:-0}"]
     environment:
       <<: *airflow-env

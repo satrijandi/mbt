@@ -24,7 +24,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
 import uuid
 from pathlib import Path
 
@@ -74,14 +73,17 @@ def docker_sock_gid() -> int:
     """GID of the group owning /var/run/docker.sock as containers see it.
 
     airflow-scheduler's non-root user joins this group to run DAG tasks.
-    Native Linux bind-mounts the host socket (root:docker), so the host
-    stat is authoritative; Docker Desktop resolves the mount inside its VM
-    where the socket is group 0, and the host stat would be wrong.
+    The answer differs per runtime (Docker Desktop, OrbStack, Rancher
+    Desktop, rootless), so ask the daemon the same way the Makefile does.
     """
-    sock = Path("/var/run/docker.sock")
-    if sys.platform == "linux" and sock.exists():
-        return sock.stat().st_gid
-    return 0
+    proc = subprocess.run(
+        [str(SHOWCASE_DIR / "scripts" / "docker_sock_gid.sh")],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=True,
+    )
+    return int(proc.stdout.strip())
 
 
 def service_log_tails(compose, lines: int = 80, chars_per_service: int = 4000) -> str:

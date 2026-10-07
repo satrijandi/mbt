@@ -303,3 +303,23 @@ def test_seaweedfs_capacity_does_not_follow_free_disk() -> None:
         f"-volume.max={flags['-volume.max']} cannot seat {collections} collections "
         f"growing {SEAWEED_GROWTH_PER_COLLECTION} volumes each, plus one growth step"
     )
+
+
+# -- docker-socket probe (rides an image the stack already pulls) -------------
+
+SOCK_PROBE = REPO_ROOT / "examples" / "showcase" / "scripts" / "docker_sock_gid.sh"
+
+
+def test_the_docker_socket_probe_uses_airflow_dbs_image() -> None:
+    """scripts/docker_sock_gid.sh stats the socket from inside a container,
+    because each runtime presents it with a different group (Rancher Desktop's
+    Lima VM is not group 0, and guessing 0 for every Mac failed every DAG task
+    there with PermissionError). It borrows airflow-db's image so the probe
+    costs no extra pull; a bump of one without the other silently adds one.
+    """
+    import yaml
+
+    image = yaml.safe_load(COMPOSE.read_text())["services"]["airflow-db"]["image"]
+    probe = re.search(r'^PROBE_IMAGE="([^"]+)"$', SOCK_PROBE.read_text(), re.M)
+    assert probe, "docker_sock_gid.sh no longer declares PROBE_IMAGE"
+    assert probe.group(1) == image, f"probe uses {probe.group(1)}, airflow-db uses {image}"
