@@ -11,6 +11,11 @@
 # mutants than scripts/mutation_baseline.json records. When it has fewer, the
 # job summary says so and the baseline should come down in a reviewed commit
 # (`uv run --group mutation python scripts/mutation_score.py --update-baseline`).
+#
+# One job per mutated module, added up by the score job. Run as one job, the
+# measurement took 92-120 minutes and hit its two-hour limit on seven of the
+# eleven nights from 2026-10-05, and each of those runs measured nothing while
+# its notice said the score had regressed.
 name: Mutation score
 
 on:
@@ -25,12 +30,37 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write   # the failure notice below; a red nightly nobody reads is not a detector
 
 jobs:
-  mutation:
+  plan:
+    # The matrix comes from the tree, so a new module gets its own job. The
+    # harness needs only the standard library to plan and to combine, hence
+    # --no-project: no workspace install for either.
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
+        with:
+          python-version: "3.11"
+      - id: plan
+        run: echo "matrix=$(uv run --no-project python scripts/mutation_score.py --plan)" >> "$GITHUB_OUTPUT"
+
+  mutate:
+    needs: plan
+    name: mutate ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    # quality/gates.py and quality/checks.py are each about a third of the
+    # measurement (2026-10-15), so the slowest job is a third of the old run
+    # plus mutmut's few minutes of setup: well inside the old run's limit,
+    # kept because runner speed varied by a third between nights. A module
+    # that outgrows it wants splitting, not a retry.
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
@@ -38,37 +68,118 @@ jobs:
           python-version: "3.11"
       - name: Install the locked workspace plus the mutation group
         run: uv sync --group mutation
-      - name: Mutate, test, and compare against the baseline
-        run: uv run --group mutation python scripts/mutation_score.py
+      - name: Mutate the module and test each mutant
+        env:
+          PACKAGE: ${{ matrix.package }}
+          MODULE: ${{ matrix.module }}
+          OUT: mutation-results/${{ strategy.job-index }}.json
+        run: >-
+          uv run --group mutation python scripts/mutation_score.py
+          --package "$PACKAGE" --module "$MODULE" --out "$OUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
+        with:
+          name: mutation-${{ strategy.job-index }}
+          path: mutation-results/
+          if-no-files-found: error
+          retention-days: 14
 
+  score:
+    # Not always(): a module whose job did not finish has no result, and
+    # scoring the rest would read as fewer survivors. --combine refuses a
+    # partial set on its own as well.
+    needs: mutate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      exit: ${{ steps.score.outputs.exit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c   # v8.0.1
+        with:
+          pattern: mutation-*
+          path: mutation-results
+          merge-multiple: true
+      - name: Add up the modules and compare against the baseline
+        id: score
+        # The exit code tells the notice a regression (2) from a harness
+        # that could not score (1).
+        run: |
+          code=0
+          uv run --no-project python scripts/mutation_score.py --combine mutation-results || code=$?
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+  notify:
+    # Same contract as upstream.yml and live.yml: one issue, commented on
+    # rather than duplicated, closed automatically when the tier is green.
+    # It says which of three things went wrong, because the old notice called
+    # every red run a regression and seven timeouts were filed as one.
+    needs: [plan, mutate, score]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
       - name: Raise or update the tracking issue
-        # Same contract as upstream.yml and live.yml: one issue, commented on
-        # rather than duplicated, closed automatically when the score recovers.
-        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          TITLE: "Mutation score regressed"
-          OUTCOME: ${{ job.status }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "Mutation tier is failing"
+          PLAN: ${{ needs.plan.result }}
+          MUTATE: ${{ needs.mutate.result }}
+          SCORE: ${{ needs.score.result }}
+          SCORE_EXIT: ${{ needs.score.outputs.exit }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           existing=$(gh issue list --state open --search "$TITLE in:title" \
             --json number,title --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
-          if [ "$OUTCOME" = "success" ]; then
+
+          if [ "$SCORE" = "success" ]; then
             if [ -n "$existing" ]; then
-              gh issue close "$existing" --comment "Back at or under the baseline: $RUN_URL"
+              gh issue close "$existing" --comment "Measured, and at or under the baseline: $RUN_URL"
             fi
             exit 0
           fi
-          body=$(printf '%s\n' \
-            "More mutants of the gate, verdict, monitor or metric code survived" \
-            "the fast suite than scripts/mutation_baseline.json allows." \
-            "" \
-            "Run (the job summary lists every survivor): $RUN_URL" \
-            "" \
-            "Triage: a new survivor is a comparison, branch or constant no test" \
-            "would notice changing. Add the test that kills it; only raise the" \
-            "baseline for a survivor that is equivalent by construction.")
+
+          if [ "${SCORE_EXIT:-}" = "2" ]; then
+            body=$(printf '%s\n' \
+              "The mutation score regressed: more mutants of the gate, verdict," \
+              "monitor or metric code survived the fast suite than" \
+              "scripts/mutation_baseline.json allows." \
+              "" \
+              "Run (the job summary lists every survivor): $RUN_URL" \
+              "" \
+              "Triage: a new survivor is a comparison, branch or constant no test" \
+              "would notice changing. Add the test that kills it; only raise the" \
+              "baseline for a survivor that is equivalent by construction.")
+          elif [ "$PLAN" = "cancelled" ] || [ "$MUTATE" = "cancelled" ] || [ "$SCORE" = "cancelled" ]; then
+            body=$(printf '%s\n' \
+              "A job did not finish: it hit its time limit or was cancelled, so" \
+              "this run measured nothing and the baseline was not checked." \
+              "" \
+              "Run: $RUN_URL" \
+              "" \
+              "Each mutate job logs mutmut's progress every five minutes, which" \
+              "shows how far a timed-out module got. A module that outgrows its" \
+              "job's timeout-minutes wants splitting or a longer limit, not a retry.")
+          else
+            body=$(printf '%s\n' \
+              "The tier failed before it could compare against the baseline" \
+              "(plan: $PLAN, mutate: $MUTATE, score: $SCORE)." \
+              "" \
+              "Run: $RUN_URL" \
+              "" \
+              "A mutate job fails when the package's tests fail unmutated, since" \
+              "mutmut refuses to start, and its log ends with the last lines" \
+              "mutmut printed. The score job fails when a module's result is" \
+              "missing or doubled.")
+          fi
+
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else
