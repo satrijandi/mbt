@@ -52,11 +52,11 @@ jobs:
     needs: plan
     name: mutate ${{ matrix.module }}
     runs-on: ubuntu-latest
-    # quality/gates.py and quality/checks.py are each about a third of the
-    # measurement (2026-10-15), so the slowest job is a third of the old run
-    # plus mutmut's few minutes of setup: well inside the old run's limit,
-    # kept because runner speed varied by a third between nights. A module
-    # that outgrows it wants splitting, not a retry.
+    # Measured on the first run (2026-10-15): quality/gates.py 59 minutes and
+    # quality/checks.py 54, every other module 26 or less, about 5 of each
+    # being mutmut's setup. Half the limit, because runner speed varied by a
+    # third between nights. A module that outgrows it wants splitting (mutmut
+    # selects mutants by name glob, so by function), not a longer limit.
     timeout-minutes: 120
     strategy:
       fail-fast: false
