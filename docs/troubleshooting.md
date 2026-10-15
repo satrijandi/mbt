@@ -1360,6 +1360,82 @@ The same lock made the pipelines API answer with a non-JSON error body, which th
 **Fix:** the showcase's compose file now sets `WOODPECKER_DATABASE_DATASOURCE` with `_busy_timeout=30000&_journal_mode=WAL`, so a contended write waits and reads no longer block the lease writes, and `make lifecycle` treats a failed pipelines poll as transient and polls again.
 A running Woodpecker keeps the datasource it booted with, so recreate the stack with `make down && make up`.
 
+### `expected the grant page, got:` stops `make lifecycle` at step 1 on a fresh stack
+
+**Symptom (hard error, exit 1):** `make clean && make up && make lifecycle` runs `make ci`, which ends with `CI ready:`, and then step 1 stops before it pushes anything:
+
+```text
+==> [1/8] Deployable unit: prod-build baked and pinned by digest, DAGs live in Airflow
+    no deployable unit pinned yet: pushing to main so prod-build bakes the first one
+expected the grant page, got:
+<!DOCTYPE html>
+<html lang="en-US" data-theme="gitea-auto">
+...
+make: *** [lifecycle] Error 1
+```
+
+`docker inspect mbt-showcase-woodpecker-server-1` shows `WOODPECKER_GITEA_CLIENT=pending-bootstrap`: Woodpecker was recreated with the placeholder OAuth client after `make ci` had set the real one, so nobody can log into it.
+
+**Why:** `make ci` records the OAuth client it creates in the workspace's `woodpecker.env`, and every later `docker compose up` passes that client on, so compose leaves Woodpecker alone.
+The Makefile read that file when make started, but on a fresh stack `make lifecycle` runs `make ci` as a sub-make, which writes the file after the outer make has started.
+The outer make's own `docker compose up`, the one that adds Airflow, then saw the placeholder as changed configuration and recreated Woodpecker with it.
+Running `make ci` by hand first, as the README's order does, hides it.
+
+**Fix:** the Makefile now loads `woodpecker.env` each time it runs `docker compose up`, not once when make starts.
+On a checkout without the fix, run `make lifecycle` again: the file exists by then, and the first `docker compose up` puts Woodpecker back on the real client.
+
+### `images.env has no IMAGE pin yet - run a prod build first` fails the showcase's retrain DAG
+
+**Symptom (hard error, exit 1):** on a fresh stack, step 1 of `make lifecycle` bakes and pins the first unit, and then both tries of the `mbt_retrain` run fail before mbt starts:
+
+```text
+    deployable unit baked and pinned: localhost:15000/mbt/churn@sha256:51ad5b34...
+    Airflow has mbt_retrain, mbt_score, mbt_monitor registered and unpaused
+    triggered mbt_retrain run manual__2026-10-15T07:38:20.367357+00:00
+    http://localhost:8280/dags/mbt_retrain/runs/manual__2026-10-15T07%3A38%3A20.367357%2B00%3A00
+    mbt_retrain: queued (0s)
+    mbt_retrain: running (5s)
+    mbt_retrain: failed (15s)
+--- mbt_retrain.retrain try 1 (failed) ---
+Task failed with exception
+  AirflowException: images.env has no IMAGE pin yet - run a prod build first
+--- mbt_retrain.retrain try 2 (failed) ---
+Task failed with exception
+  AirflowException: images.env has no IMAGE pin yet - run a prod build first
+```
+
+The deploy repo's `images.env` on Gitea does have the pin; the copy Airflow reads does not have it yet.
+
+**Why:** there are two copies of the deploy repo.
+prod-build writes the pin to Gitea, git-sync copies Gitea's `main` to Airflow every 5 seconds, and a DAG task reads Airflow's copy when it starts.
+`make lifecycle` checked only Gitea, so it could trigger the retrain in the seconds before git-sync caught up, and on a fresh stack that copy pins nothing.
+Whether it happens depends on how soon git-sync's next fetch lands after the pin, which is why the same stack usually passes: on a 10-core laptop git-sync's copy was 2 seconds ahead of the trigger, and a slower or busier docker VM loses that race.
+
+**Fix:** step 1 now waits until the `images.env` that git-sync serves in the scheduler container pins the same unit as Gitea, and says so: `git-sync has handed the pin to Airflow: every DAG task runs that unit`.
+If git-sync has not synced it within 5 minutes, step 1 stops there and names the git-sync container whose log to read, instead of letting a DAG fail.
+The task's own message now also names the copy it read, `/gitsync/.worktrees/<deploy commit>/images.env`, to compare with the deploy repo's `main`; the DAGs reach Airflow through the deploy repo that `make ci` seeds, so a running stack keeps the old message until `make clean && make up`.
+On a checkout without the fix, run `make lifecycle` again: git-sync has the pin by then, and step 1 reports `deployable unit already pinned`.
+
+### `400 Client Error: Bad Request for url: .../registered-models/alias?name=churn_automl&alias=production` at the showcase's promotion step
+
+**Symptom (hard error, exit 1):** step 4 of `make lifecycle` protects `main` and then crashes before it opens the promotion PR:
+
+```text
+==> [4/8] Governed promotion: mbtds opens a promotions.yml PR, mbtops approves, CI promotes
+committed CODEOWNERS: promotions.yml @mbtops
+protected main
+Traceback (most recent call last):
+  ...
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: http://localhost:5501/api/2.0/mlflow/registered-models/alias?name=churn_automl&alias=production
+make: *** [lifecycle] Error 1
+```
+
+**Why:** the step first asks MLflow which version serves production, so that it can skip a promotion that is already done.
+On a stack where nothing has been promoted yet (`make lifecycle` without `make demo` first), no version holds `production`, and MLflow answers that lookup with `400 INVALID_PARAMETER_VALUE` (`Registered model alias production not found.`), not the `404` the step took to mean "nobody".
+
+**Fix:** the step now reads the aliases from the registered model itself, where an alias that no version holds is simply absent.
+On a checkout without the fix, run `make demo` before `make lifecycle`: it promotes a first champion.
+
 ### `failed to copy: ... no space left on device` building the showcase runner image
 
 **Symptom (the build fails, `make up` stops):**

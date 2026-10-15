@@ -19,7 +19,7 @@ The test catalog (section 8) maps onto these gated modules, all in repo-root `te
 | `test_showcase_k3d.py` | SHOW-16 | `MBT_LIVE_SHOWCASE_K3D=1` (own pytest invocation, own nightly step) |
 | `test_showcase_make.py` | SHOW-18 | `MBT_LIVE_SHOWCASE_MAKE=1` (own pytest invocation) |
 
-Hermetic modules guard the showcase from the ordinary fast suite, because `-m e2e` excludes the live tier and `-m "not e2e"` deselects it: `tests/test_showcase_gates.py` (SHOW-15: every gated module keeps its gate), `tests/test_showcase_image_pins.py` (the runner image's hand pins, the extras closure, the S3 credentials, SeaweedFS capacity) and `tests/test_showcase_panel.py` (the lake table's generator and the project's use of it).
+Hermetic modules guard the showcase from the ordinary fast suite, because `-m e2e` excludes the live tier and `-m "not e2e"` deselects it: `tests/test_showcase_drivers.py` (the Makefile and `scripts/lifecycle.py`), `tests/test_showcase_gates.py` (SHOW-15: every gated module keeps its gate), `tests/test_showcase_image_pins.py` (the runner image's hand pins, the extras closure, the S3 credentials, SeaweedFS capacity) and `tests/test_showcase_panel.py` (the lake table's generator and the project's use of it).
 
 Modules share one session stack and run in collection (alphabetical) order; the only load-bearing constraint is that `test_showcase_ci` is the first forge consumer (virgin-bootstrap assertion).
 Everything else provisions or promotes what it needs, and a module that changes the lake table (`land-outcomes`, `inject-drift`) puts it back with `reset` before it finishes.
@@ -321,6 +321,7 @@ tests/
   test_showcase_obs.py         # SHOW-14
   test_showcase_k3d.py         # SHOW-16 (extra gate, own nightly step)
   test_showcase_make.py        # SHOW-18 (extra gate, own invocation)
+  test_showcase_drivers.py     # hermetic: the Makefile and scripts/lifecycle.py
   test_showcase_gates.py       # SHOW-15 (hermetic: fast suite)
   test_showcase_image_pins.py  # hermetic: runner image pins, extras closure, S3 credentials
   test_showcase_panel.py       # hermetic: the lake table's generator and the project's use of it

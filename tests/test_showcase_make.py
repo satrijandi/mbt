@@ -2,6 +2,7 @@
 through `make` exactly as a human would - doctor, up, demo (a refused
 challenger included), ci, clone, protect, lifecycle (its promotion a reviewed
 PR), score, outcomes, monitor, inject-drift + recovery, week, down, clean.
+Then docs/showcase-lifecycle.md's own path from nothing: clean, up, lifecycle.
 
 Every other module tests the platform through its own harness; this one
 tests that the COMMANDS THE README TELLS A HUMAN TO TYPE still work, so the
@@ -140,6 +141,46 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     return proc
 
 
+def _assert_lifecycle_ran(runner: MakeRunner) -> None:
+    """What `make lifecycle` promises: a pinned unit, every DAG run green,
+    ground truth evaluated, and production on the version a reviewed
+    promotions.yml PR from mbtds pinned."""
+    import requests
+
+    gitea = f"http://localhost:{runner.env['SHOWCASE_GITEA_PORT']}"
+    deploy = requests.get(f"{gitea}/mbt-showcase/deploy/raw/branch/main/images.env", timeout=30)
+    assert "@sha256:" in deploy.text, deploy.text
+    af = f"http://localhost:{runner.env['SHOWCASE_AIRFLOW_PORT']}"
+    af_token = requests.post(
+        f"{af}/auth/token", json={"username": "admin", "password": "admin"}, timeout=60
+    ).json()["access_token"]
+    for dag_id, runs in (("mbt_retrain", 1), ("mbt_score", 1), ("mbt_monitor", 2)):
+        payload = requests.get(
+            f"{af}/api/v2/dags/{dag_id}/dagRuns",
+            headers={"Authorization": f"Bearer {af_token}"},
+            timeout=60,
+        ).json()
+        states = [run["state"] for run in payload["dag_runs"]]
+        assert states == ["success"] * runs, (dag_id, states)
+    predictions = runner.workspace / "predictions" / "retention_scores"
+    assert list(predictions.glob("*/ground_truth.marker.json"))
+    pulls = requests.get(
+        f"{gitea}/api/v1/repos/mbt-showcase/churn/pulls?state=closed",
+        auth=(GITEA_USER, GITEA_PASSWORD),
+        timeout=30,
+    ).json()
+    promotion = next(p for p in pulls if p["title"].startswith("promote churn_automl v"))
+    assert promotion["merged"] and promotion["user"]["login"] == DS_USER, promotion
+    version = promotion["title"].rsplit("v", 1)[1]
+    mlflow = f"http://localhost:{runner.env['SHOWCASE_MLFLOW_PORT']}"
+    alias = requests.get(
+        f"{mlflow}/api/2.0/mlflow/registered-models/alias",
+        params={"name": "churn_automl", "alias": "production"},
+        timeout=30,
+    ).json()
+    assert alias["model_version"]["version"] == version, alias
+
+
 @pytest.fixture(scope="module")
 def runbook(tmp_path_factory: pytest.TempPathFactory):
     runner = MakeRunner(tmp_path_factory.mktemp("showcase-make-ws"))
@@ -247,37 +288,7 @@ def test_runbook_golden_path(runbook) -> None:
     # protection rule - bakes the first unit, then runs every DAG in the
     # pinned unit: retrain, score, monitor before and after the outcomes.
     runner.make("lifecycle", timeout=3600)
-    deploy = requests.get(
-        f"http://localhost:{gitea_port}/mbt-showcase/deploy/raw/branch/main/images.env",
-        timeout=30,
-    )
-    assert "@sha256:" in deploy.text, deploy.text
-    af = f"http://localhost:{runner.env['SHOWCASE_AIRFLOW_PORT']}"
-    af_token = requests.post(
-        f"{af}/auth/token", json={"username": "admin", "password": "admin"}, timeout=60
-    ).json()["access_token"]
-    for dag_id, runs in (("mbt_retrain", 1), ("mbt_score", 1), ("mbt_monitor", 2)):
-        payload = requests.get(
-            f"{af}/api/v2/dags/{dag_id}/dagRuns",
-            headers={"Authorization": f"Bearer {af_token}"},
-            timeout=60,
-        ).json()
-        states = [run["state"] for run in payload["dag_runs"]]
-        assert states == ["success"] * runs, (dag_id, states)
-    assert list((ws / "predictions" / "retention_scores").glob("*/ground_truth.marker.json"))
-    # The promotion went the reviewed way: mbtds's promotions.yml PR, merged by
-    # the code owner, and the version it pins is the one production serves.
-    pulls = requests.get(f"{api}/pulls?state=closed", auth=auth, timeout=30).json()
-    promotion = next(p for p in pulls if p["title"].startswith("promote churn_automl v"))
-    assert promotion["merged"] and promotion["user"]["login"] == DS_USER, promotion
-    version = promotion["title"].rsplit("v", 1)[1]
-    mlflow = f"http://localhost:{runner.env['SHOWCASE_MLFLOW_PORT']}"
-    alias = requests.get(
-        f"{mlflow}/api/2.0/mlflow/registered-models/alias",
-        params={"name": "churn_automl", "alias": "production"},
-        timeout=30,
-    ).json()
-    assert alias["model_version"]["version"] == version, alias
+    _assert_lifecycle_ran(runner)
 
     # The standalone targets rerun cleanly on the same anchors, from the
     # seeded table: reset, score, a week passes, monitor.
@@ -314,3 +325,20 @@ def test_runbook_golden_path(runbook) -> None:
 
     runner.make("clean")
     assert not ws.exists(), "make clean left the workspace behind"
+
+
+def test_lifecycle_page_from_nothing(runbook) -> None:
+    """docs/showcase-lifecycle.md as written, its optional demo skipped:
+    clean, up, lifecycle. The golden path above runs `make demo` and `make ci`
+    first, so it never saw `make lifecycle` run `make ci` itself or promote
+    with no champion yet - the reader's path, which shipped broken twice:
+    Woodpecker recreated with placeholder OAuth credentials after the
+    sub-make, and the promotion crashing on MLflow's answer for an alias
+    nothing holds yet."""
+    runner = runbook
+    runner.make("clean")
+    runner.make("up")
+    runner.make("lifecycle", timeout=3600)
+    _assert_lifecycle_ran(runner)
+    runner.make("clean")
+    assert runner.containers() == [], "make clean left containers behind"

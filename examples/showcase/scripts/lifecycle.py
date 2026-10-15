@@ -7,13 +7,14 @@ Airflow, and every retrain, score and monitor is an Airflow DAG run that
 executes mbt inside that pinned unit (showcase_dag_utils.run_in_unit).
 
 Runs on the HOST against the published ports, like ci_bootstrap.py (the dev
-venv has `requests` via mlflow). Two phases, which the Makefile narrates:
+venv has `requests` via mlflow). Three phases, which the Makefile narrates:
 
   unit - make sure a deployable unit is pinned. If the deploy repo's
          images.env has no digest yet, commit to the churn repo's main (a
          push event, exactly what a merge is), wait for Woodpecker's
-         prod-build to bake the unit, then wait for Airflow to register
-         and unpause every DAG. Idempotent: an existing pin is kept.
+         prod-build to bake the unit, then wait for git-sync to hand that
+         pin to Airflow and for Airflow to register and unpause every DAG.
+         Idempotent: an existing pin is kept.
   run  - trigger one DAG with an optional conf, wait for a terminal state,
          print the task log (mbt's own output from inside the unit) and the
          run's Airflow URL. Exits 0 on `success`, 1 otherwise.
@@ -27,6 +28,7 @@ venv has `requests` via mlflow). Two phases, which the Makefile narrates:
 
 Usage:
   lifecycle.py unit --gitea-url URL --woodpecker-url URL --airflow-url URL
+                    --compose-project NAME
   lifecycle.py run  --airflow-url URL DAG_ID [--conf JSON]
   lifecycle.py promote --gitea-url URL --woodpecker-url URL --mlflow-url URL
 """
@@ -34,6 +36,7 @@ Usage:
 import argparse
 import base64
 import json
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -62,23 +65,70 @@ MODEL = "churn_automl"
 PIPELINE_TERMINAL = {"success", "failure", "error", "killed", "declined", "canceled"}
 #: The marker file the unit phase commits to trigger the first prod-build.
 MARKER = "LIFECYCLE.md"
+#: git-sync's link to the deploy repo commit Airflow serves (compose file).
+GITSYNC_LINK = "/gitsync/current"
 
 
 def say(message: str) -> None:
     print(f"    {message}", flush=True)
 
 
+def image_pin(images_env: str) -> str:
+    """The unit an images.env pins (``repo@sha256:...``), or '' if none."""
+    for line in images_env.splitlines():
+        if line.startswith("IMAGE=") and "@sha256:" in line:
+            return line.partition("=")[2].strip()
+    return ""
+
+
 def pinned_image(gitea_url: str) -> str:
-    """The deploy repo's pinned unit (``repo@sha256:...``), or '' if none."""
+    """The deploy repo's pinned unit, or '' if none."""
     resp = requests.get(f"{gitea_url}/{ORG}/{DEPLOY_REPO}/raw/branch/main/images.env", timeout=30)
     if not resp.ok:
         raise SystemExit(
             f"no {ORG}/{DEPLOY_REPO} repo on Gitea ({resp.status_code}) - run `make ci` first"
         )
-    for line in resp.text.splitlines():
-        if line.startswith("IMAGE=") and "@sha256:" in line:
-            return line.partition("=")[2].strip()
-    return ""
+    return image_pin(resp.text)
+
+
+def served_image(scheduler: str) -> str:
+    """The unit a DAG task would run right now, or '' if none.
+
+    That is the pin in the deploy repo copy git-sync keeps for Airflow, read
+    in the scheduler container, where the LocalExecutor runs every task.
+    """
+    proc = subprocess.run(
+        ["docker", "exec", scheduler, "cat", f"{GITSYNC_LINK}/images.env"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    # No link yet means git-sync has never synced: no pin for Airflow either.
+    return image_pin(proc.stdout) if proc.returncode == 0 else ""
+
+
+def wait_served(project: str, image: str, timeout_s: int = 300) -> None:
+    """Wait until Airflow's DAG tasks run ``image``, the pin on Gitea.
+
+    Gitea gets the pin first and git-sync copies it to Airflow on its own
+    period, so for a few seconds after prod-build pins a unit, a DAG task
+    still reads the previous images.env. On a fresh stack that copy pins
+    nothing, and the task fails with "images.env has no IMAGE pin yet".
+    Checking Gitea alone let `make lifecycle` trigger the retrain inside
+    that window.
+    """
+    scheduler = f"{project}-airflow-scheduler-1"
+    end = time.time() + timeout_s
+    served = served_image(scheduler)
+    while served != image:
+        if time.time() >= end:
+            raise SystemExit(
+                f"Airflow still runs {served or 'no unit'} {timeout_s}s after the deploy repo "
+                f"pinned {image}: git-sync has not synced it (docker logs {project}-git-sync-1)"
+            )
+        time.sleep(2)
+        served = served_image(scheduler)
 
 
 def event_text(event: object) -> str:
@@ -305,6 +355,8 @@ def phase_unit(args: argparse.Namespace) -> int:
             raise SystemExit("prod-build succeeded but the deploy repo still has no IMAGE pin")
         say(f"deployable unit baked and pinned: {image}")
 
+    wait_served(args.compose_project, image)
+    say("git-sync has handed the pin to Airflow: every DAG task runs that unit")
     af = Airflow(args.airflow_url)
     af.wait_dags()
     say(f"Airflow has {', '.join(DAGS)} registered and unpaused")
@@ -348,15 +400,22 @@ def phase_run(args: argparse.Namespace) -> int:
 
 
 def alias_version(mlflow_url: str, alias: str) -> str | None:
+    """The version ``alias`` points at, or None if nothing holds it yet.
+
+    Read from the registered model's alias list: MLflow answers a lookup of
+    an alias nothing holds with 400 INVALID_PARAMETER_VALUE, not 404, so a
+    stack with no production champion yet crashed the promote phase.
+    """
     resp = requests.get(
-        f"{mlflow_url}/api/2.0/mlflow/registered-models/alias",
-        params={"name": MODEL, "alias": alias},
-        timeout=30,
+        f"{mlflow_url}/api/2.0/mlflow/registered-models/get", params={"name": MODEL}, timeout=30
     )
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
-    return str(resp.json()["model_version"]["version"])
+    for held in resp.json()["registered_model"].get("aliases", []):
+        if held["alias"] == alias:
+            return str(held["version"])
+    return None
 
 
 def phase_promote(args: argparse.Namespace) -> int:
@@ -442,6 +501,9 @@ def main() -> int:
     unit.add_argument("--gitea-url", required=True)
     unit.add_argument("--woodpecker-url", required=True)
     unit.add_argument("--airflow-url", required=True)
+    unit.add_argument(
+        "--compose-project", required=True, help="the stack's compose project, for git-sync's copy"
+    )
     unit.add_argument("--timeout", type=int, default=1800, help="seconds to wait for prod-build")
     run = sub.add_parser("run", help="trigger one DAG run and wait for it")
     run.add_argument("dag_id", choices=DAGS)

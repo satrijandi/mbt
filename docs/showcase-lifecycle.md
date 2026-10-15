@@ -88,13 +88,14 @@ That creates the `mbtops` and `mbtds` accounts, the `mbt-showcase/churn` repo (t
 ==> [1/8] Deployable unit: prod-build baked and pinned by digest, DAGs live in Airflow
     no deployable unit pinned yet: pushing to main so prod-build bakes the first one
     prod-build pipeline #1: http://localhost:8305/repos/1/pipeline/1
-    deployable unit baked and pinned: localhost:15000/mbt/churn@sha256:3bdd6a27...
+    deployable unit baked and pinned: localhost:15000/mbt/churn@sha256:14c77134...
+    git-sync has handed the pin to Airflow: every DAG task runs that unit
     Airflow has mbt_retrain, mbt_score, mbt_monitor registered and unpaused
 ```
 
 The DAGs run whatever image `images.env` in the deploy repo pins, and a fresh stack pins none.
 So the target commits `LIFECYCLE.md` to the churn repo's `main` as `mbtops` - exactly what a merge produces - and Woodpecker's prod-build does the rest: trains on the `dev` target, publishes the state baseline, bakes the unit, pushes it to Zot, and writes its digest into the deploy repo.
-git-sync then hands the deploy repo to Airflow, and the target waits until all three DAGs are registered and unpaused.
+git-sync then copies the deploy repo to Airflow every 5 seconds, so for a moment Gitea has the pin and the copy a DAG task reads does not; the target waits until that copy pins the same unit, then until all three DAGs are registered and unpaused.
 On a rerun the unit is already pinned, and this step says so and moves on.
 
 ### 2. Reset

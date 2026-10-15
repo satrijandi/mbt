@@ -25,6 +25,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 #: else matching test_showcase_*.py is gated.
 HERMETIC = frozenset(
     {
+        "test_showcase_drivers",
         "test_showcase_gates",
         "test_showcase_image_pins",
         "test_showcase_panel",

@@ -56,7 +56,12 @@ def run_in_unit(mbt_args: list[str], *, anchor: str, alert_class_2_owner: bool =
 
     conf = load_conf()
     if not conf.get("IMAGE"):
-        raise AirflowException("images.env has no IMAGE pin yet - run a prod build first")
+        # CONF_PATH is resolved, so it names git-sync's worktree: the deploy
+        # commit this task read, to compare with the deploy repo's main.
+        raise AirflowException(
+            f"images.env has no IMAGE pin yet ({CONF_PATH}) - run a prod build first; "
+            "if one just pinned a unit, git-sync has not synced it here yet"
+        )
 
     command = " ".join(shlex.quote(a) for a in mbt_args) + " " + anchor
     wrapped = (

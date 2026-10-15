@@ -6,13 +6,14 @@ REPO_ROOT := $(abspath $(SHOWCASE_DIR)/../..)
 -include $(SHOWCASE_DIR)/.env
 
 export SHOWCASE_WORKSPACE ?= $(HOME)/.cache/mbt-showcase/workspace
-# The Woodpecker OAuth app `make ci` created, so every later compose up -
-# `make lifecycle` starting Airflow, or a plain `docker compose up` - keeps
-# Woodpecker on it. Without this, compose saw the placeholder credentials as
-# changed env and recreated Woodpecker unable to log anyone in.
+# The Woodpecker OAuth app `make ci` created, which compose_up below loads so
+# every later compose up - `make lifecycle` starting Airflow, a `make ci`
+# re-run - keeps Woodpecker on it. Without it, compose saw the placeholder
+# credentials as changed env and recreated Woodpecker unable to log anyone in.
+# Loaded when the recipe runs, not included when make parses this file: on a
+# fresh stack `make lifecycle` runs `make ci` as a sub-make, which writes the
+# file after this make has already read its makefiles.
 WOODPECKER_ENV = $(SHOWCASE_WORKSPACE)/woodpecker.env
--include $(WOODPECKER_ENV)
-export SHOWCASE_WOODPECKER_CLIENT SHOWCASE_WOODPECKER_SECRET
 export SHOWCASE_RUNNER_IMAGE ?= mbt-showcase-runner:dev
 # Overrides read from .env must reach docker compose's ${...:-default}
 # interpolation (make does not export include'd variables by itself).
@@ -41,7 +42,8 @@ COMPOSE = $(COMPOSE_BASE) --profile core --profile spark --profile dev --profile
 # Start just these profiles' services. `make up` boots the data/ML core plus
 # observability; the forge (ci) and the scheduler it feeds (orch) start with
 # `make ci`, so a DS loop on a small machine never runs them.
-compose_up = $(COMPOSE_BASE) $(foreach p,$(1),--profile $(p)) up -d --wait
+compose_up = { set -a; [ ! -f "$(WOODPECKER_ENV)" ] || . "$(WOODPECKER_ENV)"; set +a; } && \
+	$(COMPOSE_BASE) $(foreach p,$(1),--profile $(p)) up -d --wait
 EXEC = $(COMPOSE) exec -T --workdir /workspace/project jupyterlab
 # Anchors come from the DATA, never the clock: the day after the lake's newest
 # weekly cohort to build and score, ten days later to monitor
@@ -255,7 +257,8 @@ lifecycle:
 	$(call compose_up,core spark obs ci orch)
 	@echo "==> [1/8] Deployable unit: prod-build baked and pinned by digest, DAGs live in Airflow"
 	@$(LIFECYCLE) unit --gitea-url http://localhost:$(GITEA_PORT) \
-	  --woodpecker-url http://localhost:$(WOODPECKER_PORT) --airflow-url $(AIRFLOW_URL)
+	  --woodpecker-url http://localhost:$(WOODPECKER_PORT) --airflow-url $(AIRFLOW_URL) \
+	  --compose-project $(SHOWCASE_PROJECT)
 	@echo "==> [2/8] The newest cohort as seeded: its outcome week is still open, labels NULL"
 	$(PANEL) reset
 	@echo "==> [3/8] Airflow mbt_retrain: mbt build --target prod in the unit (cluster + sparkling H2O)"
