@@ -1461,6 +1461,42 @@ Measured on OrbStack, two runner-image rebuilds took the VM from 27GB free to 2G
 **Fix:** run `make doctor` (`make up` runs it first): it knows when a build is coming - no runner image, or one whose content label is not this checkout's - and then wants about 25GB free, and it prints how much build cache is reclaimable.
 `docker builder prune --filter 'type!=exec.cachemount'` drops the layer cache but keeps the pip cache mount that makes the next build fast; also `docker rmi` old `localhost:15000/mbt/churn:*` units, or `make down` first, then `make up` again.
 
+### `failed to copy: httpReadSeeker: failed open` in the showcase's bake step
+
+**Symptom (the prod-build pipeline fails at its `bake` step):** the steps that run on the runner image pass, and then the bake's `docker build` fails:
+
+```text
+#8 ERROR: failed to copy: httpReadSeeker: failed open: failed to do request: Get "https://localhost/v2/mbt-showcase-runner/blobs/sha256:3f26bc2d...": dial tcp [::1]:443: connect: connection refused
+ERROR: failed to build: failed to solve: failed to copy: httpReadSeeker: failed open: failed to do request: Get "https://localhost/v2/mbt-showcase-runner/blobs/sha256:3f26bc2d...": dial tcp [::1]:443: connect: connection refused
+```
+
+A checkout from before the runner image was named `localhost/mbt-showcase-runner:dev` reports the same fault as a Docker Hub refusal:
+
+```text
+ERROR: failed to build: failed to solve: failed to copy: httpReadSeeker: failed open: server message: insufficient_scope: authorization failed
+```
+
+or, behind a TLS-intercepting proxy, as `x509: certificate signed by unknown authority` from `auth.docker.io`.
+
+**Why:** the docker daemon has lost the runner image's layer blobs but kept its unpacked layers.
+Containers start from the unpacked layers, so every step on the runner image still runs, but the bake has to copy the base layers into the new image, and with the blobs gone the daemon fetches them from the image's origin.
+The runner is never published under its local name, so that fetch can only fail.
+The `localhost/` prefix sends it to the daemon's own loopback, where no registry listens; the old bare name meant `docker.io/library/mbt-showcase-runner`, which made a local fault look like a registry or proxy problem.
+Re-pulling the runner does not repair it while any tag still holds the image; only removing every tag lets the daemon drop the damaged layers.
+Seen on Rancher Desktop (moby 29.5.2 with the containerd image store); how the blobs went missing is unknown.
+`docker images localhost/mbt-showcase-runner` gives it away: a healthy runner shows a CONTENT SIZE of about 2GB beside its 5.6GB DISK USAGE, a damaged one far less.
+
+**Fix:** remove every image that holds those layers, then let `make up` pull or build the runner again:
+
+```bash
+make down
+docker rmi $(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E 'mbt-showcase-runner|/mbt/churn:')
+docker builder prune -f --filter 'type!=exec.cachemount'
+make up
+```
+
+The `grep` takes the prebuilt `ghcr.io/...` tag and every `localhost:15000/mbt/churn:<sha>` unit too: each one shares the runner's layers, and a failed bake still leaves its tag behind.
+
 ### `advancing 1 week(s) moves the lake to ... that cohort has not happened yet`
 
 **Symptom (exit 1, the lake unchanged):**

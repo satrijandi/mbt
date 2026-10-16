@@ -29,12 +29,12 @@ clone:
 
 steps:
   - name: lint-promotions
-    image: mbt-showcase-runner:dev
+    image: localhost/mbt-showcase-runner:dev
     commands:
       - python3 scripts/lint_promotions.py
 
   - name: build
-    image: mbt-showcase-runner:dev
+    image: localhost/mbt-showcase-runner:dev
     environment:
       # Demo credentials, committed on purpose (they already live in
       # compose/seaweedfs/s3_config.json); the compose network is isolated.
@@ -65,7 +65,7 @@ steps:
         fi
 
   - name: comment
-    image: mbt-showcase-runner:dev
+    image: localhost/mbt-showcase-runner:dev
     when:
       - status: [success, failure]
     environment:

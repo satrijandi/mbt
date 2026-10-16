@@ -32,7 +32,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RUNNER_DIR="$REPO_ROOT/examples/showcase/images/runner"
 CACHE_DIR="${MBT_SHOWCASE_CACHE:-$HOME/.cache/mbt-showcase}/build"
-IMAGE_TAG="${MBT_SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}"
+# The image exists only in the local daemon, and the localhost/ name keeps it
+# that way. A bare name means docker.io/library/<name>: whenever the daemon
+# went to the image's origin - a Woodpecker step whose image is missing, or a
+# bake whose base has lost its layer blobs - it asked Docker Hub for an image
+# that was never published, and failed with `insufficient_scope`, or with an
+# x509 error behind a TLS-intercepting proxy. localhost/ sends that lookup to
+# the daemon's own loopback, which Go's HTTP client never proxies, so it fails
+# in a second, locally, whatever the network is doing.
+IMAGE_TAG="${MBT_SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}"
 CONTENT_LABEL="mbt.showcase.content"
 REMOTE_IMAGE="${MBT_SHOWCASE_REMOTE_IMAGE:-ghcr.io/satrijandi/mbt-showcase-runner}"
 

@@ -22,7 +22,7 @@ clone:
 
 steps:
   - name: promote
-    image: mbt-showcase-runner:dev
+    image: localhost/mbt-showcase-runner:dev
     environment:
       # Promotion only talks to the registry, but rendering profiles.yml
       # resolves the s3a env_var lookups strictly - the same env the build

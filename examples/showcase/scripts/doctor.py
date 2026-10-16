@@ -44,7 +44,7 @@ MEMORY_WANTED = 10 * GIB
 DISK_WARN_BUILD = 25 * GIB
 DISK_WARN = 8 * GIB  # image current: room for the lake, artifacts, logs and Airflow's db
 DISK_FAIL = 5 * GIB
-RUNNER_IMAGE = os.environ.get("SHOWCASE_RUNNER_IMAGE", "mbt-showcase-runner:dev")
+RUNNER_IMAGE = os.environ.get("SHOWCASE_RUNNER_IMAGE", "localhost/mbt-showcase-runner:dev")
 
 #: Host ports the stack publishes, by .env name, with their defaults.
 PORTS = {

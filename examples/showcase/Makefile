@@ -14,7 +14,7 @@ export SHOWCASE_WORKSPACE ?= $(HOME)/.cache/mbt-showcase/workspace
 # fresh stack `make lifecycle` runs `make ci` as a sub-make, which writes the
 # file after this make has already read its makefiles.
 WOODPECKER_ENV = $(SHOWCASE_WORKSPACE)/woodpecker.env
-export SHOWCASE_RUNNER_IMAGE ?= mbt-showcase-runner:dev
+export SHOWCASE_RUNNER_IMAGE ?= localhost/mbt-showcase-runner:dev
 # Overrides read from .env must reach docker compose's ${...:-default}
 # interpolation (make does not export include'd variables by itself).
 # Undefined names export as empty, which :- treats the same as unset.

@@ -6,7 +6,9 @@
 # Same-image bake is what makes ADR-19 env_digest verification hold by
 # construction: `mbt run --manifest` inside this image sees the environment
 # the manifest was compiled in, byte for byte.
-FROM mbt-showcase-runner:dev
+#
+# localhost/ keeps the base off every registry: see scripts/build_image.sh.
+FROM localhost/mbt-showcase-runner:dev
 
 COPY . /app/project
 WORKDIR /app/project

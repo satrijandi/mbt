@@ -45,7 +45,7 @@ SHOWCASE_MARKS = [
 
 ANCHOR = "2026-09-29T00:00:00Z"
 MONITOR_ANCHOR = "2026-10-09T00:00:00Z"
-RUNNER_IMAGE = os.environ.get("MBT_SHOWCASE_RUNNER_IMAGE", "mbt-showcase-runner:dev")
+RUNNER_IMAGE = os.environ.get("MBT_SHOWCASE_RUNNER_IMAGE", "localhost/mbt-showcase-runner:dev")
 
 
 def require_docker() -> None:

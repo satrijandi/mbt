@@ -323,3 +323,53 @@ def test_the_docker_socket_probe_uses_airflow_dbs_image() -> None:
     probe = re.search(r'^PROBE_IMAGE="([^"]+)"$', SOCK_PROBE.read_text(), re.M)
     assert probe, "docker_sock_gid.sh no longer declares PROBE_IMAGE"
     assert probe.group(1) == image, f"probe uses {probe.group(1)}, airflow-db uses {image}"
+
+
+# -- runner image name (local-only, one spelling) -----------------------------
+
+SHOWCASE_DIR = REPO_ROOT / "examples" / "showcase"
+LOCAL_RUNNER = "localhost/mbt-showcase-runner:dev"
+#: Consumers of the name outside the showcase: the test harness and the
+#: workflow that publishes the prebuilt image. Markdown is not scanned - prose
+#: quotes registry URLs and the old name - and only a ghcr.io/<owner>/ pull
+#: source may name the image without localhost/.
+RUNNER_NAME_ELSEWHERE = [
+    REPO_ROOT / "tests" / "showcase_utils.py",
+    *sorted((REPO_ROOT / ".github").rglob("*.yml")),
+]
+
+
+def test_every_reference_names_the_runner_image_under_localhost() -> None:
+    """The runner image is built or retagged on the host and never published
+    under its local name, so every reference must say localhost/. A bare name
+    means docker.io/library/mbt-showcase-runner, and the daemon goes there
+    whenever it reaches for the image's origin: Woodpecker pulls a step image
+    it cannot find, and a bake whose base has lost its layer blobs fetches them.
+    Both then failed against Docker Hub (`insufficient_scope`, or x509 behind
+    a TLS-intercepting proxy) instead of failing locally. The tag has seven
+    consumers - compose, the Makefile, build_image.sh, doctor.py, the test
+    harness, the Woodpecker steps and the bake's FROM - and one bare spelling
+    in any of them brings the registry round trip back.
+    """
+    sources = [
+        path
+        for path in sorted(SHOWCASE_DIR.rglob("*"))
+        if path.is_file()
+        and path.suffix != ".md"
+        and path.name != ".env"
+        and "__pycache__" not in path.parts
+    ]
+    local_refs: set[str] = set()
+    for path in [*sources, *RUNNER_NAME_ELSEWHERE]:
+        text = path.read_text(errors="ignore")
+        for match in re.finditer(r"mbt-showcase-runner(:[\w.-]+)?", text):
+            before = text[max(0, match.start() - 80) : match.start()]
+            if before.endswith("localhost/"):
+                local_refs.add("localhost/" + match.group(0))
+                continue
+            line = text.count("\n", 0, match.start()) + 1
+            assert re.search(r"ghcr\.io/[^/\n]+/$", before), (
+                f"{path.relative_to(REPO_ROOT)}:{line} names the runner image without "
+                f"localhost/, which resolves to docker.io/library/{match.group(0)}"
+            )
+    assert local_refs == {LOCAL_RUNNER}, local_refs

@@ -86,7 +86,7 @@ services:
       retries: 30
 
   mlflow:
-    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [core]
     # --allowed-hosts: mlflow 3.x rejects non-localhost Host headers (DNS
     # rebinding protection); in-network clients send Host: mlflow:5000.
@@ -105,7 +105,7 @@ services:
       retries: 60
 
   spark-master:
-    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [spark]
     command: spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080
     ports:
@@ -117,7 +117,7 @@ services:
       retries: 30
 
   spark-worker:
-    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [spark]
     command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --cores 4 --memory 4g --webui-port 8081
     environment:
@@ -134,7 +134,7 @@ services:
       retries: 30
 
   jupyterlab:
-    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [dev]
     command: jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''
     working_dir: /workspace
@@ -264,7 +264,7 @@ services:
       - "127.0.0.1:${SHOWCASE_ZOT_PORT:-15000}:5000"
 
   webhook-sink:
-    image: ${SHOWCASE_RUNNER_IMAGE:-mbt-showcase-runner:dev}
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     # The one alert inbox: CI's exit-code wrapper curls it, and Alertmanager
     # delivers model alerts to it. Observability's, so it runs whenever the
     # alerts it receives can fire, forge or no forge.
