@@ -2,7 +2,10 @@
 
 Selection governs which models *train*; every dataset a selected model needs
 joins the execution plan even if unselected (datasets are cheap
-materializations and CI runners start cold).
+materializations and CI runners start cold). ``auto_materialize=False``
+(``--no-auto-materialize``, ADR-32) is the exact-node mode an orchestrator
+wants: the plan is the selection and nothing else, and a model reads its
+dataset from the cache a dataset node already filled.
 """
 
 from dataclasses import dataclass
@@ -34,6 +37,7 @@ def plan_execution(
     state: StateIndex | None = None,
     *,
     executable: tuple[str, ...] = _EXECUTABLE,
+    auto_materialize: bool = True,
 ) -> ExecutionPlan:
     """Plan one command's execution set.
 
@@ -41,6 +45,10 @@ def plan_execution(
     datasets + models; ``mbt score`` executes scoring nodes only (their
     input materializes inside the runner, and the model comes from the
     registry, so nothing auto-joins the plan).
+
+    With ``auto_materialize`` off, selected models do not pull their upstream
+    datasets in either; whether those datasets exist is the runner's question,
+    asked only if the model actually needs one.
     """
     graph = manifest.graph()
     selectable = manifest.selectable_nodes()
@@ -52,7 +60,8 @@ def plan_execution(
     }
 
     execution_set = set(selected)
-    for uid in selected:
+    pulling_upstream = selected if auto_materialize else set()
+    for uid in pulling_upstream:
         node = manifest.nodes[uid]
         if node.resource_type != "model":
             continue

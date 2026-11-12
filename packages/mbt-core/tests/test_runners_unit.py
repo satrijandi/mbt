@@ -510,7 +510,7 @@ def test_a_model_with_no_dataset_dependency_records_no_window_use(tmp_path: Path
         unique_id="model.d.m", resource_type="model", name="m", path="m.yml", config={}
     )
     ModelRunner(ctx)._note_window_reuse(node, "model.d.m")  # type: ignore[arg-type]
-    assert read_log(tmp_path) == {}
+    assert read_log(tmp_path / "gate_history.json") == {}
 
 
 def test_an_overused_test_window_warns_on_the_bus(tmp_path: Path) -> None:
@@ -520,6 +520,7 @@ def test_an_overused_test_window_warns_on_the_bus(tmp_path: Path) -> None:
     from mbt.contracts import ManifestNode
     from mbt.execute.runners import ModelRunner
     from mbt.state.gate_log import REUSE_WARN_THRESHOLD
+    from mbt.state.layout import TargetLayout
 
     dataset = ManifestNode(
         unique_id="dataset.d.panel",
@@ -538,7 +539,8 @@ def test_an_overused_test_window_warns_on_the_bus(tmp_path: Path) -> None:
         depends_on=["dataset.d.panel"],
     )
     ctx = SimpleNamespace(
-        manifest=SimpleNamespace(nodes={"dataset.d.panel": dataset}), project_dir=tmp_path
+        manifest=SimpleNamespace(nodes={"dataset.d.panel": dataset}),
+        layout=TargetLayout.for_project(tmp_path),
     )
     runner = ModelRunner(ctx)  # type: ignore[arg-type]
     with recording_bus() as sink:

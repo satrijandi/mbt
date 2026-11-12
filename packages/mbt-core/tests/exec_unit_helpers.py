@@ -66,6 +66,7 @@ def make_execution_context(
         profiles=prepared.profiles,
         registry=prepared.registry,
         project_dir=opts.project_dir.resolve(),
+        layout=opts.layout,
         run_id=prepared.run_id,
         command=command,
         cli_vars=opts.cli_vars,

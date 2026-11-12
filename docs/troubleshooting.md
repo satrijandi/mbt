@@ -504,25 +504,50 @@ the shape change would be invisible to both of mbt's hashes.
 
 ### `another mbt command is already writing <project>/target`
 
-**Symptom (hard error, exit 1):**
+**Symptom (hard error, exit 1; captured from a real reproduction):**
 
 ```text
 Error: another mbt command is already writing
 /home/ci/churn_models/target: pid 65957 (mbt build, started
 2026-10-04T10:44:06+00:00)
-  hint: wait for it to finish, or run this one from a separate checkout; the
-lock is released the moment that process exits, so a crashed run never leaves it
-behind
+  hint: wait for it to finish, or give this one its own directory with
+--target-path (or run it from a separate checkout); the lock is released the
+moment that process exits, so a crashed run never leaves it behind
 ```
 
-**Why:** every command that writes `target/` (`compile`, `build`, `run`, `test`, `score`, `evaluate`, `monitor`, `docs generate`, `clean`) holds a lock on `target/.mbt.lock` while it runs.
-Two commands writing one project's `target/` at once corrupt each other: mbt versions before v0.2.0 either failed one of them on a DuckDB file lock (misreported as a filter problem) or let both finish, with the last writer's `manifest.json` and `run_results.json` silently winning.
+**Why:** every command that writes a target directory (`compile`, `build`, `run`, `test`, `score`, `evaluate`, `monitor`, `docs generate`, `clean`) holds a lock on `.mbt.lock` inside it while it runs - `target/` unless `--target-path` says otherwise.
+Two commands writing one directory at once corrupt each other: mbt versions before v0.2.0 either failed one of them on a DuckDB file lock (misreported as a filter problem) or let both finish, with the last writer's `manifest.json` and `run_results.json` silently winning.
 This happens wherever a project directory is shared: cron or an Airflow worker on one host, or a developer building while a scheduled run is in flight.
 CI runners that check out a fresh copy per job never see it.
 
 **Fix:** let the named process finish, then re-run.
-To run two commands at the same time, give each its own checkout.
+To run two commands at the same time, give each its own directory with `--target-path` (or `MBT_TARGET_PATH`), or its own checkout.
+Tasks that must share datasets add `--datasets-path` pointing at one common directory; they then take turns only while building the same dataset.
 The lock is an operating-system lock tied to the holding process, so there is never a stale lock to delete: if the named pid is gone, so is the lock.
+
+### `dataset '<name>' is not materialized in <datasets-path>`
+
+**Symptom (hard error on the model node, exit 1, only with `--no-auto-materialize`; captured from a real reproduction):**
+
+```text
+[1/1] ERROR model model.proj.churn_classifier in 0.00s - dataset
+          'churn_training_set' is not materialized in
+          /runs/42/empty-cache (key ea5bead90c44)
+          resource: dataset.proj.churn_training_set
+          hint: build it first with 'mbt build --select churn_training_set'
+          against the same --manifest, --vars and --datasets-path, or drop
+          --no-auto-materialize
+```
+
+**Why:** `--no-auto-materialize` runs exactly the nodes you selected (ADR-32), so the model reads its dataset from the dataset cache instead of building it.
+The cache had no finished materialization for this dataset's key.
+Either no task has built it yet, or it was built under a different key or into a different directory.
+The key hashes the dataset's pinned inputs, its resolved windows, and `sample_fraction`, so a different `--manifest`, anchor, or `--vars sample_fraction` is a different key.
+
+**Fix:** run the dataset's node first, with the same `--manifest`, `--vars`, and `--datasets-path` as the model's.
+In a scheduler, make the model task depend on the dataset task and give both the same `MBT_DATASETS_PATH` on a directory they can all see.
+Exit 1 is deliberate: a missing prerequisite is retried by the scheduler, and exit 2 stays reserved for a quality verdict.
+If you want the model task to build its own dataset, drop `--no-auto-materialize`.
 
 ### `Permission denied` reading `target/manifest.json` or `target/run_results.json`
 

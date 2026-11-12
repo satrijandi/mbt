@@ -26,7 +26,7 @@ class GcPlan:
     root: Path | None = None
 
 
-def run_results_artifact_uris(project_dir: Path) -> set[str]:
+def run_results_artifact_uris(results_path: Path) -> set[str]:
     """Artifact URIs recorded by the latest *training* run.
 
     Prefers the per-command siblings over the shared ``run_results.json``:
@@ -41,7 +41,6 @@ def run_results_artifact_uris(project_dir: Path) -> set[str]:
     sidecar (R2-19). A file it cannot read contributes nothing to the
     keep-set, and the champion half still protects what matters.
     """
-    results_path = project_dir / "target" / "run_results.json"
     candidates = [
         path
         for path in (command_results_path(results_path, c) for c in ("build", "run", "evaluate"))

@@ -50,6 +50,9 @@ These behave the same on every command that accepts them.
 | `--allow-env-mismatch` | With `--manifest`, downgrade an `env_digest` mismatch from an error to a warning. A freeze-only mismatch always just warns |
 | `--anchor TIMESTAMP` | Pin the time anchor every window expression resolves against (ISO 8601, e.g. `2026-06-30T00:00:00Z`); defaults to now |
 | `--deep-snapshot` | Pin data snapshots by content hash instead of the default file listing. Slower, and immune to mtime churn from fresh checkouts (ADR-11). Use one scheme per pipeline |
+| `--target-path DIR` | Directory this command writes its manifest, results, logs, and lock to, instead of `<project>/target`. One writer per directory, so concurrent tasks each take their own. Also `MBT_TARGET_PATH`. On `parse`, `compile`, `run`, `build`, `test`, `score`, `evaluate`, `monitor`, `predictions`, `docs`, and `clean` (ADR-32) |
+| `--datasets-path DIR` | Directory of the dataset cache, instead of `<target-path>/datasets`. Point concurrent tasks at one shared directory and a model reads the dataset another task built; two builders of one key take turns. Also `MBT_DATASETS_PATH`. On `run`, `build`, `test`, `score`, and `evaluate` (ADR-32) |
+| `--no-auto-materialize` | Run exactly the selected nodes: an upstream dataset the selection does not name is read from the dataset cache instead of being built, and a missing one is an error (exit 1). On `run`, `build`, `test`, and `score`, where it has no effect on `score` because a scoring plan never builds datasets (ADR-32) |
 | `--log-format FORMAT` | Event format on stderr: `text` (the default) or `json`, which also suppresses the results table |
 | `-q`, `--quiet` | Suppress events |
 | `-v`, `--verbose` | Show debug-level events, such as per-trial tuning lines (text mode only) |
@@ -58,15 +61,16 @@ These behave the same on every command that accepts them.
 
 ### Paths
 
-Paths you type on the command line (`--state`, `--manifest`, `--from-file`, `--profiles-dir`) are relative to where you run mbt, as in any shell command.
+Paths you type on the command line (`--state`, `--manifest`, `--from-file`, `--profiles-dir`, `--target-path`, `--datasets-path`) are relative to where you run mbt, as in any shell command.
 Relative paths inside config files (a `file://` artifact store, a sqlite URI, an adapter `root`) resolve against the project directory, wherever mbt runs from.
-URIs such as `s3://...` pass through untouched.
+URIs such as `s3://...` pass through untouched, except for `--target-path` and `--datasets-path`, which must be local directories (a mounted shared volume is fine).
 
 ### Environment variables
 
 | Variable | Effect |
 |---|---|
 | `MBT_PROFILES_DIR` | Directory holding `profiles.yml`, checked after `--profiles-dir` |
+| `MBT_TARGET_PATH`, `MBT_DATASETS_PATH` | The environment spelling of `--target-path` and `--datasets-path`, for schedulers that set a task's environment instead of its arguments. The flag wins; a relative value is relative to where mbt runs |
 | `MBT_LOG_FILE=PATH` | Also append every event as redacted JSON lines to `PATH`, whatever `--log-format` and `--quiet` say. Relative to where mbt runs; each line carries a `run_id`, so overlapping runs can share a file |
 | `MBT_OTEL=1` | Emit each command as an OpenTelemetry trace - a root span per command and a child span per node - against your process's configured tracer. Needs `mbt-core[otel]`; mbt ships no exporter, so wire one through the standard `OTEL_*` variables. Setting it without the extra is an error, not a silent no-op |
 | `MBT_DEBUG=1` | Print the full traceback for an `Internal error` instead of the one-line summary |
@@ -74,6 +78,8 @@ URIs such as `s3://...` pass through untouched.
 Values in `profiles.yml` read the environment through `{{ env_var('NAME') }}` (secrets, redacted everywhere) and `{{ env('NAME') }}` (plain values); see [Reading the environment](spec-reference.md#reading-the-environment-env_var-vs-env).
 
 ### Files mbt writes
+
+Paths are under the target directory, `target/` unless `--target-path` says otherwise; `datasets/` is under `--datasets-path` when that is given.
 
 | Path | Written by | Contents |
 |---|---|---|
@@ -109,6 +115,7 @@ mbt build --select state:modified+ --state state/prod/latest.json
 A name, `tag:` or `resource_type:` atom that matches nothing in the project is an error (exit 1) with a did-you-mean, on `--select` and `--exclude` alike: a typo or a renamed tag must not turn a scheduled run into a green no-op.
 A selection that is legitimately empty still exits 0: `state:modified` when nothing changed, or an intersection of atoms that each match something but share nothing.
 Selection decides which models **train**; every dataset a selected model needs is materialized regardless, from cache when possible (ADR-13).
+`--no-auto-materialize` turns that off: the plan is the selection, and a model reads its dataset from the cache instead.
 
 ## Project setup
 
@@ -148,6 +155,7 @@ Delete `target/`, or garbage-collect the artifact store.
 
 ```bash
 mbt clean
+mbt clean --target-path /scratch/run-42/task-a
 mbt clean --artifacts-older-than 30d [--dry-run]
 ```
 
@@ -159,6 +167,9 @@ mbt clean --artifacts-older-than 30d [--dry-run]
 | `--dry-run` | List what the artifact GC would delete, and delete nothing |
 
 </div>
+
+`mbt clean --target-path DIR` deletes `DIR` instead, but only if an mbt command has used it as a target directory (it holds the `.mbt.lock` every command leaves there); any other directory is refused, so a mistyped path cannot remove something that was never mbt's.
+A `--datasets-path` kept outside the target path is a shared cache and is left alone.
 
 Plain `mbt clean` also removes debugging payloads that failed training jobs left in the temp directory (`mbt-job-*`) once they are older than 7 days.
 
@@ -210,6 +221,20 @@ mbt build [--select ...] [--state PATH_OR_URI] [--threads N] [--fail-fast]
 
 A node that fails - an error, a failed check or test, a failed gate - skips its downstream nodes, and independent branches keep going unless `--fail-fast` is set.
 A model registers only when every one of its gates passes, and lands in the spec's `registration.stage_on_pass` stage.
+
+**One node per task.**
+An orchestrator that runs each node as its own task gives every task a private target directory over one shared dataset cache, and reads every task from the manifest one compile wrote (ADR-32):
+
+```bash
+mbt compile --anchor 2026-07-01T00:00:00Z --target-path /runs/42/compile
+mbt build --manifest /runs/42/compile/manifest.json --select churn_training_set \
+    --target-path /runs/42/dataset --datasets-path /runs/42/datasets
+mbt build --manifest /runs/42/compile/manifest.json --select churn_classifier --no-auto-materialize \
+    --target-path /runs/42/model --datasets-path /runs/42/datasets
+```
+
+The model task builds nothing: it reads the dataset the second command left in `/runs/42/datasets`.
+If that dataset is not there it fails with exit `1` (`dataset 'churn_training_set' is not materialized`), so the scheduler retries it rather than paging a model owner, and `--vars` and `--manifest` must match the dataset task's for the cache key to match.
 
 ### `mbt test`
 

@@ -85,6 +85,7 @@ def run_monitor(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
         profiles=prepared.profiles,
         registry=prepared.registry,
         project_dir=opts.project_dir.resolve(),
+        layout=opts.layout,
         run_id=prepared.run_id,
         command="monitor",
         cli_vars=opts.cli_vars,
@@ -118,7 +119,7 @@ def run_monitor(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
         ),
         results=results,
     )
-    run_results.write(opts.project_dir / "target" / "run_results.json")
+    run_results.write(opts.layout.run_results)
     statuses: list[str] = [r.status for r in results]
     bus.emit(
         RunFinished(
@@ -295,7 +296,7 @@ def _materialize_labels(ctx: ExecutionContext, node: ManifestNode, spec: Scoring
         resolved_windows={},
         sample_fraction=1.0,  # never sample labels: evaluation wants them all
         deep_snapshot=ctx.manifest.metadata.deep_snapshot,
-        output_dir=ctx.project_dir / "target" / "scoring_inputs" / f"{node.name}_labels" / key,
+        output_dir=ctx.layout.scoring_input_dir(f"{node.name}_labels", key),
         events=_LabelReadEvents(get_bus()),
         columns=tuple(dict.fromkeys(needed)),
     )

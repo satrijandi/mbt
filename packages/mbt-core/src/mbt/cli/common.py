@@ -18,6 +18,7 @@ from mbt.exceptions import ConfigError, MbtError
 from mbt.execute.orchestrator import InvocationOptions
 from mbt.parsing import ParsedProject
 from mbt.secrets import redact
+from mbt.state.layout import TargetLayout
 from mbt.yamlio import safe_load
 
 err_console = Console(stderr=True, highlight=False)
@@ -52,6 +53,10 @@ class CLIContext:
     #: Surface debug-level events in text mode (ConsoleSink drops them by
     #: default); no effect in json/quiet modes, which are unconditional.
     verbose: bool = False
+    #: ``--target-path`` / ``--datasets-path`` as typed (ADR-32); :attr:`layout`
+    #: absolutizes them against the invocation cwd.
+    target_path: str | None = None
+    datasets_path: str | None = None
 
     @classmethod
     def enter(
@@ -65,6 +70,8 @@ class CLIContext:
         verbose: bool = False,
         *,
         chdir: bool = True,
+        target_path: str | None = None,
+        datasets_path: str | None = None,
     ) -> "CLIContext":
         """Build the per-command context and enter the project directory.
 
@@ -100,9 +107,20 @@ class CLIContext:
             log_format=log_format,
             quiet=quiet,
             verbose=verbose,
+            target_path=target_path,
+            datasets_path=datasets_path,
         )
         setup_bus(ctx)
         return ctx
+
+    @property
+    def layout(self) -> TargetLayout:
+        """Where this command writes: its own ``--target-path``, else ``<project>/target``."""
+        return TargetLayout.for_project(
+            self.project_dir,
+            self.resolve_cli_path(self.target_path),
+            self.resolve_cli_path(self.datasets_path),
+        )
 
     def parse(self, *, warn: bool = True) -> ParsedProject:
         """Parse the project, surfacing the parser's warnings by default.
@@ -187,6 +205,8 @@ class CLIContext:
             profiles_dir=self.profiles_dir,
             target=self.target,
             cli_vars=self.cli_vars,
+            target_path=self.resolve_cli_path(self.target_path),
+            datasets_path=self.resolve_cli_path(self.datasets_path),
             **kwargs,
         )
 

@@ -117,25 +117,37 @@ def show_cmd(
 
 
 def clean_target_cmd(cli: "CLIContext") -> list[str]:
-    """Delete ``target/`` and age out leaked job-payload dirs; return the notes.
+    """Delete the target directory and age out leaked job-payload dirs; return the notes.
 
     Goes through ``cli.project_dir``, which is resolved and chdir'd. The command
     body used to call ``shutil.rmtree`` on the raw typer path with no context at
     all (A-2), so ``--project-dir`` was interpreted relative to the invocation
     cwd here and relative to nothing anywhere else.
+
+    The default ``<project>/target`` is deleted freely. A ``--target-path`` is a
+    directory the user named, so it is deleted only if mbt demonstrably owns it
+    (it holds the ``.mbt.lock`` every mbt command leaves there): ``mbt clean
+    --target-path ~`` must not be able to remove a home directory.
     """
     import shutil
     from datetime import UTC, datetime, timedelta
 
     from mbt.adapters.local.compute import sweep_stale_job_payloads
+    from mbt.exceptions import ConfigError
+    from mbt.state.lock import LOCK_FILE, target_lock
 
     notes: list[str] = []
-    target_dir = cli.project_dir / "target"
+    layout = cli.layout
+    target_dir = layout.root
     if target_dir.is_dir():
-        from mbt.state.lock import target_lock
-
+        if layout.custom_root and not (target_dir / LOCK_FILE).is_file():
+            raise ConfigError(
+                f"refusing to delete {target_dir}: it has no {LOCK_FILE}, so no mbt command "
+                "has used it as a target directory",
+                hint="check --target-path; remove the directory by hand if it really is one",
+            )
         # Never delete a target/ another command is still writing (B-1).
-        with target_lock(cli.project_dir, "clean"):
+        with target_lock(target_dir, "clean"):
             shutil.rmtree(target_dir)
         notes.append(f"removed {target_dir}")
     else:

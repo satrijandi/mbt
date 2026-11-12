@@ -47,6 +47,8 @@ from mbt.runtime import (
     tracking_adapter as build_tracking_adapter,
 )
 from mbt.secrets import Secret
+from mbt.state.layout import TargetLayout
+from mbt.state.lock import materialization_lock
 from mbt.storage import artifact_store_for
 from mbt.utils import canonical_json
 from mbt_adapter_base import (
@@ -126,6 +128,8 @@ class ExecutionContext:
     profiles: LoadedProfiles
     registry: AdapterRegistry
     project_dir: Path
+    #: Where this invocation writes and where datasets are cached (ADR-32).
+    layout: TargetLayout
     run_id: str
     command: str  # run | build | test | evaluate
     cli_vars: dict[str, Any] = field(default_factory=dict)
@@ -187,8 +191,54 @@ class ExecutionContext:
         return build_registry_adapter(self.profiles, self.project_dir, self.registry)
 
     def dataset_handle(self, uid: str) -> Any:
+        """The handle for a dataset this model reads.
+
+        Normally the one this invocation's own dataset node stored. Under
+        ``--no-auto-materialize`` the dataset was built by some other
+        invocation, so it comes from the dataset cache - or is an error: an
+        exact-node run never builds what it was not asked to build.
+        """
         with self._state_lock:
-            return self._dataset_handles[uid]
+            handle = self._dataset_handles.get(uid)
+        if handle is not None:
+            return handle
+        node = self.manifest.nodes[uid]
+        handle = self.cached_dataset(node)
+        if handle is None:
+            key = materialization_key(node, self.sample_fraction())
+            raise StateError(
+                f"dataset {node.name!r} is not materialized in {self.layout.datasets} "
+                f"(key {key[:12]})",
+                resource=uid,
+                hint=f"build it first with 'mbt build --select {node.name}' against the same "
+                "--manifest, --vars and --datasets-path, or drop --no-auto-materialize",
+            )
+        self.store_dataset_handle(uid, handle)
+        return handle
+
+    def sample_fraction(self) -> float:
+        return float(self.merged_vars.get("sample_fraction", 1.0))
+
+    def dataset_dir(self, node: ManifestNode) -> Path:
+        """Where ``node``'s materialization lives (or would): ``<datasets>/<name>/<key>``."""
+        return self.layout.dataset_dir(node.name, materialization_key(node, self.sample_fraction()))
+
+    def cached_dataset(self, node: ManifestNode) -> Any:
+        """The handle of an already-materialized dataset, or None if the cache has none.
+
+        A materialization counts only once its ``_SUCCESS`` marker exists; the
+        marker is the last thing a build writes.
+        """
+        output_dir = self.dataset_dir(node)
+        if not (output_dir / "_SUCCESS").is_file():
+            return None
+        return self.data_adapter.from_locator(
+            DatasetLocator(
+                adapter=self.profiles.target.data.adapter,
+                uri=f"file://{output_dir.resolve()}",
+                snapshot_id=node.snapshot_id or "",
+            )
+        )
 
     def store_dataset_handle(self, uid: str, handle: Any) -> None:
         with self._state_lock:
@@ -382,18 +432,38 @@ class DatasetRunner:
 
     def _materialize(self, node: ManifestNode, spec: DatasetSpec) -> Any:
         ctx = self.ctx
-        sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
-        key = materialization_key(node, sample_fraction)
-        output_dir = ctx.project_dir / "target" / "datasets" / node.name / key
-        if (output_dir / "_SUCCESS").is_file():
-            get_bus().emit(LogMessage(unique_id=node.unique_id, message=f"cache hit ({key})"))
-            return ctx.data_adapter.from_locator(
-                DatasetLocator(
-                    adapter=ctx.profiles.target.data.adapter,
-                    uri=f"file://{output_dir.resolve()}",
-                    snapshot_id=node.snapshot_id or "",
+        output_dir = ctx.dataset_dir(node)
+
+        def waiting() -> None:
+            get_bus().emit(
+                LogMessage(
+                    unique_id=node.unique_id,
+                    message=(
+                        f"another process is materializing {node.name} ({output_dir.name}); "
+                        "waiting for it"
+                    ),
                 )
             )
+
+        cached = ctx.cached_dataset(node)
+        if cached is None:
+            # The dataset cache can be shared between invocations (ADR-32), so
+            # a build is one critical section per key: the second builder
+            # waits, then finds the first one's _SUCCESS instead of emptying
+            # the directory under it. Probing first keeps a warm cache free of
+            # lock files, and readable from a read-only mount.
+            with materialization_lock(output_dir, on_wait=waiting):
+                cached = ctx.cached_dataset(node)
+                if cached is None:
+                    return self._build(node, spec, output_dir)
+        get_bus().emit(
+            LogMessage(unique_id=node.unique_id, message=f"cache hit ({output_dir.name})")
+        )
+        return cached
+
+    def _build(self, node: ManifestNode, spec: DatasetSpec, output_dir: Path) -> Any:
+        ctx = self.ctx
+        sample_fraction = ctx.sample_fraction()
         source_tables = {
             dep: ctx.manifest.sources[dep].config
             for dep in node.depends_on
@@ -614,7 +684,7 @@ class ModelRunner:
         windows = (dataset_node.resolved.get("windows") or {}) if dataset_node else {}
         test = windows.get("test")
         window = (str(test[0]), str(test[1])) if test and len(test) == 2 else None
-        use = record_evaluation(self.ctx.project_dir, dataset_uid, window)
+        use = record_evaluation(self.ctx.layout.gate_history, dataset_uid, window)
         if use is not None and use.overused:
             get_bus().emit(LogMessage(level="warn", unique_id=uid, message=reuse_warning(use)))
 
@@ -1120,9 +1190,9 @@ class ScoringRunner:
 
     def _materialize_input(self, node: ManifestNode, spec: ScoringSpec) -> Any:
         ctx = self.ctx
-        sample_fraction = float(ctx.merged_vars.get("sample_fraction", 1.0))
+        sample_fraction = ctx.sample_fraction()
         key = materialization_key(node, sample_fraction)
-        output_dir = ctx.project_dir / "target" / "scoring_inputs" / node.name / key
+        output_dir = ctx.layout.scoring_input_dir(node.name, key)
         # No cache reuse for scoring inputs: a scoring batch is expected-mutable
         # (fresh unlabeled rows, or the labels `mbt monitor` reads through this
         # same path, change every run), and under --manifest the key is fully

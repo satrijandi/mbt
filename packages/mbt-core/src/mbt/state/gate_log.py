@@ -20,20 +20,19 @@ So this counts and warns, and carries no policy. It is worth doing for the same
 reason the backtest std is reported next to the backtest mean: it tells a reader
 how much to trust a number that otherwise looks unconditional.
 
-**Where it lives.** ``target/gate_history.json``, beside ``run_results.json``.
+**Where it lives.** ``gate_history.json`` in the target directory, beside
+``run_results.json`` (``TargetLayout.gate_history``).
 That makes it per-checkout and per-clone, which understates the count on a
 fresh CI runner - deliberately: a shared, authoritative counter would be state
 mbt does not own, and understating is the safe direction for a signal whose
-only action is a warning.
+only action is a warning. An orchestrator that gives every task its own
+``--target-path`` (ADR-32) understates it further, by the same reasoning.
 """
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-#: Beside ``run_results.json``; ``mbt clean`` removes it with the rest of target/.
-GATE_LOG_FILE = "gate_history.json"
 
 #: Evaluations of one (dataset, window) pair past which the window is worth a
 #: warning. Twenty candidates judged against one held-out window is enough
@@ -55,22 +54,17 @@ class WindowUse:
         return self.count >= REUSE_WARN_THRESHOLD
 
 
-def _log_path(project_dir: Path) -> Path:
-    return project_dir / "target" / GATE_LOG_FILE
-
-
 def _key(dataset_uid: str, window: tuple[str, str]) -> str:
     return f"{dataset_uid}|{window[0]}|{window[1]}"
 
 
-def read_log(project_dir: Path) -> dict[str, int]:
+def read_log(path: Path) -> dict[str, int]:
     """The recorded counts, or an empty log.
 
     A malformed or unreadable log reads as empty: this is an observability
     signal, and failing a build over its bookkeeping would be worse than
     losing the count.
     """
-    path = _log_path(project_dir)
     try:
         loaded: Any = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -81,7 +75,7 @@ def read_log(project_dir: Path) -> dict[str, int]:
 
 
 def record_evaluation(
-    project_dir: Path, dataset_uid: str, window: tuple[str, str] | None
+    path: Path, dataset_uid: str, window: tuple[str, str] | None
 ) -> WindowUse | None:
     """Count one gate evaluation against ``window``; return the new total.
 
@@ -90,11 +84,10 @@ def record_evaluation(
     """
     if window is None:
         return None
-    log = read_log(project_dir)
+    log = read_log(path)
     key = _key(dataset_uid, window)
     count = log.get(key, 0) + 1
     log[key] = count
-    path = _log_path(project_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(log, indent=1, sort_keys=True) + "\n")
@@ -117,7 +110,6 @@ def reuse_warning(use: WindowUse) -> str:
 
 
 __all__ = [
-    "GATE_LOG_FILE",
     "REUSE_WARN_THRESHOLD",
     "WindowUse",
     "read_log",

@@ -87,6 +87,7 @@ nav:
       - "ADR-29: Single-relation datasets": adr/0029-single-relation-datasets.md
       - "ADR-30: Training report and after-test window": adr/0030-training-report-and-after-test-window.md
       - "ADR-31: Projection hint and full-width datasets": adr/0031-projection-hint-and-full-width-datasets.md
+      - "ADR-32: Target path and exact-node execution": adr/0032-target-path-and-exact-node-execution.md
 
 markdown_extensions:
   - admonition

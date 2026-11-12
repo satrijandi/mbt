@@ -155,8 +155,8 @@ def test_gc_handles_missing_store_and_reads_run_results(tmp_path: Path) -> None:
             }
         )
     )
-    assert run_results_artifact_uris(tmp_path) == {"file:///a/model.bin"}
-    assert run_results_artifact_uris(tmp_path / "empty") == set()
+    assert run_results_artifact_uris(target / "run_results.json") == {"file:///a/model.bin"}
+    assert run_results_artifact_uris(tmp_path / "empty" / "run_results.json") == set()
 
 
 def _results_file(target: Path, name: str, uri: str) -> Path:
@@ -183,7 +183,7 @@ def test_gc_keep_set_survives_a_scoring_run(tmp_path: Path) -> None:
     (target / "run_results.score.json").write_text(
         json.dumps({"results": [{"unique_id": "scoring.p.s"}]})
     )
-    assert run_results_artifact_uris(tmp_path) == {"file:///a/model.bin"}
+    assert run_results_artifact_uris(target / "run_results.json") == {"file:///a/model.bin"}
 
 
 def test_gc_prefers_the_newest_training_command(tmp_path: Path) -> None:
@@ -193,7 +193,7 @@ def test_gc_prefers_the_newest_training_command(tmp_path: Path) -> None:
     new = _results_file(target, "run_results.run.json", "file:///a/new.bin")
     os.utime(old, (1_000_000, 1_000_000))
     os.utime(new, (2_000_000, 2_000_000))
-    assert run_results_artifact_uris(tmp_path) == {"file:///a/new.bin"}
+    assert run_results_artifact_uris(target / "run_results.json") == {"file:///a/new.bin"}
 
 
 def test_gc_tolerates_an_unreadable_results_file(tmp_path: Path) -> None:
@@ -201,9 +201,9 @@ def test_gc_tolerates_an_unreadable_results_file(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     (target / "run_results.build.json").write_text("{not json")
-    assert run_results_artifact_uris(tmp_path) == set()
+    assert run_results_artifact_uris(target / "run_results.json") == set()
     (target / "run_results.build.json").write_bytes(b"\xff\xfe")
-    assert run_results_artifact_uris(tmp_path) == set()
+    assert run_results_artifact_uris(target / "run_results.json") == set()
 
 
 # -- champion keep-set (ADR-10: GC must never delete a champion artifact) ---------

@@ -151,6 +151,7 @@ The graph is a `networkx.DiGraph` built from resource dependencies (`dag/graph.p
 **Selection** (`dag/selector.py`) follows dbt semantics: `+node` (upstream), `node+` (downstream), `tag:`, `resource_type:`, `state:modified`, `--exclude`, comma for intersection and space for union.
 Selection governs which **models train**; the planner then auto-joins every upstream **dataset** a selected model needs, even if unselected, because datasets are cheap materializations and CI runners start cold (`execute/planner.py`, ADR-13).
 That is why a model-only PR builds green on a fresh runner.
+An orchestrator that runs one node per task turns the pull off with `--no-auto-materialize` (ADR-32): the plan is then exactly the selection, and a model reads its dataset from the cache a dataset task filled.
 
 **State** (`state/diff.py`) loads a reference manifest and compares `input_hash`es to mark nodes modified.
 Environment drift alone does **not** mark nodes modified - an adapter bump would otherwise retrain everything - so `env_digest` differences are reported prominently but only act as a selector under `--state-include-env` (ADR-7).
@@ -171,7 +172,8 @@ The scheduler keeps at most `threads` jobs outstanding so `--fail-fast` can actu
 There are four runners, all sharing one node-lifecycle wrapper (`run_with_lifecycle`) that emits `NodeStarted`/`NodeFinished` and times the body:
 
 - **`DatasetRunner`** - materialize (or reuse) the dataset, then run its `checks` and Python data tests.
-  Materialization is cache-aware: the key is `sha256(input_hash + resolved windows [+ sample_fraction])`, so a warm `target/datasets/<name>/<key>` with a `_SUCCESS` marker is reused, and a sampled dev build never satisfies a full build's cache probe.
+  Materialization is cache-aware: the key is `sha256(input_hash + resolved windows [+ sample_fraction])`, so a warm `<datasets>/<name>/<key>` (by default `target/datasets/...`) with a `_SUCCESS` marker is reused, and a sampled dev build never satisfies a full build's cache probe.
+  The cache can be shared between invocations (`--datasets-path`), so a cache miss builds under a per-key lock (`materialization_lock`): the loser of a race waits, then reads the winner's build.
 - **`ModelRunner`** - resolve the champion, assemble the job, run it, call `evaluate_gates`, and register the artifact **only if every gate passes** (transitioning it to `stage_on_pass` and stamping `mbt.gates_passed=true`, plus the config/input/hooks hashes and the baseline reference, into the registry metadata).
 - **`ScoringRunner`** - resolve the champion from the registry **at run time by stage alias** (so a promotion takes effect on the next scheduled run without a spec edit, ADR-5/ADR-20), verify hooks parity against the champion's `mbt.hooks_hash`, read the model spec back from the champion's own `mbt.inference_config_uri` (ADR-28), materialize the input, run input `checks` (a failure skips scoring entirely), score, then evaluate shift `monitors`. It opens no tracking run.
 - **`ModelTestRunner`** - `mbt test` on a model re-evaluates the version in the spec's `stage_on_pass` stage against its gates; it **never trains** (TSD §11.3). No version in that stage means `skipped`, not a train.
@@ -229,7 +231,7 @@ In `--log-format json` a `JsonLinesSink` writes redacted JSON lines to stderr in
 Job subprocesses always use the JSON-lines sink on their own stdout, and the coordinator reads those lines and forwards them onto its own bus - one event stream regardless of how many subprocesses ran.
 Every sink redacts tainted values, so a credential in a traceback never reaches a log or a result file.
 
-The engine writes two artifacts to `target/`, and the difference matters:
+The engine writes two artifacts to the target directory, and the difference matters:
 
 - **`manifest.json`** is the *plan*: the pinned, hashed, reproducible description of what *would* run. Deterministic at a given anchor.
 - **`run_results.json`** is the *outcome*: per-node status, metrics, gate results, registrations, and timings from what *did* run.
@@ -269,7 +271,7 @@ Where to start reading, by directory under `packages/mbt-core/src/mbt/` (about 1
 | `config/` | `profiles.py`, `project.py`, and the `tasks/` schemas (binary classification, regression) |
 | `artifacts/` | The `Manifest` (plan) and `RunResults` (outcome) models |
 | `events/` | The event bus, the typed event models, and the console / JSON-lines sinks |
-| `state/` | `diff.py` - `input_hash` comparison that powers `state:modified` |
+| `state/` | `diff.py` - `input_hash` comparison that powers `state:modified`; `layout.py` - `TargetLayout`, the one place that knows where the manifest, results, logs, and dataset cache live (ADR-32); `lock.py` - one writer per target directory, one builder per dataset key; `gate_log.py` - how often a test window has judged a candidate (D-3) |
 | `docsgen/` | Model cards and lineage for `mbt docs generate` |
 
 The interchange types these modules pass around (`ManifestNode`, `TrainingJob`, `JobResult`, the specs, the adapter protocols) are defined in `mbt-adapter-base`, not here, and core imports them from there directly.

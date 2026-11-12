@@ -173,6 +173,35 @@ AnchorOpt = Annotated[
 DeepSnapshotOpt = Annotated[
     bool, typer.Option("--deep-snapshot", help="Content-hash snapshots (slow, exact).")
 ]
+TargetPathOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--target-path",
+        envvar="MBT_TARGET_PATH",
+        help="Directory this command writes its manifest, results, logs and lock to "
+        "(default: <project>/target). One writer per directory, so concurrent tasks "
+        "each take their own (ADR-32).",
+    ),
+]
+DatasetsPathOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--datasets-path",
+        envvar="MBT_DATASETS_PATH",
+        help="Directory of the dataset cache (default: <target-path>/datasets). Point "
+        "concurrent tasks at one shared directory so a model reads the dataset another "
+        "task built (ADR-32).",
+    ),
+]
+NoAutoMaterializeOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-auto-materialize",
+        help="Run exactly the selected nodes: upstream datasets are read from the dataset "
+        "cache instead of being built, and a missing one is an error (ADR-32). "
+        "Has no effect on 'score', which never builds datasets.",
+    ),
+]
 OutputOpt = Annotated[str, typer.Option("--output", "-o", help="Output format.")]
 
 
@@ -269,6 +298,7 @@ def clean(
     profiles_dir: ProfilesDirOpt = None,
     target: TargetOpt = None,
     vars_: VarsOpt = None,
+    target_path: TargetPathOpt = None,
     artifacts_older_than: Annotated[
         str | None,
         typer.Option(
@@ -290,7 +320,9 @@ def clean(
     # directory printed "nothing to clean" instead of the ConfigError every
     # other command raises. All four clean tests passed an absolute
     # --project-dir, so the divergence was untested.
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, "text", False)
+    cli = CLIContext.enter(
+        project_dir, profiles_dir, target, vars_, "text", False, target_path=target_path
+    )
 
     if artifacts_older_than is None:
         from mbt.cli.inspect import clean_target_cmd
@@ -327,7 +359,7 @@ def clean(
     store_uri = resolve_artifact_store_uri(
         profiles.target.artifact_store, cli.project_dir.resolve()
     )
-    keep_uris = run_results_artifact_uris(cli.project_dir)
+    keep_uris = run_results_artifact_uris(cli.layout.run_results)
     registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
     keep_uris |= champion_artifact_uris(parsed, registry_adapter)
 
@@ -353,6 +385,7 @@ def parse(
     profiles_dir: ProfilesDirOpt = None,
     target: TargetOpt = None,
     vars_: VarsOpt = None,
+    target_path: TargetPathOpt = None,
     write_json_schema: Annotated[
         bool, typer.Option("--write-json-schema", help="Publish JSON Schemas for editors.")
     ] = False,
@@ -367,7 +400,16 @@ def parse(
     from mbt.exceptions import ConfigError
     from mbt.parsing import parse_project
 
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(
+        project_dir,
+        profiles_dir,
+        target,
+        vars_,
+        log_format,
+        quiet,
+        verbose,
+        target_path=target_path,
+    )
     bus = get_bus()
     # The banner names the PROJECT, read from mbt_project.yml, not the directory
     # it happens to sit in. profiles.yml is keyed by the project name, so when
@@ -400,8 +442,9 @@ def parse(
     if write_json_schema:
         from mbt.cli.schema_export import write_json_schemas
 
-        written = write_json_schemas(cli.project_dir / "target" / "json-schemas")
-        out_console.print(f"wrote {len(written)} JSON Schemas to target/json-schemas/")
+        schemas_dir = cli.layout.json_schemas
+        written = write_json_schemas(schemas_dir)
+        out_console.print(f"wrote {len(written)} JSON Schemas to {schemas_dir}/", soft_wrap=True)
 
 
 @app.command()
@@ -412,17 +455,28 @@ def compile(
     target: TargetOpt = None,
     vars_: VarsOpt = None,
     anchor: AnchorOpt = None,
+    target_path: TargetPathOpt = None,
     deep_snapshot: DeepSnapshotOpt = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
 ) -> None:
     """Resolve Jinja + profiles + snapshots into target/manifest.json."""
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(
+        project_dir,
+        profiles_dir,
+        target,
+        vars_,
+        log_format,
+        quiet,
+        verbose,
+        target_path=target_path,
+    )
     from mbt.state.lock import target_lock
 
-    path = cli.project_dir / "target" / "manifest.json"
-    with target_lock(cli.project_dir, "compile"):
+    layout = cli.layout
+    path = layout.manifest
+    with target_lock(layout.root, "compile"):
         cli.compile(anchor=anchor, deep_snapshot=deep_snapshot, write_to=path)
     out_console.print(f"wrote {path}", soft_wrap=True)
 
@@ -450,13 +504,26 @@ def _register_execution_command(command: str, help_text: str) -> None:
         allow_env_mismatch: AllowEnvMismatchOpt = False,
         anchor: AnchorOpt = None,
         deep_snapshot: DeepSnapshotOpt = False,
+        target_path: TargetPathOpt = None,
+        datasets_path: DatasetsPathOpt = None,
+        no_auto_materialize: NoAutoMaterializeOpt = False,
         log_format: LogFormatOpt = "text",
         quiet: QuietOpt = False,
         verbose: VerboseOpt = False,
     ) -> None:
         from mbt.execute.orchestrator import run_command
 
-        cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+        cli = CLIContext.enter(
+            project_dir,
+            profiles_dir,
+            target,
+            vars_,
+            log_format,
+            quiet,
+            verbose,
+            target_path=target_path,
+            datasets_path=datasets_path,
+        )
         results = run_command(
             cli.invocation(
                 command,
@@ -470,6 +537,7 @@ def _register_execution_command(command: str, help_text: str) -> None:
                 allow_env_mismatch=allow_env_mismatch,
                 anchor=parse_anchor(anchor),
                 deep_snapshot=deep_snapshot,
+                auto_materialize=not no_auto_materialize,
             )
         )
         render_results_table(results, cli)
@@ -520,6 +588,8 @@ def evaluate(
     manifest: ManifestOpt = None,
     allow_env_mismatch: AllowEnvMismatchOpt = False,
     anchor: AnchorOpt = None,
+    target_path: TargetPathOpt = None,
+    datasets_path: DatasetsPathOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -527,7 +597,17 @@ def evaluate(
     """Re-evaluate a registered artifact on freshly built data; never trains."""
     from mbt.execute.orchestrator import run_evaluate
 
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(
+        project_dir,
+        profiles_dir,
+        target,
+        vars_,
+        log_format,
+        quiet,
+        verbose,
+        target_path=target_path,
+        datasets_path=datasets_path,
+    )
     results = run_evaluate(
         cli.invocation(
             "evaluate",
@@ -564,6 +644,7 @@ def monitor(
     allow_env_mismatch: AllowEnvMismatchOpt = False,
     anchor: AnchorOpt = None,
     deep_snapshot: DeepSnapshotOpt = False,
+    target_path: TargetPathOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -571,7 +652,16 @@ def monitor(
     """Evaluate matured predictions against arrived labels; never trains (ADR-21)."""
     from mbt.execute.monitor import run_monitor
 
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(
+        project_dir,
+        profiles_dir,
+        target,
+        vars_,
+        log_format,
+        quiet,
+        verbose,
+        target_path=target_path,
+    )
     results = run_monitor(
         cli.invocation(
             "monitor",
@@ -603,6 +693,7 @@ def predictions_ls(
     target: TargetOpt = None,
     vars_: VarsOpt = None,
     manifest: ManifestOpt = None,
+    target_path: TargetPathOpt = None,
     output: OutputOpt = "table",
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
@@ -613,7 +704,16 @@ def predictions_ls(
 
     from mbt.execute.predictions_view import list_prediction_runs
 
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(
+        project_dir,
+        profiles_dir,
+        target,
+        vars_,
+        log_format,
+        quiet,
+        verbose,
+        target_path=target_path,
+    )
     runs = list_prediction_runs(
         cli.invocation("predictions", manifest_path=cli.resolve_cli_path(manifest))
     )
@@ -648,6 +748,7 @@ def predictions_show(
     target: TargetOpt = None,
     vars_: VarsOpt = None,
     manifest: ManifestOpt = None,
+    target_path: TargetPathOpt = None,
     output: OutputOpt = "table",
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
@@ -659,7 +760,16 @@ def predictions_show(
     from mbt.exceptions import StateError
     from mbt.execute.predictions_view import show_prediction_run
 
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(
+        project_dir,
+        profiles_dir,
+        target,
+        vars_,
+        log_format,
+        quiet,
+        verbose,
+        target_path=target_path,
+    )
     run = show_prediction_run(
         cli.invocation("predictions", manifest_path=cli.resolve_cli_path(manifest)), run_key
     )
@@ -985,6 +1095,7 @@ def docs_generate(
     vars_: VarsOpt = None,
     manifest: ManifestOpt = None,
     anchor: AnchorOpt = None,
+    target_path: TargetPathOpt = None,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -999,7 +1110,16 @@ def docs_generate(
     from mbt.artifacts.run_results import read_latest_results
     from mbt.docsgen import generate_docs
 
-    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    cli = CLIContext.enter(
+        project_dir,
+        profiles_dir,
+        target,
+        vars_,
+        log_format,
+        quiet,
+        verbose,
+        target_path=target_path,
+    )
     manifest = cli.resolve_cli_path(manifest)
     if manifest is not None:
         current = read_manifest(Path(manifest), source="--manifest")
@@ -1008,14 +1128,12 @@ def docs_generate(
     # Model cards want the metrics a TRAINING command produced, which is not
     # necessarily the last command that ran: `mbt score`/`mbt monitor` rewrite
     # the shared run_results.json with only their own nodes (A-2).
-    run_results = read_latest_results(
-        cli.project_dir / "target" / "run_results.json",
-        commands=("build", "run", "evaluate"),
-    )
+    layout = cli.layout
+    run_results = read_latest_results(layout.run_results, commands=("build", "run", "evaluate"))
     from mbt.state.lock import target_lock
 
-    with target_lock(cli.project_dir, "docs generate"):
-        index = generate_docs(current, run_results, cli.project_dir / "target" / "docs")
+    with target_lock(layout.root, "docs generate"):
+        index = generate_docs(current, run_results, layout.docs)
     out_console.print(f"wrote {index}", soft_wrap=True)
 
 
@@ -1023,6 +1141,7 @@ def docs_generate(
 @guard
 def docs_serve(
     project_dir: ProjectDirOpt = Path("."),
+    target_path: TargetPathOpt = None,
     port: Annotated[int, typer.Option("--port", "-p", help="Local port to listen on.")] = 8080,
 ) -> None:
     """Serve target/docs over HTTP on localhost."""
@@ -1031,7 +1150,8 @@ def docs_serve(
 
     from mbt.exceptions import ConfigError
 
-    docs_dir = project_dir / "target" / "docs"
+    cli = CLIContext.enter(project_dir, target_path=target_path)
+    docs_dir = cli.layout.docs
     if not (docs_dir / "index.html").is_file():
         raise ConfigError(f"no generated docs at {docs_dir}", hint="run 'mbt docs generate' first")
     handler = ft.partial(http.server.SimpleHTTPRequestHandler, directory=str(docs_dir))

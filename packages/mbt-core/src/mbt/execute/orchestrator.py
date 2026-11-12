@@ -40,6 +40,7 @@ from mbt.execute.runners import (
 from mbt.execute.scheduler import execute_plan
 from mbt.parsing import ParsedProject, parse_project
 from mbt.state.diff import ManifestStateIndex, load_state
+from mbt.state.layout import TargetLayout
 from mbt.state.lock import holds_target_lock
 from mbt_adapter_base import (
     ModelSpec,
@@ -67,6 +68,17 @@ class InvocationOptions:
     allow_env_mismatch: bool = False
     anchor: datetime | None = None
     deep_snapshot: bool = False
+    #: ``--target-path`` / ``--datasets-path`` (ADR-32), already absolutized by
+    #: the CLI; None means the project's own ``target/`` and ``target/datasets``.
+    target_path: str | None = None
+    datasets_path: str | None = None
+    #: False under ``--no-auto-materialize``: upstream datasets the selection
+    #: does not name are READ from the dataset cache instead of joining the plan.
+    auto_materialize: bool = True
+
+    @property
+    def layout(self) -> TargetLayout:
+        return TargetLayout.for_project(self.project_dir, self.target_path, self.datasets_path)
 
 
 @dataclass
@@ -119,7 +131,7 @@ def prepare(
         cli_vars=opts.cli_vars,
         project_vars=parsed.project.vars,
     )
-    manifest_path = opts.project_dir / "target" / "manifest.json"
+    manifest_path = opts.layout.manifest
     manifest = compile_project(
         parsed,
         profiles,
@@ -339,8 +351,15 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
 
     state_index = build_state_index(opts, manifest)
     executable = ("scoring",) if opts.command == "score" else ("dataset", "model")
-    plan = plan_execution(manifest, opts.select, opts.exclude, state_index, executable=executable)
-    with node_logs(opts.project_dir, prepared.run_id) as logs:
+    plan = plan_execution(
+        manifest,
+        opts.select,
+        opts.exclude,
+        state_index,
+        executable=executable,
+        auto_materialize=opts.auto_materialize,
+    )
+    with node_logs(opts.layout, prepared.run_id) as logs:
         bus.emit(
             RunStarted(
                 command=opts.command,
@@ -375,16 +394,16 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
         ),
         results=ordered,
     )
-    run_results.write(opts.project_dir / "target" / "run_results.json")
+    run_results.write(opts.layout.run_results)
 
     _emit_run_finished(opts.command, run_results)
     return run_results
 
 
 @contextmanager
-def node_logs(project_dir: Path, run_id: str) -> Iterator[NodeLogSink]:
+def node_logs(layout: TargetLayout, run_id: str) -> Iterator[NodeLogSink]:
     """Per-node log files for one invocation (ADR-30), attached for its duration."""
-    sink = NodeLogSink(project_dir / "target" / "run_logs" / run_id)
+    sink = NodeLogSink(layout.run_logs(run_id))
     bus = get_bus()
     bus.add_sink(sink)
     try:
@@ -406,6 +425,7 @@ def _execute(
         profiles=prepared.profiles,
         registry=prepared.registry,
         project_dir=opts.project_dir.resolve(),
+        layout=opts.layout,
         run_id=prepared.run_id,
         command=opts.command,
         cli_vars=opts.cli_vars,
@@ -501,6 +521,7 @@ def run_evaluate(
         profiles=prepared.profiles,
         registry=prepared.registry,
         project_dir=opts.project_dir.resolve(),
+        layout=opts.layout,
         run_id=prepared.run_id,
         command="evaluate",
         cli_vars=opts.cli_vars,
@@ -521,7 +542,7 @@ def run_evaluate(
         )
     )
 
-    with node_logs(opts.project_dir, prepared.run_id) as logs:
+    with node_logs(opts.layout, prepared.run_id) as logs:
         ctx.node_logs = logs
         if out_of_time:
             results = _run_out_of_time(
@@ -552,7 +573,7 @@ def run_evaluate(
         ),
         results=results,
     )
-    run_results.write(opts.project_dir / "target" / "run_results.json")
+    run_results.write(opts.layout.run_results)
 
     _emit_run_finished("evaluate", run_results)
     return run_results

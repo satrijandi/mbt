@@ -55,7 +55,7 @@ def _prepared_context(
     # read to a clean parse + live snapshot pinning, so a transient source outage
     # during an incident would fail `ls` even though the store reads fine). A
     # fresh compile happens only if nothing is built yet, or --manifest is given.
-    built = opts.project_dir / "target" / "manifest.json"
+    built = opts.layout.manifest
     if opts.manifest_path is None and built.is_file():
         prepared = prepare_readonly(opts, built, registry=registry)
     else:
@@ -65,6 +65,7 @@ def _prepared_context(
         profiles=prepared.profiles,
         registry=prepared.registry,
         project_dir=opts.project_dir.resolve(),
+        layout=opts.layout,
         run_id=prepared.run_id,
         command="predictions",
         cli_vars=opts.cli_vars,

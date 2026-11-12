@@ -1,12 +1,19 @@
-"""One writer per project ``target/`` at a time (FEEDBACK v6 B-1).
+"""One writer per ``target/`` at a time (FEEDBACK v6 B-1), one builder per dataset key.
 
-Every command that writes ``target/`` - the manifest, ``run_results.json``,
-dataset materializations, run logs - holds an advisory lock on
-``target/.mbt.lock`` for its whole lifetime. Without it two ``mbt build``s in
-one project directory (cron and a developer, two Airflow tasks on one worker)
-raced: if they compiled in the same second they picked the same dataset
-directory and one died on a DuckDB file lock, reported as a filter problem; a
-second apart, both ran and the last writer's manifest and run results won.
+Every command that writes a target directory - the manifest,
+``run_results.json``, run logs - holds an advisory lock on ``.mbt.lock`` inside
+it for its whole lifetime. Without it two ``mbt build``s in one project
+directory (cron and a developer, two Airflow tasks on one worker) raced: if
+they compiled in the same second they picked the same dataset directory and one
+died on a DuckDB file lock, reported as a filter problem; a second apart, both
+ran and the last writer's manifest and run results won.
+
+The target directory is ``--target-path`` when given (ADR-32), so concurrent
+tasks that each own one do not contend. They may still share a dataset cache,
+which lived under ``target/`` and was therefore covered by this lock; sharing
+it takes it out from under the lock, so a materialization has its own
+(:func:`materialization_lock`): the second builder of a key waits, then finds
+the first one's ``_SUCCESS``.
 
 The lock is an OS ``flock``, so it frees itself when the holding process exits,
 however it exits - a crashed or killed run never leaves a stale lock behind.
@@ -18,6 +25,7 @@ reach one locked entry point through another.
 import json
 import os
 import sys
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -28,6 +36,8 @@ from typing import Any, ParamSpec, TypeVar
 from mbt.exceptions import StateError
 
 LOCK_FILE = ".mbt.lock"
+#: How often a waiter retries a held materialization lock.
+_POLL_SECONDS = 0.2
 
 #: target dir -> (fd, depth) for the locks this process holds.
 _HELD: dict[Path, tuple[int, int]] = {}
@@ -73,9 +83,9 @@ def _holder(path: Path) -> str:
 
 
 @contextmanager
-def target_lock(project_dir: Path, command: str) -> Iterator[None]:
-    """Hold ``<project>/target/.mbt.lock`` for the duration of the block."""
-    target = (project_dir / "target").resolve()
+def target_lock(target_dir: Path, command: str) -> Iterator[None]:
+    """Hold ``<target_dir>/.mbt.lock`` for the duration of the block."""
+    target = target_dir.resolve()
     held = _HELD.get(target)
     if held is not None:
         fd, depth = held
@@ -93,9 +103,9 @@ def target_lock(project_dir: Path, command: str) -> Iterator[None]:
         if not _try_lock(fd):
             raise StateError(
                 f"another mbt command is already writing {target}: {_holder(path)}",
-                hint="wait for it to finish, or run this one from a separate checkout; "
-                "the lock is released the moment that process exits, so a crashed run "
-                "never leaves it behind",
+                hint="wait for it to finish, or give this one its own directory with "
+                "--target-path (or run it from a separate checkout); the lock is released "
+                "the moment that process exits, so a crashed run never leaves it behind",
             )
         record = {
             "pid": os.getpid(),
@@ -123,10 +133,35 @@ def holds_target_lock(fn: Callable[P, R]) -> Callable[P, R]:
     @wraps(fn)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         opts: Any = args[0]
-        with target_lock(opts.project_dir, opts.command):
+        with target_lock(opts.layout.root, opts.command):
             return fn(*args, **kwargs)
 
     return wrapper
 
 
-__all__ = ["LOCK_FILE", "holds_target_lock", "target_lock"]
+@contextmanager
+def materialization_lock(
+    output_dir: Path, *, on_wait: Callable[[], None] | None = None
+) -> Iterator[None]:
+    """Serialize builds of ONE dataset materialization across processes.
+
+    Unlike :func:`target_lock` this WAITS: the process that loses the race is
+    about to need exactly what the winner is building, so refusing it would
+    only make it retry. ``on_wait`` runs once, when the lock is found held, so
+    the caller can say what it is waiting for. The lock file sits beside the
+    key directory, not in it, because a build empties the key directory first.
+    """
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(output_dir.parent / f"{output_dir.name}.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        if not _try_lock(fd):
+            if on_wait is not None:
+                on_wait()
+            while not _try_lock(fd):
+                time.sleep(_POLL_SECONDS)
+        yield
+    finally:
+        os.close(fd)  # closing the descriptor releases the lock
+
+
+__all__ = ["LOCK_FILE", "holds_target_lock", "materialization_lock", "target_lock"]
