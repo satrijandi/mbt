@@ -17,6 +17,7 @@ When an error says `Internal error`, re-run with `MBT_DEBUG=1` for the traceback
 - [Gates, artifacts, and promotion](#gates-artifacts-and-promotion)
 - [Scoring and monitoring](#scoring-and-monitoring)
 - [Snowflake](#snowflake)
+- [Running on Airflow](#running-on-airflow)
 - [The showcase](#the-showcase)
 - [Reading the event log](#reading-the-event-log)
 
@@ -1306,6 +1307,27 @@ Note that `set -a; source .env; set +a` is not itself the culprit - it strips a 
 Nothing needs cleaning up in the warehouse: the objects that were created landed in the real schema, and re-running with the trimmed value replaces them.
 
 `profiles.yml` does not trim either - it passes `env('SNOWFLAKE_SCHEMA')` through verbatim - so a padded value still reaches `mbt build --target snowflake`, where the interpolated path means it may appear to work.
+
+## Running on Airflow
+
+### `this DAG is stale against the project it ran`
+
+**Symptom (the `mbt_compile` task fails at once, with no retry, and every task after it is `upstream_failed`; captured from a real run of `mbt-airflow` over `churn_demo`, after a model gained the tag the DAG selects on):**
+
+```text
+airflow.sdk.exceptions.AirflowFailException: this DAG is stale against the project it ran:
+drawn but gone [], in the project but not drawn ['churn_classifier_deep']. Recompile the
+manifest the DAG is drawn from.
+```
+
+**Why:** an `MbtDag` is drawn when Airflow parses the file, from a manifest compiled ahead of time, but each run compiles the project again at its own anchor.
+The compile task re-plans that fresh manifest with the DAG's own `select` and `exclude`, and refuses to go on when the two graphs differ.
+Here `churn_classifier_deep` gained the `weekly` tag after the manifest was published, so `tag:weekly` now means a model the DAG has no task for.
+Running anyway would have skipped it behind a green run ([ADR-33](adr/0033-mbt-project-as-an-airflow-dag.md)).
+"drawn but gone" is the other direction: a node the DAG has a task for no longer exists in the project.
+
+**Fix:** recompile and republish the manifest the DAG reads (`manifest_path` on `MbtProject`), then let Airflow re-parse the file.
+It is a deterministic mismatch, so retrying the task cannot clear it.
 
 ## The showcase
 

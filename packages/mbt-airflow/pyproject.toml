@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbt-airflow"
+version = "0.3.0.dev0"
+description = "Render an mbt project as an Airflow DAG, one task per node"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Nugroho Satrijandi", email = "satrijandi@gmail.com" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Apache Airflow",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    "mbt-core>=0.3.0.dev0,<0.4",
+    # airflow.sdk (DAG, BaseOperator, Param, TaskGroup) is the Airflow 3 authoring
+    # surface. 3.3.1 is the oldest release this package's suite (unit and e2e) is run
+    # against, by CI's airflow-floor job, and it is the release the showcase pins.
+    # Older lines were measured and are out, for reasons that are Airflow's and mbt's
+    # together: 3.1.x and 3.2.x publish constraints that pin click==8.3.1, which cannot
+    # install beside mbt-core's click>=8.3.3 (a security floor), and an unconstrained
+    # 3.1.0 does not even import against current structlog. AirflowFailException lives
+    # in airflow.sdk.exceptions only from 3.2.
+    "apache-airflow>=3.3.1,<4",
+]
+
+[project.urls]
+Homepage = "https://github.com/satrijandi/mbt"
+Documentation = "https://satrijandi.github.io/mbt/"
+Repository = "https://github.com/satrijandi/mbt"
+Issues = "https://github.com/satrijandi/mbt/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbt_airflow"]

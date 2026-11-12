@@ -36,6 +36,21 @@ import sys
 import tomllib
 from pathlib import Path
 
+#: Workspace members the floors environment leaves out, and why. Their own floors are
+#: tested by a job of their own, and the test below pins that such a job exists.
+#:
+#: mbt-airflow: a floors resolution (direct dependencies lowest, everything else newest)
+#: is a combination Airflow does not support - it only supports installs under its own
+#: published constraints. Its dependency tree also lifts pydantic and packaging above the
+#: floors mbt-core declares, so with it present this job would quietly stop testing them
+#: (`--verify` fails on exactly that). CI's airflow-floor job installs the Airflow floor
+#: the supported way instead.
+EXCLUDED: dict[str, str] = {
+    "mbt-airflow": "Airflow only supports installs under its own constraints, and its "
+    "dependency tree lifts pydantic and packaging above mbt-core's floors; "
+    "CI's airflow-floor job tests it",
+}
+
 #: `name`, optional `[extras]`, and whatever specifier follows.
 _REQUIREMENT = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s*(?:\[(?P<extras>[^\]]*)\])?")
 #: the `>=` lower bound, which is what "floor" means in this repo.
@@ -107,6 +122,8 @@ def install_args(root: Path, group: str = "dev") -> list[str]:
     args = ["--resolution", "lowest-direct"]
     for requirement in config["dependency-groups"][group]:
         name, extras, _ = _parse(requirement)
+        if name in EXCLUDED:
+            continue
         path = members.get(name)
         if path is None:
             args.append(requirement)
@@ -138,11 +155,15 @@ def declared_floors(root: Path, group: str = "dev") -> dict[str, str]:
     wanted: list[str] = []
     for requirement in config["dependency-groups"][group]:
         name, extras, _ = _parse(requirement)
+        if name in EXCLUDED:
+            continue
         if name in members:
             wanted += [f"{name}:{extra}" for extra in extras.split(",") if extra]
         record([requirement])
 
     for name, path in members.items():
+        if name in EXCLUDED:
+            continue
         project = tomllib.loads((path / "pyproject.toml").read_text())["project"]
         record(project.get("dependencies", []))
         for extra, requirements in (project.get("optional-dependencies") or {}).items():

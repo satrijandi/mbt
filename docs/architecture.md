@@ -25,6 +25,8 @@ mbt-xgboost    mbt-lightgbm   mbt-sklearn   mbt-h2o      (training)
 mbt-snowflake  mbt-spark      mbt-mlflow    mbt-optuna   (data, compute, tracking, tuning)
 mbt-evidently                                            (report engine)
 mbt-testing                                              (fakes for every role)
+
+mbt-airflow   a client of mbt-core, not an adapter: it draws the manifest as Airflow tasks
 ```
 
 The rule that keeps this honest: **`mbt-core` never imports an ML framework, and adapters build against `mbt-adapter-base`, not core internals.**
@@ -44,6 +46,7 @@ Core itself imports from `mbt_adapter_base` directly.
 | `mbt-optuna` | tuning engine | Seeded TPE or random hyperparameter search, with median pruning |
 | `mbt-evidently` | report engine | Evidently's drift reports in the training report, for reading beside mbt's own stability tables |
 | `mbt-testing` | fake adapters | Framework-free adapters so a project's specs can be tested without JVMs or GPUs |
+| `mbt-airflow` | orchestration | `MbtDag` and `MbtTaskGroup`: the manifest as one Airflow task per node, each running the CLI ([Running on Airflow](airflow.md), ADR-33) |
 
 `mbt-lightgbm` and `mbt-sklearn` are the extensibility proof: each is built against the public contract only, with no privileged access, so anyone can ship an adapter the same way.
 [Adapters](adapters.md) compares what every shipped adapter supports.

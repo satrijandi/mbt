@@ -148,7 +148,7 @@ def test_every_package_is_listed_for_publisher_configuration() -> None:
         tomllib.loads(path.read_text())["project"]["name"]
         for path in (root / "packages").glob("*/pyproject.toml")
     }
-    assert len(names) == 12, sorted(names)
+    assert len(names) == 13, sorted(names)
     contributing = CONTRIBUTING.read_text()
     missing = sorted(name for name in names if f"`{name}`" not in contributing)
     assert not missing, f"CONTRIBUTING's publisher list is missing {missing}"

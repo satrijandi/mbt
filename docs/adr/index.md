@@ -58,6 +58,7 @@ What does get updated in place is a record's account of what has shipped, so tha
 | [30](0030-training-report-and-after-test-window.md) | The training report: an after-test window, same-slot periods, and stability judged against the test set | accepted |
 | [31](0031-projection-hint-and-full-width-datasets.md) | Reads take a column projection hint; dataset builds stay full-width | accepted |
 | [32](0032-target-path-and-exact-node-execution.md) | A private target path, a shareable dataset cache, and exact-node execution | accepted; amends [13](0013-upstream-datasets-auto-materialize.md) |
+| [33](0033-mbt-project-as-an-airflow-dag.md) | An mbt project is an Airflow DAG: one task per node, drawn from the manifest, run through the CLI | accepted |
 
 ## Writing a new ADR
 

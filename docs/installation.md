@@ -66,6 +66,7 @@ The scaffold's default (`mbt init`) uses the local data and compute adapters tha
 | Tuning | `mbt-optuna` | `optuna` |
 | Drift report engine | `mbt-evidently` | `evidently` (under `evaluation.report.stability.engine`) |
 | Testing your project | `mbt-testing` | `fake` |
+| Running on Airflow | `mbt-airflow` | - (not an adapter; see [Running on Airflow](airflow.md)) |
 
 [Adapters](adapters.md) compares what each one supports.
 

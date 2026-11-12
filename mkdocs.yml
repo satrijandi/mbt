@@ -35,6 +35,7 @@ nav:
   - Guides:
       - Concepts: concepts.md
       - GitOps & CI: gitops.md
+      - Running on Airflow: airflow.md
       - Naming conventions: naming-conventions.md
       - Showcase: showcase.md
       - Showcase walkthrough: showcase-walkthrough.md
@@ -88,6 +89,7 @@ nav:
       - "ADR-30: Training report and after-test window": adr/0030-training-report-and-after-test-window.md
       - "ADR-31: Projection hint and full-width datasets": adr/0031-projection-hint-and-full-width-datasets.md
       - "ADR-32: Target path and exact-node execution": adr/0032-target-path-and-exact-node-execution.md
+      - "ADR-33: An mbt project as an Airflow DAG": adr/0033-mbt-project-as-an-airflow-dag.md
 
 markdown_extensions:
   - admonition

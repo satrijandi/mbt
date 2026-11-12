@@ -1,6 +1,6 @@
 # CLAUDE.md - working guide for the mbt repo
 
-mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-sklearn, mbt-mlflow, mbt-optuna, mbt-evidently, mbt-snowflake, mbt-spark, mbt-h2o, mbt-testing}`, plus `examples/showcase`, repo-root `tests/` (E2E, golden, perf, live, plus `tests/fixtures/{churn_demo, revenue_demo}` - whole mbt projects the suite copies to tmp and drives through the real CLI, excluded from collection via `norecursedirs`), and `docs/` (mkdocs + ADRs).
+mbt ("dbt for ML models") is a uv workspace monorepo: `packages/{mbt-core, mbt-adapter-base, mbt-xgboost, mbt-lightgbm, mbt-sklearn, mbt-mlflow, mbt-optuna, mbt-evidently, mbt-snowflake, mbt-spark, mbt-h2o, mbt-airflow, mbt-testing}`, plus `examples/showcase`, repo-root `tests/` (E2E, golden, perf, live, plus `tests/fixtures/{churn_demo, revenue_demo}` - whole mbt projects the suite copies to tmp and drives through the real CLI, excluded from collection via `norecursedirs`), and `docs/` (mkdocs + ADRs).
 Design history lives in `docs/adr/`; read the relevant ADR before "fixing" anything that looks odd.
 Whole-repo review cycles live in `design-history/reviews/` once closed (newest: `feedback-v6.md`); code comments cite them by section (`FEEDBACK 2.6`, `R2-7`, `F17`, `FEEDBACK v3 A-1`, v5's bare `A-1`/`B-4`/`C-2`/`D-2`, and `FEEDBACK v6 A-2`), so do not delete them.
 A cycle still in flight sits at the repo root as `FEEDBACK_v<n>.md` instead - findings plus a progress log, one appended entry per completed item (symptom, fix, verification, docs) - and moves into `reviews/` when that log closes.
@@ -18,7 +18,7 @@ uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
   packages/mbt-xgboost/src packages/mbt-mlflow/src packages/mbt-optuna/src \
   packages/mbt-lightgbm/src packages/mbt-sklearn/src packages/mbt-testing/src \
   packages/mbt-snowflake/src packages/mbt-spark/src \
-  packages/mbt-h2o/src packages/mbt-evidently/src   # strict, all 12 packages, must be clean
+  packages/mbt-h2o/src packages/mbt-evidently/src packages/mbt-airflow/src   # strict, all 13 packages, must be clean
 uv run pre-commit run --all-files
 uv run mkdocs build --strict         # docs changes; site/ is gitignored output
 uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" packages examples tests/fixtures .github
@@ -46,6 +46,9 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
 - Where an invocation writes is `mbt/state/layout.py`'s (`TargetLayout`, ADR-32). Never spell `project_dir / "target" / ...` in a module; `test_target_layout_unit.py` fails if one does.
   `--target-path` is per-task state with its own lock, and `--datasets-path` is the shareable content-addressed dataset cache, whose builds take `materialization_lock`.
   `--no-auto-materialize` is the one way to run exactly a selection, and a model then reads its dataset through `ExecutionContext.dataset_handle`; a new reader of a dataset goes through that, not around it.
+- `mbt-airflow` draws a manifest as Airflow tasks and runs the real CLI per node (ADR-33); `plan_tasks` (`plan.py`) is its pure core and calls mbt's own `plan_execution`, so never reimplement selection there.
+  Airflow is deliberately NOT in the floors environment (`EXCLUDED` in `scripts/install_floors.py`): it only supports installs under its own constraints and lifts shared floors, so CI's `airflow-floor` job tests its floor instead.
+- Read DuckDB results through `mbt.utils.first_row`, never `execute(...).fetchone()`. DuckDB 2.0 refuses new work on a connection with an unfinished result, and `fetchone()` leaves one; `test_duckdb_unfinished_results.py` enforces that rule on whatever DuckDB is installed.
 - Events go to stderr; stdout is command data. Job subprocesses emit JSON events on stdout and the coordinator forwards them.
 - `main()` in `mbt/cli/main.py` catches BOTH real-click and typer-vendored-click exceptions; typer >= 0.20 vendors click, so the duplicate-looking except tuples are required.
 - `uv.lock` contains TWO pyspark versions on purpose: a `[tool.uv] conflicts` fork keeps the dev lock on Spark 4.x while `mbt-h2o[sparkling]` pins 3.5. Never hand-edit the lock; use `uv lock`.

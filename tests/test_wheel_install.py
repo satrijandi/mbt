@@ -92,6 +92,7 @@ CLOSURE_PROBES = {
     "mbt_lightgbm": f"import lightgbm, numpy; {_CALIBRATOR_PROBE}",
     "mbt_mlflow": "import mlflow.tracking; from mbt_mlflow.adapter import MlflowTracking",
     "mbt_optuna": "import optuna; from mbt_optuna.engine import OptunaTuningEngine",
+    "mbt_airflow": "import airflow.sdk; from mbt_airflow import MbtDag, plan_tasks",
     "mbt_evidently": (
         "from evidently import Report; from mbt_evidently.engine import parse_snapshot"
     ),

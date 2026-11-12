@@ -31,6 +31,8 @@ def test_every_workspace_member_is_installed_editable() -> None:
     args = floors.install_args(REPO_ROOT)
     editable = {args[i + 1] for i, a in enumerate(args) if a == "-e"}
     for name, path in floors.member_paths(REPO_ROOT).items():
+        if name in floors.EXCLUDED:
+            continue  # left out on purpose; see the tests below
         rel = path.relative_to(REPO_ROOT).as_posix()
         assert any(e == rel or e.startswith(f"{rel}[") for e in editable), (
             f"{name} is a workspace member but install_floors would not install it"
@@ -216,3 +218,28 @@ def test_every_floors_step_bypasses_the_project_environment() -> None:
         if line.strip().startswith("uv run") and "--no-project" not in line
     ]
     assert not offenders, f"floors steps missing --no-project: {offenders}"
+
+
+def test_an_excluded_member_is_left_out_with_its_reason_and_everything_it_brings() -> None:
+    """mbt-airflow's dependency tree lifts pydantic and packaging above mbt-core's
+    floors, so with it installed the floors job stops testing them (and --verify
+    fails). Leaving it out has to take its own declared floors with it too."""
+    members = floors.member_paths(REPO_ROOT)
+    assert floors.EXCLUDED, "nothing is excluded: has the exclusion outlived its reason?"
+    for name, reason in floors.EXCLUDED.items():
+        assert name in members, f"{name} is excluded but is not a workspace member"
+        assert reason, f"{name} is excluded without saying why"
+        rel = members[name].relative_to(REPO_ROOT).as_posix()
+        assert not any(rel in arg for arg in floors.install_args(REPO_ROOT))
+    assert "apache-airflow" not in floors.declared_floors(REPO_ROOT)
+    assert "mbt-airflow" in floors.EXCLUDED
+
+
+def test_every_excluded_member_has_a_job_that_tests_its_floor() -> None:
+    """An exclusion is only honest if something else installs what it left out."""
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "airflow-floor:" in ci, (
+        "mbt-airflow is excluded from the floors job but nothing tests it"
+    )
+    declared = (REPO_ROOT / "packages" / "mbt-airflow" / "pyproject.toml").read_text()
+    assert "apache-airflow>=" in declared

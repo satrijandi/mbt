@@ -40,6 +40,7 @@ jobs:
           packages/mbt-xgboost/src packages/mbt-mlflow/src
           packages/mbt-optuna/src packages/mbt-lightgbm/src
           packages/mbt-sklearn/src packages/mbt-testing/src
+          packages/mbt-airflow/src
           packages/mbt-snowflake/src packages/mbt-spark/src packages/mbt-h2o/src
           packages/mbt-evidently/src
       - name: yamllint
@@ -158,6 +159,48 @@ jobs:
         run: >-
           uv run --no-project python scripts/audit_dependencies.py
           --no-check-stale --require-floor-only
+
+  airflow-floor:
+    # mbt-airflow's lower bound on Apache Airflow, tested the way Airflow supports an
+    # install: under that release's own published constraints. It cannot ride the floors
+    # job above: a floors resolution (direct dependencies lowest, the rest newest) is a
+    # combination Airflow does not support, and Airflow's dependency tree lifts pydantic
+    # and packaging above the floors mbt-core declares, which would stop that job testing
+    # them. scripts/install_floors.py leaves mbt-airflow out for that reason, and a test
+    # pins that this job exists.
+    #
+    # The constraints are what make the floor meaningful: Airflow 3.1.x and 3.2.x pin
+    # click==8.3.1, which mbt-core (click>=8.3.3) cannot install beside, and that is why
+    # the floor is where it is. Runs the unit suite and the real-Airflow e2e (dag.test(),
+    # real mbt, real XGBoost); neither needs the JVM.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install the declared Airflow floor under its own constraints
+        run: |
+          FLOOR="$(grep -oP '"apache-airflow>=\K[0-9.]+' packages/mbt-airflow/pyproject.toml)"
+          echo "AIRFLOW_FLOOR=$FLOOR" >> "$GITHUB_ENV"
+          curl -fsSL "https://raw.githubusercontent.com/apache/airflow/constraints-${FLOOR}/constraints-3.11.txt" \
+            -o "$RUNNER_TEMP/airflow-constraints.txt"
+          uv venv --clear
+          uv pip install --constraint "$RUNNER_TEMP/airflow-constraints.txt" "apache-airflow==${FLOOR}" \
+            -e packages/mbt-adapter-base -e packages/mbt-core -e packages/mbt-testing \
+            -e packages/mbt-xgboost -e packages/mbt-mlflow -e packages/mbt-evidently \
+            -e packages/mbt-airflow pytest pytest-timeout
+      - name: Assert the floor is what got installed
+        run: |
+          uv run --no-project python -c "
+          import importlib.metadata as m, os
+          assert m.version('apache-airflow') == os.environ['AIRFLOW_FLOOR'], m.version('apache-airflow')"
+      - name: mbt-airflow against the floor
+        run: >-
+          uv run --no-project pytest -q --timeout 900
+          packages/mbt-airflow/tests tests/test_e2e_airflow.py
 
   e2e:
     # The JVM tier (Spark 4.x per the locked resolution, H2O) runs once on
@@ -279,7 +322,7 @@ jobs:
     # Push-to-main only - a PR already shows its own checks, and a red gate on
     # a release tag is reported by the tag run itself.
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [lint-type, test, floors, e2e, security, secrets-scan, docs]
+    needs: [lint-type, test, floors, airflow-floor, e2e, security, secrets-scan, docs]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

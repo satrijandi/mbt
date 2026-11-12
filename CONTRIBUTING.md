@@ -40,7 +40,7 @@ uv run mypy packages/mbt-core/src packages/mbt-adapter-base/src \
   packages/mbt-xgboost/src packages/mbt-mlflow/src packages/mbt-optuna/src \
   packages/mbt-lightgbm/src packages/mbt-sklearn/src packages/mbt-testing/src \
   packages/mbt-snowflake/src packages/mbt-spark/src packages/mbt-h2o/src \
-  packages/mbt-evidently/src
+  packages/mbt-evidently/src packages/mbt-airflow/src
 uv run pre-commit run --all-files
 uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 140}}}" \
   packages examples tests/fixtures .github
@@ -84,9 +84,9 @@ Among other things it fails an adapter whose plugin imports `mbt-core` internals
 A release is a version bump plus a tag; the automated PyPI publish is gated on
 the release-readiness work (see `release.yml`).
 
-The one version string lives in **13 `pyproject.toml` files** (the repo root and
-each of the twelve `packages/*/`) and in **each package's runtime `__version__`**
-(`packages/*/src/*/__init__.py`) - 25 strings that must stay in lockstep.
+The one version string lives in **14 `pyproject.toml` files** (the repo root and
+each of the thirteen `packages/*/`) and in **each package's runtime `__version__`**
+(`packages/*/src/*/__init__.py`) - 27 strings that must stay in lockstep.
 Bump them all with one command:
 
 ```bash
@@ -97,7 +97,7 @@ It rewrites every version string (failing loudly if any file does not carry the
 current version exactly once, so a dependency pin is never touched) and prints
 the changed files.
 `tests/test_version_sync.py` then fails the suite until the root `pyproject.toml`,
-all twelve package `pyproject.toml`, and every package's `__init__.__version__`
+all thirteen package `pyproject.toml`, and every package's `__init__.__version__`
 agree (it also checks each package declares `license = "Apache-2.0"` and ships a
 `LICENSE`), so it is the backstop if a version is ever edited by hand.
 
@@ -156,13 +156,13 @@ the check stable.
 ### Enabling the PyPI publish (one-time, maintainer-only)
 
 Until this is done a tag still produces a fully green run and a GitHub release
-with all 24 wheels/sdists attached - the publish step is skipped by an explicit
+with all 26 wheels/sdists attached - the publish step is skipped by an explicit
 opt-in gate rather than failing. That ordering is deliberate: an unconfigured
 Trusted Publisher fails `invalid-publisher`, and when the publish ran *before*
 the release step it took the GitHub release down with it.
 
 Trusted Publishing uses OIDC, so there is no API token to store anywhere.
-On PyPI, for **each of the twelve projects** below, add a GitHub publisher with
+On PyPI, for **each of the thirteen projects** below, add a GitHub publisher with
 exactly these values:
 
 | field | value |
@@ -172,10 +172,10 @@ exactly these values:
 | Workflow name | `release.yml` |
 | Environment | `release` |
 
-The twelve projects (all must exist and all must carry the publisher, or a tag
+The thirteen projects (all must exist and all must carry the publisher, or a tag
 publishes partially):
 
-`mbt-adapter-base`, `mbt-core`, `mbt-evidently`, `mbt-h2o`, `mbt-lightgbm`,
+`mbt-adapter-base`, `mbt-airflow`, `mbt-core`, `mbt-evidently`, `mbt-h2o`, `mbt-lightgbm`,
 `mbt-mlflow`, `mbt-optuna`, `mbt-sklearn`, `mbt-snowflake`, `mbt-spark`, `mbt-testing`,
 `mbt-xgboost`
 
@@ -203,7 +203,7 @@ push (`docs-publish` is deliberately excluded - it is main-only and would
 deadlock a PR):
 
 `lint-type`, `test (3.11)`, `test (3.12)`, `test (3.13)`, `test (3.14)`,
-`floors`, `e2e`, `security`, `secrets-scan`, `docs`
+`floors`, `airflow-floor`, `e2e`, `security`, `secrets-scan`, `docs`
 
 This is not hypothetical hygiene: CI ran red on `main` for eight consecutive
 commits in August 2026 because nothing stopped a push and nothing announced it.
