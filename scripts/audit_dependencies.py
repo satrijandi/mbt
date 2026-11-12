@@ -53,45 +53,6 @@ ACCEPTED: dict[str, str] = {
         "process, never as a network service. No fixed h2o release exists "
         "(<= 3.46.1 all affected). Ends when a fixed h2o ships."
     ),
-    "PYSEC-2026-3552": (
-        "CVE-2026-69247: Bleichenbacher oracle in cryptography's PKCS#7 "
-        "decryption (pkcs7_decrypt_der/pem/smime). mbt never imports "
-        "cryptography and decrypts no PKCS#7; it reaches us only as a "
-        "transitive dep of mlflow, pyopenssl and snowflake-connector-python. "
-        "The fix is 50.0.0 and mlflow 3.15.2 (newest) still pins "
-        "cryptography<50, so it is unreachable. pyopenssl 26.4.0 already "
-        "allows <51, leaving mlflow as the sole blocker. Already fixed "
-        "upstream: mlflow#24871 -> PR mlflow#24872 raises the cap to "
-        "cryptography<51, merged to master and still unreleased as of the "
-        "3.15.2 patch. Ends when the next mlflow minor ships and Renovate "
-        "bumps us onto it; this script's staleness check will then fail and "
-        "force the entry out."
-    ),
-    "CVE-2026-71211": (
-        "GHSA-h7x2-h6g9-p789: SSRF in MLflow's AI Gateway - a request to the "
-        "gateway can reach an arbitrary host because api_base is not validated. "
-        "No fixed release exists: the advisory covers mlflow >= 3.13.0 <= 3.15.2 "
-        "and 3.15.2 is the newest, with first_patched_version null. Not in mbt's "
-        "execute path: the AI Gateway is a separate server mbt neither runs nor "
-        "configures, and mbt-mlflow imports exactly two things from mlflow - "
-        "mlflow.tracking.MlflowClient and mlflow.exceptions.MlflowException - "
-        "with no reference anywhere to mlflow.gateway, mlflow.deployments or "
-        "api_base. Ends when an mlflow release ships the fix and Renovate bumps "
-        "us onto it; this script's staleness check will then force the entry out."
-    ),
-    "PYSEC-2026-3740": (
-        "CVE-2026-81726 / GHSA-8mgp-746c-j5xp: nltk's model-artifact APIs "
-        "(TransitionParser, AveragedPerceptron/PerceptronTagger, maxent "
-        "parameter files) open caller-controlled paths with raw file calls, "
-        "bypassing nltk's opt-in pathsec roots. No fixed release exists: 3.10.3 "
-        "is the newest and is marked last_affected. nltk reaches us only through "
-        "evidently (mbt-evidently), which imports the package eagerly but uses "
-        "just WordNetLemmatizer, the words corpus and VADER, in text descriptors "
-        "the drift preset mbt runs never touches; neither mbt nor evidently "
-        "calls any of the affected APIs, and mbt passes nltk no paths at all. "
-        "Ends when nltk ships a fix (Renovate bumps the lock; the staleness "
-        "check then forces the entry out) or evidently drops nltk."
-    ),
     "PYSEC-2026-352": _SPARKLING_FLOOR,
     "PYSEC-2026-349": _SPARKLING_FLOOR,
     "PYSEC-2026-2180": _SPARKLING_FLOOR,

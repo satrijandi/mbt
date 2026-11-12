@@ -84,12 +84,19 @@ def test_an_accepted_finding_passes_while_it_still_fires() -> None:
     assert audit.report(unaccepted, stale, check_stale=True) == 0
 
 
-def test_an_acceptance_that_stopped_firing_fails_so_it_gets_deleted() -> None:
-    """The whole point: pip-audit alone would go on passing here forever."""
-    checkable = sorted(set(audit.ACCEPTED) - audit.FLOOR_ONLY)
-    still_applies = checkable[:1]
+def test_an_acceptance_that_stopped_firing_fails_so_it_gets_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point: pip-audit alone would go on passing here forever.
+
+    Done with an acceptance made up for the purpose, because the real ones come and
+    go: this once picked "the first of several" and broke the day the lock was
+    cleaned and only one was left.
+    """
+    monkeypatch.setitem(audit.ACCEPTED, "PYSEC-0000-0", "made up: its advisory never fires")
+    still_applies = sorted(set(audit.ACCEPTED) - audit.FLOOR_ONLY - {"PYSEC-0000-0"})
     unaccepted, stale = audit.classify(set(still_applies))
-    assert stale == sorted(set(checkable) - set(still_applies))
+    assert stale == ["PYSEC-0000-0"]
     assert audit.report(unaccepted, stale, check_stale=True) == 1
 
 

@@ -29,7 +29,11 @@ dependencies = [
     # (older ones import pkg_resources), and use_aliases=false still covers old
     # servers - but 2.16 carries ~30 advisories, so the floor is the first
     # release clear of all of them (PYSEC-2026-3687 fixes last, in 3.15.0).
-    "mlflow>=3.15",
+    # Raised 3.15 -> 3.17.2: 3.15.0 still carries GHSA-2wqp-q3c6-ccj5 and
+    # GHSA-j7qq-vr8c-xvw3 (fixed in 3.17.0) and GHSA-wqmh-qccw-pqwf (fixed in
+    # 3.17.2), so the floors job was installing a tracking client with known
+    # advisories. The lock already ships 3.18.0; only the declared floor was exposed.
+    "mlflow>=3.17.2",
 ]
 
 [project.urls]

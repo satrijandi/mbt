@@ -39,7 +39,12 @@ dependencies = [
     # drivers could write authentication tokens, query-result encryption keys
     # and pre-signed URLs into diagnostic logs. mbt's coordinator and jobs log
     # through this driver, so it is in the execute path; 4.7.3 is the fix.
-    "snowflake-connector-python>=4.7.3",
+    # Raised 4.7.3 -> 4.8.1: every earlier release requires filelock<4, and the
+    # 3.x line of filelock carries thirteen advisories (ReadWriteLock and the soft
+    # locks, e.g. GHSA-v4x8-3wr5-3wq8) fixed only in 4.x. So a floor below 4.8.1
+    # installs a vulnerable filelock however new everything else is; 4.8.1 raised
+    # that bound ("to allow installation of filelock 4.X") and its certifi minimum.
+    "snowflake-connector-python>=4.8.1",
 ]
 
 [project.optional-dependencies]
@@ -47,7 +52,7 @@ dependencies = [
 # through keyring (its secure-local-storage extra, available since well
 # before our 3.7 floor). Without it client_store_temporary_credential is a
 # silent no-op and every connection re-prompts the browser.
-sso = ["snowflake-connector-python[secure-local-storage]>=4.7.3"]
+sso = ["snowflake-connector-python[secure-local-storage]>=4.8.1"]
 
 [project.urls]
 Homepage = "https://github.com/satrijandi/mbt"
