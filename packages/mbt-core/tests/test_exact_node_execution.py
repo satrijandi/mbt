@@ -258,11 +258,17 @@ def test_without_the_flag_the_model_still_builds_its_dataset(demo_project: Path)
     assert set(results_of(mine)) == {DATASET_UID, MODEL_UID}
 
 
-def test_the_flag_is_accepted_everywhere_a_plan_is_made() -> None:
+def test_the_flags_are_accepted_everywhere_a_plan_is_made() -> None:
+    """Read from the command's own parameters, not from its rendered --help: rich
+    colours the help in CI and splits an option name across escape codes."""
+    import typer
+
+    from mbt.cli.main import app
+
+    commands = typer.main.get_command(app).commands  # type: ignore[attr-defined]
     for command in ("run", "build", "test", "score"):
-        helped = invoke([command, "--help"])
-        assert "--no-auto-materialize" in helped.output
-        assert "--datasets-path" in helped.output
+        flags = {opt for param in commands[command].params for opt in param.opts}
+        assert {"--no-auto-materialize", "--datasets-path", "--target-path"} <= flags, command
 
 
 def test_the_planner_does_not_pull_datasets_in_unless_asked(

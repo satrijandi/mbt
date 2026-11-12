@@ -40,6 +40,8 @@ from pathlib import Path
 _REQUIREMENT = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s*(?:\[(?P<extras>[^\]]*)\])?")
 #: the `>=` lower bound, which is what "floor" means in this repo.
 _FLOOR = re.compile(r">=\s*(?P<floor>[0-9][^,;\s]*)")
+#: any bound that sets the LOWEST version a requirement allows.
+_LOWER_BOUND = re.compile(r"(?:>=|==|~=|>)\s*([0-9][0-9A-Za-z.]*)")
 
 
 def _canonical(name: str) -> str:
@@ -149,7 +151,34 @@ def declared_floors(root: Path, group: str = "dev") -> dict[str, str]:
     return floors
 
 
-def verify(root: Path) -> list[str]:
+def forced_by(name: str, installed: str) -> str | None:
+    """An installed distribution whose own requirement holds ``name`` at ``installed``.
+
+    "Holds" means that requirement's lower bound is in the installed version's
+    series, so ``installed`` is the lowest version the environment allows. This is
+    how a floor is legitimately lifted: ``virtualenv`` (a transitive of pre-commit,
+    resolved newest) began requiring ``packaging>=26.3``, so ``packaging`` could no
+    longer sit at mbt-core's declared 23.1 in this environment, whatever the install
+    path did. It is not the failure ``--verify`` exists for.
+    """
+    from importlib.metadata import distributions
+
+    series = _release(installed)[:2]
+    for dist in distributions():
+        for requirement in dist.requires or []:
+            parsed = _REQUIREMENT.match(requirement)
+            if parsed is None or _canonical(parsed.group("name")) != name:
+                continue
+            specifier = requirement.split(";")[0]
+            if "extra ==" in requirement:
+                continue
+            bounds = [_release(v)[:2] for v in _LOWER_BOUND.findall(specifier)]
+            if bounds and max(bounds) == series:
+                return str(dist.metadata["Name"])
+    return None
+
+
+def verify(root: Path, notes: list[str] | None = None) -> list[str]:
     """Packages whose installed version is not in the declared floor's series.
 
     Compared on (major, minor) rather than exactly, because the floor is a
@@ -169,7 +198,13 @@ def verify(root: Path) -> list[str]:
         except PackageNotFoundError:
             continue  # an extra we did not ask for, or a marker that excluded it
         if _release(installed)[:2] != _release(floor)[:2]:
-            drift.append(f"{name}: declared floor {floor}, installed {installed}")
+            forcing = forced_by(name, installed)
+            if forcing is None:
+                drift.append(f"{name}: declared floor {floor}, installed {installed}")
+            elif notes is not None:
+                notes.append(
+                    f"{name} {installed} is above its floor {floor}: {forcing} requires it"
+                )
     return drift
 
 
@@ -177,7 +212,10 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     root = Path(__file__).resolve().parent.parent
     if "--verify" in args:
-        drift = verify(root)
+        notes: list[str] = []
+        drift = verify(root, notes)
+        for line in notes:
+            print(f"note: {line}")
         for line in drift:
             print(f"FAIL not at its floor: {line}")
         if drift:

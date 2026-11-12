@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 from mbt.exceptions import AdapterError
+from mbt.utils import first_row
 from mbt_adapter_base import (
     DatasetLocator,
     DatasetSpec,
@@ -246,10 +247,12 @@ class LocalDataAdapter:
         not_null = " AND ".join(f"{_quote(c)} IS NOT NULL" for c in columns)
         con = duckdb.connect()
         try:
-            row = con.execute(
-                f"SELECT count(*) FROM (SELECT 1 FROM {self._source_relation(source)} "
-                f"WHERE {not_null} GROUP BY {cols} HAVING count(*) > 1)"
-            ).fetchone()
+            row = first_row(
+                con.execute(
+                    f"SELECT count(*) FROM (SELECT 1 FROM {self._source_relation(source)} "
+                    f"WHERE {not_null} GROUP BY {cols} HAVING count(*) > 1)"
+                )
+            )
             return int(row[0]) if row else 0
         finally:
             con.close()
@@ -383,7 +386,7 @@ class LocalDataAdapter:
                 f"COPY (SELECT {select} FROM mbt_base WHERE {time_sql} >= TIMESTAMP '{start_ts}' "
                 f"AND {time_sql} < TIMESTAMP '{end_ts}') TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
-            row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
+            row = first_row(con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]))
             written[split] = int(row[0]) if row else 0
         return written
 
@@ -428,7 +431,7 @@ class LocalDataAdapter:
                     f"WHERE __mbt_rank >= {lo} AND {upper}) "
                     f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
                 )
-                row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
+                row = first_row(con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]))
                 written[split] = int(row[0]) if row else 0
             return written
 
@@ -442,7 +445,7 @@ class LocalDataAdapter:
                 f"COPY (SELECT {select} FROM mbt_base WHERE {bucket} >= {lo} AND {bucket} < {hi}) "
                 f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
-            row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
+            row = first_row(con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]))
             written[split] = int(row[0]) if row else 0
         return written
 
@@ -472,7 +475,7 @@ class LocalDataAdapter:
                 f"COPY (SELECT {select} FROM mbt_base{where}) "
                 f"TO {_sql_str(str(out))} (FORMAT PARQUET)"
             )
-            row = con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]).fetchone()
+            row = first_row(con.execute("SELECT count(*) FROM read_parquet(?)", [str(out)]))
             return int(row[0]) if row else 0
         except duckdb.Error as exc:
             raise AdapterError(

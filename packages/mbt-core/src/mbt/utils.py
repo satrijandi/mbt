@@ -28,6 +28,21 @@ def did_you_mean(unknown: str, candidates: list[str], max_distance: int = 3) -> 
     return None
 
 
+def first_row(result: Any) -> tuple[Any, ...] | None:
+    """The first row of a DuckDB result, or None, with the result fully consumed.
+
+    ``execute(...).fetchone()`` leaves the result unfinished until a fetch returns
+    nothing, and DuckDB 2.0 refuses to run anything else on that connection until
+    then (``ResourceInUseException``). DuckDB 1.x tolerated it, so a check that
+    queried once per split on one connection passed for years and broke the day
+    ``duckdb`` moved to 2.0 (the nightly upstream run, issue #32). Every query here
+    reads one aggregate row, so fetching them all costs nothing and cannot leave a
+    result open.
+    """
+    rows = result.fetchall()
+    return rows[0] if rows else None
+
+
 def canonical_json(value: Any) -> str:
     """Canonical JSON for hashing: UTF-8, sorted keys, no whitespace (TSD §8.4).
 

@@ -14,6 +14,7 @@ import pyarrow as pa
 
 from mbt.events import get_bus
 from mbt.events.models import CheckEvaluated, LogMessage
+from mbt.utils import first_row
 from mbt_adapter_base import (
     OUT_OF_TIME_SPLIT,
     CheckSpec,
@@ -254,9 +255,9 @@ def _check_not_null(
             for column in columns:
                 if split == OUT_OF_TIME_SPLIT and column == label:
                     continue  # an immature row's label is null by design (ADR-30)
-                row = con.execute(
-                    f'SELECT count(*) FROM split_{split} WHERE "{column}" IS NULL'
-                ).fetchone()
+                row = first_row(
+                    con.execute(f'SELECT count(*) FROM split_{split} WHERE "{column}" IS NULL')
+                )
                 nulls = int(row[0]) if row else 0
                 if nulls:
                     problems.append(f"{split}.{column}: {nulls} null(s)")
@@ -355,10 +356,12 @@ def _check_unique(
         problems = []
         for split in splits:
             for column in columns:
-                row = con.execute(
-                    f'SELECT count(*) FROM (SELECT "{column}" FROM split_{split} '
-                    f'WHERE "{column}" IS NOT NULL GROUP BY "{column}" HAVING count(*) > 1)'
-                ).fetchone()
+                row = first_row(
+                    con.execute(
+                        f'SELECT count(*) FROM (SELECT "{column}" FROM split_{split} '
+                        f'WHERE "{column}" IS NOT NULL GROUP BY "{column}" HAVING count(*) > 1)'
+                    )
+                )
                 dup = int(row[0]) if row else 0
                 if dup:
                     problems.append(f"{split}.{column}: {dup} duplicated value(s)")
@@ -399,11 +402,13 @@ def _check_accepted_values(
         placeholders = ", ".join("?" for _ in values)
         problems = []
         for split in splits:
-            row = con.execute(
-                f'SELECT count(DISTINCT "{column}") FROM split_{split} '
-                f'WHERE "{column}" IS NOT NULL AND "{column}" NOT IN ({placeholders})',
-                values,
-            ).fetchone()
+            row = first_row(
+                con.execute(
+                    f'SELECT count(DISTINCT "{column}") FROM split_{split} '
+                    f'WHERE "{column}" IS NOT NULL AND "{column}" NOT IN ({placeholders})',
+                    values,
+                )
+            )
             unexpected = int(row[0]) if row else 0
             if unexpected:
                 problems.append(f"{split}.{column}: {unexpected} unexpected value(s)")
@@ -492,9 +497,9 @@ def _check_freshness(
         newest = None
         for split in sorted(handle.splits()):
             con.register(f"f_{split}", handle.read(split))
-            row = con.execute(
-                f'SELECT CAST(max("{time_column}") AS TIMESTAMP) FROM f_{split}'
-            ).fetchone()
+            row = first_row(
+                con.execute(f'SELECT CAST(max("{time_column}") AS TIMESTAMP) FROM f_{split}')
+            )
             candidate = row[0] if row else None
             if candidate is not None and (newest is None or candidate > newest):
                 newest = candidate
@@ -553,9 +558,9 @@ def _check_no_future_columns(
             for field in table.schema:
                 if not str(field.type).startswith(_TIMESTAMP_TYPES):
                     continue
-                row = con.execute(
-                    f'SELECT CAST(max("{field.name}") AS TIMESTAMP) FROM t_{split}'
-                ).fetchone()
+                row = first_row(
+                    con.execute(f'SELECT CAST(max("{field.name}") AS TIMESTAMP) FROM t_{split}')
+                )
                 maximum = row[0] if row else None
                 if maximum is not None and maximum > boundary:
                     problems.append(
@@ -581,15 +586,17 @@ def _numeric_association(con: Any, column: str, label: str) -> tuple[float | Non
     ``rank()`` and both thresholds keep meaning what they say. The categorical
     path never had this weakness: Cramér's V is association, not correlation.
     """
-    row = con.execute(
-        f'SELECT corr(CAST("{column}" AS DOUBLE), CAST("{label}" AS DOUBLE)), '
-        f"corr(r_col, r_label) FROM ("
-        f'  SELECT "{column}", "{label}",'
-        f'    rank() OVER (ORDER BY CAST("{column}" AS DOUBLE)) AS r_col,'
-        f'    rank() OVER (ORDER BY CAST("{label}" AS DOUBLE)) AS r_label'
-        f"  FROM t"
-        f") t"
-    ).fetchone()
+    row = first_row(
+        con.execute(
+            f'SELECT corr(CAST("{column}" AS DOUBLE), CAST("{label}" AS DOUBLE)), '
+            f"corr(r_col, r_label) FROM ("
+            f'  SELECT "{column}", "{label}",'
+            f'    rank() OVER (ORDER BY CAST("{column}" AS DOUBLE)) AS r_col,'
+            f'    rank() OVER (ORDER BY CAST("{label}" AS DOUBLE)) AS r_label'
+            f"  FROM t"
+            f") t"
+        )
+    )
     if not row:  # pragma: no cover - an aggregate SELECT always yields a row
         return None, "|corr|"
 

@@ -84,6 +84,7 @@ def test_verify_flags_a_package_installed_above_its_declared_floor(
     in one and fails in the other.
     """
     monkeypatch.setattr(floors, "declared_floors", lambda root, group="dev": {"pytest": "1.0"})
+    monkeypatch.setattr(floors, "forced_by", lambda name, installed: None)
     drift = floors.verify(REPO_ROOT)
     assert len(drift) == 1
     assert drift[0].startswith("pytest: declared floor 1.0, installed ")
@@ -105,6 +106,58 @@ def test_verify_ignores_a_declared_package_that_is_not_installed(
         floors, "declared_floors", lambda root, group="dev": {"not-a-real-package": "1.0"}
     )
     assert floors.verify(REPO_ROOT) == []
+
+
+class _Dist:
+    """Just enough of an installed distribution for forced_by."""
+
+    def __init__(self, name: str, requires: list[str]) -> None:
+        self.metadata = {"Name": name}
+        self.requires = requires
+
+
+def _environment(monkeypatch: pytest.MonkeyPatch, installed: str, dists: list[_Dist]) -> None:
+    monkeypatch.setattr(floors, "declared_floors", lambda root, group="dev": {"packaging": "23.1"})
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: installed)
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: dists)
+
+
+def test_verify_allows_a_floor_another_installed_package_forces_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floors job went red when virtualenv, a transitive of pre-commit, began
+    requiring packaging>=26.3. That is not the install path ignoring the floors,
+    which is the one thing --verify is for - and it is said out loud, not hidden."""
+    _environment(monkeypatch, "26.3", [_Dist("virtualenv", ["packaging>=26.3", "filelock<5"])])
+    notes: list[str] = []
+    assert floors.verify(REPO_ROOT, notes) == []
+    assert notes == ["packaging 26.3 is above its floor 23.1: virtualenv requires it"]
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "packaging>=25.0",  # forces 25.x, but 26.3 is installed: something else lifted it
+        "packaging<27",  # an upper bound holds nothing up
+        "packaging>=26.3; extra == 'docs'",  # an extra we did not install
+        "other>=26.3",  # a different package
+    ],
+)
+def test_verify_still_fails_when_nothing_installed_forces_the_version(
+    monkeypatch: pytest.MonkeyPatch, requirement: str
+) -> None:
+    _environment(monkeypatch, "26.3", [_Dist("something", [requirement])])
+    assert floors.verify(REPO_ROOT) == ["packaging: declared floor 23.1, installed 26.3"]
+
+
+def test_the_cli_prints_the_notes_and_still_passes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _environment(monkeypatch, "26.3", [_Dist("virtualenv", ["packaging>=26.3"])])
+    assert floors.main(["--verify"]) == 0
+    assert "note: packaging 26.3 is above its floor 23.1: virtualenv requires it" in (
+        capsys.readouterr().out
+    )
 
 
 # -- the job that runs it (.github/workflows/ci.yml) ---------------------------
