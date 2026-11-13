@@ -69,7 +69,8 @@ One DAG is one command's.
 
 | `command` | Draws | Each task runs |
 |---|---|---|
-| `build` (the default), `run`, `test` | datasets and models | `mbt <command> --select <node> --no-auto-materialize` |
+| `build` (the default), `run` | datasets and models, each as a group of steps ([below](#a-node-is-a-group-of-steps)) | `mbt <command> --select <node> --phase <step> --no-auto-materialize` |
+| `test` | datasets and models | `mbt test --select <node> --no-auto-materialize` |
 | `score`, `monitor` | scoring nodes | `mbt <command> --select <node>` |
 
 They are separate DAGs because mbt's commands partition the nodes that way.
@@ -77,13 +78,41 @@ A scoring node depends on its model in the manifest, but it reads the registry's
 The score DAG therefore has no edge to a training task.
 
 A model selection is drawn with the datasets it needs, because a model task reads its dataset instead of building it.
-For `churn_demo`, `select=["tag:weekly"]` selects two models and draws five tasks:
+For `churn_demo`, `select=["tag:weekly"]` selects two models, and with `phases=False` (one task per node) draws five tasks:
 
 ```text
 mbt_compile --+--> churn_training_set --> churn_classifier
               |
               +--> upsell_training_set --> upsell_classifier
 ```
+
+### A node is a group of steps
+
+By default a node of `build` or `run` is not one task but one per step mbt can run on its own ([ADR-35](adr/0035-phases-of-a-node.md)):
+
+| Node | Steps, in order |
+|---|---|
+| dataset | `materialize`, `checks` |
+| model | `train`, `gate`, `register` |
+
+so the same selection is eleven tasks, each node a collapsible group in Airflow's graph view:
+
+```text
+mbt_compile --+--> churn_training_set [ materialize --> checks ] --> churn_classifier [ train --> gate --> register ]
+              |
+              +--> upsell_training_set [ materialize --> checks ] --> upsell_classifier [ train --> gate --> register ]
+```
+
+A node waits for the last step of each node it reads, so a model trains only once its dataset's checks have passed.
+The steps have different failure stories, which is the point of drawing them:
+
+- **`register`** is a registry write. If the registry blips after a two-hour training, the retry registers the trained artifact; it does not train again.
+- **`gate`** carries the quality verdict. A red `gate` is exit 2: it is not retried and goes to the model's owner, while a red `train` or `register` is infrastructure.
+- **`checks`** can be re-run without rebuilding the dataset, and `train` is the only step that needs the training pool, queue or GPU. `MbtExecution.phase_args` gives a step operator arguments of its own: `phase_args={"train": {"pool": "gpu"}, "register": {"retries": 5}}`.
+
+The steps of one node share a target directory and hand their work over through a state file there, so every step of a node must see the same workspace ([ADR-35](adr/0035-phases-of-a-node.md)).
+`phases=False` draws one task per node.
+Preprocessing is part of `train`: it runs inside the training job, through the model's hooks.
 
 Promotion is not a task.
 It stays a reviewed step between the build DAG and the score DAG ([GitOps & CI](gitops.md)).
@@ -93,8 +122,9 @@ It stays a reviewed step between the build DAG and the score DAG ([GitOps & CI](
 The first task, `mbt_compile`, compiles the project once at the run's anchor.
 Every node task then executes that manifest verbatim (`--manifest`), so snapshots, windows, and seeds agree across the whole run.
 
-Each node task gets its own target directory and shares one dataset cache with the rest of the run ([ADR-32](adr/0032-target-path-and-exact-node-execution.md)).
+Each node gets its own target directory, shared by its steps, and one dataset cache is shared with the rest of the run ([ADR-32](adr/0032-target-path-and-exact-node-execution.md)).
 A task's result is read from its own `run_results.json` and returned as its XCom: the node's status, its metrics, and any message.
+After `train` that is the metrics and the artifact; after `register` it is the finished node, registration included.
 
 The anchor is the run's `anchor` param when you set one, else what your `anchor_command` prints, else the end of its data interval, else its logical date.
 The `vars` param is passed to the compile task only, which is what keeps the dataset and the model tasks agreeing on cache keys.
@@ -161,6 +191,7 @@ execution = MbtExecution(
 | `retries`, `retry_delay` | How a hard error is retried. A quality verdict never is |
 | `cleanup_on_success` | Add a final task that removes the run's workspace, but only if every node succeeded, so a failed run keeps its logs and results |
 | `operator_args` | Passed to every operator: `pool`, `queue`, `execution_timeout`, and any other `BaseOperator` argument. They win over the named settings |
+| `phase_args` | The same, for the tasks of one step, by phase name (`train`, `gate`, `register`, `materialize`, `checks`). They win over `operator_args` |
 
 **The workspace must be visible to every worker.**
 On one machine a temp directory is fine.

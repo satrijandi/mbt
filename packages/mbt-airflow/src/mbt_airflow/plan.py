@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from mbt.artifacts.manifest import Manifest
 from mbt.exceptions import ConfigError
+from mbt.execute.phases import PHASE_COMMANDS, PHASES_BY_KIND
 from mbt.execute.planner import plan_execution
 
 #: Task id of the root task every other task hangs off.
@@ -44,6 +45,12 @@ class TaskSpec:
     command: str
     #: Task ids this one waits for.
     upstream: tuple[str, ...]
+    #: The node's name: what a task's target directory is called, and what groups the
+    #: phases of one node. Empty for the compile task.
+    node: str = ""
+    #: The step of the node this task runs (``train``, ``gate``, ...), or None when the
+    #: task runs the whole node (ADR-35).
+    phase: str | None = None
 
 
 def plan_tasks(
@@ -51,6 +58,8 @@ def plan_tasks(
     command: str,
     select: Sequence[str] | None = None,
     exclude: Sequence[str] | None = None,
+    *,
+    phases: bool = True,
 ) -> list[TaskSpec]:
     """The tasks of a DAG that runs ``command`` over ``select`` of ``manifest``.
 
@@ -68,6 +77,13 @@ def plan_tasks(
 
     ``state:`` selectors are refused by the planner: a DAG is drawn before any
     run, so there is no reference state to compare against.
+
+    With ``phases`` (the default) a node of ``run`` or ``build`` is not one task but
+    one per step ``mbt run --phase`` knows (ADR-35): a dataset is materialized and then
+    checked, a model is trained, judged against its gates, and registered. The steps
+    of a node run in that order, a node waits for the LAST step of each node it reads,
+    and the first step of a root waits for the compile task. The other commands have
+    one step per node, so ``phases`` does not change them.
     """
     if command not in UNIVERSE:
         raise ConfigError(
@@ -96,21 +112,37 @@ def plan_tasks(
             hint="rename one resource, or select fewer nodes",
         )
 
+    phased = phases and command in PHASE_COMMANDS
+    steps: dict[str, list[str | None]] = {}
+    for uid in plan.order:
+        kind = manifest.nodes[uid].resource_type
+        steps[uid] = list(PHASES_BY_KIND[kind]) if phased else [None]
+
+    def task_id(uid: str, phase: str | None) -> str:
+        return task_ids[uid] if phase is None else f"{task_ids[uid]}.{phase}"
+
     graph = manifest.graph()
     specs = [TaskSpec(COMPILE, "", "compile", "compile", ())]
     for uid in plan.order:
         parents = sorted(
-            task_ids[parent] for parent in graph.predecessors(uid) if parent in task_ids
+            task_id(parent, steps[parent][-1])
+            for parent in graph.predecessors(uid)
+            if parent in task_ids
         )
-        specs.append(
-            TaskSpec(
-                task_id=task_ids[uid],
-                uid=uid,
-                kind=manifest.nodes[uid].resource_type,
-                command=command,
-                upstream=tuple(parents) or (COMPILE,),
+        waits_for: tuple[str, ...] = tuple(parents) or (COMPILE,)
+        for phase in steps[uid]:
+            specs.append(
+                TaskSpec(
+                    task_id=task_id(uid, phase),
+                    uid=uid,
+                    kind=manifest.nodes[uid].resource_type,
+                    command=command,
+                    upstream=waits_for,
+                    node=task_ids[uid],
+                    phase=phase,
+                )
             )
-        )
+            waits_for = (task_id(uid, phase),)
     return specs
 
 

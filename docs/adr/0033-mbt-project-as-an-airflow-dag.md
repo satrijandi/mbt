@@ -1,6 +1,6 @@
 # ADR-33: An mbt project is an Airflow DAG: one task per node, drawn from the manifest, run through the CLI
 
-**Status:** accepted; extended by [34](0034-airflow-tasks-run-in-a-container.md), which adds container execution
+**Status:** accepted; extended by [34](0034-airflow-tasks-run-in-a-container.md), which adds container execution, and refined by [35](0035-phases-of-a-node.md), which splits a node into the steps that make up its task
 
 **Builds on:** ADR-32 (a private target path, a shareable dataset cache, exact-node execution), ADR-19 (`--manifest` execution), ADR-13 (upstream datasets auto-materialize), ADR-20 (the champion resolves at run time).
 

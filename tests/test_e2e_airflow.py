@@ -157,6 +157,11 @@ def run_results(result: dict[str, Any], task: str) -> dict[str, dict]:
 WEEKLY = ["tag:weekly"]
 MODELS = ("churn_classifier", "upsell_classifier")
 DATASETS = ("churn_training_set", "upsell_training_set")
+#: A node is a group of tasks, one per step `mbt run --phase` can run alone (ADR-35).
+DATASET_STEPS = ("materialize", "checks")
+MODEL_STEPS = ("train", "gate", "register")
+DATASET_TASKS = tuple(f"{d}.{step}" for d in DATASETS for step in DATASET_STEPS)
+MODEL_TASKS = tuple(f"{m}.{step}" for m in MODELS for step in MODEL_STEPS)
 
 
 def test_the_whole_lifecycle_runs_as_airflow_tasks(project: Project) -> None:
@@ -164,14 +169,20 @@ def test_the_whole_lifecycle_runs_as_airflow_tasks(project: Project) -> None:
     built = project.run("weekly", select=WEEKLY, conf={"anchor": DEMO_ANCHOR})
     assert built["state"] == "success", built
     assert set(states(built).values()) == {"success"}
-    assert set(built["tasks"]) == {"mbt_compile", *DATASETS, *MODELS}
+    assert set(built["tasks"]) == {"mbt_compile", *DATASET_TASKS, *MODEL_TASKS}
     assert all(info["tries"] == 1 for info in built["tasks"].values())
 
     workspace: Path = built["workspace"]
-    # one private target directory per task, holding that task's node and nothing else
+    # one private target directory per node, shared by its steps and holding that node alone
     for model in MODELS:
-        assert set(run_results(built, model)) == {f"model.churn_demo.{model}"}
+        uid = f"model.churn_demo.{model}"
+        assert set(run_results(built, model)) == {uid}
         assert not (workspace / model / "datasets").exists()  # read from the shared cache
+        # the last step's result is the finished node's: judged, and registered in staging
+        final = run_results(built, model)[uid]
+        assert final["status"] == "success" and final["registration"]["stage"] == "staging"
+        assert final["gates"] and all(g["passed"] for g in final["gates"])
+        assert (workspace / model / "phases" / f"{model}.json").is_file()  # what the steps share
     # ...and each dataset was built once, into the one shared cache
     assert sorted(p.name for p in (workspace / "datasets").iterdir()) == sorted(DATASETS)
 
@@ -199,15 +210,19 @@ def test_a_failed_gate_is_a_verdict_and_is_not_retried(project: Project) -> None
         "gates", select=WEEKLY, conf={"anchor": DEMO_ANCHOR, "vars": "pr_auc_floor: 0.99"}
     )
     assert result["state"] == "failed"
+    # training succeeded; the gate step alone carries the verdict; nothing registers
     assert states(result) == {
         "mbt_compile": "success",
-        **dict.fromkeys(DATASETS, "success"),
-        **dict.fromkeys(MODELS, "failed"),
+        **dict.fromkeys(DATASET_TASKS, "success"),
+        **{f"{m}.train": "success" for m in MODELS},
+        **{f"{m}.gate": "failed" for m in MODELS},
+        **{f"{m}.register": "upstream_failed" for m in MODELS},
     }
     for model in MODELS:
-        assert result["tasks"][model]["tries"] == 1  # exit 2 fails at once
+        assert result["tasks"][f"{model}.gate"]["tries"] == 1  # exit 2 fails at once
         node = run_results(result, model)[f"model.churn_demo.{model}"]
         assert node["status"] == "gate_failed"
+        assert node["registration"] is None
 
 
 def test_a_hard_error_is_retried_and_everything_after_it_is_skipped(project: Project) -> None:

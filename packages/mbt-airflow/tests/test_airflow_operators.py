@@ -27,6 +27,7 @@ MODEL = TaskSpec(
     "model",
     "build",
     ("churn_training_set",),
+    node="churn_classifier",
 )
 SCORING = TaskSpec(
     "retention_scoring",
@@ -34,6 +35,7 @@ SCORING = TaskSpec(
     "scoring",
     "score",
     ("mbt_compile",),
+    node="retention_scoring",
 )
 
 
@@ -61,6 +63,7 @@ def compile_op(tmp_path: Path, fake: str, **kwargs: Any) -> MbtCompileOperator:
     options: dict[str, Any] = {
         "anchor": ANCHOR,
         "plan_command": "build",
+        "plan_phases": False,
         "plan_select": ["tag:weekly"],
         "plan_exclude": None,
         "rendered_for": [
@@ -214,7 +217,7 @@ def test_a_dag_that_no_longer_matches_the_project_refuses_to_run(tmp_path: Path,
 def test_what_compile_checks_is_what_plan_tasks_draws(
     tmp_path: Path, fake: str, manifest: Any
 ) -> None:
-    drawn = [s.task_id for s in plan_tasks(manifest, "build", ["tag:weekly"])]
+    drawn = [s.task_id for s in plan_tasks(manifest, "build", ["tag:weekly"], phases=False)]
     compile_op(tmp_path, fake, rendered_for=drawn).execute({})  # no raise
 
 
@@ -397,3 +400,68 @@ def test_the_task_log_carries_the_nodes_result_unless_the_run_was_a_hard_error(
     else:
         [result] = results
         assert json.loads(result.removeprefix("result "))["metrics"] == {"pr_auc": 0.5}
+
+
+# -- phases: the steps of one node (ADR-35) ------------------------------------------------
+
+TRAIN = TaskSpec(
+    "churn_classifier.train",
+    "model.churn_demo.churn_classifier",
+    "model",
+    "build",
+    ("churn_training_set.checks",),
+    node="churn_classifier",
+    phase="train",
+)
+GATE = TaskSpec(**{**TRAIN.__dict__, "task_id": "churn_classifier.gate", "phase": "gate"})
+
+
+def test_a_step_runs_its_phase_of_exactly_its_node(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    assert node(tmp_path, "mbt", TRAIN).argv() == [
+        *["mbt", "build", "--project-dir", "/proj"],
+        *["--manifest", f"{ws}/mbt_compile/manifest.json"],
+        *["--select", "model.churn_demo.churn_classifier", "--threads", "1"],
+        *["--target-path", f"{ws}/churn_classifier"],
+        *["--phase", "train"],
+        *["--no-auto-materialize", "--datasets-path", f"{ws}/datasets"],
+    ]
+
+
+def test_the_steps_of_a_node_share_one_target_directory(tmp_path: Path) -> None:
+    """They hand their work to each other through a state file there, and never run
+    at once, so one directory is still one writer at a time."""
+    assert node(tmp_path, "mbt", TRAIN).target_path() == node(tmp_path, "mbt", GATE).target_path()
+    assert node(tmp_path, "mbt", TRAIN).target_path().endswith("/ws/churn_classifier")
+
+
+def test_a_step_reports_its_own_result_from_the_shared_directory(
+    tmp_path: Path, fake: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each step overwrites run_results.json, so a task reads what its own step left."""
+    monkeypatch.setenv("FAKE_MBT_METRICS", json.dumps({"pr_auc": 0.5}))
+    assert node(tmp_path, fake, TRAIN).execute({})["metrics"] == {"pr_auc": 0.5}
+    monkeypatch.setenv("FAKE_MBT_METRICS", json.dumps({"pr_auc": 0.7}))
+    assert node(tmp_path, fake, GATE).execute({})["metrics"] == {"pr_auc": 0.7}
+    calls = logged_calls(tmp_path / "calls.jsonl")
+    assert [c["argv"][c["argv"].index("--phase") + 1] for c in calls] == ["train", "gate"]
+    assert calls[0]["env"]["MBT_AIRFLOW_TARGET_PATH"] == calls[1]["env"]["MBT_AIRFLOW_TARGET_PATH"]
+
+
+def test_a_failed_gate_step_is_the_quality_verdict(
+    tmp_path: Path, fake: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MBT_EXIT", "2")
+    monkeypatch.setenv("FAKE_MBT_STATUS", "gate_failed")
+    with pytest.raises(AirflowFailException, match="quality verdict"):
+        node(tmp_path, fake, GATE).execute({})
+
+
+def test_the_stale_guard_compares_the_phases_the_dag_was_drawn_with(
+    tmp_path: Path, fake: str, manifest: Any
+) -> None:
+    drawn = [s.task_id for s in plan_tasks(manifest, "build", ["tag:weekly"], phases=True)]
+    compile_op(tmp_path, fake, plan_phases=True, rendered_for=drawn).execute({})  # no raise
+    undrawn = [s.task_id for s in plan_tasks(manifest, "build", ["tag:weekly"], phases=False)]
+    with pytest.raises(AirflowFailException, match="stale"):
+        compile_op(tmp_path, fake, plan_phases=True, rendered_for=undrawn).execute({})

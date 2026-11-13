@@ -53,6 +53,7 @@ These behave the same on every command that accepts them.
 | `--target-path DIR` | Directory this command writes its manifest, results, logs, and lock to, instead of `<project>/target`. One writer per directory, so concurrent tasks each take their own. Also `MBT_TARGET_PATH`. On `parse`, `compile`, `run`, `build`, `test`, `score`, `evaluate`, `monitor`, `predictions`, `docs`, and `clean` (ADR-32) |
 | `--datasets-path DIR` | Directory of the dataset cache, instead of `<target-path>/datasets`. Point concurrent tasks at one shared directory and a model reads the dataset another task built; two builders of one key take turns. Also `MBT_DATASETS_PATH`. On `run`, `build`, `test`, `score`, and `evaluate` (ADR-32) |
 | `--no-auto-materialize` | Run exactly the selected nodes: an upstream dataset the selection does not name is read from the dataset cache instead of being built, and a missing one is an error (exit 1). On `run`, `build`, `test`, and `score`, where it has no effect on `score` because a scoring plan never builds datasets (ADR-32) |
+| `--phase PHASE` | Run one step of each selected node: `materialize` or `checks` for a dataset, `train`, `gate` or `register` for a model. On `run` and `build` only; implies `--no-auto-materialize`. See [one step per task](#mbt-build) (ADR-35) |
 | `--log-format FORMAT` | Event format on stderr: `text` (the default) or `json`, which also suppresses the results table |
 | `-q`, `--quiet` | Suppress events |
 | `-v`, `--verbose` | Show debug-level events, such as per-trial tuning lines (text mode only) |
@@ -235,6 +236,43 @@ mbt build --manifest /runs/42/compile/manifest.json --select churn_classifier --
 
 The model task builds nothing: it reads the dataset the second command left in `/runs/42/datasets`.
 If that dataset is not there it fails with exit `1` (`dataset 'churn_training_set' is not materialized`), so the scheduler retries it rather than paging a model owner, and `--vars` and `--manifest` must match the dataset task's for the cache key to match.
+
+**One step per task.**
+`--phase` goes one level below the node: it runs a single step of each selected node, so an orchestrator can give the steps their own retries, resources and place in the graph ([ADR-35](adr/0035-phases-of-a-node.md)).
+
+| Node | Phases, in order | What each does |
+|---|---|---|
+| dataset | `materialize` | reads the source, windows, splits and projects it, and caches the result |
+| | `checks` | runs the declared checks (and, under `build`, the Python data tests) against the cached dataset |
+| model | `train` | runs the training job and evaluates it on the test split; leaves the result next to the artifact |
+| | `gate` | judges that result against the gates (threshold, champion, stability) and records the verdict |
+| | `register` | registers the artifact and sets its stage; a retry finishes the same version instead of registering a second |
+
+```bash
+mbt run --manifest /runs/42/compile/manifest.json --select churn_training_set \
+    --phase materialize --target-path /runs/42/churn_training_set --datasets-path /runs/42/datasets
+mbt build --manifest /runs/42/compile/manifest.json --select churn_training_set \
+    --phase checks --target-path /runs/42/churn_training_set --datasets-path /runs/42/datasets
+mbt run --manifest /runs/42/compile/manifest.json --select churn_classifier \
+    --phase train --target-path /runs/42/churn_classifier --datasets-path /runs/42/datasets
+mbt run --manifest /runs/42/compile/manifest.json --select churn_classifier \
+    --phase gate --target-path /runs/42/churn_classifier
+mbt run --manifest /runs/42/compile/manifest.json --select churn_classifier \
+    --phase register --target-path /runs/42/churn_classifier
+```
+
+Run in that order with no `--phase`, a node does exactly this in one process, and the results are the same.
+What differs:
+
+- `--phase` applies to `run` and `build` only, implies `--no-auto-materialize`, and refuses a selection with a node that lacks the phase (`phase 'train' is a model phase, but the selection includes ['churn_training']`), before any work starts.
+- A model's phases share one `--target-path`: `train` leaves its result in `phases/<model>.json` there, `gate` and `register` read and extend it.
+  The phases never run at the same time, so the directory still has one writer.
+  A phase that finds no state, or a state from a different `--manifest`, exits `1` and says which phase to run first.
+- The exit codes keep their meaning: `gate` exits `2` when a gate says no, and every other failure of every phase is `1`.
+- `run_results.json` records the phase in `metadata.phase`, and holds the result of that step alone: after `train` the model has metrics and an artifact but no gates and no registration. Its `execution_time_s` is the model's time so far, summed over its phases, so the last result a dashboard reads is the node's cost.
+- The champion a model is gated against is the one `train` compared with, so the verdict describes the comparison the job made even if the champion moved in between.
+- `register` is idempotent once the registry has the version: re-running it does not register the artifact again.
+  The one window left is a process killed between the registry accepting the artifact and the version being written down, which can register it twice.
 
 ### `mbt test`
 

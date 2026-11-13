@@ -167,7 +167,8 @@ Four modules split the work of running the plan:
 |---|---|
 | `execute/planner.py` | Selectors + state → the `ExecutionPlan` (`selected`, `execution_set`, topological `order`). |
 | `execute/scheduler.py` | Walk the DAG with a `ThreadPoolExecutor`: start a node when its in-plan parents succeed, mark transitive descendants `skipped` on failure, keep independent branches going, honor `--fail-fast`. |
-| `execute/runners.py` | The coordinator side of each node type. Builds the `TrainingJob`, submits it, applies gates/checks/monitors to the result, registers. |
+| `execute/runners.py` | The coordinator side of each node type. Builds the `TrainingJob`, submits it, applies gates/checks/monitors to the result, registers. A model is `train`, `judge`, `register` over one `ModelPhaseState`, and `--phase` runs one of them. |
+| `execute/phases.py` | The phases of a node (`materialize`/`checks`, `train`/`gate`/`register`), the validation of `--phase`, and the state file a model's phases share (ADR-35). |
 | `execute/job.py` | The subprocess entrypoint - all framework-heavy work (see the split above). |
 
 The scheduler keeps at most `threads` jobs outstanding so `--fail-fast` can actually cancel not-yet-started work, and it calls back into the orchestrator's `cancel_active_jobs` to terminate running subprocesses when fail-fast trips.

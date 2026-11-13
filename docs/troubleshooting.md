@@ -1316,18 +1316,57 @@ Nothing needs cleaning up in the warehouse: the objects that were created landed
 
 ```text
 airflow.sdk.exceptions.AirflowFailException: this DAG is stale against the project it ran:
-drawn but gone [], in the project but not drawn ['churn_classifier_deep']. Recompile the
-manifest the DAG is drawn from.
+drawn but gone [], in the project but not drawn ['churn_classifier_deep.gate',
+'churn_classifier_deep.register', 'churn_classifier_deep.train']. Recompile the manifest the
+DAG is drawn from.
 ```
 
 **Why:** an `MbtDag` is drawn when Airflow parses the file, from a manifest compiled ahead of time, but each run compiles the project again at its own anchor.
 The compile task re-plans that fresh manifest with the DAG's own `select` and `exclude`, and refuses to go on when the two graphs differ.
-Here `churn_classifier_deep` gained the `weekly` tag after the manifest was published, so `tag:weekly` now means a model the DAG has no task for.
+Here `churn_classifier_deep` gained the `weekly` tag after the manifest was published, so `tag:weekly` now means a model the DAG has no tasks for (a node is drawn as its steps, so each missing step is listed, [ADR-35](adr/0035-phases-of-a-node.md)).
 Running anyway would have skipped it behind a green run ([ADR-33](adr/0033-mbt-project-as-an-airflow-dag.md)).
 "drawn but gone" is the other direction: a node the DAG has a task for no longer exists in the project.
 
 **Fix:** recompile and republish the manifest the DAG reads (`manifest_path` on `MbtProject`), then let Airflow re-parse the file.
 It is a deterministic mismatch, so retrying the task cannot clear it.
+
+### `nothing to gate for model '<name>': no training state`
+
+**Symptom (the `<model>.gate` task fails and is retried; captured by running the phase by hand over `churn_demo`):**
+
+```text
+[1/1] ERROR model model.churn_demo.churn_classifier in 0.00s - nothing to gate for model
+          'churn_classifier': no training state at <target-path>/phases/churn_classifier.json
+          resource: model.churn_demo.churn_classifier
+          hint: run 'mbt run --phase train' for this model first, with the same
+          --target-path (a model's phases share one)
+```
+
+`register` says the same for a model that has not been judged (`model 'churn_classifier' has not been judged: its gates have not run`), and `gate` or `register` run against a different manifest than `train` says `the training state at <path> was left by a different plan`.
+
+**Why:** a model's `train`, `gate` and `register` steps hand their work to each other through a state file under the node's `--target-path` ([ADR-35](adr/0035-phases-of-a-node.md)), so all three must be given the same `--target-path` and the same `--manifest`.
+Under `mbt-airflow` that is arranged for you, so seeing this there means the workspace is not shared: the steps ran on different machines without a common volume, or `train` was cleared and re-run in a different run.
+Run by hand, it is the order: `gate` needs `train`, and `register` needs `gate`.
+
+**Fix:** run the earlier step first, against the same `--target-path` and `--manifest`.
+On Airflow, point `workspace_root` at storage every worker sees ([Running on Airflow](airflow.md)), or clear the `train` task so the state is rewritten.
+It exits `1`, a hard error, so the scheduler retries it rather than paging a model owner.
+
+### `phase 'train' is a model phase, but the selection includes [...]`
+
+**Symptom (exit `1`, before any node runs; captured by hand over `churn_demo`):**
+
+```text
+Error: phase 'train' is a model phase, but the selection includes ['churn_training_set']
+  hint: select only models, for example --select <name> for one node; a phase runs exactly the nodes selected
+```
+
+The other refusals are `unknown phase 'polish'` and `--phase applies to 'run' and 'build', not 'test'`.
+
+**Why:** `--phase` runs one step of every selected node, so every selected node needs that step ([ADR-35](adr/0035-phases-of-a-node.md)).
+Skipping the nodes that lack it would let an orchestrator believe a dataset had been built when it had not.
+
+**Fix:** select only nodes of the kind the phase belongs to (`materialize` and `checks` are dataset phases; `train`, `gate` and `register` are model phases), or drop `--phase` to run whole nodes.
 
 ## The showcase
 

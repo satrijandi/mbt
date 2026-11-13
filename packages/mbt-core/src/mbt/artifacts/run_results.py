@@ -141,6 +141,9 @@ class RunResultsMetadata(BaseModel):
     elapsed_s: float = 0.0
     command: str
     selector: str | None = None
+    #: ``--phase`` (ADR-35): set when the run was one step of each selected node, so a
+    #: result reads as "trained, not yet judged" instead of looking like a finished node.
+    phase: str | None = None
 
 
 class RunResults(BaseModel):

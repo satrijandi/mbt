@@ -28,6 +28,7 @@ from mbt.events import get_bus
 from mbt.events.models import ArtifactRegistered, LogMessage, NodeFinished, NodeStarted
 from mbt.events.node_log import NodeLogSink, combined_log, node_scope
 from mbt.exceptions import AdapterError, ConfigError, JobInterrupted, MbtError, StateError
+from mbt.execute.phases import ModelPhaseState, read_state, write_state
 from mbt.quality.checks import SourceAccess, labeled_splits, run_checks, run_scoring_checks
 from mbt.quality.gates import all_gates_passed, evaluate_gates
 from mbt.quality.judgement import after_test_tags, gate_failure_summary, judge
@@ -151,6 +152,9 @@ class ExecutionContext:
     #: Per-node run logs for this invocation (ADR-30); None when the caller
     #: did not install them.
     node_logs: NodeLogSink | None = None
+    #: ``--phase`` (ADR-35): the one step of each node this invocation runs, or None
+    #: for the whole node.
+    phase: str | None = None
 
     def __post_init__(self) -> None:
         self.data_adapter = build_data_adapter(self.profiles, self.project_dir, self.registry)
@@ -210,8 +214,13 @@ class ExecutionContext:
                 f"dataset {node.name!r} is not materialized in {self.layout.datasets} "
                 f"(key {key[:12]})",
                 resource=uid,
-                hint=f"build it first with 'mbt build --select {node.name}' against the same "
-                "--manifest, --vars and --datasets-path, or drop --no-auto-materialize",
+                hint=(
+                    f"build it first with 'mbt run --phase materialize --select {node.name}'"
+                    if self.phase == "checks"
+                    else f"build it first with 'mbt build --select {node.name}'"
+                )
+                + " against the same --manifest, --vars and --datasets-path"
+                + ("" if self.phase else ", or drop --no-auto-materialize"),
             )
         self.store_dataset_handle(uid, handle)
         return handle
@@ -401,7 +410,11 @@ def run_with_lifecycle(
 
 
 class DatasetRunner:
-    """Materialize (or reuse) a dataset, then run its checks and data tests."""
+    """Materialize (or reuse) a dataset, then run its checks and data tests.
+
+    ``--phase materialize`` stops after the first; ``--phase checks`` runs only the
+    second, against what a ``materialize`` left in the dataset cache (ADR-35).
+    """
 
     def __init__(self, ctx: ExecutionContext) -> None:
         self.ctx = ctx
@@ -412,8 +425,15 @@ class DatasetRunner:
 
     def _run_inner(self, uid: str, node: ManifestNode) -> NodeResult:
         spec = DatasetSpec.model_validate(node.config)
-        handle = self._materialize(node, spec)
-        self.ctx.store_dataset_handle(uid, handle)
+        phase = self.ctx.phase
+        if phase == "checks":
+            # Builds nothing: a missing materialization is the error it always is.
+            handle = self.ctx.dataset_handle(uid)
+        else:
+            handle = self._materialize(node, spec)
+            self.ctx.store_dataset_handle(uid, handle)
+        if phase == "materialize":
+            return NodeResult(unique_id=uid, status="success")
         tests = self._run_quality(uid, node, spec, handle)
         failed = [t for t in tests if not t.passed]
         status = "test_failed" if failed else "success"
@@ -536,7 +556,29 @@ class ModelRunner:
 
     def run(self, uid: str) -> NodeResult:
         node = self.ctx.manifest.nodes[uid]
-        return run_with_lifecycle(self.ctx, uid, "model", lambda: self._run_inner(uid, node))
+        result = run_with_lifecycle(self.ctx, uid, "model", lambda: self._run_inner(uid, node))
+        if self.ctx.phase is not None:
+            self._add_to_elapsed(node, result)
+        return result
+
+    def _add_to_elapsed(self, node: ManifestNode, result: NodeResult) -> None:
+        """Report the node's time so far, not only this phase's.
+
+        A dashboard reads the last result a node pushed, and the last phase of a model
+        is the registry write: its duration alone would say training took a second.
+        The events still carry each phase's own time. A phase that left no state (a
+        training that failed before it wrote one) has nothing to add to.
+        """
+        path = self.ctx.layout.phase_state(node.name)
+        try:
+            state = read_state(
+                path, node, self.ctx.manifest.manifest_hash(), phase=self.ctx.phase or ""
+            )
+        except StateError:
+            return
+        state.elapsed_s += result.execution_time_s
+        write_state(path, state)
+        result.execution_time_s = state.elapsed_s
 
     # -- helpers -------------------------------------------------------------
 
@@ -740,7 +782,7 @@ class ModelRunner:
         spec: ModelSpec,
         node: ManifestNode,
         job_result: Any,
-        champion: ModelVersion | None,
+        champion_version: str | None,
         metric_specs: list[MetricSpec],
         *,
         evaluated_is_champion: bool = False,
@@ -752,7 +794,7 @@ class ModelRunner:
             resource=node.unique_id,
             challenger=job_result.metrics,
             champion=job_result.champion_metrics,
-            champion_version=champion.version if champion else None,
+            champion_version=champion_version,
             metric_specs=metric_specs,
             determinism=adapter.determinism,
             champion_delta_bounds=job_result.champion_delta_bounds,
@@ -766,10 +808,16 @@ class ModelRunner:
         self,
         spec: ModelSpec,
         node: ManifestNode,
-        job_result: Any,
-        gates: list[GateResult],
-        verdict: str | None = None,
+        state: ModelPhaseState,
+        persist: Path | None = None,
     ) -> RegistrationResult | None:
+        """Register the trained artifact and set its stage.
+
+        With ``persist`` (the ``register`` phase), the version is written to the phase
+        state the moment the registry has it, so a retry after a failure in the stage
+        transition finishes that version instead of registering the artifact again.
+        """
+        job_result = state.job_result
         if spec.registration is None or job_result.artifact is None:
             return None
         ctx = self.ctx
@@ -796,9 +844,9 @@ class ModelRunner:
             # check replaces it with a fresher one.
             after_test=(
                 AfterTestVerdict(
-                    passed=verdict, anchor=ctx.manifest.metadata.anchor, source="build"
+                    passed=state.verdict, anchor=ctx.manifest.metadata.anchor, source="build"
                 )
-                if verdict is not None
+                if state.verdict is not None
                 else None
             ),
             # Deployable cutoffs (R2-5), so a scoring pipeline can default its
@@ -807,9 +855,15 @@ class ModelRunner:
                 operating_points(job_result.metrics.metrics) if job_result.metrics else {}
             ),
         )
-        version = registry_adapter.register(
-            job_result.artifact, spec.registration.name, record.pack()
-        )
+        if state.registered_version is not None:
+            version = ModelVersion(name=spec.registration.name, version=state.registered_version)
+        else:
+            version = registry_adapter.register(
+                job_result.artifact, spec.registration.name, record.pack()
+            )
+            if persist is not None:
+                state.registered_version = version.version
+                write_state(persist, state)
         registry_adapter.transition(version, spec.registration.stage_on_pass)
         get_bus().emit(
             ArtifactRegistered(
@@ -902,7 +956,58 @@ class ModelRunner:
     # -- main path -------------------------------------------------------------
 
     def _run_inner(self, uid: str, node: ManifestNode) -> NodeResult:
+        """Train, judge, register: the whole model, or the one phase asked for (ADR-35).
+
+        Run whole, the three steps share ``state`` in memory and nothing is written.
+        Run as phases, ``state`` is the file the steps hand to one another, and each
+        step does what it always did, in the same order.
+        """
+        phase = self.ctx.phase
         spec = ModelSpec.model_validate(node.config)
+        path = self.ctx.layout.phase_state(node.name)
+        if phase in (None, "train"):
+            trained = self._train(uid, node, spec)
+            if isinstance(trained, NodeResult):
+                return trained
+            state = trained
+            if phase == "train":
+                write_state(path, state)
+                return self._node_result(uid, state)
+        else:
+            state = read_state(path, node, self.ctx.manifest.manifest_hash(), phase=phase)
+
+        if phase in (None, "gate"):
+            self._judge(uid, node, spec, state)
+            if phase == "gate":
+                if not state.passed:
+                    # A model that fails its gate goes no further, so this is its end.
+                    self._finish(node, state)
+                write_state(path, state)
+                return self._node_result(uid, state)
+        elif state.passed is None:
+            raise StateError(
+                f"model {node.name!r} has not been judged: its gates have not run",
+                resource=uid,
+                hint="run 'mbt run --phase gate' for this model before 'register'",
+            )
+        elif not state.passed:
+            raise StateError(
+                f"model {node.name!r} failed its gates, so there is nothing to register",
+                resource=uid,
+                hint=state.failure_summary,
+            )
+
+        if state.passed and state.registration is None:
+            state.registration = self._register(
+                spec, node, state, persist=path if phase == "register" else None
+            )
+        self._finish(node, state)
+        if phase == "register":
+            write_state(path, state)
+        return self._node_result(uid, state)
+
+    def _train(self, uid: str, node: ManifestNode, spec: ModelSpec) -> ModelPhaseState | NodeResult:
+        """Run the training job; its result, or the error NodeResult it ended in."""
         metric_specs = self._metric_specs(spec, node)
         champion, _stage = self._champion(spec, node)
 
@@ -918,34 +1023,57 @@ class ModelRunner:
                 status="error",
                 message=job_result.error or "job returned no metrics",
             )
+        return ModelPhaseState(
+            unique_id=uid,
+            manifest_hash=self.ctx.manifest.manifest_hash(),
+            job_result=job_result,
+            champion_version=champion.version if champion else None,
+        )
 
-        gates = self._gate_results(spec, node, job_result, champion, metric_specs)
+    def _judge(self, uid: str, node: ManifestNode, spec: ModelSpec, state: ModelPhaseState) -> None:
+        """Judge the job result against the gates and record the judgement on ``state``."""
+        metric_specs = self._metric_specs(spec, node)
+        gates = self._gate_results(
+            spec, node, state.job_result, state.champion_version, metric_specs
+        )
         # One owner for "judge this job result" (C-1).
-        outcome = judge(spec, gates, job_result.report, resource=uid)
+        outcome = judge(spec, gates, state.job_result.report, resource=uid)
         self._note_window_reuse(node, uid)
-        stability, verdict, passed = outcome.stability, outcome.verdict, outcome.passed
-        registration = None
-        if passed:
-            registration = self._register(spec, node, job_result, gates, verdict)
-        self._attach_tracking_tags(job_result, gates, registration, stability.results, verdict)
+        state.gates = gates
+        state.stability = outcome.stability.results
+        state.verdict = outcome.verdict
+        state.passed = outcome.passed
+        state.failure_summary = outcome.failure_summary
+
+    def _finish(self, node: ManifestNode, state: ModelPhaseState) -> None:
+        """What ends a model's run, passed or not: the tracking tags and the run log."""
+        job_result = state.job_result
+        self._attach_tracking_tags(
+            job_result, state.gates or [], state.registration, state.stability, state.verdict
+        )
         self._upload_log(node, job_result.tracking_run_id)
 
+    @staticmethod
+    def _node_result(uid: str, state: ModelPhaseState) -> NodeResult:
+        job_result = state.job_result
+        assert job_result.metrics is not None  # _train returns an error result without them
         return NodeResult(
             unique_id=uid,
-            status="success" if passed else "gate_failed",
+            # A model that has not been judged yet (after `train`) has failed nothing.
+            status="gate_failed" if state.passed is False else "success",
             metrics=dict(job_result.metrics.metrics),
             slices=dict(job_result.metrics.slices),
-            gates=gates,
+            gates=state.gates or [],
             artifact=job_result.artifact,
-            registration=registration,
+            registration=state.registration,
             tracking_run_id=job_result.tracking_run_id,
             resolved_auto=dict(job_result.resolved_auto),
             feature_importance=dict(job_result.feature_importance),
             partial_dependence=dict(job_result.partial_dependence),
             backtest_metrics=dict(job_result.backtest_metrics),
             backtest_std=dict(job_result.backtest_std),
-            monitors=stability.results,
-            message=outcome.failure_summary,
+            monitors=state.stability,
+            message=state.failure_summary,
         )
 
     # -- re-evaluation of registered artifacts (FR-RUN-07, TSD §11.3) -----------
@@ -995,7 +1123,7 @@ class ModelRunner:
                 spec,
                 node,
                 job_result,
-                champion,
+                champion.version if champion else None,
                 metric_specs,
                 evaluated_is_champion=is_champion,
                 # A re-evaluation builds no after-test report; those gates are

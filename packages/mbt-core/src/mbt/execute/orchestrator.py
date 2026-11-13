@@ -28,6 +28,7 @@ from mbt.events import get_bus
 from mbt.events.models import LogMessage, RunFinished, RunStarted
 from mbt.events.node_log import NodeLogSink
 from mbt.exceptions import ConfigError, MbtError, StateError
+from mbt.execute.phases import check_phase
 from mbt.execute.planner import ExecutionPlan, plan_execution
 from mbt.execute.runners import (
     DatasetRunner,
@@ -75,6 +76,10 @@ class InvocationOptions:
     #: False under ``--no-auto-materialize``: upstream datasets the selection
     #: does not name are READ from the dataset cache instead of joining the plan.
     auto_materialize: bool = True
+    #: ``--phase`` (ADR-35): run one step of each selected node and no other. It
+    #: implies exact-node execution, because a phase is by definition not the whole
+    #: node and must not pull in what the node would otherwise have built.
+    phase: str | None = None
 
     @property
     def layout(self) -> TargetLayout:
@@ -357,8 +362,10 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
         opts.exclude,
         state_index,
         executable=executable,
-        auto_materialize=opts.auto_materialize,
+        auto_materialize=opts.auto_materialize and opts.phase is None,
     )
+    if opts.phase is not None:
+        check_phase(opts.command, opts.phase, manifest, plan.order)
     with node_logs(opts.layout, prepared.run_id) as logs:
         bus.emit(
             RunStarted(
@@ -391,6 +398,7 @@ def run_command(opts: InvocationOptions, *, registry: AdapterRegistry | None = N
             elapsed_s=round(time.monotonic() - started_monotonic, 3),
             command=opts.command,
             selector=" ".join(opts.select) if opts.select else None,
+            phase=opts.phase,
         ),
         results=ordered,
     )
@@ -432,6 +440,7 @@ def _execute(
         python_tests=prepared.parsed.python_tests if prepared.parsed else [],
         total_nodes=len(plan.execution_set),
         node_logs=logs,
+        phase=opts.phase,
     )
     dataset_runner = DatasetRunner(ctx)
     model_runner = ModelRunner(ctx) if opts.command in ("run", "build") else ModelTestRunner(ctx)

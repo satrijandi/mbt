@@ -91,6 +91,10 @@ class TargetLayout:
     def json_schemas(self) -> Path:
         return self.root / "json-schemas"
 
+    def phase_state(self, model_name: str) -> Path:
+        """What a model's phases hand to one another (ADR-35): one file per model."""
+        return self.root / "phases" / f"{model_name}.json"
+
     def run_logs(self, run_id: str) -> Path:
         return self.root / "run_logs" / run_id
 

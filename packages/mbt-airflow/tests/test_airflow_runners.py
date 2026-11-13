@@ -35,6 +35,7 @@ NODE = TaskSpec(
     "model",
     "build",
     ("churn_training_set",),
+    node="churn_classifier",
 )
 
 

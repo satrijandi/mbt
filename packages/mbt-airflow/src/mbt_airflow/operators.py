@@ -154,11 +154,13 @@ class MbtCompileOperator(_MbtOperator):
         plan_select: Sequence[str] | None,
         plan_exclude: Sequence[str] | None,
         rendered_for: Sequence[str],
+        plan_phases: bool = True,
         anchor_command: Sequence[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.plan_command = plan_command
+        self.plan_phases = plan_phases
         self.plan_select = list(plan_select) if plan_select else None
         self.plan_exclude = list(plan_exclude) if plan_exclude else None
         #: The task ids this DAG was drawn with, to compare against at run time.
@@ -221,7 +223,13 @@ class MbtCompileOperator(_MbtOperator):
         fresh = read_manifest(raw.decode(), source="run-time manifest")
         current = {
             spec.task_id
-            for spec in plan_tasks(fresh, self.plan_command, self.plan_select, self.plan_exclude)
+            for spec in plan_tasks(
+                fresh,
+                self.plan_command,
+                self.plan_select,
+                self.plan_exclude,
+                phases=self.plan_phases,
+            )
         }
         drawn = set(self.rendered_for)
         if current != drawn:
@@ -241,7 +249,12 @@ class MbtNodeOperator(_MbtOperator):
         self.spec = spec
 
     def target_path(self) -> str:
-        return f"{self.workspace}/{self.spec.task_id}"
+        """The node's private target directory, shared by all of its phases (ADR-35).
+
+        A model's phases hand their work to each other through a state file there, and
+        they never run at the same time, so one directory is one writer at a time.
+        """
+        return f"{self.workspace}/{self.spec.node}"
 
     def manifest_path(self) -> str:
         """The run's manifest, compiled once by the root task."""
@@ -260,6 +273,8 @@ class MbtNodeOperator(_MbtOperator):
             *["--select", self.spec.uid, "--threads", "1"],
             *["--target-path", self.target_path()],
         ]
+        if self.spec.phase is not None:
+            argv += ["--phase", self.spec.phase]
         if self.spec.command in DATASET_COMMANDS:
             # One private state directory per task, ONE dataset cache for the run,
             # and a model that reads its dataset instead of building it (ADR-32).

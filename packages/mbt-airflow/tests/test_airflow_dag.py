@@ -34,6 +34,7 @@ def project(churn_demo: tuple[Path, Path]) -> MbtProject:
 
 def make_dag(project: MbtProject, **kwargs: Any) -> MbtDag:
     kwargs.setdefault("select", ["tag:weekly"])
+    kwargs.setdefault("phases", False)  # one task per node; the phased graph has its own tests
     kwargs.setdefault("start_date", START)
     kwargs.setdefault("execution", MbtExecution(workspace_root="/ws"))
     return MbtDag("churn", project=project, **kwargs)
@@ -225,8 +226,16 @@ def test_an_anchor_command_replaces_the_derived_anchor(project: MbtProject) -> N
 def test_a_group_takes_an_anchor_command_too(project: MbtProject) -> None:
     command = ["python3", "anchor.py"]
     with DAG("outer", schedule=None, start_date=START) as dag:
-        MbtTaskGroup("a", project=project, select=["tag:weekly"], anchor_command=command)
-        MbtTaskGroup("b", project=project, select=["tag:weekly"], anchor="2026-06-30T00:00:00Z")
+        MbtTaskGroup(
+            "a", project=project, select=["tag:weekly"], phases=False, anchor_command=command
+        )
+        MbtTaskGroup(
+            "b",
+            project=project,
+            select=["tag:weekly"],
+            phases=False,
+            anchor="2026-06-30T00:00:00Z",
+        )
     assert dag.task_dict["a.mbt_compile"].anchor_command == command
     assert dag.task_dict["a.mbt_compile"].anchor == ""
     assert dag.task_dict["b.mbt_compile"].anchor == "2026-06-30T00:00:00Z"
@@ -261,6 +270,7 @@ def test_a_task_group_chains_with_your_own_tasks(project: MbtProject) -> None:
             "weekly",
             project=project,
             select=["tag:weekly"],
+            phases=False,
             execution=MbtExecution(workspace_root="/ws"),
         )
         publish = BaseOperator(task_id="publish")
@@ -279,7 +289,11 @@ def test_a_task_group_chains_with_your_own_tasks(project: MbtProject) -> None:
 
 def test_two_groups_in_one_dag_do_not_share_a_workspace(project: MbtProject) -> None:
     with DAG("host", schedule=None, start_date=START) as dag:
-        kwargs = {"project": project, "execution": MbtExecution(workspace_root="/ws")}
+        kwargs = {
+            "project": project,
+            "execution": MbtExecution(workspace_root="/ws"),
+            "phases": False,
+        }
         MbtTaskGroup("weekly", select=["tag:weekly"], **kwargs)
         MbtTaskGroup("score", command="score", select=["tag:daily"], **kwargs)
     weekly = render(dag, "weekly.churn_classifier").workspace
@@ -294,6 +308,7 @@ def test_a_task_group_takes_a_pinned_anchor_and_vars(project: MbtProject) -> Non
             "g",
             project=project,
             select=["tag:weekly"],
+            phases=False,
             anchor="{{ ds }}T00:00:00Z",
             mbt_vars="pr_auc_floor: 0.5",
         )
@@ -304,5 +319,103 @@ def test_a_task_group_takes_a_pinned_anchor_and_vars(project: MbtProject) -> Non
 
 def test_a_task_group_defaults_to_the_run_derived_anchor(project: MbtProject) -> None:
     with DAG("host", schedule=None, start_date=START) as dag:
-        MbtTaskGroup("g", project=project, select=["tag:weekly"])
+        MbtTaskGroup("g", project=project, select=["tag:weekly"], phases=False)
     assert render(dag, "g.mbt_compile").anchor == "2026-11-12T10:00:00+00:00"
+
+
+# -- phases: a node is a group of tasks (ADR-35) ---------------------------------------------
+
+PHASED_MODEL = [f"churn_classifier.{p}" for p in ("train", "gate", "register")]
+PHASED_DATASET = [f"churn_training_set.{p}" for p in ("materialize", "checks")]
+
+
+def test_a_phased_dag_draws_each_node_as_a_group_of_steps(project: MbtProject) -> None:
+    dag = make_dag(project, phases=True)
+    assert set(PHASED_MODEL + PHASED_DATASET) <= set(dag.task_dict)
+    assert "churn_classifier" not in dag.task_dict  # the node is a group, not a task
+    # the nodes are collapsible groups in the graph
+    assert {"churn_classifier", "churn_training_set"} <= set(dag.task_group.children)
+    assert dag.task_group.children["churn_classifier"].children.keys() == {
+        "churn_classifier.train",
+        "churn_classifier.gate",
+        "churn_classifier.register",
+    }
+
+
+def test_the_steps_are_wired_in_order_and_to_the_steps_of_the_nodes_they_read(
+    project: MbtProject,
+) -> None:
+    tasks = make_dag(project, phases=True).task_dict
+    assert tasks["mbt_compile"].downstream_task_ids == {
+        "churn_training_set.materialize",
+        "upsell_training_set.materialize",
+    }
+    assert tasks["churn_training_set.checks"].downstream_task_ids == {"churn_classifier.train"}
+    assert tasks["churn_classifier.train"].downstream_task_ids == {"churn_classifier.gate"}
+    assert tasks["churn_classifier.gate"].downstream_task_ids == {"churn_classifier.register"}
+    assert tasks["churn_classifier.register"].downstream_task_ids == set()
+
+
+def test_each_step_runs_its_phase_and_shares_its_nodes_directory(project: MbtProject) -> None:
+    dag = make_dag(project, phases=True)
+    train, gate = dag.task_dict["churn_classifier.train"], dag.task_dict["churn_classifier.gate"]
+    assert (train.spec.phase, gate.spec.phase) == ("train", "gate")
+    assert train.target_path() == gate.target_path()
+    assert train.target_path().endswith("/churn_classifier")
+
+
+def test_a_group_of_steps_nests_inside_a_group_of_your_own(project: MbtProject) -> None:
+    with DAG("host", schedule=None, start_date=START) as dag:
+        MbtTaskGroup(
+            "weekly",
+            project=project,
+            select=["tag:weekly"],
+            execution=MbtExecution(workspace_root="/ws"),
+        )
+    assert "weekly.churn_classifier.train" in dag.task_dict
+    assert dag.task_dict["weekly.churn_classifier.gate"].upstream_task_ids == {
+        "weekly.churn_classifier.train"
+    }
+    assert (
+        render(dag, "weekly.churn_classifier.register")
+        .target_path()
+        .endswith("/weekly/churn_classifier")
+    )
+
+
+def test_cleanup_waits_for_the_last_step_of_each_leaf_node(project: MbtProject) -> None:
+    dag = make_dag(
+        project,
+        phases=True,
+        execution=MbtExecution(workspace_root="/ws", cleanup_on_success=True),
+    )
+    assert dag.task_dict["mbt_cleanup"].upstream_task_ids == {
+        "churn_classifier.register",
+        "upsell_classifier.register",
+    }
+
+
+def test_phases_are_the_default_for_build(project: MbtProject) -> None:
+    dag = MbtDag("churn", project=project, select=["tag:weekly"], start_date=START)
+    assert "churn_classifier.train" in dag.task_dict
+    score = MbtDag(
+        "score", project=project, command="score", select=["tag:daily"], start_date=START
+    )
+    assert sorted(score.task_dict) == ["mbt_compile", "retention_scoring"]
+
+
+def test_a_step_can_have_operator_arguments_of_its_own(project: MbtProject) -> None:
+    """Only training needs the GPU pool, and a registry write is cheap to retry hard."""
+    execution = MbtExecution(
+        workspace_root="/ws",
+        retries=1,
+        operator_args={"pool": "default_pool", "queue": "cpu"},
+        phase_args={"train": {"pool": "gpu", "queue": "gpu"}, "register": {"retries": 5}},
+    )
+    tasks = make_dag(project, phases=True, execution=execution).task_dict
+    train, gate, register = (tasks[f"churn_classifier.{p}"] for p in ("train", "gate", "register"))
+    assert (train.pool, train.queue, train.retries) == ("gpu", "gpu", 1)
+    assert (gate.pool, gate.queue, gate.retries) == ("default_pool", "cpu", 1)
+    assert (register.pool, register.queue, register.retries) == ("default_pool", "cpu", 5)
+    # the compile task is not a step, so it takes the general arguments only
+    assert (tasks["mbt_compile"].pool, tasks["mbt_compile"].retries) == ("default_pool", 1)

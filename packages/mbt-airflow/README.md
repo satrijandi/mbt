@@ -42,6 +42,17 @@ mbt_compile --+--> churn_training_set --> churn_classifier
 ```
 
 A model is drawn with the datasets it needs, and the first task compiles the project once at the run's anchor, so every other task executes that one manifest.
+
+By default each node is a group of steps mbt can run on its own, so the same selection is eleven tasks:
+
+```text
+mbt_compile --+--> churn_training_set [ materialize --> checks ] --> churn_classifier [ train --> gate --> register ]
+              |
+              +--> upsell_training_set [ materialize --> checks ] --> upsell_classifier [ train --> gate --> register ]
+```
+
+A failed registration retries without retraining, and a red `gate` is the quality verdict on its own.
+`phases=False` draws one task per node.
 `select` and `exclude` are mbt's own selector grammar.
 
 ## What it does

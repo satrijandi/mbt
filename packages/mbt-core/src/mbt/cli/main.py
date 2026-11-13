@@ -202,6 +202,16 @@ NoAutoMaterializeOpt = Annotated[
         "Has no effect on 'score', which never builds datasets.",
     ),
 ]
+PhaseOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--phase",
+        help="Run one step of each selected node instead of the whole node (ADR-35). "
+        "Datasets: materialize, checks. Models: train, gate, register. Applies to 'run' "
+        "and 'build', implies --no-auto-materialize, and needs the node's earlier phases "
+        "to have run: a model's phases share one --target-path.",
+    ),
+]
 OutputOpt = Annotated[str, typer.Option("--output", "-o", help="Output format.")]
 
 
@@ -507,6 +517,7 @@ def _register_execution_command(command: str, help_text: str) -> None:
         target_path: TargetPathOpt = None,
         datasets_path: DatasetsPathOpt = None,
         no_auto_materialize: NoAutoMaterializeOpt = False,
+        phase: PhaseOpt = None,
         log_format: LogFormatOpt = "text",
         quiet: QuietOpt = False,
         verbose: VerboseOpt = False,
@@ -538,6 +549,7 @@ def _register_execution_command(command: str, help_text: str) -> None:
                 anchor=parse_anchor(anchor),
                 deep_snapshot=deep_snapshot,
                 auto_materialize=not no_auto_materialize,
+                phase=phase,
             )
         )
         render_results_table(results, cli)

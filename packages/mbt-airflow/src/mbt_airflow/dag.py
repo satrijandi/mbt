@@ -10,6 +10,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from mbt_airflow.operators import (
     MbtCompileOperator,
     MbtNodeOperator,
 )
-from mbt_airflow.plan import plan_tasks
+from mbt_airflow.plan import TaskSpec, plan_tasks
 from mbt_airflow.runners import MbtDocker
 
 #: Environment variable naming the default workspace root.
@@ -73,6 +74,10 @@ class MbtExecution:
     cleanup_on_success: bool = False
     #: Passed to every operator (``pool``, ``queue``, ``execution_timeout``, ...).
     operator_args: Mapping[str, Any] = field(default_factory=dict)
+    #: Operator arguments for the tasks of one step, by phase name, applied over
+    #: ``operator_args``: ``{"train": {"pool": "gpu"}, "register": {"retries": 5}}``
+    #: gives only training the GPU pool and lets a registry write retry harder (ADR-35).
+    phase_args: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def _workspace_root(execution: MbtExecution) -> str:
@@ -112,10 +117,11 @@ def _add_tasks(
     anchor_command: Sequence[str] | None,
     mbt_vars: str,
     scope: str,
+    phases: bool,
 ) -> str:
     """Create the tasks inside the current DAG or group; return the project's name."""
     manifest = read_manifest(Path(project.manifest_path), source="the manifest to draw")
-    specs = plan_tasks(manifest, command, select, exclude)
+    specs = plan_tasks(manifest, command, select, exclude, phases=phases)
     root = _workspace_root(execution)
     workspace = _workspace(root, scope)
     common: dict[str, Any] = {
@@ -134,19 +140,39 @@ def _add_tasks(
     }
     rendered = [spec.task_id for spec in specs]
     tasks: dict[str, Any] = {}
-    for spec in specs:
+
+    def add(spec: TaskSpec, task_id: str) -> None:
         if spec.kind == "compile":
             tasks[spec.task_id] = MbtCompileOperator(
-                task_id=spec.task_id,
+                task_id=task_id,
                 plan_command=command,
                 plan_select=select,
                 plan_exclude=exclude,
+                plan_phases=phases,
                 rendered_for=rendered,
                 anchor_command=anchor_command,
                 **common,
             )
         else:
-            tasks[spec.task_id] = MbtNodeOperator(task_id=spec.task_id, spec=spec, **common)
+            step_args = execution.phase_args.get(spec.phase or "", {})
+            tasks[spec.task_id] = MbtNodeOperator(
+                task_id=task_id, spec=spec, **{**common, **step_args}
+            )
+
+    # The steps of one node are adjacent in the plan. Each node with steps is an Airflow
+    # task group of its own, so the graph shows nodes and a click opens their steps; the
+    # operators inside are named for the step, and Airflow prefixes the node (a spec's
+    # task id, ``churn_automl.train``, is exactly the id it ends up with).
+    for node, node_specs in groupby(specs, key=lambda spec: spec.node):
+        members = list(node_specs)
+        if members[0].phase is None:
+            for spec in members:
+                add(spec, spec.task_id)
+        else:
+            with TaskGroup(group_id=node):
+                for spec in members:
+                    assert spec.phase is not None  # a node's steps are all phases or none
+                    add(spec, spec.phase)
     for spec in specs:
         for upstream in spec.upstream:
             tasks[upstream] >> tasks[spec.task_id]
@@ -179,6 +205,12 @@ class MbtDag(DAG):
 
     ``anchor_command`` is for a project whose clock is its data: a command run
     where mbt runs (in the container, with ``MbtDocker``) that prints the anchor.
+
+    With ``phases`` (the default) a node of ``build`` or ``run`` is a group of tasks, one
+    per step mbt can run on its own: a dataset is materialized and then checked, a
+    model is trained, judged against its gates, and registered (ADR-35). A failed
+    registration is retried without retraining, and a failed gate is its own task's
+    verdict. ``phases=False`` draws one task per node.
     """
 
     def __init__(
@@ -192,6 +224,7 @@ class MbtDag(DAG):
         exclude: Sequence[str] | None = None,
         anchor: str | None = None,
         anchor_command: Sequence[str] | None = None,
+        phases: bool = True,
         params: Mapping[str, Any] | None = None,
         tags: Sequence[str] | None = None,
         **dag_kwargs: Any,
@@ -219,6 +252,7 @@ class MbtDag(DAG):
                 anchor_command=anchor_command,
                 mbt_vars="{{ params.vars }}",
                 scope="",
+                phases=phases,
             )
         for tag in ("mbt", command, project_name):
             self.tags.add(tag)
@@ -244,6 +278,7 @@ class MbtTaskGroup(TaskGroup):
         exclude: Sequence[str] | None = None,
         anchor: str | None = None,
         anchor_command: Sequence[str] | None = None,
+        phases: bool = True,
         mbt_vars: str = "",
         **group_kwargs: Any,
     ) -> None:
@@ -259,6 +294,7 @@ class MbtTaskGroup(TaskGroup):
                 anchor_command=anchor_command,
                 mbt_vars=mbt_vars,
                 scope=group_id,
+                phases=phases,
             )
 
 
