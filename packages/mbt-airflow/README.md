@@ -50,6 +50,8 @@ A model is drawn with the datasets it needs, and the first task compiles the pro
 - **Exit codes keep their meaning.** A failed gate, check, test, or monitor (exit `2`) fails the task at once with no retry, and the failure message carries the gate detail. Any other failure is retried, and quotes mbt's own last lines.
 - **Private state per task.** Each task owns a target directory and shares one dataset cache with the rest of the run, so tasks do not fight over `target/` and a model reads the dataset another task built.
 - **A stale DAG refuses to run.** If the project gained a node the selector matches after the DAG was drawn, the run fails and names it, instead of quietly running a different graph than the one you see.
+- **Local or in a container.** By default the tasks run `mbt` on the worker. `MbtDocker` runs each one in a container started through the Docker API (`pip install 'mbt-airflow[docker]'`), from an image you pin, with the results read back through Docker. Failures keep their meaning either way.
+- **An anchor from your data.** `anchor_command` names a command that prints the run's anchor (a lake's newest cohort, say), run once by the compile task, with a pinned `anchor` param always winning.
 - **`MbtTaskGroup`** draws the same tasks inside a DAG you already have.
 
 The workspace holding those directories must be visible to every worker, so on more than one machine it is a shared volume.

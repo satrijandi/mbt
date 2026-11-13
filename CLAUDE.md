@@ -47,6 +47,7 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
   `--target-path` is per-task state with its own lock, and `--datasets-path` is the shareable content-addressed dataset cache, whose builds take `materialization_lock`.
   `--no-auto-materialize` is the one way to run exactly a selection, and a model then reads its dataset through `ExecutionContext.dataset_handle`; a new reader of a dataset goes through that, not around it.
 - `mbt-airflow` draws a manifest as Airflow tasks and runs the real CLI per node (ADR-33); `plan_tasks` (`plan.py`) is its pure core and calls mbt's own `plan_execution`, so never reimplement selection there.
+  Where a task runs is a `Runner` (`runners.py`, ADR-34): operators decide what an exit code means, runners only start the argument vector (on the worker, or in a container) and read files back; a new place to run is a new runner, never a branch in an operator.
   Airflow is deliberately NOT in the floors environment (`EXCLUDED` in `scripts/install_floors.py`): it only supports installs under its own constraints and lifts shared floors, so CI's `airflow-floor` job tests its floor instead.
 - Read DuckDB results through `mbt.utils.first_row`, never `execute(...).fetchone()`. DuckDB 2.0 refuses new work on a connection with an unfinished result, and `fetchone()` leaves one; `test_duckdb_unfinished_results.py` enforces that rule on whatever DuckDB is installed.
 - Events go to stderr; stdout is command data. Job subprocesses emit JSON events on stdout and the coordinator forwards them.

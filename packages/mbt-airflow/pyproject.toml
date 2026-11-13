@@ -37,6 +37,14 @@ dependencies = [
     "apache-airflow>=3.3.1,<4",
 ]
 
+[project.optional-dependencies]
+# MbtDocker starts the tasks' containers through the Docker API (ADR-34); it is
+# imported only when a container is started, so a worker running mbt locally never
+# needs it. 7.2.0 is the release the runner was measured against on a real daemon
+# (containers.run with detach, get_archive on a stopped container's bind mount,
+# wait returning a dict, from_env(timeout=)); older 7.x lines were not run.
+docker = ["docker>=7.2,<8"]
+
 [project.urls]
 Homepage = "https://github.com/satrijandi/mbt"
 Documentation = "https://satrijandi.github.io/mbt/"

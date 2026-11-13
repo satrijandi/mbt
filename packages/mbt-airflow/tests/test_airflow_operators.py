@@ -4,6 +4,7 @@ The tasks run a fake ``mbt`` (see airflow_helpers) so every exit code is reachab
 without training anything; the real CLI is exercised by tests/test_e2e_airflow.py.
 """
 
+import contextlib
 import json
 import threading
 from pathlib import Path
@@ -58,6 +59,7 @@ def node(tmp_path: Path, fake: str, spec: TaskSpec = MODEL, **kwargs: Any) -> Mb
 
 def compile_op(tmp_path: Path, fake: str, **kwargs: Any) -> MbtCompileOperator:
     options: dict[str, Any] = {
+        "anchor": ANCHOR,
         "plan_command": "build",
         "plan_select": ["tag:weekly"],
         "plan_exclude": None,
@@ -74,7 +76,6 @@ def compile_op(tmp_path: Path, fake: str, **kwargs: Any) -> MbtCompileOperator:
         task_id="mbt_compile",
         project_dir="/proj",
         workspace=str(tmp_path / "ws"),
-        anchor=ANCHOR,
         mbt_executable=fake,
         **options,
     )
@@ -217,6 +218,88 @@ def test_what_compile_checks_is_what_plan_tasks_draws(
     compile_op(tmp_path, fake, rendered_for=drawn).execute({})  # no raise
 
 
+# -- the anchor command -------------------------------------------------------------
+
+
+def anchored(tmp_path: Path, fake: str, **kwargs: Any) -> MbtCompileOperator:
+    """A compile task whose anchor is not pinned: the project says where it is."""
+    return compile_op(tmp_path, fake, anchor="", anchor_command=[fake, "anchor"], **kwargs)
+
+
+def test_an_unpinned_anchor_is_what_the_anchor_command_prints(
+    tmp_path: Path, fake: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MBT_ANCHOR", "2026-09-29T00:00:00Z")
+    anchored(tmp_path, fake).execute({})
+    anchor_call, compile_call = logged_calls(tmp_path / "calls.jsonl")
+    assert anchor_call["argv"] == ["anchor"]
+    assert (
+        compile_call["argv"][compile_call["argv"].index("--anchor") + 1] == "2026-09-29T00:00:00Z"
+    )
+
+
+def test_a_pinned_anchor_never_asks_the_command(
+    tmp_path: Path, fake: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MBT_ANCHOR", "2026-09-29T00:00:00Z")
+    compile_op(tmp_path, fake, anchor_command=[fake, "anchor"]).execute({})  # ANCHOR is pinned
+    [only] = logged_calls(tmp_path / "calls.jsonl")
+    assert only["argv"][0] == "compile"
+    assert only["argv"][only["argv"].index("--anchor") + 1] == ANCHOR
+
+
+def test_an_anchor_command_that_fails_is_a_retryable_hard_error(
+    tmp_path: Path, fake: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MBT_ANCHOR_EXIT", "1")
+    monkeypatch.setenv("FAKE_MBT_STDERR", "the lake holds no cohort files - seed the lake first")
+    with pytest.raises(AirflowException, match=r"anchor command exited 1.*seed the lake") as info:
+        anchored(tmp_path, fake).execute({})
+    assert not isinstance(info.value, AirflowFailException)
+    assert [c["argv"][0] for c in logged_calls(tmp_path / "calls.jsonl")] == [
+        "anchor"
+    ]  # no compile
+
+
+@pytest.mark.parametrize("printed", ["", "two anchors\nhere", "2026-09-29 00:00"])
+def test_an_anchor_command_must_print_exactly_one_anchor(
+    tmp_path: Path, fake: str, monkeypatch: pytest.MonkeyPatch, printed: str
+) -> None:
+    monkeypatch.setenv("FAKE_MBT_ANCHOR", printed)
+    with pytest.raises(AirflowFailException, match="must print one anchor"):
+        anchored(tmp_path, fake).execute({})
+
+
+def test_without_an_anchor_or_a_command_the_compile_gets_what_it_was_given(
+    tmp_path: Path, fake: str
+) -> None:
+    """The DAG always templates a derived anchor in this case; the operator does not guess."""
+    compile_op(tmp_path, fake, anchor="").execute({})
+    [call] = logged_calls(tmp_path / "calls.jsonl")
+    assert call["argv"][call["argv"].index("--anchor") + 1] == ""
+
+
+# -- what a wrapper around mbt is told ------------------------------------------------
+
+
+def test_every_mbt_process_is_told_where_its_results_and_manifest_are(
+    tmp_path: Path, fake: str
+) -> None:
+    ws = tmp_path / "ws"
+    node(tmp_path, fake, env={"MBT_AIRFLOW_TARGET_PATH": "shadowed"}).execute({})
+    [call] = logged_calls(tmp_path / "calls.jsonl")
+    assert call["env"] == {
+        "MBT_AIRFLOW_TARGET_PATH": f"{ws}/churn_classifier",  # the task's own wins
+        "MBT_AIRFLOW_MANIFEST": f"{ws}/mbt_compile/manifest.json",
+    }
+
+
+def test_the_compile_task_has_a_target_path_but_no_manifest_yet(tmp_path: Path, fake: str) -> None:
+    compile_op(tmp_path, fake).execute({})
+    [call] = logged_calls(tmp_path / "calls.jsonl")
+    assert call["env"] == {"MBT_AIRFLOW_TARGET_PATH": f"{tmp_path}/ws/mbt_compile"}
+
+
 # -- killing a task -----------------------------------------------------------------
 
 
@@ -282,3 +365,35 @@ def test_cleanup_refuses_to_delete_anything_but_a_child_of_the_root(
         operator.execute({})
     assert target.is_dir()
     assert (outside / "precious").read_text() == "keep"
+
+
+# -- what the log says ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("code", ["0", "2", "1"])
+def test_the_task_log_carries_the_nodes_result_unless_the_run_was_a_hard_error(
+    tmp_path: Path, fake: str, monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
+    """mbt's results table is stdout, which a task discards; without this line the
+    metrics and the gate's message exist only in run_results.json."""
+    monkeypatch.setenv("FAKE_MBT_EXIT", code)
+    monkeypatch.setenv("FAKE_MBT_METRICS", json.dumps({"pr_auc": 0.5}))
+    operator = node(tmp_path, fake)
+    lines: list[str] = []
+
+    class Spy:
+        def info(self, message: str, *args: Any) -> None:
+            lines.append(message % args if args else message)
+
+        def __getattr__(self, name: str) -> Any:  # warning, debug, ...: Airflow calls them
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(type(operator), "log", Spy(), raising=False)
+    with contextlib.suppress(AirflowException):  # exits 2 and 1 raise; that is tested above
+        operator.execute({})
+    results = [line for line in lines if line.startswith("result ")]
+    if code == "1":
+        assert results == []  # a crash left nothing to report, and "success" would mislead
+    else:
+        [result] = results
+        assert json.loads(result.removeprefix("result "))["metrics"] == {"pr_auc": 0.5}

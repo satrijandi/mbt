@@ -46,7 +46,7 @@ Core itself imports from `mbt_adapter_base` directly.
 | `mbt-optuna` | tuning engine | Seeded TPE or random hyperparameter search, with median pruning |
 | `mbt-evidently` | report engine | Evidently's drift reports in the training report, for reading beside mbt's own stability tables |
 | `mbt-testing` | fake adapters | Framework-free adapters so a project's specs can be tested without JVMs or GPUs |
-| `mbt-airflow` | orchestration | `MbtDag` and `MbtTaskGroup`: the manifest as one Airflow task per node, each running the CLI ([Running on Airflow](airflow.md), ADR-33) |
+| `mbt-airflow` | orchestration | `MbtDag` and `MbtTaskGroup`: the manifest as one Airflow task per node, each running the CLI on the worker or in a container ([Running on Airflow](airflow.md), ADR-33, ADR-34) |
 
 `mbt-lightgbm` and `mbt-sklearn` are the extensibility proof: each is built against the public contract only, with no privileged access, so anyone can ship an adapter the same way.
 [Adapters](adapters.md) compares what every shipped adapter supports.

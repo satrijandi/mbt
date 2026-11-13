@@ -16,12 +16,14 @@ from typing import Any
 from airflow.sdk import DAG, Param, TaskGroup
 
 from mbt.artifacts.manifest import read_manifest
+from mbt.exceptions import ConfigError
 from mbt_airflow.operators import (
     MbtCleanupOperator,
     MbtCompileOperator,
     MbtNodeOperator,
 )
 from mbt_airflow.plan import plan_tasks
+from mbt_airflow.runners import MbtDocker
 
 #: Environment variable naming the default workspace root.
 WORKSPACE_ENV = "MBT_AIRFLOW_WORKSPACE"
@@ -29,10 +31,6 @@ WORKSPACE_ENV = "MBT_AIRFLOW_WORKSPACE"
 #: A run's anchor when nothing pins one: the end of the data interval, else the
 #: logical date, else when the run was created. Manual runs have no interval.
 _DERIVED_ANCHOR = "(data_interval_end or logical_date or run_after).isoformat()"
-
-
-def _default_workspace_root() -> str:
-    return os.environ.get(WORKSPACE_ENV) or str(Path(tempfile.gettempdir()) / "mbt-airflow")
 
 
 @dataclass(frozen=True)
@@ -52,14 +50,20 @@ class MbtProject:
 
 @dataclass(frozen=True)
 class MbtExecution:
-    """How the tasks run. Local execution: ``mbt`` is an executable on the worker."""
+    """How the tasks run: ``mbt`` on the worker, or in a container (``docker``)."""
 
     mbt_executable: str = "mbt"
     #: Where each run's private target directories and shared dataset cache live.
     #: Every worker must see it, so on more than one machine it is a shared volume.
-    workspace_root: str | os.PathLike[str] = field(default_factory=_default_workspace_root)
-    #: Extra environment for the mbt processes (the worker's own is inherited).
+    #: Defaults to ``$MBT_AIRFLOW_WORKSPACE``, else a temp directory; with ``docker``
+    #: it is a path in the container and has no default, because the worker's temp
+    #: directory is not a place a container can see.
+    workspace_root: str | os.PathLike[str] | None = None
+    #: Extra environment for the mbt processes. On the worker the worker's own is
+    #: inherited; in a container nothing is, and ``DockerUnit.env`` is the base.
     env: Mapping[str, str] | None = None
+    #: Run every mbt process in a container instead of on the worker.
+    docker: MbtDocker | None = None
     #: A hard error (exit 1) is retried this many times; a quality verdict (exit 2)
     #: never is.
     retries: int = 1
@@ -71,11 +75,30 @@ class MbtExecution:
     operator_args: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _workspace(root: str | os.PathLike[str], scope: str) -> str:
+def _workspace_root(execution: MbtExecution) -> str:
+    if execution.workspace_root is not None:
+        return os.fspath(execution.workspace_root)
+    if execution.docker is not None and not os.environ.get(WORKSPACE_ENV):
+        raise ConfigError(
+            "MbtExecution.workspace_root is required with docker",
+            hint="name the directory inside the container where the run keeps its state, "
+            "a path on the unit's shared volume (for example /workspace/mbt-airflow)",
+        )
+    return os.environ.get(WORKSPACE_ENV) or str(Path(tempfile.gettempdir()) / "mbt-airflow")
+
+
+def _workspace(root: str, scope: str) -> str:
     """The run's workspace as a template: one directory per DAG run (and group)."""
     run = "{{ run_id | replace(':', '-') | replace('+', '_') }}"
-    parts = [os.fspath(root), "{{ dag.dag_id }}", run, *([scope] if scope else [])]
+    parts = [root, "{{ dag.dag_id }}", run, *([scope] if scope else [])]
     return "/".join(parts)
+
+
+def _dag_anchor(anchor_command: Sequence[str] | None) -> str:
+    """The anchor template of a DAG: the param, else the command, else the run's own."""
+    if anchor_command:
+        return "{{ params.anchor }}"  # empty renders empty, and the compile task asks the command
+    return f"{{{{ params.anchor or {_DERIVED_ANCHOR} }}}}"
 
 
 def _add_tasks(
@@ -86,13 +109,15 @@ def _add_tasks(
     select: Sequence[str] | None,
     exclude: Sequence[str] | None,
     anchor: str,
+    anchor_command: Sequence[str] | None,
     mbt_vars: str,
     scope: str,
 ) -> str:
     """Create the tasks inside the current DAG or group; return the project's name."""
     manifest = read_manifest(Path(project.manifest_path), source="the manifest to draw")
     specs = plan_tasks(manifest, command, select, exclude)
-    workspace = _workspace(execution.workspace_root, scope)
+    root = _workspace_root(execution)
+    workspace = _workspace(root, scope)
     common: dict[str, Any] = {
         "project_dir": os.fspath(project.project_dir),
         "workspace": workspace,
@@ -102,6 +127,7 @@ def _add_tasks(
         "target": project.target,
         "profiles_dir": os.fspath(project.profiles_dir) if project.profiles_dir else None,
         "env": execution.env,
+        "docker": execution.docker,
         "retries": execution.retries,
         "retry_delay": execution.retry_delay,
         **execution.operator_args,
@@ -116,6 +142,7 @@ def _add_tasks(
                 plan_select=select,
                 plan_exclude=exclude,
                 rendered_for=rendered,
+                anchor_command=anchor_command,
                 **common,
             )
         else:
@@ -128,7 +155,8 @@ def _add_tasks(
         cleanup = MbtCleanupOperator(
             task_id="mbt_cleanup",
             workspace=workspace,
-            workspace_root=os.fspath(execution.workspace_root),
+            workspace_root=root,
+            docker=execution.docker,
         )
         waited_on = {up for spec in specs for up in spec.upstream}
         for spec in specs:
@@ -145,8 +173,12 @@ class MbtDag(DAG):
     because mbt's own commands partition the nodes that way (ADR-33).
 
     ``select`` and ``exclude`` use the CLI's selector grammar. The run's anchor is
-    the ``anchor`` DAG param when set, else ``anchor`` here, else derived from the
-    run; ``vars`` is the other param, forwarded to the compile task only.
+    the ``anchor`` DAG param when set, else ``anchor`` here, else what
+    ``anchor_command`` prints, else derived from the run; ``vars`` is the other
+    param, forwarded to the compile task only.
+
+    ``anchor_command`` is for a project whose clock is its data: a command run
+    where mbt runs (in the container, with ``MbtDocker``) that prints the anchor.
     """
 
     def __init__(
@@ -159,6 +191,7 @@ class MbtDag(DAG):
         select: Sequence[str] | None = None,
         exclude: Sequence[str] | None = None,
         anchor: str | None = None,
+        anchor_command: Sequence[str] | None = None,
         params: Mapping[str, Any] | None = None,
         tags: Sequence[str] | None = None,
         **dag_kwargs: Any,
@@ -182,7 +215,8 @@ class MbtDag(DAG):
                 command=command,
                 select=select,
                 exclude=exclude,
-                anchor=f"{{{{ params.anchor or {_DERIVED_ANCHOR} }}}}",
+                anchor=_dag_anchor(anchor_command),
+                anchor_command=anchor_command,
                 mbt_vars="{{ params.vars }}",
                 scope="",
             )
@@ -194,8 +228,9 @@ class MbtTaskGroup(TaskGroup):
     """The same tasks inside a DAG you already have, to chain with your own.
 
     ``anchor`` and ``mbt_vars`` are literals or Jinja templates; the anchor
-    defaults to one derived from the run. Task ids are prefixed by the group, and
-    the group's workspace is its own, so several groups can share a DAG.
+    defaults to what ``anchor_command`` prints, else one derived from the run. Task
+    ids are prefixed by the group, and the group's workspace is its own, so several
+    groups can share a DAG.
     """
 
     def __init__(
@@ -208,6 +243,7 @@ class MbtTaskGroup(TaskGroup):
         select: Sequence[str] | None = None,
         exclude: Sequence[str] | None = None,
         anchor: str | None = None,
+        anchor_command: Sequence[str] | None = None,
         mbt_vars: str = "",
         **group_kwargs: Any,
     ) -> None:
@@ -219,7 +255,8 @@ class MbtTaskGroup(TaskGroup):
                 command=command,
                 select=select,
                 exclude=exclude,
-                anchor=anchor or f"{{{{ {_DERIVED_ANCHOR} }}}}",
+                anchor=anchor or ("" if anchor_command else f"{{{{ {_DERIVED_ANCHOR} }}}}"),
+                anchor_command=anchor_command,
                 mbt_vars=mbt_vars,
                 scope=group_id,
             )

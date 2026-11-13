@@ -8,15 +8,17 @@ from typing import Any
 import pytest
 from airflow.sdk import DAG, BaseOperator
 from mbt_airflow import (
+    DockerUnit,
     MbtCleanupOperator,
     MbtCompileOperator,
     MbtDag,
+    MbtDocker,
     MbtExecution,
     MbtNodeOperator,
     MbtProject,
     MbtTaskGroup,
 )
-from mbt_airflow.dag import WORKSPACE_ENV
+from mbt_airflow.dag import WORKSPACE_ENV, _workspace_root
 
 from mbt.exceptions import ConfigError, StateError
 
@@ -177,9 +179,58 @@ def test_the_default_workspace_root_follows_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(WORKSPACE_ENV, "/mnt/shared/mbt")
-    assert str(MbtExecution().workspace_root) == "/mnt/shared/mbt"
+    assert _workspace_root(MbtExecution()) == "/mnt/shared/mbt"
     monkeypatch.delenv(WORKSPACE_ENV)
-    assert Path(MbtExecution().workspace_root) == Path(tempfile.gettempdir()) / "mbt-airflow"
+    assert Path(_workspace_root(MbtExecution())) == Path(tempfile.gettempdir()) / "mbt-airflow"
+    assert _workspace_root(MbtExecution(workspace_root="/ws")) == "/ws"
+
+
+# -- running in a container -----------------------------------------------------------
+
+UNIT = MbtDocker(DockerUnit(image="registry/churn@sha256:abc", working_dir="/app/project"))
+
+
+def test_a_container_execution_reaches_every_task_and_the_cleanup(project: MbtProject) -> None:
+    execution = MbtExecution(workspace_root="/workspace/mbt", docker=UNIT, cleanup_on_success=True)
+    dag = make_dag(project, execution=execution)
+    for task_id, task in dag.task_dict.items():
+        assert task.docker is UNIT, task_id
+    assert dag.task_dict["mbt_cleanup"].workspace_root == "/workspace/mbt"
+
+
+def test_a_container_has_no_default_workspace_because_the_workers_temp_dir_is_not_its_own(
+    project: MbtProject, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(WORKSPACE_ENV, raising=False)
+    with pytest.raises(ConfigError, match="workspace_root is required with docker") as info:
+        make_dag(project, execution=MbtExecution(docker=UNIT))
+    assert "/workspace/mbt-airflow" in (info.value.hint or "")
+    # the environment variable names a directory the operator chose, and counts
+    monkeypatch.setenv(WORKSPACE_ENV, "/workspace/from-env")
+    dag = make_dag(project, execution=MbtExecution(docker=UNIT))
+    assert dag.task_dict["churn_classifier"].workspace.startswith("/workspace/from-env/")
+
+
+def test_an_anchor_command_replaces_the_derived_anchor(project: MbtProject) -> None:
+    command = ["python3", "scripts/lake_anchor.py"]
+    compiled = render(make_dag(project, anchor_command=command), "mbt_compile")
+    assert compiled.anchor == "" and compiled.anchor_command == command  # asked at run time
+    dag = make_dag(project, anchor_command=command)  # rendering replaces the template in place
+    pinned = render(dag, "mbt_compile", params={"anchor": "2026-06-30T00:00:00Z", "vars": ""})
+    assert pinned.anchor == "2026-06-30T00:00:00Z"
+    # only the root compiles, so only the root can ask
+    assert not hasattr(dag.task_dict["churn_classifier"], "anchor_command")
+
+
+def test_a_group_takes_an_anchor_command_too(project: MbtProject) -> None:
+    command = ["python3", "anchor.py"]
+    with DAG("outer", schedule=None, start_date=START) as dag:
+        MbtTaskGroup("a", project=project, select=["tag:weekly"], anchor_command=command)
+        MbtTaskGroup("b", project=project, select=["tag:weekly"], anchor="2026-06-30T00:00:00Z")
+    assert dag.task_dict["a.mbt_compile"].anchor_command == command
+    assert dag.task_dict["a.mbt_compile"].anchor == ""
+    assert dag.task_dict["b.mbt_compile"].anchor == "2026-06-30T00:00:00Z"
+    assert dag.task_dict["b.mbt_compile"].anchor_command is None
 
 
 # -- cleanup ------------------------------------------------------------------------
@@ -223,7 +274,7 @@ def test_a_task_group_chains_with_your_own_tasks(project: MbtProject) -> None:
     }
     # the nodes' own names, not the group-prefixed ids, name their private directories
     node = render(dag, "weekly.churn_classifier")
-    assert node.target_path() == Path(node.workspace) / "churn_classifier"
+    assert node.target_path() == f"{node.workspace}/churn_classifier"
 
 
 def test_two_groups_in_one_dag_do_not_share_a_workspace(project: MbtProject) -> None:

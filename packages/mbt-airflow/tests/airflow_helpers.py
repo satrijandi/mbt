@@ -51,7 +51,13 @@ log = os.environ.get("FAKE_MBT_LOG")
 if log:
     with open(log, "a") as handle:
         marker = os.environ.get("FAKE_MBT_MARKER")
-        handle.write(json.dumps({{"argv": argv, "marker": marker}}) + "\\n")
+        task_env = {{k: v for k, v in os.environ.items() if k.startswith("MBT_AIRFLOW_")}}
+        handle.write(json.dumps({{"argv": argv, "marker": marker, "env": task_env}}) + "\\n")
+
+if argv[0] == "anchor":
+    print(os.environ.get("FAKE_MBT_ANCHOR", ""))
+    print(os.environ.get("FAKE_MBT_STDERR", ""), file=sys.stderr)
+    sys.exit(int(os.environ.get("FAKE_MBT_ANCHOR_EXIT", "0")))
 
 started = os.environ.get("FAKE_MBT_STARTED")
 if started:

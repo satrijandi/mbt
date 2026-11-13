@@ -168,6 +168,7 @@ module = [
     "jsonschema.*",
     "boto3.*",
     "botocore.*",
+    "docker.*",
 ]
 ignore_missing_imports = true
 

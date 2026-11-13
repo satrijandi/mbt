@@ -90,6 +90,7 @@ nav:
       - "ADR-31: Projection hint and full-width datasets": adr/0031-projection-hint-and-full-width-datasets.md
       - "ADR-32: Target path and exact-node execution": adr/0032-target-path-and-exact-node-execution.md
       - "ADR-33: An mbt project as an Airflow DAG": adr/0033-mbt-project-as-an-airflow-dag.md
+      - "ADR-34: Airflow tasks in a container": adr/0034-airflow-tasks-run-in-a-container.md
 
 markdown_extensions:
   - admonition

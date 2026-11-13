@@ -3225,11 +3225,18 @@ dependencies = [
     { name = "mbt-core" },
 ]
 
+[package.optional-dependencies]
+docker = [
+    { name = "docker" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "apache-airflow", specifier = ">=3.3.1,<4" },
+    { name = "docker", marker = "extra == 'docker'", specifier = ">=7.2,<8" },
     { name = "mbt-core", editable = "packages/mbt-core" },
 ]
+provides-extras = ["docker"]
 
 [[package]]
 name = "mbt-core"

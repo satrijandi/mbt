@@ -10,7 +10,7 @@ pip install mbt-airflow   # on the scheduler and on every worker; mbt-core comes
 
 Airflow 3.3.1 or later is required.
 Every worker also needs the `mbt` executable and whatever your models import (XGBoost, MLflow, and so on).
-Airflow itself needs only the package, because the tasks run the real CLI in a subprocess ([ADR-33](adr/0033-mbt-project-as-an-airflow-dag.md)).
+Airflow itself needs only the package, because the tasks run the real CLI in a subprocess ([ADR-33](adr/0033-mbt-project-as-an-airflow-dag.md)), or in a container ([below](#running-each-task-in-a-container)).
 
 ## The smallest DAG
 
@@ -96,8 +96,23 @@ Every node task then executes that manifest verbatim (`--manifest`), so snapshot
 Each node task gets its own target directory and shares one dataset cache with the rest of the run ([ADR-32](adr/0032-target-path-and-exact-node-execution.md)).
 A task's result is read from its own `run_results.json` and returned as its XCom: the node's status, its metrics, and any message.
 
-The anchor is the run's `anchor` param when you set one, else the end of its data interval, else its logical date.
+The anchor is the run's `anchor` param when you set one, else what your `anchor_command` prints, else the end of its data interval, else its logical date.
 The `vars` param is passed to the compile task only, which is what keeps the dataset and the model tasks agreeing on cache keys.
+
+`anchor_command` is for a project whose clock is its data, such as a lake that grows a cohort a week and should be scored as of its newest one.
+It is a command run where mbt runs (in the container, with `MbtDocker`) that prints exactly one anchor, and only the compile task runs it, once per run:
+
+```python
+churn_score = MbtDag(
+    "churn_score",
+    project=project,
+    command="score",
+    anchor_command=["python3", "scripts/lake_anchor.py"],
+    start_date=datetime(2026, 1, 1),
+)
+```
+
+A pinned `anchor` param still wins, so a run can be pointed at any date by hand.
 
 ## When a task fails
 
@@ -141,6 +156,7 @@ execution = MbtExecution(
 |---|---|
 | `mbt_executable` | The `mbt` to run, `mbt` on the worker's `PATH` by default |
 | `workspace_root` | Where each run keeps its target directories and dataset cache. Defaults to `$MBT_AIRFLOW_WORKSPACE`, else a temp directory |
+| `docker` | Run every task in a container instead of on the worker: an `MbtDocker` ([below](#running-each-task-in-a-container)) |
 | `env` | Extra environment for the mbt processes. The worker's own is inherited, which is where secrets read by `env_var()` in `profiles.yml` come from |
 | `retries`, `retry_delay` | How a hard error is retried. A quality verdict never is |
 | `cleanup_on_success` | Add a final task that removes the run's workspace, but only if every node succeeded, so a failed run keeps its logs and results |
@@ -150,6 +166,80 @@ execution = MbtExecution(
 On one machine a temp directory is fine.
 On several, point `workspace_root` at a shared volume, because a model task reads the dataset another task built.
 An object-store location is not supported.
+
+## Running each task in a container
+
+By default the tasks run `mbt` on the worker.
+`MbtDocker` runs each one in a container instead, started through the Docker API, which is how a team that deploys its project as a pinned image keeps the image the code that runs ([ADR-34](adr/0034-airflow-tasks-run-in-a-container.md)):
+
+```bash
+pip install 'mbt-airflow[docker]'   # the Docker SDK; imported only when a container starts
+```
+
+```python
+from datetime import timedelta
+from pathlib import Path
+
+from mbt_airflow import DockerUnit, MbtDocker, MbtExecution, MbtProject
+
+
+def unit() -> DockerUnit:
+    pin = Path("/opt/deploy/image.digest").read_text().strip()
+    return DockerUnit(
+        image=pin,  # registry/churn@sha256:...
+        network="mbt_default",
+        volumes={"/srv/mbt-workspace": "/workspace"},  # host path -> path in the container
+        working_dir="/app/project",
+        env={"MLFLOW_TRACKING_URI": "http://mlflow:5000"},
+    )
+
+
+execution = MbtExecution(
+    docker=MbtDocker(unit),
+    workspace_root="/workspace/mbt-airflow",  # a path IN the container
+    retries=1,
+    retry_delay=timedelta(seconds=5),
+)
+project = MbtProject(
+    project_dir="/app/project",  # also in the container
+    manifest_path="/opt/deploy/manifest.json",  # on the worker: the DAG is drawn from it
+    target="prod",
+)
+```
+
+| `DockerUnit` field | Meaning |
+|---|---|
+| `image` | The image to run, normally pinned by digest |
+| `network` | The docker network to join, where the services the project talks to live |
+| `volumes` | Host path to container path. The run's workspace lives on one of these, because a model task reads the dataset another task built |
+| `working_dir` | Where the project is in the container |
+| `env` | The container's whole environment. The worker's is **not** inherited: a container starts clean, so the credentials it needs are named here |
+
+`MbtDocker(unit)` accepts a function as well as a `DockerUnit`, and calls it when the task runs, not when the DAG file is parsed.
+Read the pin there: a pin that changes between parsing and running is then the one the task uses, and a missing pin fails the task with your message.
+
+What differs from running locally:
+
+- **`workspace_root` is required.** It is a path in the container, and the worker's temp directory is not somewhere a container can see.
+- **The worker needs the Docker socket**, which is root on the host.
+- **The task log is written when the container exits**, not as it runs: a stream would time out on a quiet stretch of a long training. Killing the task stops the container.
+- **Results come back through Docker.** The worker reads a node's `run_results.json` out of the finished container, so it needs no mount of the workspace, and a failed task's message still carries the gate detail. `cleanup_on_success` removes the workspace by running `rm -rf` in the unit.
+- **Failure handling is unchanged.** Exit 2 fails at once, any other nonzero exit is retried, and the last lines of mbt's stderr are in the exception.
+
+### Around `mbt`
+
+Every mbt process is told where its task's results are, in `MBT_AIRFLOW_TARGET_PATH` (the task's private target directory) and, for a node task, `MBT_AIRFLOW_MANIFEST` (the run's manifest).
+Give `mbt_executable` a wrapper script that runs `mbt "$@"` and acts on them, then exits with mbt's own code:
+
+```bash
+#!/usr/bin/env bash
+mbt "$@"
+code=$?
+python3 scripts/push_metrics.py --target-dir "$MBT_AIRFLOW_TARGET_PATH" --manifest "$MBT_AIRFLOW_MANIFEST" . || true
+exit "$code"
+```
+
+The configured `env` cannot shadow these two.
 
 ## Inside a DAG you already have
 
@@ -176,6 +266,6 @@ Task ids are prefixed by the group (`train.churn_classifier`), and each group ha
 
 ## Limits
 
-- **Local execution only.** The tasks run `mbt` on the worker. Running each in a container is a later addition.
+- **Local and Docker execution only.** A Kubernetes pod per task is not built; the runner seam ([ADR-34](adr/0034-airflow-tasks-run-in-a-container.md)) is where it would go.
 - **Parallel branches need a real tracking server.** Independent models run at once under a real executor, and two training jobs writing one sqlite MLflow database at once is the first thing that goes wrong. Use an MLflow server for anything beyond a laptop.
 - **The manifest has to be republished** when the project's nodes change. A stale one fails the run, as described above, instead of drifting silently.

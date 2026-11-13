@@ -29,7 +29,7 @@ These build on seams the architecture already has; none needs a change to the ad
 | **Ensembles and stacking** | Models with `ref()` inputs from other models; the DAG and manifest already support model-to-model edges |
 | **Champion slice gates with a confidence bound** | Slice gates block registration today, but champion slice gates compare point deltas rather than the paired-bootstrap lower bound whole-split gates use |
 | **Kubernetes and Ray compute** | New compute adapters over the same serialized training-job seam `mbt-spark` already uses |
-| **Airflow container execution** | `mbt-airflow` draws a project as one task per node and runs `mbt` on the worker (ADR-33). Running each task in a container, and moving the showcase's reference DAGs onto the package, are still open |
+| **Airflow on Kubernetes** | `mbt-airflow` draws a project as one task per node and runs `mbt` on the worker or in a Docker container (ADR-33, ADR-34). Moving the showcase's reference DAGs onto the package, and a pod per task (the missing runner, which plugs into `mbt_airflow.runners`), are still open |
 | **Iceberg sources** | Snapshot ids read from table metadata |
 
 [MLOps alignment](mlops-alignment.md) lists the practices mbt does not cover yet - fairness metrics beyond the disparity gate, drift-triggered retraining, delivery metrics, and others - and says which of them are candidates and which are out of scope.

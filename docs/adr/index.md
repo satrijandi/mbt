@@ -59,6 +59,7 @@ What does get updated in place is a record's account of what has shipped, so tha
 | [31](0031-projection-hint-and-full-width-datasets.md) | Reads take a column projection hint; dataset builds stay full-width | accepted |
 | [32](0032-target-path-and-exact-node-execution.md) | A private target path, a shareable dataset cache, and exact-node execution | accepted; amends [13](0013-upstream-datasets-auto-materialize.md) |
 | [33](0033-mbt-project-as-an-airflow-dag.md) | An mbt project is an Airflow DAG: one task per node, drawn from the manifest, run through the CLI | accepted |
+| [34](0034-airflow-tasks-run-in-a-container.md) | An Airflow task can run mbt in a container: a runner seam, files read back through it, and an anchor the project names | accepted; extends [33](0033-mbt-project-as-an-airflow-dag.md) |
 
 ## Writing a new ADR
 
