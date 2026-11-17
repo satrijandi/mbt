@@ -330,16 +330,17 @@ Where a fix was proved to bite, it says so: the new test was run once with the f
 
 ### A-1 - the only release cannot run the quickstart
 
-**Done here.**
-`docs/installation.md` carries a warning under the install command ("v0.2.0 needs `duckdb<2`"), and `docs/troubleshooting.md` has an entry whose symptom text was captured from the real failure (`check no_future_columns: FAIL - check raised: ResourceInUseException(...)`).
+**Interim.**
+Before the release, `docs/installation.md` carried a warning ("v0.2.0 needs `duckdb<2`") and `docs/troubleshooting.md` got an entry whose symptom text was captured from the real failure (`check no_future_columns: FAIL - check raised: ResourceInUseException(...)`).
 The workaround was verified before it was written down: v0.2.0 installed with `duckdb<2` builds the scaffolded project green (`mbt build` exit 0, 24 s cold).
 Nothing caps `duckdb` on `main`, as the finding asked.
 
-**Not done, and not mine to do.**
-Cutting a release from `main` is the actual fix, and it is an outward-facing act (a tag, GitHub release assets, a changelog written by `scripts/generate_changelog.py`).
-It is the one item here that waits for the maintainer.
-The 18 commits since `v0.2.0` include the DuckDB fix and several advisory bumps.
-When it ships, remove the warning in `docs/installation.md`; the troubleshooting entry stays, because anyone on v0.2.0 still meets it.
+**The fix.**
+v0.3.0 is cut from this tree: the 18 commits since v0.2.0 (the DuckDB fix and several advisory bumps among them) plus this sweep, with `main` carrying the next development version after it.
+The warning is gone from `docs/installation.md`, which pins `@v0.3.0`; the troubleshooting entry stays and now says "upgrade to v0.3.0", because anyone on v0.2.0 still meets it.
+The changelog records the release's retraining impact as none: no spec model changed since v0.2.0, and the golden manifest differs from v0.2.0's only in its contract and version strings.
+It also records the one behaviour change a scheduler could notice, A-3's exit code.
+`released.yml` was written to go red on v0.2.0 and to close its own tracking issue the night v0.3.0 installs and runs; if v0.3.0 is itself broken on a fresh install, that is where it will say so.
 
 ### A-2 - `--log-format json` is not a JSON stream again
 
@@ -466,14 +467,9 @@ The full `CLAUDE.md` battery, on the working tree after the last edit:
 
 ## What is left for the maintainer
 
-Three things, and none of them is code.
+Two things, and neither is code.
 
-1. **Cut a release from `main`.**
-   This is the fix for A-1; everything else about it is done, and `released.yml` will close its own tracking issue the night the new tag installs and runs.
-   After it ships, delete the `v0.2.0 needs duckdb<2` warning from `docs/installation.md`.
-2. **Commit.**
-   Nothing here is committed or pushed.
-   When it is, `git mv FEEDBACK.md design-history/reviews/feedback-v7.md` closes the cycle the way v1 to v6 were closed, and the code comments that cite `FEEDBACK v7 A-3` and the rest then point at a file that is where `design-history/README.md` says it is.
-   Regenerating `CHANGELOG.md` is `scripts/generate_changelog.py`'s job at release time, not a hand edit.
-3. **Issue #1's body** still names `orchestrator.py:421` as the `hasattr` gate for batch scoring.
+1. **Issue #1's body** still names `orchestrator.py:421` as the `hasattr` gate for batch scoring.
    It is now `Capability.BATCH_SCORING`; the issue is public, so I did not edit it.
+2. **PyPI.**
+   The release is a GitHub release with wheels attached; publishing to PyPI still waits on the Trusted Publisher setup in `CONTRIBUTING.md`, and until then every install is a git reference, which is why A-1 mattered as much as it did.

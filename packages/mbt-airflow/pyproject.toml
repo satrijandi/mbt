@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mbt-airflow"
-version = "0.3.0.dev0"
+version = "0.3.0"
 description = "Render an mbt project as an Airflow DAG, one task per node"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
-    "mbt-core>=0.3.0.dev0,<0.4",
+    "mbt-core>=0.3.0,<0.4",
     # airflow.sdk (DAG, BaseOperator, Param, TaskGroup) is the Airflow 3 authoring
     # surface. 3.3.1 is the oldest release this package's suite (unit and e2e) is run
     # against, by CI's airflow-floor job, and it is the release the showcase pins.

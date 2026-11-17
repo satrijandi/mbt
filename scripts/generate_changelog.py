@@ -71,6 +71,16 @@ RETRAINING_IMPACT: dict[str, str] = {
         "overlaps the test window and a YAML file with a duplicate key, and a build "
         "rejects a `features.include` entry that matches no column."
     ),
+    "v0.3.0": (
+        "None. No spec model gained or lost a field since v0.2.0, so no config hash "
+        "moves and `state:modified` selects nothing it did not before. The adapter "
+        "contract is 1.3 (a column-projection hint, additive: a 1.2 plugin still loads), "
+        "and an adapter that declares no `capabilities()` is served as before. "
+        "Behaviour that changes: a built-in check that crashes now exits 1 instead of "
+        "reporting a failed check (exit 2), so a scheduler that routed every exit 2 to "
+        "the data owners will see environment errors as errors; and `mbt init` on a "
+        "fresh DuckDB 2.0 install now produces a project that builds (v0.2.0 did not)."
+    ),
 }
 
 

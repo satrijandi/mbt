@@ -93,10 +93,11 @@ build finished [quality_failure]: 0 ok, 1 failed, 1 skipped in 9.2s
 
 **Why:** v0.2.0 declares `duckdb>=1.2` with no ceiling, and DuckDB 2.0 refuses new work on a connection that still holds an unfinished result, which v0.2.0's built-in checks left behind.
 `mbt init` pins the numerics stack to the environment it ran in, so a project scaffolded on DuckDB 2.0 carries `duckdb==2.0.0` in `requirements.txt` and `requirements.in`, and its CI fails the same way.
-The code on `main` reads results through `mbt.utils.first_row` and builds green on DuckDB 2.0; it is not in a release yet.
-Builds on `main` and later releases report a check that crashes as an error (exit `1`, `check '<name>' raised ...`), never as a failed check.
+v0.3.0 reads results through `mbt.utils.first_row` and builds green on DuckDB 2.0.
+v0.3.0 and later report a check that crashes as an error (exit `1`, `check '<name>' raised ...`), never as a failed check.
 
-**Fix:** until a release contains the change, stay below DuckDB 2.
+**Fix:** upgrade to v0.3.0 or later.
+If you have to stay on v0.2.0, stay below DuckDB 2.
 
 ```bash
 pip install "duckdb<2"

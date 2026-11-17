@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.2.x | yes |
+| 0.3.x | yes |
+| 0.2.x | no |
 | 0.1.x | no |
 
 Only the newest released minor series is supported.

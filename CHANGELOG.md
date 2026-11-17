@@ -10,6 +10,29 @@ next `state:modified` build retrains everything (ADR-7). Read that line before
 upgrading a project with expensive models.
 
 
+## v0.3.0 - 2026-11-17
+
+**Retraining impact:** None. No spec model gained or lost a field since v0.2.0, so no config hash moves and `state:modified` selects nothing it did not before. The adapter contract is 1.3 (a column-projection hint, additive: a 1.2 plugin still loads), and an adapter that declares no `capabilities()` is served as before. Behaviour that changes: a built-in check that crashes now exits 1 instead of reporting a failed check (exit 2), so a scheduler that routed every exit 2 to the data owners will see environment errors as errors; and `mbt init` on a fresh DuckDB 2.0 install now produces a project that builds (v0.2.0 did not).
+
+- FEEDBACK v7: v0.2.0 could not run on a fresh install, and three rules held in one place and not in all
+- The upstream tier had been red for 26 days because pandas 3.1 broke evidently's import
+- The showcase ran each DAG as one opaque task, so mbt-airflow had never run on the real stack
+- A model was one Airflow task, so a registry blip after a two-hour training retrained the model
+- mbt-airflow ran every task on the worker, so a project that deploys as a pinned image could not use it
+- The security and floors jobs were red on advisories published since the lock was last refreshed
+- An mbt project could not be an Airflow DAG: the showcase ran each command as one opaque task
+- Main went red: a test read coloured help text, virtualenv lifted a floor, DuckDB 2.0 broke checks
+- A task per node could not work: target/ had one writer and every model run owned its datasets
+- The showcase bake asked Docker Hub for a runner image that only ever existed locally
+- The mutation workflow put its slowest module at a third of the old run, and it is half
+- The mutation tier timed out most nights, and its notice called each timeout a regression
+- make lifecycle triggered the retrain before git-sync had handed Airflow the unit it just pinned
+- The showcase showed one frozen week, once, and never showed the champion gate saying no
+- The champion gate scored the champion through the challenger's features, so a worse model was staged
+- The showcase guessed the docker-socket group from the host OS, so every DAG task failed on Rancher Desktop
+- Three werkzeug, multidict and Snowflake-connector advisories landed overnight and turned security and floors red
+- A development build of mbt failed every project's require_mbt_version at the packaging floor
+
 ## v0.2.0 - 2026-10-05
 
 **Retraining impact:** Full retrain, and some specs need editing first. Every model's config hash changes (the spec models gained fields; ADR-7), so the first `state:modified` build after upgrading retrains everything. A dataset that used `inputs:` (multi-table joins, ADR-16/22/25) no longer parses: ADR-29 moved the join upstream, so build the joined relation in your warehouse or dbt and point `source:` at it. Parse now also rejects a train or validation window that overlaps the test window and a YAML file with a duplicate key, and a build rejects a `features.include` entry that matches no column.
