@@ -752,11 +752,23 @@ def test_init_refuses_an_unknown_forge(tmp_path: Path, monkeypatch: pytest.Monke
 def test_a_thread_count_below_one_is_refused(command: str, value: str, tmp_path: Path) -> None:
     """FEEDBACK v7 D-2: profiles.yml's `threads` has always been `ge=1`, but the
     option was a bare int the scheduler quietly clamped, so `--threads 0` ran
-    serially and reported success."""
+    serially and reported success.
+
+    The refusal is asserted on the exit code and on the option's declared bound,
+    not on the usage message: rich colours that panel in CI (GITHUB_ACTIONS makes
+    typer force a terminal) and splits the text across escape codes, which is how
+    the first version of this test passed locally and failed 10 cases in CI."""
+    import typer
+
+    from mbt.cli.main import app
+
     result = invoke([command, f"--threads={value}", "--project-dir", str(tmp_path)])
     # A usage error: `main()` reports click's code as 1, as it does for every bad flag.
     assert result.exit_code != 0, debug(result)
-    assert f"Invalid value for '--threads': {value} is not in the range x>=1" in result.stderr
+
+    params = typer.main.get_command(app).commands[command].params  # type: ignore[attr-defined]
+    (threads,) = [p for p in params if "--threads" in p.opts]
+    assert threads.type.min == 1, command  # type: ignore[attr-defined]
 
 
 def _init_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, *flags: str) -> Result:
