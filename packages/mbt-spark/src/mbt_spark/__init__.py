@@ -4,7 +4,7 @@ from mbt_spark.compute import SparkComputeAdapter
 from mbt_spark.data import SparkAdapterError, SparkDataAdapter
 from mbt_spark.training import SparkMLTrainingAdapter
 
-__version__ = "0.3.0"
+__version__ = "0.4.0.dev0"
 
 __all__ = [
     "SparkAdapterError",
