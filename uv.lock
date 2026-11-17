@@ -3295,12 +3295,14 @@ source = { editable = "packages/mbt-evidently" }
 dependencies = [
     { name = "evidently" },
     { name = "mbt-adapter-base" },
+    { name = "pandas" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "evidently", specifier = ">=0.7.20,<0.8" },
     { name = "mbt-adapter-base", editable = "packages/mbt-adapter-base" },
+    { name = "pandas", specifier = "<3.1" },
 ]
 
 [[package]]

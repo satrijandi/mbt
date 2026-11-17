@@ -30,6 +30,15 @@ dependencies = [
     # and the floors job installs; 0.8 is free to move the payload again, so
     # the ceiling holds until parse_snapshot is re-verified against it.
     "evidently>=0.7.20,<0.8",
+    # evidently 0.7.23 imports pandas.core.dtypes.common.infer_dtype_from_object
+    # at module level, and pandas 3.1.0 removed it, so `import evidently` fails
+    # on a fresh install (evidentlyai/evidently#1974, a fix PR is open) while
+    # evidently asks for `pandas>=1.3.5` with no ceiling. mbt does not import
+    # pandas here; the cap exists so installing this package yields a working
+    # evidently. Verified: pandas 3.0.6 imports and passes this package's
+    # tests, 3.1.1 does not. Drop the cap once an evidently release carries
+    # the fix and `upstream.yml` goes green without it.
+    "pandas<3.1",
 ]
 
 [project.urls]
