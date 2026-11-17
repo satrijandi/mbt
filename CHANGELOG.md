@@ -14,6 +14,7 @@ upgrading a project with expensive models.
 
 **Retraining impact:** None. No spec model gained or lost a field since v0.2.0, so no config hash moves and `state:modified` selects nothing it did not before. The adapter contract is 1.3 (a column-projection hint, additive: a 1.2 plugin still loads), and an adapter that declares no `capabilities()` is served as before. Behaviour that changes: a built-in check that crashes now exits 1 instead of reporting a failed check (exit 2), so a scheduler that routed every exit 2 to the data owners will see environment errors as errors; and `mbt init` on a fresh DuckDB 2.0 install now produces a project that builds (v0.2.0 did not).
 
+- The new --threads test read rich's coloured error panel, so CI failed ten cases the local run passed
 - FEEDBACK v7: v0.2.0 could not run on a fresh install, and three rules held in one place and not in all
 - The upstream tier had been red for 26 days because pandas 3.1 broke evidently's import
 - The showcase ran each DAG as one opaque task, so mbt-airflow had never run on the real stack

@@ -5,7 +5,7 @@ from mbt_airflow.operators import MbtCleanupOperator, MbtCompileOperator, MbtNod
 from mbt_airflow.plan import TaskSpec, plan_tasks
 from mbt_airflow.runners import DockerUnit, MbtDocker
 
-__version__ = "0.4.0.dev0"
+__version__ = "0.3.0"
 
 __all__ = [
     "DockerUnit",
