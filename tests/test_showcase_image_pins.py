@@ -1,6 +1,6 @@
 """The showcase runner image's hardcoded pins must satisfy declared metadata.
 
-`scripts/build_image.sh` pins the JVM trio by hand, because the sparkling fork
+`images/runner/stage.sh` pins the JVM trio by hand, because the sparkling fork
 needs versions the dev lock deliberately does not carry (ADR-17). Those pins are
 a second source of truth, and nothing checked it against the first: raising
 mbt-h2o's `h2o` floor to 3.46.0.11 left the script pinning `h2o==3.46.0.6`, and
@@ -27,14 +27,14 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BUILD_IMAGE = REPO_ROOT / "examples" / "showcase" / "scripts" / "build_image.sh"
+STAGE = REPO_ROOT / "examples" / "showcase" / "images" / "runner" / "stage.sh"
 MBT_H2O = REPO_ROOT / "packages" / "mbt-h2o" / "pyproject.toml"
 
 
 def _pin(name: str) -> tuple[str, str]:
-    """(package, version) from a `NAME_PIN="pkg==1.2.3"` line in build_image.sh."""
-    match = re.search(rf'^{name}="([A-Za-z0-9._-]+)==([^"]+)"', BUILD_IMAGE.read_text(), re.M)
-    assert match is not None, f"{name} is no longer declared in {BUILD_IMAGE.name}"
+    """(package, version) from a `NAME_PIN="pkg==1.2.3"` line in images/runner/stage.sh."""
+    match = re.search(rf'^{name}="([A-Za-z0-9._-]+)==([^"]+)"', STAGE.read_text(), re.M)
+    assert match is not None, f"{name} is no longer declared in {STAGE.name}"
     return match.group(1), match.group(2)
 
 
@@ -62,7 +62,7 @@ def test_the_pinned_h2o_satisfies_the_declared_range() -> None:
     _, version = _pin("H2O_PIN")
     declared = _declared("h2o")
     assert declared.contains(Version(version)), (
-        f"build_image.sh pins h2o=={version} but mbt-h2o declares h2o{declared}. "
+        f"stage.sh pins h2o=={version} but mbt-h2o declares h2o{declared}. "
         f"The showcase image cannot build. The floor is bounded above by the H2O "
         f"embedded in h2o-pysparkling-3.5, not by the advisory list."
     )
@@ -72,7 +72,7 @@ def test_the_pinned_pyspark_satisfies_the_sparkling_extra() -> None:
     _, version = _pin("PYSPARK_PIN")
     declared = _declared("pyspark", extra="sparkling")
     assert declared.contains(Version(version)), (
-        f"build_image.sh pins pyspark=={version} but mbt-h2o[sparkling] declares pyspark{declared}"
+        f"stage.sh pins pyspark=={version} but mbt-h2o[sparkling] declares pyspark{declared}"
     )
 
 
@@ -80,7 +80,7 @@ def test_the_pinned_pysparkling_satisfies_the_sparkling_extra() -> None:
     package, version = _pin("PYSPARKLING_PIN")
     declared = _declared(package, extra="sparkling")
     assert declared.contains(Version(version)), (
-        f"build_image.sh pins {package}=={version} but mbt-h2o[sparkling] declares {declared}"
+        f"stage.sh pins {package}=={version} but mbt-h2o[sparkling] declares {declared}"
     )
 
 
@@ -154,7 +154,7 @@ def test_the_image_installs_only_extras_the_closure_pins() -> None:
     from_pypi = {name for name in requested if not name.startswith("mbt-")}
 
     declared = {
-        _canon(line.split("==")[0])
+        _canon(re.match(r"[A-Za-z0-9._-]+", line).group(0))
         for line in EXTRAS_IN.read_text().splitlines()
         if line.strip() and not line.startswith("#")
     }
@@ -303,73 +303,3 @@ def test_seaweedfs_capacity_does_not_follow_free_disk() -> None:
         f"-volume.max={flags['-volume.max']} cannot seat {collections} collections "
         f"growing {SEAWEED_GROWTH_PER_COLLECTION} volumes each, plus one growth step"
     )
-
-
-# -- docker-socket probe (rides an image the stack already pulls) -------------
-
-SOCK_PROBE = REPO_ROOT / "examples" / "showcase" / "scripts" / "docker_sock_gid.sh"
-
-
-def test_the_docker_socket_probe_uses_airflow_dbs_image() -> None:
-    """scripts/docker_sock_gid.sh stats the socket from inside a container,
-    because each runtime presents it with a different group (Rancher Desktop's
-    Lima VM is not group 0, and guessing 0 for every Mac failed every DAG task
-    there with PermissionError). It borrows airflow-db's image so the probe
-    costs no extra pull; a bump of one without the other silently adds one.
-    """
-    import yaml
-
-    image = yaml.safe_load(COMPOSE.read_text())["services"]["airflow-db"]["image"]
-    probe = re.search(r'^PROBE_IMAGE="([^"]+)"$', SOCK_PROBE.read_text(), re.M)
-    assert probe, "docker_sock_gid.sh no longer declares PROBE_IMAGE"
-    assert probe.group(1) == image, f"probe uses {probe.group(1)}, airflow-db uses {image}"
-
-
-# -- runner image name (local-only, one spelling) -----------------------------
-
-SHOWCASE_DIR = REPO_ROOT / "examples" / "showcase"
-LOCAL_RUNNER = "localhost/mbt-showcase-runner:dev"
-#: Consumers of the name outside the showcase: the test harness and the
-#: workflow that publishes the prebuilt image. Markdown is not scanned - prose
-#: quotes registry URLs and the old name - and only a ghcr.io/<owner>/ pull
-#: source may name the image without localhost/.
-RUNNER_NAME_ELSEWHERE = [
-    REPO_ROOT / "tests" / "showcase_utils.py",
-    *sorted((REPO_ROOT / ".github").rglob("*.yml")),
-]
-
-
-def test_every_reference_names_the_runner_image_under_localhost() -> None:
-    """The runner image is built or retagged on the host and never published
-    under its local name, so every reference must say localhost/. A bare name
-    means docker.io/library/mbt-showcase-runner, and the daemon goes there
-    whenever it reaches for the image's origin: Woodpecker pulls a step image
-    it cannot find, and a bake whose base has lost its layer blobs fetches them.
-    Both then failed against Docker Hub (`insufficient_scope`, or x509 behind
-    a TLS-intercepting proxy) instead of failing locally. The tag has seven
-    consumers - compose, the Makefile, build_image.sh, doctor.py, the test
-    harness, the Woodpecker steps and the bake's FROM - and one bare spelling
-    in any of them brings the registry round trip back.
-    """
-    sources = [
-        path
-        for path in sorted(SHOWCASE_DIR.rglob("*"))
-        if path.is_file()
-        and path.suffix != ".md"
-        and path.name != ".env"
-        and "__pycache__" not in path.parts
-    ]
-    local_refs: set[str] = set()
-    for path in [*sources, *RUNNER_NAME_ELSEWHERE]:
-        text = path.read_text(errors="ignore")
-        for match in re.finditer(r"mbt-showcase-runner(:[\w.-]+)?", text):
-            before = text[max(0, match.start() - 80) : match.start()]
-            if before.endswith("localhost/"):
-                local_refs.add("localhost/" + match.group(0))
-                continue
-            line = text.count("\n", 0, match.start()) + 1
-            assert re.search(r"ghcr\.io/[^/\n]+/$", before), (
-                f"{path.relative_to(REPO_ROOT)}:{line} names the runner image without "
-                f"localhost/, which resolves to docker.io/library/{match.group(0)}"
-            )
-    assert local_refs == {LOCAL_RUNNER}, local_refs

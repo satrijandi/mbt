@@ -4,7 +4,8 @@
 the way production runs it: Woodpecker bakes the deployable unit and pins
 its digest in the deploy repo, git-sync hands the deploy repo's DAGs to
 Airflow, and every retrain, score and monitor is an Airflow DAG run that
-executes mbt inside that pinned unit (showcase_dag_utils.run_in_unit).
+executes mbt inside that pinned unit (mbt-airflow, ADR-34), one task per step of a
+node (ADR-35).
 
 Runs on the HOST against the published ports, like ci_bootstrap.py (the dev
 venv has `requests` via mlflow). Three phases, which the Makefile narrates:
@@ -60,7 +61,7 @@ from ci_bootstrap import (
     oauth_login,
 )
 
-DAGS = ("mbt_retrain", "mbt_score", "mbt_monitor")
+DAGS = ("mbt_retrain", "mbt_retrain_baseline", "mbt_score", "mbt_monitor")
 MODEL = "churn_automl"
 PIPELINE_TERMINAL = {"success", "failure", "error", "killed", "declined", "canceled"}
 #: The marker file the unit phase commits to trigger the first prod-build.
@@ -249,7 +250,16 @@ class Airflow:
         encoded = urllib.parse.quote(run_id, safe="")
         tis = self.api("GET", f"/dags/{dag_id}/dagRuns/{encoded}/taskInstances")
         chunks = []
-        for ti in tis["task_instances"]:
+
+        # A DAG is a task per step of each node now, and the API lists them in no useful order:
+        # read them in the order they ran, so the tail of the log is the last node's.
+        # A task that never started (upstream failed) has no start and goes last.
+        def order(ti: dict) -> tuple:
+            started = ti.get("start_date")
+            return (started is None, started or "", ti["task_id"])
+
+        ran = sorted(tis["task_instances"], key=order)
+        for ti in ran:
             base = f"/dags/{dag_id}/dagRuns/{encoded}/taskInstances/{ti['task_id']}"
             # Each attempt's own state: the task instance's is the latest
             # try's, which labelled a failed-then-retried try 1 "success".

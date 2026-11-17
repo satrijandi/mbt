@@ -1,13 +1,18 @@
 """The scheduling/CD half of P4 (SHOW-11 strong form + SHOW-13 routing).
 
 Airflow (LocalExecutor + postgres) runs the DAGs that git-sync reconciles
-out of the Gitea `deploy` repo; every task runs mbt inside the deployable
-unit pinned by digest in images.env. This module proves:
+out of the Gitea `deploy` repo, drawn by mbt-airflow (ADR-33, ADR-35): a task
+per step of each node (a build node is several steps; a score or monitor node
+is one), from the manifest prod-build published beside the image pin. Every
+task runs mbt inside the deployable unit pinned by digest in images.env
+(ADR-34). This module proves:
 
-- the retrain DAG builds on the PROD target from a scheduled, pinned unit:
-  cluster pushdown from a container Airflow launched (the deterministic
+- the baseline retrain DAG builds on the PROD target from a scheduled, pinned
+  unit: cluster pushdown from a container Airflow launched (the deterministic
   xgboost workhorse - sparkling-on-cluster is SHOW-04's own module, kept
-  out of scheduled paths per DESIGN's flake-isolation rule);
+  out of scheduled paths per DESIGN's flake-isolation rule), as the dataset's
+  materialize and checks tasks and the model's train, gate and register tasks,
+  each reading what the one before left;
 - SHOW-11, the ADR-20 inversion end to end: two score DAG runs straddling a
   promotion serve different champions while the deploy repo HEAD and the
   pinned image digest stay byte-identical - promotion is a registry event,
@@ -23,7 +28,7 @@ from showcase_utils import ANCHOR, SHOWCASE_MARKS
 
 pytestmark = SHOWCASE_MARKS
 
-DAGS = ("mbt_retrain", "mbt_score", "mbt_monitor")
+DAGS = ("mbt_retrain", "mbt_retrain_baseline", "mbt_score", "mbt_monitor")
 _state: dict = {}
 
 
@@ -85,8 +90,25 @@ def test_retrain_dag_builds_on_cluster_from_pinned_unit(sched) -> None:
         master_before.get("activeapps", [])
     )
 
-    run_id = ci.trigger_dag("mbt_retrain", {"select": "+churn_baseline_xgb"})
-    assert ci.wait_dag_run("mbt_retrain", run_id) == "success"
+    run_id = ci.trigger_dag("mbt_retrain_baseline")
+    assert ci.wait_dag_run("mbt_retrain_baseline", run_id) == "success"
+
+    # A node is a group of steps (ADR-35), each its own container: the lake's
+    # anchor was asked for once by the compile task, the dataset was built and
+    # then checked, and the model was trained, judged and registered - the
+    # registry write in a task of its own, so a blip there never retrains.
+    tasks = ci.task_instances("mbt_retrain_baseline", run_id)
+    expected = {
+        "mbt_compile",
+        "churn_training.materialize",
+        "churn_training.checks",
+        "churn_baseline_xgb.train",
+        "churn_baseline_xgb.gate",
+        "churn_baseline_xgb.register",
+    }
+    assert set(tasks) == expected, tasks
+    assert {task["state"] for task in tasks.values()} == {"success"}, tasks
+    assert all(task["try_number"] == 1 for task in tasks.values()), tasks
 
     # A new version registered from the scheduled run, trained via cluster
     # pushdown (the master saw new applications from the unit container).
@@ -176,7 +198,7 @@ def _monitor_dag_routes_exit_codes(ci) -> None:
     # fails on try 1, retries NOT consumed (AirflowFailException).
     run_id = ci.trigger_dag("mbt_monitor", {"vars": "pr_auc_floor: 0.99"})
     assert ci.wait_dag_run("mbt_monitor", run_id) == "failed"
-    task = ci.task_instances("mbt_monitor", run_id)["monitor"]
+    task = ci.task_instances("mbt_monitor", run_id)["retention_scoring"]
     assert task["state"] == "failed"
     assert task["try_number"] == 1, task
 
@@ -185,13 +207,15 @@ def _monitor_dag_routes_exit_codes(ci) -> None:
     run_id = ci.trigger_dag("mbt_monitor")
     assert ci.wait_dag_run("mbt_monitor", run_id) == "success"
 
-    # Hard error: a nonexistent target exits 1 -> Airflow RETRIES first
-    # (try_number 2), then fails toward on-call.
-    run_id = ci.trigger_dag("mbt_monitor", {"target": "does_not_exist"})
+    # Hard error: a pinned anchor that is not a date exits 1 at the compile
+    # task -> Airflow RETRIES first (try_number 2), then fails toward on-call,
+    # and the scoring task behind it never starts.
+    run_id = ci.trigger_dag("mbt_monitor", {"anchor": "not-a-date"})
     assert ci.wait_dag_run("mbt_monitor", run_id) == "failed"
-    task = ci.task_instances("mbt_monitor", run_id)["monitor"]
-    assert task["state"] == "failed"
-    assert task["try_number"] == 2, task
+    tasks = ci.task_instances("mbt_monitor", run_id)
+    assert tasks["mbt_compile"]["state"] == "failed"
+    assert tasks["mbt_compile"]["try_number"] == 2, tasks["mbt_compile"]
+    assert tasks["retention_scoring"]["state"] == "upstream_failed", tasks["retention_scoring"]
 
     # And the monitored runs really were this module's two score runs.
     monitored = {str(v) for v in _state.get("scored_versions", ())}

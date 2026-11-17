@@ -59,7 +59,7 @@ Issues = "https://github.com/satrijandi/mbt/issues"
 # H2O distributed on Spark executors; version-locked to the Spark minor.
 # 3.5.8: PYSEC-2026-3966 (CVE-2026-32773); the 3.5.2 it replaced cleared
 # PYSEC-2025-184. It is also the pin the showcase runner image already builds
-# on (examples/showcase/scripts/build_image.sh), so the sparkling fork is known
+# on (examples/showcase/images/runner/stage.sh), so the sparkling fork is known
 # to resolve and train there.
 sparkling = ["h2o-pysparkling-3.5>=3.46", "pyspark>=3.5.8,<3.6"]
 

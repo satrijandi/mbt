@@ -15,9 +15,16 @@ owner when the manifest exposes one. Push failures are deliberately
 best-effort (warn + exit 0): observability observes, it must never fail a
 pipeline (mbt's own exit codes enforce).
 
-Usage: push_metrics.py [project_dir] (default: cwd)
+Usage: push_metrics.py [project_dir] [--target-dir DIR] [--manifest FILE]
+
+  project_dir   the project (default: cwd); names the series and holds target/
+  --target-dir  where run_results.json is (default: project_dir/target). An Airflow
+                task keeps its own (mbt-airflow's MBT_AIRFLOW_TARGET_PATH)
+  --manifest    where to read node owners from (default: TARGET_DIR/manifest.json).
+                A task executes the run's manifest and does not write one of its own
 """
 
+import argparse
 import json
 import math
 import os
@@ -43,11 +50,11 @@ def _labels(pairs: dict) -> str:
     return "{" + inner + "}" if inner else ""
 
 
-def _owner_by_node(project_dir: Path) -> dict:
+def _owner_by_node(manifest_path: Path) -> dict:
     """Best-effort owner lookup from the manifest; absent owners are omitted."""
     owners: dict = {}
     try:
-        manifest = json.loads((project_dir / "target" / "manifest.json").read_text())
+        manifest = json.loads(manifest_path.read_text())
         nodes = manifest.get("nodes", {})
         if isinstance(nodes, dict):
             items = nodes.items()
@@ -109,15 +116,21 @@ def render_node(result: dict, owner: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
-    project_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
-    results_path = project_dir / "target" / "run_results.json"
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Push mbt run results to the Pushgateway")
+    parser.add_argument("project_dir", nargs="?", default=".")
+    parser.add_argument("--target-dir")
+    parser.add_argument("--manifest")
+    args = parser.parse_args(argv)
+    project_dir = Path(args.project_dir)
+    target_dir = Path(args.target_dir) if args.target_dir else project_dir / "target"
+    results_path = target_dir / "run_results.json"
     if not results_path.exists():
         print(f"push_metrics: {results_path} not found, nothing to push", file=sys.stderr)
         return 0
     payload = json.loads(results_path.read_text())
     meta = payload.get("metadata", {})
-    owners = _owner_by_node(project_dir)
+    owners = _owner_by_node(Path(args.manifest) if args.manifest else target_dir / "manifest.json")
 
     project = "unknown"
     try:

@@ -23,7 +23,7 @@ when:
 # container cannot reach; clone from the in-network address instead.
 clone:
   git:
-    image: docker.io/woodpeckerci/plugin-git:2.10.0
+    image: localhost/mbt-showcase-plugin-git:2.10.0
     settings:
       remote: http://gitea:3000/${CI_REPO}.git
 

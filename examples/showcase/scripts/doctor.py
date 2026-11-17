@@ -32,19 +32,22 @@ from pathlib import Path
 SHOWCASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT = os.environ.get("SHOWCASE_PROJECT", "mbt-showcase")
 NETWORK = os.environ.get("SHOWCASE_NETWORK", f"{PROJECT}_default")
-#: The probe image: one the stack already pulls (airflow-db's, the same one
-#: docker_sock_gid.sh uses), so the disk check costs no extra download.
-PROBE_IMAGE = "postgres:18.6-alpine"
+#: The probe image: the root every showcase image builds from (the same one
+#: docker_sock_gid.sh uses), built here when missing - a rootfs unpack that
+#: needs no registry - so the disk check works before the first `make image`.
+PROBE_IMAGE = "localhost/mbt-showcase-ubuntu:26.04.1"
+BUILD_IMAGES = SHOWCASE_DIR / "scripts" / "build_images.sh"
 GIB = 1024**3
 MEMORY_WANTED = 10 * GIB
-#: A runner image build, measured on OrbStack: the new image (~6GB unpacked)
+#: Building the images, measured on OrbStack: a new runner (~6GB unpacked)
 #: beside the old one, ~10GB of layer cache, and the pip cache mount - a build
 #: started with 27GB free left 2GB, and the next JVM died with SIGBUS mapping
-#: its perf file onto the full disk.
-DISK_WARN_BUILD = 25 * GIB
+#: its perf file onto the full disk - plus ~4GB for the service images on a
+#: first build.
+DISK_WARN_BUILD = 30 * GIB
 DISK_WARN = 8 * GIB  # image current: room for the lake, artifacts, logs and Airflow's db
 DISK_FAIL = 5 * GIB
-RUNNER_IMAGE = os.environ.get("SHOWCASE_RUNNER_IMAGE", "localhost/mbt-showcase-runner:dev")
+RUNNER_IMAGE = "localhost/mbt-showcase-runner:dev"
 
 #: Host ports the stack publishes, by .env name, with their defaults.
 PORTS = {
@@ -112,9 +115,32 @@ def check_daemon(report: Report) -> bool:
     return True
 
 
+def build_images(*args: str, timeout: int = 120) -> str:
+    """scripts/build_images.sh's stdout ("" when it fails)."""
+    return subprocess.run(
+        ["bash", str(BUILD_IMAGES), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    ).stdout.strip()
+
+
 def check_disk(report: Report) -> None:
+    if docker("image", "inspect", PROBE_IMAGE).returncode != 0:
+        build_images("ubuntu", timeout=600)
     probe = docker(
-        "run", "--rm", "--network", "none", "--entrypoint", "df", PROBE_IMAGE, "-Pk", "/"
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--entrypoint",
+        "df",
+        PROBE_IMAGE,
+        "-Pk",
+        "/",
     )
     if probe.returncode != 0:
         report.warn("could not measure the docker VM's free disk", probe.stderr.strip()[:200])
@@ -125,7 +151,7 @@ def check_disk(report: Report) -> None:
         "free space: docker system df, then docker image prune / docker builder prune\n"
         "(a full disk corrupts airflow-db and fails every model upload: docs/troubleshooting.md)"
     )
-    building = image_needs_build()
+    building = images_need_build()
     wanted = DISK_WARN_BUILD if building else DISK_WARN
     cache = build_cache_reclaimable()
     if cache:
@@ -136,27 +162,23 @@ def check_disk(report: Report) -> None:
     if free < DISK_FAIL:
         report.fail(text, fix)
     elif free < wanted:
-        why = "building the runner image" if building else "the running stack"
+        why = "building the stack's images" if building else "the running stack"
         report.warn(f"{text}; {why} wants ~{wanted // GIB}GB", fix)
     else:
-        report.ok(text + (" (the runner image will be built)" if building else ""))
+        report.ok(text + (" (the stack's images will be built)" if building else ""))
 
 
-def image_needs_build() -> bool:
-    """Whether `make up` will build the runner image: none exists, or its
-    content label is not this checkout's hash (build_image.sh's own test).
-    A prebuilt pull would avoid the build, but whether one is published is
-    not known until the pull is tried, so plan for the build."""
+def images_need_build() -> bool:
+    """Whether `make up` will build images for real: one of the images it
+    builds is missing, or the runner's content label is not this checkout's
+    hash (build_images.sh's own test). An unchanged image is a cache hit."""
+    tags = build_images("--tags").split()
+    if not tags or any(docker("image", "inspect", tag).returncode != 0 for tag in tags):
+        return True
     labels = docker("image", "inspect", "--format", "{{json .Config.Labels}}", RUNNER_IMAGE)
     if labels.returncode != 0:
         return True
-    current = subprocess.run(
-        ["bash", str(SHOWCASE_DIR / "scripts" / "build_image.sh"), "--print-hash"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    ).stdout.strip()
+    current = build_images("--print-hash")
     built = (json.loads(labels.stdout or "null") or {}).get("mbt.showcase.content", "")
     return not current or built != current
 

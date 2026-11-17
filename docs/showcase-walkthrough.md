@@ -52,7 +52,7 @@ make up
 ```
 
 It first runs `make doctor`, which checks docker's memory and disk, the socket group Airflow needs, the ports, and leftover networks, and stops with the fix when something will not work.
-The runner image comes prebuilt from `ghcr.io/satrijandi/mbt-showcase-runner` when one is published for your checkout; otherwise the first run builds it (10-15 minutes), and after that `make up` takes under a minute and a half.
+Then it builds the stack's images from this checkout - nothing is pulled from Docker Hub or any other registry - which takes about 20 minutes the first time; after that unchanged images are build-cache hits, and `make up` takes under a minute and a half.
 It starts the lake, MLflow, JupyterLab, Spark and observability; Gitea, Woodpecker and Airflow start with `make ci` in step 2.
 It ends by generating the lake table and printing every URL:
 
@@ -256,12 +256,12 @@ Nothing was retrained and nothing was baked (`nothing retrained and a deployable
 
 Open Airflow (http://localhost:8280, `admin` / `admin`), click **Dags**, then `mbt_score`, then **Trigger** at the top right.
 The dialog shows an empty `anchor`: left empty, the run takes the lake's own anchor (the day after its newest cohort) inside the unit; click **Trigger** again.
-The run takes about 40 seconds; the task log ends with:
+The run takes about 40 seconds and has two tasks, `mbt_compile` and `retention_scoring`; the second one's log ends with:
 
 ```text
-[1/1] SUCCESS scoring scoring.churn_lake.retention_scoring in 15.76s
-score finished [success]: 1 ok, 0 failed, 0 skipped in 25.2s
-│ scoring.churn_lake.retention_scoring │ success │ 15.76s │ rows_scored=2035 │
+01:16:17  [1/1] SUCCESS scoring scoring.churn_lake.retention_scoring in 14.74s
+01:16:17  score finished [success]: 1 ok, 0 failed, 0 skipped in 22.7s
+result {"metrics": {"rows_scored": 2035.0}, "node": "scoring.churn_lake.retention_scoring", "status": "success"}
 ```
 
 It scored the 2,035 active customers of the newest cohort (2026-09-28) with whatever model holds `production`.
@@ -288,8 +288,9 @@ make outcomes
 Trigger `mbt_monitor` again, and it grades the run:
 
 ```text
-evaluated 1 of 1 matured prediction run(s)
-│ scoring.churn_lake.retenti… │ success │ 7.53s │ pr_auc=0.3248 │
+01:17:14  [1/1] SUCCESS scoring scoring.churn_lake.retention_scoring in 3.47s -
+          evaluated 1 of 1 matured prediction run(s)
+result {"message": "evaluated 1 of 1 matured prediction run(s)", "metrics": {"pr_auc": 0.3248397552053703, "roc_auc": 0.8035563810211698}, "node": "scoring.churn_lake.retention_scoring", "status": "success"}
 ```
 
 Trigger it a third time and it evaluates nothing (`0 matured prediction runs to evaluate`): each prediction run is graded exactly once.
@@ -574,13 +575,13 @@ See also the [troubleshooting entry](troubleshooting.md#no-champion-of-churn_mod
 
 ### `mbt_monitor` failed and did not retry
 
-The task fails on its first try with:
+The `retention_scoring` task fails on its first try with:
 
 ```text
-AirflowFailException: mbt exited 2: quality verdict (gate/check/monitor). Deterministic - not retried; notify the model owner, not on-call.
+AirflowFailException: mbt exited 2 (quality verdict): {'node': 'scoring.churn_lake.retention_scoring', 'status': 'monitor_failed', 'message': 'evaluated 1 of 1 matured prediction run(s); gate breach: run 3a967682837e140a: realized pr_auc=0.3248 failed >= 0.99', 'metrics': {'pr_auc': 0.3248397552053703, 'roc_auc': 0.8035563810211698}}
 ```
 
-The task log above it names the breach, for example `realized pr_auc=0.3248 failed >= 0.99`.
+The message names the breach and the metrics behind it, and the task log above it says the same in mbt's own words.
 
 **Why:** the model's realized performance missed a gate on the scoring node.
 A quality verdict does not change on a retry, so the DAG does not retry it, and it goes to the model's owner.
@@ -590,17 +591,19 @@ A quality verdict does not change on a retry, so the DAG does not retry it, and 
 
 ### `mbt_monitor` failed twice
 
-Both tries fail with:
+The `mbt_compile` task fails twice, and `retention_scoring` behind it never starts (`upstream_failed`).
+Each try fails with:
 
 ```text
-Error: target 'prod_typo' not defined for project 'churn_lake'
-AirflowException: mbt exited 1: hard error - Airflow retries, then on-call.
+Error: --anchor is not an ISO timestamp: 'not-a-date'
+  hint: e.g. --anchor 2026-07-06T12:00:00Z
+AirflowException: mbt exited 1 (hard error): Error: --anchor is not an ISO timestamp: 'not-a-date' |   hint: e.g. --anchor 2026-07-06T12:00:00Z
 ```
 
 **Why:** exit 1 is a hard error - a crash, a missing service, a mistyped parameter - which may be transient, so Airflow retries once before paging on-call.
-Here the DAG's `target` parameter names a target `profiles.yml` does not define.
+Here the DAG's `anchor` parameter was set to something that is not a date.
 
-**Fix:** trigger again with a defined target; the scoring DAGs use `batch`.
+**Fix:** trigger again with a valid `anchor`, or leave it empty so the run takes the lake's own.
 
 ### Running `make ci` again logs everyone out of Woodpecker
 

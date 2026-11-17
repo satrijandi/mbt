@@ -1411,11 +1411,12 @@ Task failed with exception
 When the retry hits it too, the step ends with `<dag> run <run id> ended failed: <airflow url>` and `make` reports `Error 1`.
 Before the fix below, `make lifecycle` printed only `Task failed with exception`, with no cause.
 
-**Why:** every showcase DAG task starts the pinned unit through the Docker API (`run_in_unit` in `deploy/dags/showcase_dag_utils.py`), and docker-py gives up on any API call after 60 seconds by default.
+**Why:** every showcase DAG task starts the pinned unit through the Docker API (`mbt-airflow`'s `DockerRunner`, [ADR-34](adr/0034-airflow-tasks-run-in-a-container.md); it was `run_in_unit` in `deploy/dags/showcase_dag_utils.py` when this was captured), and docker-py gives up on any API call after 60 seconds by default.
 With Spark, H2O, Airflow, Woodpecker and the rest of the stack sharing one Docker Desktop or OrbStack VM, creating the container sometimes takes longer than that, so the task failed on the client side while the daemon was still working.
 The task retries once, so it fails the run only when both tries are slow, which is why the same stack usually passes.
 
-**Fix:** `run_in_unit` now builds its client with `docker.from_env(timeout=600)`.
+**Fix:** the client is built with `docker.from_env(timeout=600)`; in `mbt-airflow` that is `MbtDocker(api_timeout=600)`, and a slower daemon can raise it.
+The tasks in that log are named for the node now, so the same failure reads `--- mbt_monitor.mbt_compile try 1 (failed) ---`, where the unit is first started.
 The DAGs reach Airflow through the deploy repo that `make ci` seeds, so a running stack keeps the old DAG code; recreate it with `make down && make up` and then run `make lifecycle`.
 
 ### The showcase's first prod-build ends `killed` and `make lifecycle` stops at step 1
@@ -1491,6 +1492,7 @@ Task failed with exception
 ```
 
 The deploy repo's `images.env` on Gitea does have the pin; the copy Airflow reads does not have it yet.
+The captured task names are from before the DAGs moved to `mbt-airflow` ([ADR-34](adr/0034-airflow-tasks-run-in-a-container.md)): the DAGs are now drawn from the `manifest.json` that prod-build commits beside the pin, so they do not exist at all until the first unit is baked, and the same message (from `unit()` in `deploy/dags/showcase_dag_utils.py`) fails the first task, `mbt_retrain.mbt_compile`.
 
 **Why:** there are two copies of the deploy repo.
 prod-build writes the pin to Gitea, git-sync copies Gitea's `main` to Airflow every 5 seconds, and a DAG task reads Airflow's copy when it starts.
@@ -1544,7 +1546,7 @@ A build that does finish can leave the disk nearly full instead, and the failure
 (the JVM maps its performance counters onto a file in `/tmp`, and a write to a mapped file on a full disk is a SIGBUS).
 Measured on OrbStack, two runner-image rebuilds took the VM from 27GB free to 2GB, most of it build cache.
 
-**Fix:** run `make doctor` (`make up` runs it first): it knows when a build is coming - no runner image, or one whose content label is not this checkout's - and then wants about 25GB free, and it prints how much build cache is reclaimable.
+**Fix:** run `make doctor` (`make up` runs it first): it knows when a build is coming - one of the stack's images missing, or a runner whose content label is not this checkout's - and then wants about 30GB free, and it prints how much build cache is reclaimable.
 `docker builder prune --filter 'type!=exec.cachemount'` drops the layer cache but keeps the pip cache mount that makes the next build fast; also `docker rmi` old `localhost:15000/mbt/churn:*` units, or `make down` first, then `make up` again.
 
 ### `failed to copy: httpReadSeeker: failed open` in the showcase's bake step
@@ -1572,16 +1574,30 @@ Re-pulling the runner does not repair it while any tag still holds the image; on
 Seen on Rancher Desktop (moby 29.5.2 with the containerd image store); how the blobs went missing is unknown.
 `docker images localhost/mbt-showcase-runner` gives it away: a healthy runner shows a CONTENT SIZE of about 2GB beside its 5.6GB DISK USAGE, a damaged one far less.
 
-**Fix:** remove every image that holds those layers, then let `make up` pull or build the runner again:
+**Fix:** remove every image that holds those layers, then let `make up` build them again:
 
 ```bash
 make down
-docker rmi $(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E 'mbt-showcase-runner|/mbt/churn:')
+docker rmi $(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E 'mbt-showcase-|/mbt/churn:')
 docker builder prune -f --filter 'type!=exec.cachemount'
 make up
 ```
 
-The `grep` takes the prebuilt `ghcr.io/...` tag and every `localhost:15000/mbt/churn:<sha>` unit too: each one shares the runner's layers, and a failed bake still leaves its tag behind.
+The `grep` takes every showcase image and every `localhost:15000/mbt/churn:<sha>` unit: the runner's lower layers are its base images' (`localhost/mbt-showcase-{ubuntu,base,python}`), every unit is built on the runner, and a failed bake still leaves its tag behind.
+
+### `No such image: localhost/mbt-showcase-...` starting the showcase
+
+**Symptom (compose stops before a service starts):**
+
+```text
+Error response from daemon: No such image: localhost/mbt-showcase-<name>:<version>
+```
+
+**Why:** the showcase pulls no image from any registry.
+Every image it runs is built from `examples/showcase/images/<name>/Dockerfile` by `make image` (`scripts/build_images.sh`), and compose sets `pull_policy: never`, so a service whose image was never built fails at once instead of asking Docker Hub for it.
+`make up`, `make ci` and `make lifecycle` build first; a bare `docker compose up` does not.
+
+**Fix:** `make image` (seconds when everything is current, about 20 minutes on a cold machine), then retry, or start the stack through its make targets.
 
 ### `advancing 1 week(s) moves the lake to ... that cohort has not happened yet`
 

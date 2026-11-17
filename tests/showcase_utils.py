@@ -45,7 +45,6 @@ SHOWCASE_MARKS = [
 
 ANCHOR = "2026-09-29T00:00:00Z"
 MONITOR_ANCHOR = "2026-10-09T00:00:00Z"
-RUNNER_IMAGE = os.environ.get("MBT_SHOWCASE_RUNNER_IMAGE", "localhost/mbt-showcase-runner:dev")
 
 
 def require_docker() -> None:
@@ -128,7 +127,6 @@ class ComposeStack:
         self.env = os.environ.copy()
         self.env.update({k: str(v) for k, v in self.ports.items()})
         self.env["SHOWCASE_WORKSPACE"] = str(workspace)
-        self.env["SHOWCASE_RUNNER_IMAGE"] = RUNNER_IMAGE
         # Woodpecker's agent spawns step containers OUTSIDE compose; this is
         # how they join the session network and resolve gitea/seaweedfs/
         # mlflow/webhook-sink by name (compose names it <project>_default).
@@ -289,18 +287,34 @@ def ensure_champion(stack: ComposeStack) -> None:
     stack.mbt("promote", "--model", "churn_automl", "--to", "production", timeout=300)
 
 
-def build_runner_image() -> None:
-    """Idempotent: build_image.sh skips the build when the existing image's
-    content label matches the checkout, and rebuilds when it does not."""
+BUILD_IMAGES = SHOWCASE_DIR / "scripts" / "build_images.sh"
+
+
+def build_images(*names: str) -> None:
+    """Build NAMEs, or every image the stack runs (as `make image` does),
+    from the checkout. Idempotent: unchanged images are build-cache hits, and
+    the runner is skipped while its content label matches the checkout."""
     proc = subprocess.run(
-        [str(SHOWCASE_DIR / "scripts" / "build_image.sh")],
+        [str(BUILD_IMAGES), *names],
         capture_output=True,
         text=True,
-        timeout=2400,
+        timeout=3600,
         check=False,
     )
     if proc.returncode != 0:
-        pytest.fail(f"runner image build failed:\n{proc.stdout[-8000:]}\n{proc.stderr[-8000:]}")
+        pytest.fail(f"showcase image build failed:\n{proc.stdout[-8000:]}\n{proc.stderr[-8000:]}")
+
+
+def image_tags(*names: str) -> dict[str, str]:
+    """{name: the localhost/ tag build_images.sh builds it as}."""
+    proc = subprocess.run(
+        [str(BUILD_IMAGES), "--tags", *names],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    return dict(zip(names, proc.stdout.split(), strict=True))
 
 
 # -- CI tier harness (gitea + woodpecker + zot + webhook-sink + airflow) ------

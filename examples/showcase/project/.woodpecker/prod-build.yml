@@ -18,7 +18,7 @@ when:
 # container cannot reach; clone from the in-network address instead.
 clone:
   git:
-    image: docker.io/woodpeckerci/plugin-git:2.10.0
+    image: localhost/mbt-showcase-plugin-git:2.10.0
     settings:
       remote: http://gitea:3000/${CI_REPO}.git
 
@@ -82,7 +82,7 @@ steps:
         fi
 
   - name: bake
-    image: docker:29.8.0-cli
+    image: localhost/mbt-showcase-docker-cli:29.8.0
     # Requires the repo's trusted.volumes flag (set by ci_bootstrap.py):
     # the bake talks to the host daemon, which resolves the localhost zot
     # port itself (insecure-by-default for localhost registries).
@@ -101,7 +101,7 @@ steps:
         echo "baked $(cat target/image_digest)"
 
   - name: provenance
-    image: ghcr.io/oras-project/oras:v1.3.4
+    image: localhost/mbt-showcase-oras:1.3.4
     commands:
       # The manifest is secret-free by construction, so it can live in the
       # registry as an audit artifact; tag = source sha pairs it with both
@@ -120,13 +120,19 @@ steps:
       - |
         [ -f target/bake_needed ] || { echo "skipped"; exit 0; }
         digest_ref=$(cat target/image_digest)
+        manifest="$PWD/target/manifest.json"
         git clone --depth 1 "http://mbtops:$${GITEA_TOKEN}@gitea:3000/mbt-showcase/deploy.git" /tmp/deploy
         cd /tmp/deploy
         sed -i "s|^IMAGE=.*|IMAGE=$digest_ref|" images.env
+        # The Airflow DAGs are drawn from this manifest (mbt-airflow, ADR-33) and the
+        # unit runs the project it was compiled from, so both move in ONE commit: the
+        # graph a person sees is always the graph of the code that will run.
+        cp "$manifest" manifest.json
+        git add manifest.json
         # Same digest, in-network registry ref for the k3d/ArgoCD profile.
         digest_only="$${digest_ref#*@}"
         sed -i "s|image: zot:5000/mbt/churn.*|image: zot:5000/mbt/churn@$digest_only|" k8s/score-cronjob.yaml
-        if git diff --quiet; then echo "digest unchanged; deploy repo already current"; exit 0; fi
+        if git diff --quiet HEAD; then echo "digest unchanged; deploy repo already current"; exit 0; fi
         git -c user.name=mbt-ci -c user.email=ci@showcase.local commit -am "deploy: unit digest from $CI_COMMIT_SHA"
         git push --quiet origin main
         echo "deploy repo pinned to new unit digest"

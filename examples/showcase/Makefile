@@ -14,7 +14,9 @@ export SHOWCASE_WORKSPACE ?= $(HOME)/.cache/mbt-showcase/workspace
 # fresh stack `make lifecycle` runs `make ci` as a sub-make, which writes the
 # file after this make has already read its makefiles.
 WOODPECKER_ENV = $(SHOWCASE_WORKSPACE)/woodpecker.env
-export SHOWCASE_RUNNER_IMAGE ?= localhost/mbt-showcase-runner:dev
+# Built from this checkout by `make image` like every image the stack runs
+# (scripts/build_images.sh); compose and the pipelines name it the same way.
+RUNNER_IMAGE := localhost/mbt-showcase-runner:dev
 # Overrides read from .env must reach docker compose's ${...:-default}
 # interpolation (make does not export include'd variables by itself).
 # Undefined names export as empty, which :- treats the same as unset.
@@ -71,7 +73,7 @@ PANEL = $(EXEC) python /workspace/bootstrap/churn_panel.py
 
 help:
 	@echo "mbt showcase (see README.md for the full runbook):"
-	@echo "  make up            build the runner image, boot the stack, seed the lake table"
+	@echo "  make up            build the stack's images, boot the stack, seed the lake table"
 	@echo "  make seed          (re)write the lake table; SCALE=huge for ~1.6M rows x 320 columns"
 	@echo "  make demo          the whole lifecycle, narrated (build -> promote -> score -> monitor)"
 	@echo "  make ci            seed Gitea + Woodpecker (org, repos, OAuth app, activation)"
@@ -94,8 +96,13 @@ help:
 	@echo "  make down          stop and remove containers, volumes, and the network"
 	@echo "  make clean         down, then also remove the workspace"
 
+# Every image the stack runs, built from images/ in this checkout; nothing is
+# pulled from a registry (scripts/build_images.sh). Unchanged images are a
+# cache hit, so a warm run takes seconds - which is why every target that
+# starts services (up, ci, lifecycle) runs it first: compose never pulls, so
+# an image nobody built is a "No such image" failure, not a download.
 image:
-	$(SHOWCASE_DIR)/scripts/build_image.sh
+	$(SHOWCASE_DIR)/scripts/build_images.sh
 
 # tmp/ and monitoring/ are created by the HOST here on purpose: every container
 # runs as root, so whichever one reached the directory first would own it and
@@ -112,7 +119,7 @@ image:
 workspace:
 	mkdir -p $(SHOWCASE_WORKSPACE)/tmp $(SHOWCASE_WORKSPACE)/monitoring
 	rm -rf $(SHOWCASE_WORKSPACE)/project 2>/dev/null || \
-	  docker run --rm -v $(SHOWCASE_WORKSPACE):/workspace $(SHOWCASE_RUNNER_IMAGE) \
+	  docker run --rm --pull never -v $(SHOWCASE_WORKSPACE):/workspace $(RUNNER_IMAGE) \
 	    rm -rf /workspace/project
 	rsync -a $(SHOWCASE_DIR)/project/ $(SHOWCASE_WORKSPACE)/project/
 	rsync -a $(SHOWCASE_DIR)/bootstrap/ $(SHOWCASE_WORKSPACE)/bootstrap/
@@ -149,7 +156,7 @@ urls:
 # with the real credentials, mint its API token, activate the repo. After
 # this, clone http://localhost:$(GITEA_PORT)/mbt-showcase/churn and open a
 # PR - Woodpecker runs pr-check and posts the mbt build report comment.
-ci:
+ci: image
 	$(call compose_up,core obs ci orch)
 	@set -euo pipefail; \
 	pre=$$(cd $(REPO_ROOT) && uv run python examples/showcase/scripts/ci_bootstrap.py pre \
@@ -205,7 +212,7 @@ down:
 # Permission denied - fall back to wiping the contents through a container.
 clean: down
 	rm -rf $(SHOWCASE_WORKSPACE) 2>/dev/null || { \
-	  docker run --rm -v $(SHOWCASE_WORKSPACE):/workspace $(SHOWCASE_RUNNER_IMAGE) \
+	  docker run --rm --pull never -v $(SHOWCASE_WORKSPACE):/workspace $(RUNNER_IMAGE) \
 	    bash -c 'rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null || true'; \
 	  rm -rf $(SHOWCASE_WORKSPACE); \
 	}
@@ -251,7 +258,7 @@ demo:
 LIFECYCLE := cd $(REPO_ROOT) && uv run python examples/showcase/scripts/lifecycle.py
 AIRFLOW_URL = http://localhost:$(AIRFLOW_PORT)
 
-lifecycle:
+lifecycle: image
 	@curl -fsS -o /dev/null http://localhost:$(GITEA_PORT)/api/v1/repos/mbt-showcase/churn 2>/dev/null \
 	  || $(MAKE) ci
 	$(call compose_up,core spark obs ci orch)

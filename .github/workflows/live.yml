@@ -57,8 +57,9 @@ jobs:
         if: env.SNOWFLAKE_ACCOUNT == ''
         run: echo "SNOWFLAKE_* secrets are not configured - live Snowflake suite was not run."
 
-  # The docker-compose showcase stack (examples/showcase): builds the runner
-  # image, boots SeaweedFS + MLflow + Spark + Gitea/Woodpecker + Zot +
+  # The docker-compose showcase stack (examples/showcase): builds every image
+  # it runs from this repo (scripts/build_images.sh; nothing is pulled from a
+  # registry), boots SeaweedFS + MLflow + Spark + Gitea/Woodpecker + Zot +
   # Airflow + observability, and runs the lifecycle, CI-loop, provenance,
   # and scheduling tiers, then the runbook tier and the k3d + ArgoCD tier,
   # each on a stack of its own. No secrets needed - docker ships on
@@ -183,7 +184,7 @@ jobs:
             "  ownership regardless of the in-container uid. Judge a fix on Linux." \
             "- live.yml has workflow_dispatch: never wait for the 03:17 UTC cron to" \
             "  check a fix." \
-            "- \"Task failed with exception / mbt_monitor.monitor try 2/2\" in a" \
+            "- \"Task failed with exception / mbt_monitor.mbt_compile try 2/2\" in a" \
             "  showcase log is the DAG exit-code-routing test driving a deliberate" \
             "  failure, not a real one." \
             "- The snowflake job passes vacuously when SNOWFLAKE_* secrets are not" \
