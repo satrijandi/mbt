@@ -35,7 +35,8 @@ from mbt.contracts import (
     StabilityCell,
 )
 from mbt.execute import training_report as report_step
-from mbt.execute.job import _run_train, run_job
+from mbt.execute.job import run_job
+from mbt.execute.job_train import _run_train
 from mbt.execute.orchestrator import InvocationOptions, run_command
 from mbt.reporting.builder import ReportData, ScoredSplit
 from mbt.reporting.writer import ReportMeta

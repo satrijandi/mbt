@@ -154,3 +154,26 @@ def test_the_status_page_states_no_exact_test_count() -> None:
     covers and how that is enforced, not a number."""
     page = (REPO_ROOT / "docs" / "v0.1-status.md").read_text()
     assert not re.search(r"\b\d[\d,]*\s+(?:fast\s+|e2e\s+)?tests\b", page)
+
+
+def test_security_policy_supports_the_newest_released_series_only() -> None:
+    """SECURITY.md listed `0.1.x | yes` for weeks after 0.2.0 shipped, so the
+    one supported series was the one that could not run (FEEDBACK v7 E-1). The
+    newest `## vX.Y.Z` heading in the changelog names the series that must be
+    supported, and every older series must say it is not."""
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text()
+    released = re.findall(r"^## v(\d+)\.(\d+)\.\d+\b", changelog, flags=re.MULTILINE)
+    assert released, "CHANGELOG.md names no release"
+    series = list(dict.fromkeys(f"{major}.{minor}.x" for major, minor in released))
+    rows = dict(
+        re.findall(
+            r"^\|\s*(\d+\.\d+\.x)\s*\|\s*(yes|no)\s*\|",
+            (REPO_ROOT / "SECURITY.md").read_text(),
+            flags=re.MULTILINE,
+        )
+    )
+    assert rows.get(series[0]) == "yes", f"SECURITY.md must support {series[0]}: {rows}"
+    stale = {name: answer for name, answer in rows.items() if name != series[0] and answer != "no"}
+    assert not stale, f"older series must be unsupported: {stale}"
+    missing = [name for name in series[1:] if name not in rows]
+    assert not missing, f"released series missing from SECURITY.md: {missing}"

@@ -26,9 +26,12 @@ They carry the reasoning behind a large share of the current design, and several
   Unlike the five cycles above it reviews the shape of the code rather than practice, which is why its findings are cited by the modules they created (`execute/seeds.py`, `parsing/rules.py`, `quality/judgement.py`, `mbt_adapter_base/{base,capabilities,champion,events,errors}.py`).
 - `reviews/feedback-v6.md` - review 7, closed 2026-10-05. Finding IDs `A-1`-`A-8`, `B-1`-`B-5`, `C-1`, `D-1`; code comments cite them as `FEEDBACK v6 A-2`.
   A black-box review: every finding was reproduced through the real CLI or measured by mutating the source, and its A-1 fix was the v0.2.0 release.
+- `reviews/feedback-v7.md` - review 8, closed 2026-11-17. Finding IDs `A-1`-`G-1`; code comments cite them as `FEEDBACK v7 A-3`.
+  It reviewed the released tag and the invariants `CLAUDE.md` states, and its A-1 fix is the v0.3.0 release.
 
-No review is in flight.
 A review in flight lives at the repo root as `FEEDBACK_v<n>.md` so it is impossible to miss, and moves here once its progress log is closed.
+
+`lessons.md` is not a review: it is the incident behind each rule in `CLAUDE.md`, kept here so `CLAUDE.md` can state the rule and one line of reason.
 
 ## Authoritative sources instead
 

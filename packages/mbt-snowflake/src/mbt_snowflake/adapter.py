@@ -34,6 +34,7 @@ from mbt_adapter_base import (
     ScoringOutputSpec,
     retry_with_jitter,
 )
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 from mbt_adapter_base.errors import AdapterFailure
 from mbt_adapter_base.materialization import (
     MaterializationError,
@@ -95,8 +96,10 @@ def _is_transient(exc: BaseException) -> bool:
     return isinstance(exc, OperationalError)
 
 
-class SnowflakeDataAdapter:
+class SnowflakeDataAdapter(DeclaresCapabilities):
     """DataAdapter over Snowflake tables (see package README for config)."""
+
+    adapter_kind = AdapterKind.DATA
 
     name = "snowflake"
     #: Source formats this adapter can read; the compiler rejects a referenced

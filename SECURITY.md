@@ -4,7 +4,11 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | yes |
+| 0.2.x | yes |
+| 0.1.x | no |
+
+Only the newest released minor series is supported.
+`tests/test_docs_adr_count.py` fails when a release lands in `CHANGELOG.md` without this table following it.
 
 ## Reporting a vulnerability
 

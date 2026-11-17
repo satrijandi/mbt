@@ -6,6 +6,8 @@ from pathlib import Path
 
 import mbt
 from mbt.config.project import PROJECT_NAME_PATTERN
+from mbt.events import get_bus
+from mbt.events.models import LogMessage
 from mbt.exceptions import ConfigError
 
 _TOKEN = "__PROJECT_NAME__"
@@ -170,8 +172,14 @@ def scaffold_project(
     home: Path | None = None,
     ref: str | None = None,
     forge: str = "github",
+    home_profiles: bool = True,
 ) -> Path:
-    """Create a new project directory from the template; returns its path."""
+    """Create a new project directory from the template; returns its path.
+
+    Unless ``home_profiles`` is false it also installs the project's profile into
+    ``~/.mbt/profiles.yml``, a file outside the project that other projects'
+    targets live in, and says which of the four things it did (FEEDBACK v7 D-1).
+    """
     if forge not in FORGES:
         raise ConfigError(
             f"unknown forge {forge!r}",
@@ -211,22 +219,42 @@ def scaffold_project(
             rendered = rendered.replace(token, fragment)
         target.write_text(rendered)
 
-    _install_home_profiles(name, destination, home=home)
+    # ``~`` is the user's home, which is exactly where an unforced install goes;
+    # it also keeps the line short enough not to wrap through the middle of a path.
+    shown = "~/.mbt/profiles.yml" if home is None else str(home / ".mbt" / "profiles.yml")
+    if home_profiles:
+        outcome = _install_home_profiles(name, destination, home=home)
+        message = {
+            "created": f"created {shown} with profile {name!r}",
+            "appended": f"appended profile {name!r} to {shown}",
+            "kept": f"{shown} already has a profile {name!r}; left it unchanged",
+        }[outcome]
+    else:
+        message = (
+            f"did not touch {shown} (--no-home-profiles): run mbt from the project "
+            "directory, or pass --profiles-dir"
+        )
+    get_bus().emit(LogMessage(message=message))
     return destination
 
 
-def _install_home_profiles(name: str, destination: Path, *, home: Path | None) -> None:
+def _install_home_profiles(name: str, destination: Path, *, home: Path | None) -> str:
     """profiles.yml also lives in ~/.mbt so commands run outside the project
     find it (TSD §18); the project copy is committed, because CI has no ~/.mbt
-    to read. Never clobber existing profiles for other projects."""
+    to read. Never clobber existing profiles for other projects.
+
+    Returns what it did: ``created`` the file, ``appended`` the project's block,
+    or ``kept`` an existing block of that name untouched.
+    """
     home_dir = home or Path.home()
     home_profiles = home_dir / ".mbt" / "profiles.yml"
     project_profiles = (destination / "profiles.yml").read_text()
     if not home_profiles.exists():
         home_profiles.parent.mkdir(parents=True, exist_ok=True)
         home_profiles.write_text(project_profiles)
-        return
+        return "created"
     existing = home_profiles.read_text()
     if re.search(rf"^{re.escape(name)}:", existing, flags=re.MULTILINE):
-        return  # already configured; leave the user's file alone
+        return "kept"  # already configured; leave the user's file alone
     home_profiles.write_text(existing.rstrip("\n") + "\n\n" + project_profiles)
+    return "appended"

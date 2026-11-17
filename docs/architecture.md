@@ -107,7 +107,7 @@ Why a subprocess and not a thread:
 The wire contract, precisely:
 
 - **Input:** the coordinator writes a `TrainingJob` (a Pydantic model from `mbt-adapter-base`) to `job.json`. It carries the node, the dataset locator, resolved windows, the raw (unrendered) adapter refs, the resolved metric specs, the champion artifact reference, and environment-variable **names** only. Its `mode` field selects `train`, `evaluate`, or `score` - the one payload drives all three, so "TrainingJob" is really the generic compute-job envelope.
-- **Secrets never cross the wire as values.** The payload lists required env-var names; the subprocess inherits the environment and re-resolves `env_var()` itself (`execute/job.py::_render_adapter_ref`). Anything the job taints is redacted before its result or events touch disk.
+- **Secrets never cross the wire as values.** The payload lists required env-var names; the subprocess inherits the environment and re-resolves `env_var()` itself (`execute/job_setup.py::_render_adapter_ref`). Anything the job taints is redacted before its result or events touch disk.
 - **Output:** the job writes a `JobResult` to `job.json.result.json`. The subprocess exit code is internal (`0` ok, `3` failed); the **result file is authoritative**, so a job that dies without writing one becomes a coordinator-side `error`.
 - **Events:** the job emits newline-delimited JSON events on **stdout**; the compute adapter's `wait()` reads them line by line and re-emits them on the coordinator's own event bus, so a subprocess's logs interleave into the main run in real time (`compute.py::parse_job_line`).
 
@@ -167,9 +167,9 @@ Four modules split the work of running the plan:
 |---|---|
 | `execute/planner.py` | Selectors + state → the `ExecutionPlan` (`selected`, `execution_set`, topological `order`). |
 | `execute/scheduler.py` | Walk the DAG with a `ThreadPoolExecutor`: start a node when its in-plan parents succeed, mark transitive descendants `skipped` on failure, keep independent branches going, honor `--fail-fast`. |
-| `execute/runners.py` | The coordinator side of each node type. Builds the `TrainingJob`, submits it, applies gates/checks/monitors to the result, registers. A model is `train`, `judge`, `register` over one `ModelPhaseState`, and `--phase` runs one of them. |
+| `execute/runners/` | The coordinator side of each node type, one module each: `dataset.py`, `model.py` (builds the `TrainingJob`, submits it, applies gates/checks/monitors to the result, registers; a model is `train`, `judge`, `register` over one `ModelPhaseState`, and `--phase` runs one of them), `scoring.py`, with `context.py` (`ExecutionContext`, the node lifecycle) and `champion_config.py` (a champion's inference config) shared. The package re-exports the public names. |
 | `execute/phases.py` | The phases of a node (`materialize`/`checks`, `train`/`gate`/`register`), the validation of `--phase`, and the state file a model's phases share (ADR-35). |
-| `execute/job.py` | The subprocess entrypoint - all framework-heavy work (see the split above). |
+| `execute/job.py` | The subprocess entrypoint and dispatch - all framework-heavy work (see the split above). The steps are siblings: `job_setup.py`, `job_carve.py`, `job_metrics.py`, `job_tuning.py`, `job_backtest.py`, `job_train.py`, `job_score.py`. |
 
 The scheduler keeps at most `threads` jobs outstanding so `--fail-fast` can actually cancel not-yet-started work, and it calls back into the orchestrator's `cancel_active_jobs` to terminate running subprocesses when fail-fast trips.
 
@@ -219,13 +219,14 @@ A plugin (`AdapterPlugin`) bundles typed component slots, instantiated on demand
 | `tuning` | Search hyperparameters against an objective | optuna |
 | `reporting` | Render a drift report for the training report; never gates (ADR-30) | evidently |
 
-Several capabilities are optional and probed rather than declared.
-Batch-scoring data adapters add `build_scoring_input`/`open_predictions` (contract 1.1, ADR-23).
+Several capabilities are optional, and every one is declared rather than probed: an adapter of any of the five kinds states what it can do in `capabilities() -> frozenset[Capability]`, `AdapterKind` says which seam a `Capability` belongs to, and core asks `supports(adapter, Capability.X)` and never `hasattr`.
+Batch-scoring data adapters declare `Capability.BATCH_SCORING` (`build_scoring_input`/`open_predictions`, contract 1.1, ADR-23), and the source-level checks are `Capability.SOURCE_CHECKS`.
 Training adapters may add `feature_importance`, `shap_importance`, `explain`, `train_with_report` and `best_iteration`, each with a `Supports*` protocol that pins its signature. Which of them an adapter HAS is a single declaration, `capabilities(spec) -> frozenset[Capability]`, which the parser reads before accepting a spec that needs one and the job dispatches on - so a renamed method is a capability the adapter stops declaring, rather than one that silently disappears.
 A training adapter that sets `data_access = "path"` receives its splits as Parquet files rather than in-memory Arrow, so JVM and cluster frameworks ingest natively while still seeing exactly what Arrow adapters see (ADR-17).
-Tracking adapters are probed the same way for `prepare()`, `log_trial()`, `log_document()`, and `log_directory()`, and registry adapters for `set_version_tags()` (ADR-30).
+Tracking adapters declare `prepare()`, `log_trial()`, `log_document()`, and `log_directory()`, registry adapters `set_version_tags()` (ADR-30) and `list_versions()`, and compute adapters `terminate()`, each through the `DeclaresCapabilities` mixin.
+An adapter built before declared capabilities, with no `capabilities()` at all, is still served by the method-presence rule it always used, inside `capabilities_of` and nowhere in core.
 
-The compliance suite in `mbt-adapter-base` (`TrainingAdapterCompliance`, `PredictionStoreCompliance`) is the ship bar: subclass it and keep it green, and the adapter meets the contract.
+The compliance suite in `mbt-adapter-base` (`TrainingAdapterCompliance`, `PredictionStoreCompliance`, and one per other seam) is the ship bar: subclass it and keep it green, and the adapter meets the contract.
 
 ## Events and artifacts
 

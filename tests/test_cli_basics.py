@@ -997,3 +997,84 @@ def test_gitea_ci_scripts_wire_the_token_and_honour_disabled(
             check=False,
         )
         assert quiet.returncode == 0 and "disabled; skipping" in quiet.stdout, quiet
+
+
+@pytest.mark.e2e
+def test_the_json_event_stream_is_json_on_every_line(scaffold: Path) -> None:
+    """FEEDBACK v7 A-2, and the invariant v6 B-2 only pinned by its wording.
+
+    ``--log-format json`` promises that stderr is JSON lines. v6 B-2 fixed two
+    MLflow setup messages and asserted that their text was gone, so MLflow 3.18
+    adding a third line (prose for a coding agent, printed at ``import mlflow``
+    when an agent's variables are set) broke the stream again with every test
+    green. This asserts the promise itself, in an environment that looks like an
+    agent's, against the real MLflow of a real build.
+    """
+    import json
+    import os
+
+    env = {key: value for key, value in os.environ.items() if key != "MLFLOW_DISABLE_AGENT_HINT"}
+    env["CLAUDECODE"] = "1"
+    proc = run_mbt(["build", "--log-format", "json"], scaffold, env=env)
+    lines = [line for line in proc.stderr.splitlines() if line.strip()]
+    assert lines, "a build emits events"
+    not_json = []
+    for line in lines:
+        try:
+            json.loads(line)
+        except ValueError:
+            not_json.append(line[:160])
+    assert not not_json, (
+        f"{len(not_json)} non-JSON line(s) on stderr under --log-format json: {not_json}"
+    )
+
+
+#: Top-level scaffold entries that no team has to approve, each with the reason.
+_DELIBERATELY_UNOWNED = {
+    "README.md": "prose",
+    ".gitignore": "ignore rules for generated state",
+}
+
+
+@pytest.mark.parametrize("forge", ["github", "gitea"])
+def test_every_top_level_scaffold_path_is_owned_or_deliberately_not(
+    forge: str, tmp_path: Path
+) -> None:
+    """FEEDBACK v7 B-2: CODEOWNERS named `/models/`, `/datasets/` and
+    `/promotions.yml` only, so a pull request that touched just a workflow, a
+    profile or a scoring spec needed no team's review - including `promote.yml`,
+    the workflow that moves a model to production. Every top-level path the
+    scaffold creates, on either forge, is now matched by a pattern or listed
+    above with its reason, so adding one forces the question."""
+    from mbt.cli.scaffold import scaffold_project
+
+    project = scaffold_project("owners_probe", tmp_path, home=tmp_path, ref="v0.0.0", forge=forge)
+    patterns = [
+        line.split()[0]
+        for line in (project / "CODEOWNERS").read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    def owned(entry: Path) -> bool:
+        for pattern in patterns:
+            if pattern.endswith("/"):
+                if entry.is_dir() and pattern == f"/{entry.name}/":
+                    return True
+            elif pattern == f"/{entry.name}":
+                return True
+        return False
+
+    unowned = sorted(
+        entry.name
+        for entry in project.iterdir()
+        if not owned(entry) and entry.name not in _DELIBERATELY_UNOWNED
+    )
+    assert not unowned, (
+        f"{forge}: top-level paths no CODEOWNERS pattern covers: {unowned}. "
+        "Own them in the scaffold's CODEOWNERS, or list them in _DELIBERATELY_UNOWNED "
+        "with a reason."
+    )
+    # The two paths that decide what runs in CI and what ships are never left out.
+    for decisive in ("/profiles.yml", "/scoring/", "/promotions.yml"):
+        assert decisive in patterns
+    assert ("/.github/" if forge == "github" else "/.woodpecker/") in patterns

@@ -69,6 +69,16 @@ class AdapterError(MbtError):
         )
 
 
+class CheckError(MbtError):
+    """A built-in check crashed (FEEDBACK v7 A-3).
+
+    A check that FAILS is a verdict on the data and exits 2. A check that
+    RAISES is a defect in mbt or in the environment it runs in, and says
+    nothing about the data, so it is a hard error (exit 1): a scheduler that
+    routes exit 2 to the data owners must not page them for a broken install.
+    """
+
+
 class GateFailure(MbtError):
     """A quality gate failed hard (used only where an exception is required)."""
 

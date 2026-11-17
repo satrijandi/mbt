@@ -1,6 +1,7 @@
 """mbt-mlflow edge paths: artifact upload on log(), legacy-mode search
 failures, and the plugin descriptor (complements test_mlflow_adapter)."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -267,3 +268,35 @@ def test_a_fresh_store_does_not_print_its_schema_setup(
     err = capfd.readouterr().err
     assert "database tables" not in err, err
     assert all(logging.getLogger(n).level == logging.WARNING for n in _STORE_SETUP_LOGGERS)
+
+
+def test_importing_mlflow_through_the_plugin_prints_nothing_to_an_agent(tmp_path: Path) -> None:
+    """FEEDBACK v7 A-2: MLflow 3.18 logs a line of prose addressed to a coding
+    agent at ``import mlflow``, which broke ``--log-format json`` for the agent
+    that parses it. It fires only when an agent's variables are set, so the
+    child process sets one, as an agent's shell does."""
+    import subprocess
+    import sys
+
+    env = {key: value for key, value in os.environ.items() if key != "MLFLOW_DISABLE_AGENT_HINT"}
+    env["CLAUDECODE"] = "1"
+    code = "import mbt_mlflow.adapter; from mlflow.tracking import MlflowClient"
+    quiet = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True
+    )
+    assert "agent.hint" not in quiet.stderr, quiet.stderr
+
+    # A value the user chose is theirs, not overwritten.
+    env["MLFLOW_DISABLE_AGENT_HINT"] = "0"
+    chosen = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            code + "; import os; print(os.environ['MLFLOW_DISABLE_AGENT_HINT'])",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert chosen.stdout.strip() == "0"

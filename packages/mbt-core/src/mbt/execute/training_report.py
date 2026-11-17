@@ -33,7 +33,7 @@ from mbt_adapter_base import (
     ReportSummary,
     TaskType,
 )
-from mbt_adapter_base.capabilities import Capability, capabilities_of
+from mbt_adapter_base.capabilities import Capability, capabilities_of, supports
 
 if TYPE_CHECKING:
     import numpy as np
@@ -521,9 +521,9 @@ def _upload(
     documents: list[str],
 ) -> None:
     try:
-        if hasattr(tracking, "log_directory"):
+        if supports(tracking, Capability.LOG_DIRECTORY):
             tracking.log_directory(run_handle, root, prefix)
-        elif hasattr(tracking, "log_document"):
+        elif supports(tracking, Capability.LOG_DOCUMENT):
             for name in ("report.html", "summary.json"):
                 if name in documents:
                     tracking.log_document(run_handle, root / name)
@@ -542,7 +542,7 @@ def log_config_documents(
 ) -> None:
     """The resolved model config and the dataset config as JSON on the run -
     the full values behind any parameter a tracker truncated."""
-    if not hasattr(tracking, "log_directory"):
+    if not supports(tracking, Capability.LOG_DIRECTORY):
         return
     with (
         tempfile.TemporaryDirectory(prefix="mbt-config-") as staging,

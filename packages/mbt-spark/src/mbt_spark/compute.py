@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from mbt_adapter_base import JobResult, TrainingJob, interrupted_job_result
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 
 
 @dataclass
@@ -35,8 +36,10 @@ class SparkJobHandle:
     terminated_reason: str | None = None
 
 
-class SparkComputeAdapter:
+class SparkComputeAdapter(DeclaresCapabilities):
     """ComputeAdapter delegating jobs to spark-submit."""
+
+    adapter_kind = AdapterKind.COMPUTE
 
     name = "spark"
 

@@ -32,6 +32,7 @@ from mbt_adapter_base import (
     ScoringInputSpec,
     ScoringOutputSpec,
 )
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 from mbt_adapter_base.errors import AdapterFailure
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
@@ -126,8 +127,10 @@ def key_hash_sql(key_columns: list[str], salt: str = "") -> str:
     return f"CAST(pmod(CAST({digest} AS DECIMAL(20, 0)), {SAMPLE_MODULUS}) AS BIGINT)"
 
 
-class SparkDataAdapter:
+class SparkDataAdapter(DeclaresCapabilities):
     """DataAdapter over Spark-readable tables."""
+
+    adapter_kind = AdapterKind.DATA
 
     name = "spark"
     #: Source formats this adapter can read; the compiler rejects a referenced

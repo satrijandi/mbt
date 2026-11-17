@@ -98,6 +98,7 @@ In order, `mbt build`:
 ```bash
 mbt ls                                   # resources, tags, paths
 mbt show churn_classifier                # the fully compiled config, secrets redacted
+mbt registry ls                          # registered versions: stage, recorded gates, after-test verdict
 mbt docs generate && mbt docs serve      # model cards + lineage at http://127.0.0.1:8080
 ```
 
@@ -108,7 +109,8 @@ mbt run --manifest target/manifest.json
 ```
 
 This re-executes the stored manifest verbatim - same anchor, windows, snapshots, and seeds - and reproduces the metrics exactly, after checking the environment still matches the one the manifest was compiled in.
-The reproduced model registers as `v2`.
+The reproduced model registers as the next version: `v2` when `build` registered `v1`, and a higher number if you re-ran a step in between, since every run that passes its gates registers one.
+`mbt registry ls` shows which version is where.
 
 ## 8. Promote
 
@@ -121,6 +123,7 @@ promoted churn_classifier v2 -> production
 ```
 
 `mbt promote` moves the version currently in `staging`, and refuses any version whose gates were not recorded as passed.
+It moves the newest `staging` version, so the number it prints is whatever `mbt registry ls` shows there, not necessarily `v2`.
 In CI, a reviewed change to `promotions.yml` drives it instead (see [GitOps & CI](gitops.md)).
 
 ## 9. Score and monitor

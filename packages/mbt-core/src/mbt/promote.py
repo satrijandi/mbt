@@ -64,7 +64,8 @@ def _resolve_version(
         if resolved is None:
             raise StateError(
                 f"model {name!r} has no version {version!r}",
-                hint="list versions in your registry UI, or omit --version for the latest",
+                hint=f"run 'mbt registry ls --model {name}' to see the versions, or omit --version "
+                "for the latest",
             )
         return resolved
     champion: ModelVersion | None = registry_adapter.get_champion(name, from_stage)

@@ -1,0 +1,143 @@
+# What a stranger installing the NEWEST RELEASE gets today.
+#
+# ci.yml tests main, and release.yml gates a tag on ci.yml at the moment the tag
+# is cut. upstream.yml re-resolves main against the newest dependencies every
+# night. Nothing installs the published tag afterwards, so a release that was
+# green on its day goes stale as its open-ended dependency ranges move, and the
+# first anyone hears of it is a bug report. v0.2.0 declared `duckdb>=1.2`; DuckDB
+# 2.0 arrived after the tag; every fresh install failed the quickstart's first
+# `mbt build` for weeks while main (fixed five days earlier) and every tier above
+# stayed green (FEEDBACK v7 A-1, F-1; v6 A-1 was the same shape for v0.1.0).
+#
+# So this tier does the one thing nothing else does: it installs the newest tag
+# the way docs/installation.md says (git references, no lock, newest resolution)
+# and walks docs/quickstart.md to the end. It checks out NOTHING from the
+# repository: any file read from a checkout would be main's, not the release's,
+# and tests/test_released_workflow.py fails if a checkout appears.
+#
+# A failure here is a user-facing failure of a release that already exists. The
+# remedy is a patch release, or a pin documented in docs/installation.md and
+# docs/troubleshooting.md until one ships.
+name: Released tag
+
+on:
+  schedule:
+    # After mutation.yml's 05:53 so the nightly tiers do not overlap.
+    - cron: "37 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to install (default: the newest published release)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write   # the failure notice below; a red nightly nobody reads is not a detector
+
+jobs:
+  newest-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REPO_URL: https://github.com/${{ github.repository }}
+    steps:
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
+        with:
+          python-version: "3.11"
+          # Cached index metadata is a stale view of "what a user resolves today",
+          # which is the one thing this tier measures.
+          enable-cache: false
+
+      - name: Find the release to install
+        id: release
+        env:
+          REQUESTED: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${REQUESTED:-$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Testing the install of $tag" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install it as docs/installation.md says
+        # The four packages of the quickstart, every one pinned to the tag by git
+        # reference (mbt-adapter-base included: it is not on PyPI either), into a
+        # fresh environment with no lock, so every other dependency resolves to
+        # what a user would get tonight.
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          uv venv --python 3.11 /tmp/venv
+          VIRTUAL_ENV=/tmp/venv uv pip install \
+            "mbt-adapter-base @ git+$REPO_URL@$TAG#subdirectory=packages/mbt-adapter-base" \
+            "mbt-core @ git+$REPO_URL@$TAG#subdirectory=packages/mbt-core" \
+            "mbt-xgboost @ git+$REPO_URL@$TAG#subdirectory=packages/mbt-xgboost" \
+            "mbt-mlflow @ git+$REPO_URL@$TAG#subdirectory=packages/mbt-mlflow"
+          /tmp/venv/bin/mbt --version
+          uv pip list --python /tmp/venv/bin/python | grep -iE "^(duckdb|pandas|pyarrow|mlflow|xgboost) " || true
+
+      - name: The quickstart, to the end
+        # docs/quickstart.md steps 2 to 9, in order, in an empty HOME so nothing
+        # of the runner's leaks in. Each command must exit 0: a quality failure
+        # (exit 2) on the project `mbt init` just made is as broken as a crash.
+        run: |
+          set -euo pipefail
+          export HOME=/tmp/home
+          mkdir -p "$HOME" /tmp/work
+          export PATH=/tmp/venv/bin:$PATH
+          cd /tmp/work
+          mbt init release_probe
+          cd release_probe
+          python scripts/generate_sample_data.py
+          mbt parse
+          mbt build
+          mbt run --manifest target/manifest.json
+          mbt promote --model churn_classifier --to production
+          mbt score
+          mbt monitor
+          later=$(date -u -d '+15 days' +%Y-%m-%dT%H:%M:%SZ)   # docs/quickstart.md: as if two weeks on
+          mbt monitor --anchor "$later"
+          mbt predictions ls
+
+      - name: Raise or update the tracking issue
+        # One issue, commented on rather than duplicated, closed when the newest
+        # release installs and runs again (a patch release, or an upstream fix).
+        if: always()
+        env:
+          TITLE: "The newest release fails the quickstart on a fresh install"
+          OUTCOME: ${{ job.status }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment \
+                "${TAG:-the newest release} installs and runs the quickstart again: $RUN_URL"
+            fi
+            exit 0
+          fi
+          body=$(printf '%s\n' \
+            "A fresh install of ${TAG:-the newest release}, made the way docs/installation.md" \
+            "says, does not complete docs/quickstart.md." \
+            "" \
+            "Run (the install and each step are separate log groups): $RUN_URL" \
+            "" \
+            "A release that passed on its day goes stale as its dependency ranges move." \
+            "Triage: read which step failed and which dependency moved, then either cut a" \
+            "patch release, or document a pin in docs/installation.md and an entry in" \
+            "docs/troubleshooting.md until one ships (the v0.2.0 / DuckDB 2.0 entry is the model).")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi

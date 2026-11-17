@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mbt.exceptions import ConfigError
+from mbt.jinja.sandbox import sandboxed_environment
 from mbt.secrets import taint
 from mbt.yamlio import safe_load
 from mbt_adapter_base import (
@@ -138,7 +139,7 @@ def _render_profiles_text(
             )
         return default
 
-    jinja_env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
+    jinja_env = sandboxed_environment()
     try:
         rendered = jinja_env.from_string(text).render(env_var=env_var, env=env, var=var)
         return rendered, sorted(set(used_env)), unset

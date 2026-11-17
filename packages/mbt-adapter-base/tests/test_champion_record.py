@@ -105,7 +105,12 @@ def test_the_compliance_bases_require_their_one_hook() -> None:
     """Each suite has exactly one thing a subclass must supply."""
     from pathlib import Path
 
-    from mbt_adapter_base.compliance import DataAdapterCompliance, RegistryAdapterCompliance
+    from mbt_adapter_base.compliance import (
+        ComputeAdapterCompliance,
+        DataAdapterCompliance,
+        RegistryAdapterCompliance,
+        TrackingAdapterCompliance,
+    )
     from mbt_adapter_base.compliance.suite import PredictionStoreCompliance
 
     with pytest.raises(NotImplementedError):
@@ -114,3 +119,7 @@ def test_the_compliance_bases_require_their_one_hook() -> None:
         RegistryAdapterCompliance().make_registry(Path("."))
     with pytest.raises(NotImplementedError):
         PredictionStoreCompliance().make_store(Path("."))
+    with pytest.raises(NotImplementedError):
+        TrackingAdapterCompliance().make_tracking(Path("."))
+    with pytest.raises(NotImplementedError):
+        ComputeAdapterCompliance().make_compute(Path("."))

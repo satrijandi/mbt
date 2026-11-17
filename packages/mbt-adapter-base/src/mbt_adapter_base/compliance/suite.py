@@ -27,9 +27,10 @@ from mbt_adapter_base import (
     ModelSpec,
     PredictionRunInfo,
     RunContext,
+    Stage,
     TaskType,
 )
-from mbt_adapter_base.capabilities import Capability, capabilities_of, supports
+from mbt_adapter_base.capabilities import Capability, supports
 from mbt_adapter_base.datasets import InMemoryDatasetHandle
 from mbt_adapter_base.types import OUT_OF_TIME_SPLIT
 
@@ -531,21 +532,10 @@ class TrainingAdapterCompliance:
         ``getattr(adapter, "supports_calibration", False)``, so a typo in the
         class-variable name silently SKIPPED the test rather than failing it.
         """
-        from mbt_adapter_base.capabilities import _CAPABILITY_METHODS
+        from mbt_adapter_base.capabilities import AdapterKind, declaration_problems
 
-        adapter = self.adapter()
-        declared = capabilities_of(adapter)
-        for capability, method in _CAPABILITY_METHODS.items():
-            present = callable(getattr(adapter, method, None))
-            if capability in declared:
-                assert present, (
-                    f"{type(adapter).__name__} declares {capability} but has no callable {method!r}"
-                )
-            else:
-                assert not present, (
-                    f"{type(adapter).__name__} defines {method!r} but does not declare "
-                    f"{capability}, so core will never call it"
-                )
+        problems = declaration_problems(self.adapter(), AdapterKind.TRAINING)
+        assert not problems, problems
 
     def test_calibration_round_trips_through_export_when_supported(self) -> None:
         """OPTIONAL capability (``Capability.CALIBRATION``): a model trained with
@@ -776,6 +766,16 @@ class DataAdapterCompliance:
     def make_adapter(self, root: Path, rows: pa.Table) -> tuple[Any, Any]:
         """Return ``(adapter, source_table)`` reading ``rows`` as one relation."""
         raise NotImplementedError
+
+    def test_declared_capabilities_match_what_the_adapter_can_do(self, tmp_path: Path) -> None:
+        """Declared, both directions (FEEDBACK v7 C-1): batch scoring and the
+        source-level checks are optional, so core asks ``capabilities()``
+        instead of probing for method names."""
+        from mbt_adapter_base.capabilities import AdapterKind, declaration_problems
+
+        adapter, _ = self.make_adapter(tmp_path, tiny_source_rows())
+        problems = declaration_problems(adapter, AdapterKind.DATA)
+        assert not problems, problems
 
     # -- helpers -----------------------------------------------------------
 
@@ -1155,6 +1155,14 @@ class RegistryAdapterCompliance:
     def make_registry(self, root: Path) -> Any:
         raise NotImplementedError
 
+    def test_declared_capabilities_match_what_the_registry_can_do(self, tmp_path: Path) -> None:
+        """Declared, both directions (FEEDBACK v7 C-1): ``set_version_tags`` is
+        optional, so core asks ``capabilities()`` instead of probing for it."""
+        from mbt_adapter_base.capabilities import AdapterKind, declaration_problems
+
+        problems = declaration_problems(self.make_registry(tmp_path), AdapterKind.REGISTRY)
+        assert not problems, problems
+
     def _record(self) -> Any:
         from mbt_adapter_base.champion import AfterTestVerdict, ChampionRecord
 
@@ -1204,6 +1212,30 @@ class RegistryAdapterCompliance:
             assert fetched is not None
             assert ChampionRecord.unpack(fetched.tags) == record
 
+    def test_list_versions_is_every_version_newest_first_when_declared(self) -> None:
+        """OPTIONAL capability (``Capability.LIST_VERSIONS``), what ``mbt registry
+        ls`` reads: all versions, newest first, each with its stage and its tags.
+        A registry that does not declare it is not asked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.make_registry(Path(tmp))
+            if supports(registry, Capability.LIST_VERSIONS):
+                self._check_list_versions(registry)
+
+    def _check_list_versions(self, registry: Any) -> None:
+        assert registry.list_versions("compliance_model") == []  # unknown name
+        record = self._record()
+        first = registry.register(record.artifact, "compliance_model", record.pack())
+        second = registry.register(record.artifact, "compliance_model", record.pack())
+        registry.transition(first, Stage.PRODUCTION)
+        listed = registry.list_versions("compliance_model")
+        assert [v.version for v in listed] == [second.version, first.version]
+        by_version = {v.version: v for v in listed}
+        assert by_version[first.version].stage == Stage.PRODUCTION
+        assert by_version[second.version].stage != Stage.PRODUCTION
+        fetched = registry.get_version("compliance_model", first.version)
+        assert fetched is not None
+        assert by_version[first.version].tags == fetched.tags
+
     def test_registered_version_carries_a_loadable_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = self.make_registry(Path(tmp))
@@ -1247,3 +1279,40 @@ class RegistryAdapterCompliance:
         with tempfile.TemporaryDirectory() as tmp:
             registry = self.make_registry(Path(tmp))
             assert registry.get_version("compliance_model", "999") is None
+
+
+class TrackingAdapterCompliance:
+    """Subclass per TrackingAdapter; override ``make_tracking`` (FEEDBACK v7 C-1).
+
+    A tracker's four optional methods (``prepare``, ``log_trial``,
+    ``log_document``, ``log_directory``) used to be ``hasattr``-probed by core,
+    so renaming one silently turned the feature off. They are declared now, and
+    this is the check that the declaration and the methods agree.
+    """
+
+    def make_tracking(self, root: Path) -> Any:
+        raise NotImplementedError
+
+    def test_declared_capabilities_match_what_the_tracker_can_do(self, tmp_path: Path) -> None:
+        from mbt_adapter_base.capabilities import AdapterKind, declaration_problems
+
+        problems = declaration_problems(self.make_tracking(tmp_path), AdapterKind.TRACKING)
+        assert not problems, problems
+
+
+class ComputeAdapterCompliance:
+    """Subclass per ComputeAdapter; override ``make_compute`` (FEEDBACK v7 C-1).
+
+    ``terminate`` is optional, and declaring it is what makes ``--fail-fast``
+    kill in-flight jobs; an adapter that lacks it used to be skipped by a probe
+    nobody could see.
+    """
+
+    def make_compute(self, root: Path) -> Any:
+        raise NotImplementedError
+
+    def test_declared_capabilities_match_what_the_compute_can_do(self, tmp_path: Path) -> None:
+        from mbt_adapter_base.capabilities import AdapterKind, declaration_problems
+
+        problems = declaration_problems(self.make_compute(tmp_path), AdapterKind.COMPUTE)
+        assert not problems, problems

@@ -39,21 +39,14 @@ from mbt.contracts import (
 )
 from mbt.events import get_bus, set_bus
 from mbt.exceptions import AdapterError, ConfigError
-from mbt.execute.job import (
-    _backtest_folds,
-    _carve_calibration,
-    _carve_validation,
-    _champion_delta_bounds,
-    _partial_dependence,
-    _prepare,
-    _render_adapter_ref,
-    _run_score,
-    _run_train,
-    _run_tuning,
-    _walk_forward_backtest,
-    main,
-    run_job,
-)
+from mbt.execute.job import main, run_job
+from mbt.execute.job_backtest import _backtest_folds, _walk_forward_backtest
+from mbt.execute.job_carve import _carve_calibration, _carve_validation
+from mbt.execute.job_metrics import _champion_delta_bounds
+from mbt.execute.job_score import _run_score
+from mbt.execute.job_setup import _prepare, _render_adapter_ref
+from mbt.execute.job_train import _partial_dependence, _run_train
+from mbt.execute.job_tuning import _run_tuning
 from mbt.execute.training_report import feature_importance
 from mbt.secrets import clear_taints, redact
 
@@ -243,7 +236,9 @@ def test_prepare_rejects_adapter_without_training(
 ) -> None:
     _, job = make_training_job(demo_project, fake_registry)
     real = get_registry()
-    monkeypatch.setattr("mbt.execute.job.get_registry", lambda: _RegistryWithoutTraining(real))
+    monkeypatch.setattr(
+        "mbt.execute.job_setup.get_registry", lambda: _RegistryWithoutTraining(real)
+    )
     with pytest.raises(AdapterError, match="provides no training adapter"):
         _prepare(job)
 
@@ -879,7 +874,7 @@ def test_tuning_engine_report_uses_train_with_report(
             return real.get(name)
 
     proxy = _Proxy()
-    monkeypatch.setattr("mbt.execute.job.get_registry", lambda: proxy)
+    monkeypatch.setattr("mbt.execute.job_tuning.get_registry", lambda: proxy)
     spec = minimal_model_spec(hyperparameters={"fake_metric_value": 0.6}, tuning=_tuning_spec())
     runtime = make_inline_runtime(
         _tables(),
@@ -968,7 +963,9 @@ def test_score_plugin_without_training_adapter_errors(
     _build_and_promote(score_project, fake_registry)
     _, job = make_scoring_job(score_project, fake_registry)
     real = get_registry()
-    monkeypatch.setattr("mbt.execute.job.get_registry", lambda: _RegistryWithoutTraining(real))
+    monkeypatch.setattr(
+        "mbt.execute.job_score.get_registry", lambda: _RegistryWithoutTraining(real)
+    )
     with pytest.raises(AdapterError, match="provides no training adapter"):
         _run_score(job)
 
@@ -1505,7 +1502,7 @@ def _scored_split(scores: "list[float]") -> SimpleNamespace:
 def test_a_thinly_supported_operating_point_warns_loudly() -> None:
     """D-1: the cutoff is fitted on the rows that report its precision, so a
     handful of supporting rows makes the reported number misleading."""
-    from mbt.execute.job import _check_operating_point_support
+    from mbt.execute.job_train import _check_operating_point_support
 
     runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
     test = _scored_split([0.1] * 500 + [0.99] * 5)
@@ -1519,7 +1516,7 @@ def test_a_thinly_supported_operating_point_warns_loudly() -> None:
 
 
 def test_a_well_supported_operating_point_is_reported_not_warned() -> None:
-    from mbt.execute.job import _check_operating_point_support
+    from mbt.execute.job_train import _check_operating_point_support
 
     runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
     test = _scored_split([0.1] * 500 + [0.99] * 250)
@@ -1543,7 +1540,7 @@ def test_the_final_fit_carries_the_complexity_the_trials_chose() -> None:
     hyperparameters DID stop early - shipping a less-regularized model than the
     search scored.
     """
-    from mbt.execute.job import _carry_trial_rounds
+    from mbt.execute.job_tuning import _carry_trial_rounds
 
     runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
     declared = {"n_estimators": 500, "early_stopping_rounds": 20, "learning_rate": 0.3}
@@ -1558,7 +1555,7 @@ def test_the_final_fit_carries_the_complexity_the_trials_chose() -> None:
 def test_no_trial_rounds_leaves_the_declared_hyperparameters_alone() -> None:
     """An adapter that cannot report rounds, or trials that never stopped
     early, must change nothing."""
-    from mbt.execute.job import _carry_trial_rounds
+    from mbt.execute.job_tuning import _carry_trial_rounds
 
     runtime = SimpleNamespace(job=SimpleNamespace(node=SimpleNamespace(unique_id="model.d.m")))
     declared = {"n_estimators": 500, "early_stopping_rounds": 20}
@@ -1577,7 +1574,7 @@ def test_tuning_collects_the_trials_rounds_when_the_final_fit_cannot_stop_early(
 
     from mbt.contracts import AdapterRef, MetricSpec, RunContext
     from mbt.events import EventBus
-    from mbt.execute.job import _run_tuning
+    from mbt.execute.job_tuning import _run_tuning
 
     rng = np.random.default_rng(3)
     n = 400

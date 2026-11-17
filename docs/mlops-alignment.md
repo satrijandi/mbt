@@ -74,7 +74,7 @@ The site's governance guide asks for recording, auditing, validation, approval, 
 
 - **Reconstruction metadata**: the manifest records algorithm, features, transformations (hook bytes are hashed into identity), data snapshots, hyperparameters, environment digests, and the git provenance to rebuild any model ([concepts](concepts.md#reproducibility-contract)).
 - **Model cards**: `mbt docs generate` renders a card per model (data window, features, hyperparameters, metrics, slices, gate history, registry/tracking IDs) plus a lineage site with `exposures.yml` impact analysis.
-- **Approval gates**: CODEOWNERS on specs and `promotions.yml`, branch protection, CI environment approvals, and `mbt promote` refusing versions without recorded gate passes.
+- **Approval gates**: CODEOWNERS on specs, `promotions.yml`, profiles, scoring specs and the CI workflows, branch protection, CI environment approvals, and `mbt promote` refusing versions without recorded gate passes.
 - **Audit trails**: the `mbt-state` branch is an append-only history of every published baseline; the showcase adds oras provenance artifacts per source sha and a once-per-run evaluation ledger.
 - **Traceability**: every stored prediction carries the producing model version and identity hashes, satisfying the site's "every prediction traceable to the model version" requirement.
 - **Catalog**: the MLflow registry plus the generated docs site serve as the model inventory; a dedicated searchable catalog product is out of scope.

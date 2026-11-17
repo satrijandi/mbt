@@ -14,6 +14,7 @@ import pyarrow as pa
 
 from mbt.events import get_bus
 from mbt.events.models import CheckEvaluated, LogMessage
+from mbt.exceptions import CheckError, MbtError
 from mbt.utils import first_row
 from mbt_adapter_base import (
     OUT_OF_TIME_SPLIT,
@@ -22,8 +23,17 @@ from mbt_adapter_base import (
     ScoringSpec,
     TestResult,
 )
+from mbt_adapter_base.capabilities import Capability, supports
 
 _TIMESTAMP_TYPES = ("timestamp", "date")
+
+
+class CheckFailure(Exception):
+    """A check's own verdict, raised from a helper where returning one is awkward.
+
+    The only exception ``_run_named_checks`` turns into a failed check (exit 2).
+    Any other exception from a check is a crash, and a hard error (A-3).
+    """
 
 
 class _CheckableHandle(Protocol):
@@ -55,7 +65,7 @@ class SourceAccess:
         matches = [key for key in self.tables if key.split(".", 1)[-1] == name]
         if len(matches) == 1:
             return self.tables[matches[0]], matches[0]
-        raise ValueError(
+        raise CheckFailure(
             f"{check}: unknown source {name!r}; this resource's sources: "
             f"{', '.join(sorted(self.tables)) or '(none)'}"
         )
@@ -125,8 +135,19 @@ def _run_named_checks(
             runner = _CHECKS[name]
             try:
                 result = runner(spec, handle, resolved_windows, params, resource, sources)
+            except CheckFailure as failure:
+                result = TestResult(name=name, passed=False, message=str(failure))
+            except MbtError:
+                raise  # already an mbt error with its own resource and hint
             except Exception as exc:
-                result = TestResult(name=name, passed=False, message=f"check raised: {exc!r}")
+                # Not a verdict on the data: a crash in a check is mbt's or the
+                # environment's, and must not exit 2 (FEEDBACK v7 A-3).
+                raise CheckError(
+                    f"check {name!r} raised {exc!r}",
+                    resource=resource,
+                    hint="this is an error in mbt or its environment, not a data-quality "
+                    "failure; re-run with --verbose, and report it if the install is current",
+                ) from exc
         results.append(result)
         # One event per check so the pass/fail stream is visible on the bus,
         # mirroring GateEvaluated (a check with no message renders "PASS").
@@ -162,6 +183,23 @@ def _connect_splits(handle: _CheckableHandle) -> tuple["duckdb.DuckDBPyConnectio
     for split in splits:
         con.register(f"split_{split}", handle.read(split))
     return con, splits
+
+
+def _absent_columns(
+    con: "duckdb.DuckDBPyConnection", splits: list[str], columns: list[str]
+) -> list[str]:
+    """The ``split.column`` names a check was told to inspect that the data lacks.
+
+    Naming a column the dataset does not have is a verdict on the spec against
+    the data, so a check reports it as a failure with the name in it. Left to
+    the query, it is a DuckDB binder error, which is a crash (A-3) and says
+    nothing a user can act on.
+    """
+    absent: list[str] = []
+    for split in splits:
+        have = set(con.table(f"split_{split}").columns)
+        absent.extend(f"{split}.{column}" for column in columns if column not in have)
+    return absent
 
 
 def _check_schema(
@@ -250,6 +288,13 @@ def _check_not_null(
     label = _label_column(spec)
     con, splits = _connect_splits(handle)
     try:
+        absent = _absent_columns(con, splits, columns)
+        if absent:
+            return TestResult(
+                name="not_null",
+                passed=False,
+                message=f"column(s) not in the dataset: {', '.join(absent)}",
+            )
         problems = []
         for split in splits:
             for column in columns:
@@ -277,7 +322,7 @@ def _source_check(adapter: Any, method: str) -> Any | None:
     contract - and it is one probe rather than the same ten lines written at
     each of the two call sites.
     """
-    return getattr(adapter, method, None)
+    return getattr(adapter, method) if supports(adapter, Capability.SOURCE_CHECKS) else None
 
 
 def _predates_source_checks(check: str, adapter: Any, method: str) -> TestResult:
@@ -353,6 +398,13 @@ def _check_unique(
         return TestResult(name="unique", passed=True, message=f"source {label}: ({key}) unique")
     con, splits = _connect_splits(handle)
     try:
+        absent = _absent_columns(con, splits, columns)
+        if absent:
+            return TestResult(
+                name="unique",
+                passed=False,
+                message=f"column(s) not in the dataset: {', '.join(absent)}",
+            )
         problems = []
         for split in splits:
             for column in columns:
@@ -399,6 +451,13 @@ def _check_accepted_values(
         )
     con, splits = _connect_splits(handle)
     try:
+        absent = _absent_columns(con, splits, [column])
+        if absent:
+            return TestResult(
+                name="accepted_values",
+                passed=False,
+                message=f"column(s) not in the dataset: {', '.join(absent)}",
+            )
         placeholders = ", ".join("?" for _ in values)
         problems = []
         for split in splits:
@@ -678,6 +737,14 @@ def _check_label_leakage_scan(
         # (ADR-30); nothing trains on them, so there is nothing to guard.
         return TestResult(name="label_leakage_scan", passed=True, message="no train split to scan")
     table = handle.read("train")
+    if label not in table.column_names:
+        # Nothing to be associated with, the same answer class_balance_report
+        # gives; a crash here would be mbt's, not a verdict on the data (A-3).
+        return TestResult(
+            name="label_leakage_scan",
+            passed=True,
+            message=f"label column {label!r} is not in the train split; nothing to scan",
+        )
     con = duckdb.connect()
     try:
         con.register("t", table)

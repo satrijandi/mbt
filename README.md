@@ -3,6 +3,7 @@
 [![CI](https://github.com/satrijandi/mbt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/satrijandi/mbt/actions/workflows/ci.yml?query=branch%3Amain)
 [![Live integration](https://github.com/satrijandi/mbt/actions/workflows/live.yml/badge.svg?branch=main)](https://github.com/satrijandi/mbt/actions/workflows/live.yml?query=branch%3Amain)
 [![Upstream resolution](https://github.com/satrijandi/mbt/actions/workflows/upstream.yml/badge.svg?branch=main)](https://github.com/satrijandi/mbt/actions/workflows/upstream.yml?query=branch%3Amain)
+[![Released tag](https://github.com/satrijandi/mbt/actions/workflows/released.yml/badge.svg?branch=main)](https://github.com/satrijandi/mbt/actions/workflows/released.yml?query=branch%3Amain)
 [![Docs](https://img.shields.io/badge/docs-satrijandi.github.io%2Fmbt-blue)](https://satrijandi.github.io/mbt/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20--%203.14-blue)](https://github.com/satrijandi/mbt/blob/main/pyproject.toml)
 [![License Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/satrijandi/mbt/blob/main/LICENSE)

@@ -591,7 +591,7 @@ def test_walk_forward_backtest_runs_on_spark() -> None:
     like any split, so SparkML refits and evaluates each fold."""
     from types import SimpleNamespace
 
-    from mbt.execute.job import _walk_forward_backtest
+    from mbt.execute.job_backtest import _walk_forward_backtest
     from mbt_adapter_base import MetricSpec
     from mbt_adapter_base.datasets import InMemoryDatasetHandle
 

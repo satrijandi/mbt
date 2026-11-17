@@ -24,10 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import jinja2
-from jinja2.nativetypes import NativeCodeGenerator, NativeTemplate, native_concat
-from jinja2.sandbox import SandboxedEnvironment
 
 from mbt.exceptions import CompilationError, ConfigError
+from mbt.jinja.sandbox import native_sandboxed_environment
 from mbt.secrets import taint
 from mbt_adapter_base import (
     AUTO,
@@ -38,14 +37,6 @@ _BARE_CALL_RE = re.compile(r"^\s*(ref|source)\((?P<args>[^)]*)\)\s*$")
 _JINJA_MARKERS = ("{{", "{%")
 
 _MISSING = object()
-
-
-class _NativeSandbox(SandboxedEnvironment):
-    """Sandboxed environment that preserves native Python types."""
-
-    code_generator_class = NativeCodeGenerator
-    template_class = NativeTemplate
-    concat = staticmethod(native_concat)  # type: ignore[assignment]
 
 
 @dataclass
@@ -113,7 +104,7 @@ class SpecRenderer:
     """Renders spec mappings in capture or resolve phase, plus macros."""
 
     def __init__(self, macro_paths: list[Path] | None = None) -> None:
-        self._env = _NativeSandbox(undefined=jinja2.StrictUndefined, autoescape=False)
+        self._env = native_sandboxed_environment()
         self._macro_names: list[str] = []
         for macro_dir in macro_paths or []:
             if macro_dir.is_dir():

@@ -33,6 +33,11 @@ pip install \
 
 Leave out the `mbt-adapter-base` line and pip stops with `No matching distribution found for mbt-adapter-base<0.3,>=0.2.0`.
 
+!!! warning "v0.2.0 needs `duckdb<2`"
+    v0.2.0 does not set an upper bound on DuckDB, and its built-in checks fail on DuckDB 2.0 and later, so the first `mbt build` ends with `check no_future_columns: FAIL - check raised: ResourceInUseException`.
+    Install `"duckdb<2"` beside the packages above.
+    The fix is on `main` and will be in the next release; see [the runbook entry](troubleshooting.md#every-dataset-fails-no_future_columns-with-resourceinuseexception-on-v020).
+
 A tag can be moved on GitHub.
 Where that matters, replace `@v0.2.0` with the commit SHA it points at; a SHA is immutable.
 

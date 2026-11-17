@@ -25,7 +25,7 @@ A quality verdict is deterministic, so retrying an exit-2 run only reproduces it
 ### Output streams
 
 Events - progress, check and gate verdicts, warnings - go to **stderr**, as timestamped text by default or as JSON lines with `--log-format json`.
-**stdout** carries command data: the results table after an execution command, and the output of `mbt ls`, `mbt show`, `mbt state diff`, and `mbt predictions`.
+**stdout** carries command data: the results table after an execution command, and the output of `mbt ls`, `mbt show`, `mbt state diff`, `mbt predictions`, and `mbt registry`.
 So `mbt ls --output json > resources.json` captures clean JSON while progress still reaches the terminal.
 
 ### Common options
@@ -42,7 +42,7 @@ These behave the same on every command that accepts them.
 | `--vars YAML` | A YAML or JSON mapping of vars for this invocation. Precedence: CLI, then target `vars:`, then project `vars:` |
 | `-s`, `--select SELECTOR` | Nodes to run; see [Selectors](#selectors). Several selectors separated by spaces form a union |
 | `--exclude SELECTOR` | Nodes to subtract from the selection |
-| `--threads N` | Independent DAG branches to run in parallel; defaults to the target's `threads` |
+| `--threads N` | Independent DAG branches to run in parallel (at least 1); defaults to the target's `threads` |
 | `--fail-fast` | Stop at the first failure: cancel pending nodes and terminate running training jobs (SIGTERM, then SIGKILL after a grace period) |
 | `--state PATH_OR_URI` | Reference manifest for `state:` selectors and `mbt state diff`; a local path, `file://`, or `s3://` URI |
 | `--state-include-env` | Treat an `env_digest` change as modifying every node, so an environment upgrade retrains everything (ADR-7) |
@@ -125,7 +125,7 @@ Selection decides which models **train**; every dataset a selected model needs i
 Scaffold a working project: example source, dataset, model, and scoring specs, `profiles.yml`, reference CI (GitHub Actions workflows, or Woodpecker pipelines for Gitea), pinned CI requirements, pre-commit and Renovate config, `CODEOWNERS`, and a sample-data generator.
 
 ```bash
-mbt init NAME [--project-dir PATH] [--mbt-ref REF] [--forge github|gitea]
+mbt init NAME [--project-dir PATH] [--mbt-ref REF] [--forge github|gitea] [--no-home-profiles]
 ```
 
 `NAME` must start with a letter and contain only letters, digits, and underscores.
@@ -135,7 +135,9 @@ A development build that recorded no commit (installed from a local wheel, say) 
 `--forge` picks where the project's CI runs; everything else in the project is the same either way.
 `github` (the default) ships seven GitHub Actions workflows under `.github/workflows/` and a `github-script` PR comment.
 `gitea` ships the same seven as Woodpecker CI pipelines under `.woodpecker/`, with the same names, for a Gitea or Forgejo repo: a stdlib-only `scripts/gitea_pr_comment.py` posts the PR report through the forge's API, and the README lists what Woodpecker keeps outside the files - the four secrets the pipelines name, and the crons that drive the scheduled ones.
-Its `profiles.yml` is also installed to `~/.mbt/profiles.yml`, for commands run outside the project: appended when that file already exists, and left alone when it already has a profile named `NAME`.
+Its `profiles.yml` is also installed to `~/.mbt/profiles.yml`, for commands run outside the project: created when the file does not exist, appended when it does, and left alone when it already has a profile named `NAME`.
+`init` says which of the three it did.
+`--no-home-profiles` skips the install, for people who keep profiles elsewhere; commands then need to run from the project directory or be given `--profiles-dir`.
 See the [Quickstart](quickstart.md) for what to do next.
 
 ### `mbt deps`
@@ -325,6 +327,19 @@ mbt predictions show RUN_KEY [--output table|json]
 `mbt predictions show` details one run, including its label coverage and realized metrics.
 
 ## Registry
+
+### `mbt registry`
+
+Inspect the model registry, read-only.
+
+```bash
+mbt registry ls [--model NAME] [--output table|json]
+```
+
+`mbt registry ls` lists every registered version of a model, newest first: its stage (`staging`, `production`, `archived`, or `-` when no stage points at it), whether the gates recorded a pass, the after-test check's verdict if one has judged it, and a short digest of the model artifact.
+Without `--model` it lists every model the project declares, under the name each registers as.
+It is the command to run before `mbt promote --version N` or `mbt rollback --to-version N`, and after either to verify the result.
+A registry adapter that does not declare `list_versions` (an optional capability) is refused with an error that says so; `--output json` prints the same rows as a JSON list.
 
 ### `mbt evaluate`
 

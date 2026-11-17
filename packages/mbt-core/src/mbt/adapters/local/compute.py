@@ -43,6 +43,7 @@ from mbt_adapter_base import (
     TrainingJob,
     interrupted_job_result,
 )
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 
 #: Prefix for per-job payload dirs under the system temp dir. Successful jobs
 #: clean theirs up; error payloads stay for debugging (``mbt clean`` ages them).
@@ -104,8 +105,10 @@ class LocalJobHandle:
     terminated_reason: str | None = None
 
 
-class LocalComputeAdapter:
+class LocalComputeAdapter(DeclaresCapabilities):
     """Runs each training job in a fresh Python subprocess."""
+
+    adapter_kind = AdapterKind.COMPUTE
 
     name = "local"
 

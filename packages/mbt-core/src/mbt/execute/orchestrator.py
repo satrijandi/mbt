@@ -48,6 +48,7 @@ from mbt_adapter_base import (
     ModelVersion,
     Stage,
 )
+from mbt_adapter_base.capabilities import Capability, supports
 
 
 @dataclass(frozen=True)
@@ -471,7 +472,7 @@ def _execute(
 def require_scoring_capability(ctx: ExecutionContext) -> None:
     """Fail before any job runs when the data adapter predates contract 1.1."""
     adapter = ctx.data_adapter
-    if not (hasattr(adapter, "build_scoring_input") and hasattr(adapter, "open_predictions")):
+    if not supports(adapter, Capability.BATCH_SCORING):
         raise ConfigError(
             f"data adapter {ctx.profiles.target.data.adapter!r} does not support "
             "batch scoring (contract 1.1 adds build_scoring_input and "

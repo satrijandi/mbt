@@ -31,6 +31,7 @@ from mbt_adapter_base import (
     ModelSpec,
     ModelVersion,
 )
+from mbt_adapter_base.capabilities import Capability, supports
 from mbt_adapter_base.champion import (
     OOT_CHECK_REPORT_URI,
     OOT_CHECK_RUN_ID,
@@ -270,7 +271,7 @@ def _record(
     if report_uri:
         tags[OOT_CHECK_REPORT_URI] = report_uri
     registry = ctx.registry_adapter()
-    if hasattr(registry, "set_version_tags"):
+    if supports(registry, Capability.SET_VERSION_TAGS):
         registry.set_version_tags(version.name, version.version, tags)
     else:
         get_bus().emit(

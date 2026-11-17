@@ -95,9 +95,11 @@ app = typer.Typer(
 docs_app = typer.Typer(help="Generate or serve the model cards + lineage site.")
 state_app = typer.Typer(help="Compare manifests (state:modified mechanics).")
 predictions_app = typer.Typer(help="Inspect the prediction store (runs + ground-truth ledger).")
+registry_app = typer.Typer(help="Inspect the model registry (versions, stages, recorded gates).")
 app.add_typer(docs_app, name="docs")
 app.add_typer(state_app, name="state")
 app.add_typer(predictions_app, name="predictions")
+app.add_typer(registry_app, name="registry")
 
 
 def _version_callback(show: bool) -> None:
@@ -143,7 +145,10 @@ SelectOpt = Annotated[
 ]
 ExcludeOpt = Annotated[list[str] | None, typer.Option("--exclude", help="Selector(s) to subtract.")]
 ThreadsOpt = Annotated[
-    int | None, typer.Option("--threads", help="Parallel DAG branches (default: target).")
+    int | None,
+    # min=1 as profiles.yml's `threads` is (FEEDBACK v7 D-2): the scheduler used to
+    # coerce 0 and -3 to 1 and report success.
+    typer.Option("--threads", min=1, help="Parallel DAG branches (default: target)."),
 ]
 StateOpt = Annotated[
     str | None,
@@ -258,6 +263,14 @@ def init(
             "gitea (Woodpecker CI pipelines for a Gitea or Forgejo repo).",
         ),
     ] = "github",
+    no_home_profiles: Annotated[
+        bool,
+        typer.Option(
+            "--no-home-profiles",
+            help="Do not install the project's profile into ~/.mbt/profiles.yml "
+            "(for people who keep profiles elsewhere).",
+        ),
+    ] = False,
     log_format: LogFormatOpt = "text",
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -269,7 +282,9 @@ def init(
     cli = CLIContext.enter(
         project_dir, log_format=log_format, quiet=quiet, verbose=verbose, chdir=False
     )
-    destination = scaffold_project(name, cli.project_dir, ref=mbt_ref, forge=forge)
+    destination = scaffold_project(
+        name, cli.project_dir, ref=mbt_ref, forge=forge, home_profiles=not no_home_profiles
+    )
     # soft_wrap: a path is the thing a user copies out of this line, and a
     # hard-inserted newline would split it (FEEDBACK v3 E-5, as in ConsoleSink)
     out_console.print(f"Created [bold]{destination}[/bold]", soft_wrap=True)
@@ -695,6 +710,64 @@ def monitor(
 
 def _mark(value: bool | None) -> str:
     return "-" if value is None else ("yes" if value else "no")
+
+
+@registry_app.command("ls")
+@guard
+def registry_ls(
+    project_dir: ProjectDirOpt = Path("."),
+    profiles_dir: ProfilesDirOpt = None,
+    target: TargetOpt = None,
+    vars_: VarsOpt = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Registered model name (default: every model in the project).",
+        ),
+    ] = None,
+    output: OutputOpt = "table",
+    log_format: LogFormatOpt = "text",
+    quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
+) -> None:
+    """List registered versions: stage, recorded gates, after-test verdict (read-only)."""
+    from dataclasses import asdict
+
+    from mbt.adapters.registry import get_registry
+    from mbt.parsing import parse_project
+    from mbt.registry_view import list_versions
+    from mbt.runtime import registry_adapter as build_registry_adapter
+    from mbt_adapter_base import ModelSpec
+
+    cli = CLIContext.enter(project_dir, profiles_dir, target, vars_, log_format, quiet, verbose)
+    parsed = parse_project(cli.project_dir, cli_vars=cli.cli_vars)
+    profiles = cli.profiles(parsed)
+    registry_adapter = build_registry_adapter(profiles, cli.project_dir.resolve(), get_registry())
+    names = [model] if model else []
+    if not names:
+        for resource in parsed.models.values():
+            spec = resource.spec
+            assert isinstance(spec, ModelSpec)
+            names.append(spec.registration.name if spec.registration else spec.name)
+    rows = list_versions(registry_adapter, names)
+    if output == "json":
+        typer.echo(json.dumps([asdict(row) for row in rows], indent=2))
+        return
+    if not rows:
+        out_console.print(
+            "no registered versions found (mbt build registers one when a model passes its "
+            "gates; check --target)"
+        )
+        return
+    table = Table()
+    for column in ("model", "version", "stage", "gates", "after-test", "artifact"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            row.model, row.version, row.stage or "-", row.gates, row.after_test, row.artifact
+        )
+    print_table(table)
 
 
 @predictions_app.command("ls")

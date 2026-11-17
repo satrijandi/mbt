@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pyarrow as pa
 
-from mbt_adapter_base.capabilities import Capability, method_capabilities
+from mbt_adapter_base.capabilities import AdapterKind, Capability, method_capabilities
 from mbt_adapter_base.interchange import MetricResults
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ class ArrowTrainingAdapter:
         sklearn, whose monotone support is a property of the ESTIMATOR rather
         than of the library - overrides this.
         """
-        return method_capabilities(self) | self.extra_capabilities
+        return method_capabilities(self, AdapterKind.TRAINING) | self.extra_capabilities
 
     # -- derived from _scores --------------------------------------------------
 

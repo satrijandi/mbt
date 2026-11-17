@@ -343,8 +343,10 @@ class DataAdapter(Protocol):
     """Builds and reopens datasets (TSD §12.2).
 
     ``build_scoring_input`` and ``open_predictions`` are contract 1.1
-    additions (ADR-20/21); core probes for them with ``hasattr`` and fails
-    with a clear error before any job runs when an adapter predates them.
+    additions (ADR-20/21), declared as ``Capability.BATCH_SCORING``: core fails
+    with a clear error before any job runs when an adapter does not declare it.
+    ``count_source_duplicates`` and ``read_source_distinct`` are
+    ``Capability.SOURCE_CHECKS``.
 
     The build itself is NOT per-adapter policy: ``build_dataset`` and
     ``build_scoring_input`` should delegate to
@@ -399,15 +401,17 @@ class TrackingAdapter(Protocol):
     prediction store and ``mbt monitor`` to the ground-truth ledger, so an
     implementation never sees a ``scoring`` node.
 
-    Four capabilities are optional and probed with ``hasattr`` rather than
-    declared here, so a tracker missing one still works: ``prepare()`` (warm
-    the backend before parallel jobs), ``log_trial(run, index, params, value)``
-    (tuning history as nested runs), ``log_document(run, path)`` (upload a
-    local file mbt wrote, such as the inference config), and
-    ``log_directory(run, local_dir, artifact_path)`` (upload a directory mbt
-    wrote - the training report and the run log - under ``artifact_path``,
-    keeping its layout; ADR-30). Without ``log_directory`` the report's files
-    still land in the artifact store beside the model.
+    Four capabilities are optional, so a tracker missing one still works. Each
+    is a ``Capability`` the tracker DECLARES through ``capabilities()`` (the
+    ``DeclaresCapabilities`` mixin does it from the methods defined), never
+    something core probes for: ``prepare()`` (warm the backend before parallel
+    jobs), ``log_trial(run, index, params, value)`` (tuning history as nested
+    runs), ``log_document(run, path)`` (upload a local file mbt wrote, such as
+    the inference config), and ``log_directory(run, local_dir, artifact_path)``
+    (upload a directory mbt wrote - the training report and the run log - under
+    ``artifact_path``, keeping its layout; ADR-30). Without ``log_directory``
+    the report's files still land in the artifact store beside the model.
+    ``TrackingAdapterCompliance`` asserts the declaration and the methods agree.
     """
 
     def start_run(self, node: ManifestNode, meta: dict[str, str]) -> RunHandle: ...
@@ -430,11 +434,16 @@ class TrackingAdapter(Protocol):
 class RegistryAdapter(Protocol):
     """Model registry (TSD §12.2).
 
-    ``set_version_tags(name, version, tags)`` is optional and probed with
-    ``hasattr``: it records facts learned after registration, such as the
-    pre-deploy check's verdict (ADR-30). Without it that verdict is kept only
-    on the tracking run and in ``run_results``, and a promotion that requires
-    it refuses.
+    ``set_version_tags(name, version, tags)`` is optional
+    (``Capability.SET_VERSION_TAGS``, declared through ``capabilities()``): it
+    records facts learned after registration, such as the pre-deploy check's
+    verdict (ADR-30). Without it that verdict is kept only on the tracking run
+    and in ``run_results``, and a promotion that requires it refuses.
+
+    ``list_versions(name) -> list[ModelVersion]`` is optional too
+    (``Capability.LIST_VERSIONS``): every registered version, newest first, with
+    its stage and tags. ``mbt registry ls`` is the only reader, and refuses with
+    a clear error when the registry does not declare it.
     """
 
     def register(
@@ -449,7 +458,11 @@ class RegistryAdapter(Protocol):
 
 
 class ComputeAdapter(Protocol):
-    """Where training jobs run (local subprocess in v0; K8s/Ray in v1)."""
+    """Where training jobs run (local subprocess in v0; K8s/Ray in v1).
+
+    ``terminate(handle, reason)`` is optional (``Capability.TERMINATE``): it is
+    the kill seam ``--fail-fast`` and a failed run use to reclaim in-flight jobs.
+    """
 
     def submit(self, job: TrainingJob) -> JobHandle: ...
 

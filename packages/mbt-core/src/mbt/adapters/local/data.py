@@ -34,6 +34,7 @@ from mbt_adapter_base import (
     ScoringOutputSpec,
     SplitStrategy,
 )
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 from mbt_adapter_base.materialization import (
     SAMPLE_MODULUS,
     MaterializationError,
@@ -123,8 +124,10 @@ def _connect_duckdb(output_dir: Path, parallelism: int = 1) -> "duckdb.DuckDBPyC
     return duckdb.connect(config=config)
 
 
-class LocalDataAdapter:
+class LocalDataAdapter(DeclaresCapabilities):
     """Parquet-under-a-root DataAdapter (TSD §13.2)."""
+
+    adapter_kind = AdapterKind.DATA
 
     name = "local"
     #: Source formats this adapter can read; the compiler rejects a referenced

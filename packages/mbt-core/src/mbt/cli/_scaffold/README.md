@@ -51,7 +51,7 @@ __FORGE_CI_LAYOUT__
 - `scripts/publish_state.sh` / `fetch_state.sh` - the durable prod-state
   baseline: prod builds append the manifest to the `mbt-state` branch,
   PR checks fetch it for `--state` (first run bootstraps with a full build)
-- `CODEOWNERS` - who reviews model and dataset specs, and `promotions.yml`
+- `CODEOWNERS` - routes review of model and data specs to the DS team, and of promotions, scoring, profiles, CI workflows and scripts to MLOps
 
 __FORGE_REPO_SETTINGS__
 

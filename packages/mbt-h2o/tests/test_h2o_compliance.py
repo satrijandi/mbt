@@ -192,7 +192,7 @@ def test_walk_forward_backtest_runs_on_h2o() -> None:
 
     import pyarrow as pa
 
-    from mbt.execute.job import _walk_forward_backtest
+    from mbt.execute.job_backtest import _walk_forward_backtest
     from mbt_adapter_base import MetricSpec
     from mbt_adapter_base.datasets import InMemoryDatasetHandle
 

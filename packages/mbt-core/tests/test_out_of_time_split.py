@@ -35,7 +35,8 @@ from mbt.contracts import (
 from mbt.events.models import EmptyAfterTestSplit
 from mbt.exceptions import CompilationError, ConfigError
 from mbt.execute.handles import TrainingSplitView
-from mbt.execute.job import _materialize_for_path_adapter, _prepare, run_job
+from mbt.execute.job import run_job
+from mbt.execute.job_setup import _materialize_for_path_adapter, _prepare
 from mbt.execute.runners import BuildContext
 from mbt.parsing import parse_project
 from mbt.quality.checks import labeled_splits, run_checks

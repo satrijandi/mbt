@@ -1,4 +1,31 @@
-# Model specs are reviewed by the owning team (FR-PROJ-01).
-/models/    @your-org/ds-team
-/datasets/  @your-org/ds-team
-/promotions.yml @your-org/mlops-team
+# Who must review what (FR-PROJ-01). Replace the two teams with yours.
+#
+# Review routing is the control that keeps a model change and a production
+# change apart, so it has to cover everything that decides what runs in CI and
+# what ships, not just the specs: a pull request that touches only a workflow,
+# `profiles.yml` or `scoring/` would otherwise need no team's approval at all.
+# When you add a top-level file or directory, add a line for it here.
+#
+# The DS team owns what a model is made of.
+/models/           @your-org/ds-team
+/datasets/         @your-org/ds-team
+/sources.yml       @your-org/ds-team
+/macros/           @your-org/ds-team
+/tests/            @your-org/ds-team
+
+# MLOps owns where and how it runs, and what reaches production.
+/promotions.yml    @your-org/mlops-team
+/scoring/          @your-org/mlops-team
+/profiles.yml      @your-org/mlops-team
+/mbt_project.yml   @your-org/mlops-team
+/packages.yml      @your-org/mlops-team
+/requirements.in   @your-org/mlops-team
+/requirements.txt  @your-org/mlops-team
+/scripts/          @your-org/mlops-team
+/.github/          @your-org/mlops-team
+/.woodpecker/      @your-org/mlops-team
+/renovate.json     @your-org/mlops-team
+/.pre-commit-config.yaml @your-org/mlops-team
+/CODEOWNERS        @your-org/mlops-team
+
+# Deliberately unowned: README.md and .gitignore.

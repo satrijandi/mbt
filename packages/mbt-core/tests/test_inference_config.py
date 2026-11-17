@@ -375,9 +375,10 @@ def test_a_malformed_inference_config_is_an_error(
 
 
 def test_a_tracker_without_log_document_still_trains() -> None:
-    """log_document is probed with hasattr, like prepare and log_trial: a
-    tracker that predates it keeps the tags it always had."""
-    from mbt.execute.job import _log_run_documents
+    """``log_document`` is an optional tracker capability (FEEDBACK v7 C-1): a
+    tracker that does not declare it, or predates declared capabilities and has
+    no such method, keeps the tags it always had."""
+    from mbt.execute.job_train import _log_run_documents
 
     class _OldTracker:
         def log(self, *args: object, **kwargs: object) -> None: ...
@@ -389,7 +390,7 @@ def test_a_tracker_without_log_document_still_trains() -> None:
 def test_a_failing_log_document_does_not_fail_the_training_run() -> None:
     """A tracker hiccup while attaching a document must not lose a model that
     trained, gated and exported successfully."""
-    from mbt.execute.job import _log_run_documents
+    from mbt.execute.job_train import _log_run_documents
 
     class _Boom:
         def log_document(self, run: object, path: Path) -> None:

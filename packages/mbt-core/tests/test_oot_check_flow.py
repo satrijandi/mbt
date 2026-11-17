@@ -283,8 +283,15 @@ def test_a_failing_job_is_an_error_row(
 
 
 class _TaglessRegistry:
+    """A registry that cannot tag: it does not declare the capability either."""
+
     def __init__(self, inner: Any) -> None:
         self._inner = inner
+
+    def capabilities(self, spec: Any = None) -> frozenset[Any]:
+        from mbt_adapter_base.capabilities import Capability, capabilities_of
+
+        return capabilities_of(self._inner) - {Capability.SET_VERSION_TAGS}
 
     def __getattr__(self, name: str) -> Any:
         if name == "set_version_tags":

@@ -11,6 +11,7 @@ stage API for registry servers without alias support (MLflow < 2.9).
 """
 
 import functools
+import os
 import random
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -24,10 +25,22 @@ from mbt_adapter_base import (
     RunHandle,
     Stage,
 )
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 from mbt_adapter_base.champion import ARTIFACT, TRACKING_RUN_ID, pack_artifact, unpack_artifact
 
 if TYPE_CHECKING:
     from mlflow.tracking import MlflowClient
+
+#: MLflow 3.18 prints a line of prose addressed to a coding agent, once per
+#: process, at ``import mlflow``, when an agent's environment variables are set
+#: (``CLAUDECODE``, ``CODEX_*``, ...). It goes to stderr through mlflow's own
+#: handler, so ``--log-format json`` stopped being a JSON stream for exactly the
+#: callers most likely to parse it (FEEDBACK v7 A-2, reopening v6 B-2), and it
+#: cannot be quieted by a logger level because it fires during the import.
+#: ``setdefault``: a user who set the variable keeps their value. Set here, at
+#: module import and before any method imports mlflow, so the coordinator and
+#: every job subprocess that loads this plugin are covered.
+os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -215,8 +228,10 @@ class _MlflowBase:
         return self._client
 
 
-class MlflowTracking(_MlflowBase):
+class MlflowTracking(DeclaresCapabilities, _MlflowBase):
     """TrackingAdapter over the MLflow client API (no fluent globals)."""
+
+    adapter_kind = AdapterKind.TRACKING
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
@@ -342,8 +357,10 @@ class MlflowTracking(_MlflowBase):
         return RunHandle(run_id=run_id)
 
 
-class MlflowRegistry(_MlflowBase):
+class MlflowRegistry(DeclaresCapabilities, _MlflowBase):
     """RegistryAdapter over the MLflow model registry."""
+
+    adapter_kind = AdapterKind.REGISTRY
 
     def _ensure_registered_model(self, name: str) -> None:
         import contextlib
@@ -404,6 +421,31 @@ class MlflowRegistry(_MlflowBase):
     def get_version(self, name: str, version: str) -> ModelVersion | None:
         mv = _lookup_or_none(lambda: self.client().get_model_version(name, version))
         return self._to_model_version(mv) if mv is not None else None
+
+    @_retryable
+    def list_versions(self, name: str) -> list[ModelVersion]:
+        """Every registered version of ``name``, newest first (``mbt registry ls``)."""
+        client = self.client()
+        found = _lookup_or_none(lambda: client.search_model_versions(f"name = '{name}'"))
+        if not found:
+            return []
+        # A search result carries no aliases, so a version's stage would read as
+        # none; the registered model holds the alias -> version map.
+        stage_of: dict[str, Stage] = {}
+        if self.use_aliases:
+            registered = client.get_registered_model(name)
+            for alias, version in (registered.aliases or {}).items():
+                stage = next((s for s in _ALIAS_STAGES if s.value == alias), None)
+                if stage is not None:
+                    stage_of[str(version)] = stage
+        versions = [self._to_model_version(mv) for mv in found]
+        versions = [
+            mv
+            if mv.stage is not None
+            else mv.model_copy(update={"stage": stage_of.get(mv.version)})
+            for mv in versions
+        ]
+        return sorted(versions, key=lambda mv: int(mv.version), reverse=True)
 
     def set_version_tags(self, name: str, version: str, tags: dict[str, str]) -> None:
         """Record facts learned after registration on a version (ADR-30).

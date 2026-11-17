@@ -184,7 +184,7 @@ ignore_missing_imports = true
 #
 # `attr-defined` used to be disabled here too and no longer is: it was not
 # needed by any module in this list, and a broad error code switched off for
-# mbt.execute.job (the largest module on the execution path) is the same rot
+# the job modules (the largest on the execution path) is the same rot
 # scripts/audit_dependencies.py exists to prevent one layer up - a suppression
 # that outlives its reason and reads to the next person as "recently reviewed".
 # Re-test this list when the pyarrow pin moves; keep it as narrow as it will go.
@@ -198,13 +198,13 @@ module = [
     "mbt_h2o.adapter",
     "mbt_spark.data",
     "mbt_spark.training",
-    "mbt.execute.job",
+    "mbt.execute.job_setup",  # the one job_* module that fails under pyarrow 24
 ]
 disable_error_code = ["no-untyped-call"]
 
 [tool.coverage.run]
 # Coordinator-process coverage; training-job subprocesses are not traced.
-# Subprocess-side modules (execute/job.py, plugin entry points) are held at
+# Subprocess-side modules (execute/job*.py, plugin entry points) are held at
 # 100% by in-process unit tests that call their functions directly.
 source_pkgs = [
     "mbt",

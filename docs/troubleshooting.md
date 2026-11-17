@@ -81,6 +81,30 @@ mbt-adapter-base @ git+https://github.com/satrijandi/mbt@v0.1.0#subdirectory=pac
 
 Newer scaffolds include it, and a test fails if any mbt package a pinned one depends on is left without a ref.
 
+### Every dataset fails `no_future_columns` with `ResourceInUseException` on v0.2.0
+
+**Symptom:** the first `mbt build` of a fresh project, on a machine that resolved DuckDB 2.0 or later, ends with a failed dataset and a skipped model, and exits `2`:
+
+```text
+check no_future_columns: FAIL - check raised: ResourceInUseException('Resource In Use Error: connection has an unfinished result from execute(); call complete() or abort(), or fetch until a fetch returns no rows, before other work on this connection, or use a separate connection from cursor()')
+[1/2] TEST_FAILED dataset dataset.<project>.<dataset> in 1.82s
+build finished [quality_failure]: 0 ok, 1 failed, 1 skipped in 9.2s
+```
+
+**Why:** v0.2.0 declares `duckdb>=1.2` with no ceiling, and DuckDB 2.0 refuses new work on a connection that still holds an unfinished result, which v0.2.0's built-in checks left behind.
+`mbt init` pins the numerics stack to the environment it ran in, so a project scaffolded on DuckDB 2.0 carries `duckdb==2.0.0` in `requirements.txt` and `requirements.in`, and its CI fails the same way.
+The code on `main` reads results through `mbt.utils.first_row` and builds green on DuckDB 2.0; it is not in a release yet.
+Builds on `main` and later releases report a check that crashes as an error (exit `1`, `check '<name>' raised ...`), never as a failed check.
+
+**Fix:** until a release contains the change, stay below DuckDB 2.
+
+```bash
+pip install "duckdb<2"
+```
+
+In a project that was already scaffolded, replace `duckdb==2.0.0` with `duckdb<2` in both `requirements.in` and `requirements.txt`.
+Verified: v0.2.0 with `duckdb<2` builds the scaffolded project green.
+
 ### `no profiles.yml found` on a CI runner but not locally
 
 **Symptom (hard error, exit 1, in the first CI run of a scaffolded project - `mbt parse` passes, the next step does not):**
@@ -1031,7 +1055,7 @@ Otherwise check out the commit the version was trained from and run the check th
    ```
 
    To revert to a specific earlier version instead, pass `--to-version N`. In CI, drive this from a `workflow_dispatch` job; `promotions.yml`'s git history remains the audit trail of every forward promotion.
-2. Verify: the registry now resolves the reverted version as the production champion and the bad version becomes the newly archived one; `mbt score` and `mbt monitor` pick up the reverted champion on their next run (the champion is resolved from the registry at run time, ADR-20).
+2. Verify with `mbt registry ls --model churn_classifier`: the reverted version is now in `production` and the bad version is the newly `archived` one; `mbt score` and `mbt monitor` pick up the reverted champion on their next run (the champion is resolved from the registry at run time, ADR-20).
 
 **Note:** rollback re-promotes through the same recorded-gate check as `mbt promote` (FR-REG-03), and the last-known-good target already passed its gates, so it reverts cleanly. A version promoted before gate recording, or whose run metadata is gone, needs `--force`.
 

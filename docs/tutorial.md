@@ -20,7 +20,8 @@ The one idea that holds the whole workflow together:
 | Quality gate thresholds (in specs) | owns via PR | |
 | Alerting rules and dashboards (outside specs) | consumes | owns |
 
-The scaffold encodes this split in `CODEOWNERS`: model and dataset specs route to the DS team, `promotions.yml` routes to the MLOps team.
+The scaffold encodes this split in `CODEOWNERS`: what a model is made of (model and dataset specs, sources, macros, data tests) routes to the DS team, and what decides where it runs and what ships (`promotions.yml`, scoring specs, `profiles.yml`, the CI workflows and scripts) routes to the MLOps team.
+A pull request that touched only a workflow or a profile would otherwise need neither team's review.
 
 ## Prerequisites (both)
 

@@ -24,6 +24,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 from mbt_adapter_base.errors import AdapterFailure
 from mbt_adapter_base.interchange import DatasetLocator
 from mbt_adapter_base.materialization import (
@@ -48,13 +49,15 @@ class InMemoryDataError(AdapterFailure):
     """The in-memory data adapter could not do what it was asked."""
 
 
-class InMemoryDataAdapter:
+class InMemoryDataAdapter(DeclaresCapabilities):
     """A DataAdapter over tables handed to it, keyed by source unique_id.
 
     ``tables`` maps a source's ``unique_id`` to the Arrow table it stands for.
     ``predictions_root`` is where ``open_predictions`` stages runs; unset, it
     is a directory under the adapter's own root.
     """
+
+    adapter_kind = AdapterKind.DATA
 
     name = "inmemory"
     supported_source_formats = frozenset({"parquet", "arrow"})

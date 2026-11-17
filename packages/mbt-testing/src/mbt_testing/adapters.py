@@ -42,6 +42,7 @@ from mbt_adapter_base import (
     TuningSpec,
     ValidationIssue,
 )
+from mbt_adapter_base.capabilities import AdapterKind, DeclaresCapabilities
 from mbt_adapter_base.interchange import ManifestNode, TuningObjectiveFn
 
 _ = CONTRACT_VERSION  # re-exported via plugin
@@ -64,8 +65,10 @@ class FakeModel:
         self.target = target
 
 
-class FakeTrainingAdapter:
+class FakeTrainingAdapter(DeclaresCapabilities):
     """Deterministic, controllable stand-in for a real training adapter."""
+
+    adapter_kind = AdapterKind.TRAINING
 
     name = "fake"
     contract_version = CONTRACT_VERSION
@@ -191,8 +194,10 @@ class FakeTrainingAdapter:
         return []
 
 
-class FakeTrackingAdapter:
+class FakeTrackingAdapter(DeclaresCapabilities):
     """File-backed tracking: one JSON file per run under config.root."""
+
+    adapter_kind = AdapterKind.TRACKING
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
@@ -284,8 +289,10 @@ class FakeTrackingAdapter:
         return RunHandle(run_id=run_id)
 
 
-class FakeRegistryAdapter:
+class FakeRegistryAdapter(DeclaresCapabilities):
     """File-backed registry: one JSON file per model name under config.root."""
+
+    adapter_kind = AdapterKind.REGISTRY
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
@@ -343,6 +350,11 @@ class FakeRegistryAdapter:
             if str(entry["version"]) == str(version):
                 return self._to_model_version(name, entry)
         return None
+
+    def list_versions(self, name: str) -> list[ModelVersion]:
+        """Every version of ``name``, newest first."""
+        entries = sorted(self._versions(name), key=lambda e: int(e["version"]), reverse=True)
+        return [self._to_model_version(name, entry) for entry in entries]
 
     def set_version_tags(self, name: str, version: str, tags: dict[str, str]) -> None:
         """Merge tags into one registered version (ADR-30)."""
@@ -468,8 +480,10 @@ class _InlineJobHandle:
         self.job_id = f"inline-{uuid.uuid4().hex[:12]}"
 
 
-class InlineComputeAdapter:
+class InlineComputeAdapter(DeclaresCapabilities):
     """Runs jobs in-process: fast tests, easy debugging. Not for production."""
+
+    adapter_kind = AdapterKind.COMPUTE
 
     name = "fake"
 

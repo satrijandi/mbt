@@ -22,6 +22,7 @@ from cli_unit_helpers import (  # noqa: F401 - autouse fixture import
     make_results,
 )
 from core_helpers import write
+from typer.testing import Result
 
 from mbt.artifacts.run_results import NodeResult
 
@@ -744,3 +745,66 @@ def test_init_refuses_an_unknown_forge(tmp_path: Path, monkeypatch: pytest.Monke
     assert result.exit_code == 1, debug(result)
     assert "unknown forge 'bitbucket'" in result.stderr
     assert not (tmp_path / "myproj").exists()
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+@pytest.mark.parametrize("command", ["build", "run", "test", "score", "monitor"])
+def test_a_thread_count_below_one_is_refused(command: str, value: str, tmp_path: Path) -> None:
+    """FEEDBACK v7 D-2: profiles.yml's `threads` has always been `ge=1`, but the
+    option was a bare int the scheduler quietly clamped, so `--threads 0` ran
+    serially and reported success."""
+    result = invoke([command, f"--threads={value}", "--project-dir", str(tmp_path)])
+    # A usage error: `main()` reports click's code as 1, as it does for every bad flag.
+    assert result.exit_code != 0, debug(result)
+    assert f"Invalid value for '--threads': {value} is not in the range x>=1" in result.stderr
+
+
+def _init_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, *flags: str) -> Result:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return invoke(["init", name, "--project-dir", str(tmp_path), *flags])
+
+
+def test_init_says_it_created_the_home_profiles_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FEEDBACK v7 D-1: `init` wrote ~/.mbt/profiles.yml, a file outside the
+    project, in total silence."""
+    result = _init_in(tmp_path, monkeypatch, "first")
+    assert result.exit_code == 0, debug(result)
+    home_file = tmp_path / "home" / ".mbt" / "profiles.yml"
+    assert home_file.is_file()
+    assert "created ~/.mbt/profiles.yml with profile 'first'" in result.stderr
+
+
+def test_init_says_it_appended_to_an_existing_home_profiles_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_in(tmp_path, monkeypatch, "first")
+    result = _init_in(tmp_path, monkeypatch, "second")
+    home_file = tmp_path / "home" / ".mbt" / "profiles.yml"
+    assert "appended profile 'second' to ~/.mbt/profiles.yml" in result.stderr
+    assert "first:" in home_file.read_text()
+
+
+def test_init_says_it_left_an_existing_profile_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home_file = tmp_path / "home" / ".mbt" / "profiles.yml"
+    home_file.parent.mkdir(parents=True)
+    home_file.write_text("same:\n  target: prod\n")
+    result = _init_in(tmp_path, monkeypatch, "same")
+    assert "~/.mbt/profiles.yml already has a profile 'same'; left it unchanged" in result.stderr
+    assert home_file.read_text() == "same:\n  target: prod\n"
+
+
+def test_init_can_leave_the_home_profiles_file_out_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _init_in(tmp_path, monkeypatch, "private", "--no-home-profiles")
+    assert result.exit_code == 0, debug(result)
+    assert not (tmp_path / "home" / ".mbt").exists()
+    assert "did not touch" in result.stderr
+    assert "--no-home-profiles" in result.stderr
+    assert (tmp_path / "private" / "profiles.yml").is_file()  # the project's own copy is unaffected

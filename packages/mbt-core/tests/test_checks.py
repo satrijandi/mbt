@@ -3,6 +3,7 @@
 from datetime import datetime
 
 import pyarrow as pa
+import pytest
 
 from mbt.contracts import DatasetSpec
 from mbt.quality.checks import run_checks
@@ -266,3 +267,59 @@ def test_freshness_covers_a_scoring_input() -> None:
     assert not stale.passed and "upstream may be stale" in stale.message
     fresh = _check_freshness(spec, handle, windows, {"max_lag": "2d"}, "s")
     assert fresh.passed
+
+
+def test_a_check_that_crashes_is_a_hard_error_not_a_failed_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FEEDBACK v7 A-3: an exception inside a built-in check said nothing about
+    the data, yet it became a failed check and exit 2, so a broken install read
+    as bad data. A crash is an error (exit 1); only a check's own verdict fails it."""
+    from mbt.exceptions import CheckError, MbtError
+    from mbt.quality import checks as checks_module
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("connection has an unfinished result")
+
+    monkeypatch.setitem(checks_module._CHECKS, "not_null", boom)
+    with pytest.raises(CheckError) as caught:
+        _run([{"not_null": {"columns": ["feature"]}}], _handle())
+    assert caught.value.exit_code == 1
+    assert "not_null" in str(caught.value)
+    assert "unfinished result" in str(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+    # An error mbt raised on purpose keeps its own message and hint.
+    def deliberate(*args: object, **kwargs: object) -> object:
+        raise MbtError("the adapter said no", hint="fix the adapter")
+
+    monkeypatch.setitem(checks_module._CHECKS, "not_null", deliberate)
+    with pytest.raises(MbtError, match="the adapter said no") as passthrough:
+        _run([{"not_null": {"columns": ["feature"]}}], _handle())
+    assert not isinstance(passthrough.value, CheckError)
+
+
+def test_a_label_free_train_split_has_nothing_to_scan_for_leakage() -> None:
+    table = _handle().read("test")
+    unlabeled = InMemoryDatasetHandle({"train": table.drop_columns(["churned"])})
+    result = _run([], unlabeled)["label_leakage_scan"]
+    assert result.passed
+    assert "nothing to scan" in result.message
+
+
+def test_a_column_the_spec_names_but_the_data_lacks_is_a_failed_check() -> None:
+    """The other side of A-3's line. A column the spec names that is not in the
+    data is a verdict on the spec against the data (exit 2, with the name in it),
+    not a DuckDB binder error that would now be a hard error."""
+    results = _run(
+        [
+            {"not_null": {"columns": ["nope"]}},
+            {"unique": {"columns": ["nope"]}},
+            {"accepted_values": {"column": "nope", "values": [1]}},
+        ],
+        _handle(),
+    )
+    for name in ("not_null", "unique", "accepted_values"):
+        assert not results[name].passed, name
+        assert "column(s) not in the dataset" in results[name].message
+        assert "nope" in results[name].message
