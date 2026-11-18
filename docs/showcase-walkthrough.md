@@ -52,7 +52,8 @@ make up
 ```
 
 It first runs `make doctor`, which checks docker's memory and disk, the socket group Airflow needs, the ports, and leftover networks, and stops with the fix when something will not work.
-Then it builds the stack's images from this checkout - nothing is pulled from Docker Hub or any other registry - which takes about 20 minutes the first time; after that unchanged images are build-cache hits, and `make up` takes under a minute and a half.
+The runner image comes prebuilt from `ghcr.io/satrijandi/mbt-showcase-runner` when one is published for your checkout; otherwise the first run builds it (10-15 minutes), and after that `make up` takes under a minute and a half.
+Airflow's image (`mbt-airflow` from this checkout, on upstream's `apache/airflow`) is built the same way, from local wheels, in a few minutes.
 It starts the lake, MLflow, JupyterLab, Spark and observability; Gitea, Woodpecker and Airflow start with `make ci` in step 2.
 It ends by generating the lake table and printing every URL:
 

@@ -79,28 +79,24 @@ The runner entrypoint exports `SPARK_DRIVER_HOST=$(hostname -i)`; the `prod` tar
 
 ## 3. Service inventory
 
-Every image the stack runs is built from this repo, and none is pulled from a registry: `scripts/build_images.sh` (`make image`, part of `make up`) builds each one from `images/<name>/Dockerfile` as `localhost/mbt-showcase-<name>:<version>`, and compose (`pull_policy: never`), the Woodpecker pipelines and the deployable unit's FROM name only those.
-The root image unpacks Canonical's Ubuntu 26.04 rootfs tarball onto scratch; `images/base` pins apt to one dated snapshot of the Ubuntu archive; every service image installs its upstream release on top, fetched by `ADD --checksum` (or Ubuntu's own package, for PostgreSQL), with upstream's image contract (user, paths, entrypoint, healthcheck) reproduced.
-Every image is pinned to an exact version, the `ARG VERSION=` of its Dockerfile, which is also its tag; the table names them so a reader can see what was verified together.
-`tests/test_showcase_images.py` fails in the fast tier if anything names an image the script does not build, or a Dockerfile downloads without a checksum.
+Every image is pinned to an exact version; `compose/docker-compose.yml` is the source of truth for the tags, and the table names them so a reader can see what was verified together.
 
 | Service | Image | Role |
 |---|---|---|
-| ubuntu, base, python (built, not run) | `localhost/mbt-showcase-{ubuntu,base}:26.04.1`, `localhost/mbt-showcase-python:3.11.17` | The root rootfs (also the doctor's probe image), the apt-snapshot userland every image starts from, and python-build-standalone CPython 3.11 for the runner and Airflow |
-| runner (built, not run) | `localhost/mbt-showcase-runner:dev`, built on the host by `scripts/build_images.sh` from the showcase's CPython 3.11 image + OpenJDK 17 JRE + the workspace wheels (`mbt-core[s3]`, `mbt-h2o[sparkling]`, `mbt-spark`, `mbt-xgboost`, `mbt-mlflow`) with third-party pins from `uv.lock` + pyspark 3.5.8 (its bundled jars are `SPARK_HOME`) + hadoop-aws 3.3.4 and the matching AWS SDK bundle + jupyterlab and setuptools (<82: h2o-pysparkling imports `pkg_resources`) from the committed `image-extras.txt` closure | Universal environment; env_digest identity by construction. A content-hash label rebuilds it whenever package sources, `uv.lock`, or the image inputs move |
-| gitea | `localhost/mbt-showcase-gitea:1.27.3` (the release binary, laid out like upstream's rootless image) | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
-| woodpecker server + agent | `localhost/mbt-showcase-woodpecker-{server,agent}:3.18.1`; the steps use `localhost/mbt-showcase-{plugin-git:2.10.0,docker-cli:29.8.0,oras:1.3.4}` | CI: pr-check, prod-build, promote pipelines; the local plugin-git is the server's default (so trusted) clone plugin; agent mounts the docker socket; repo marked trusted so the bake step may mount that socket; split-horizon URLs (public WOODPECKER_HOST + forge OAuth host, in-network webhook host) so the Gitea OAuth login works from a host browser; its sqlite database on a volume, so `make ci` re-runs keep the pipeline history |
-| seaweedfs | `localhost/mbt-showcase-seaweedfs:4.47` (`weed server -s3`, 64MB volumes under a fixed 100-volume ceiling, section 9) | S3-compatible object store: `mbt-lake` bucket (the one table, read via s3a://) and `mbt-artifacts` bucket (the artifact store under `churn_lake`); the filer UI is published for humans to browse the lake |
+| runner (built, not run) | `localhost/mbt-showcase-runner:dev`, built on the host by `scripts/build_image.sh` from a digest-pinned `python:3.11-slim-bookworm` + OpenJDK 17 JRE + the workspace wheels (`mbt-core[s3]`, `mbt-h2o[sparkling]`, `mbt-spark`, `mbt-xgboost`, `mbt-mlflow`) with third-party pins from `uv.lock` + pyspark 3.5.8 (its bundled jars are `SPARK_HOME`) + hadoop-aws 3.3.4 and the matching AWS SDK bundle + jupyterlab from the committed `image-extras.txt` closure | Universal environment; env_digest identity by construction. A content-hash label rebuilds it whenever package sources, `uv.lock`, or the image inputs move |
+| gitea | `gitea/gitea:1.27.3-rootless` | Hosts `churn` project repo + `deploy` repo; branch protection + CODEOWNERS gate on `promotions.yml`; `mbt-state` branch storage |
+| woodpecker server + agent | `woodpeckerci/woodpecker-*:v3.18.1` | CI: pr-check, prod-build, promote pipelines; agent mounts the docker socket; repo marked trusted so the bake step may mount that socket; split-horizon URLs (public WOODPECKER_HOST + forge OAuth host, in-network webhook host) so the Gitea OAuth login works from a host browser; its sqlite database on a volume, so `make ci` re-runs keep the pipeline history |
+| seaweedfs | `chrislusf/seaweedfs:4.47` (`weed server -s3`, 64MB volumes under a fixed 100-volume ceiling, section 9) | S3-compatible object store: `mbt-lake` bucket (the one table, read via s3a://) and `mbt-artifacts` bucket (the artifact store under `churn_lake`); the filer UI is published for humans to browse the lake |
 | spark-master, spark-worker | runner image running `spark-class ...Master` / `...Worker` (1 worker, 4 cores, 4g) | Standalone cluster: pushdown reads/sampling/windows + sparkling H2O training |
 | mlflow | runner image (`mlflow server`, sqlite on a volume) | Tracking + model registry (alias mode); champion source of truth |
 | jupyterlab | runner image + `jupyter lab` | DS workbench and the container every `make` recipe runs mbt in |
-| airflow | `localhost/mbt-showcase-airflow:3.3.1` (init + api-server + scheduler + dag-processor; apache-airflow under its published constraints, the docker SDK baked in), **LocalExecutor + `localhost/mbt-showcase-postgres:18.6`** (Ubuntu's postgresql-18; sqlite forces SequentialExecutor, invalid with LocalExecutor) + `localhost/mbt-showcase-git-sync:4.7.1` sidecar (compiled from the tagged source: upstream publishes no binaries) | Runs the retrain/score/monitor DAGs on demand; tasks drive the docker SDK to run the pinned digest from the deploy repo's `images.env` |
-| zot | `localhost/mbt-showcase-zot:2.1.16` (v2.1.17+ breaks multi-GB pushes on slow disks, zot#4140; upstream's config without the CVE scanner, which downloads its database from ghcr.io) | OCI registry: baked deployable units (`mbt/churn`) and oras-pushed `manifest.json`/`run_results.json` provenance artifacts (`mbt/churn/provenance`) |
-| prometheus + pushgateway | `localhost/mbt-showcase-prometheus:3.13.3`, `localhost/mbt-showcase-pushgateway:1.11.3` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) and the four alert rules |
-| alertmanager | `localhost/mbt-showcase-alertmanager:0.34.1` | Delivers firing alerts to webhook-sink by severity: `page` to `/alert/on-call`, `notify` to `/alert/owner` (section 7) |
-| grafana | `localhost/mbt-showcase-grafana:13.1.5` | File-provisioned Prometheus datasource + the "mbt Model Health" dashboard (gate margins, realized metrics, shift vs threshold, node durations) |
+| airflow | `localhost/mbt-showcase-airflow:3.3.1` (init + api-server + scheduler + dag-processor; upstream's `apache/airflow:3.3.1-python3.11` with `mbt-airflow` and the docker SDK installed from this checkout's wheels by `scripts/build_airflow_image.sh`, because the DAGs import `mbt-airflow`), **LocalExecutor + `postgres:18.6-alpine`** (sqlite forces SequentialExecutor; invalid with LocalExecutor) + `git-sync:v4.7.1` sidecar | Runs the retrain/score/monitor DAGs on demand; tasks drive the docker SDK to run the pinned digest from the deploy repo's `images.env` |
+| zot | `ghcr.io/project-zot/zot:v2.1.16` (v2.1.17+ breaks multi-GB pushes on slow disks, zot#4140) | OCI registry: baked deployable units (`mbt/churn`) and oras-pushed `manifest.json`/`run_results.json` provenance artifacts (`mbt/churn/provenance`) |
+| prometheus + pushgateway | `prom/prometheus:v3.13.3`, `prom/pushgateway:v1.11.3` | Metrics per docs/tutorial.md step 14 (the documented spec, implemented verbatim) and the four alert rules |
+| alertmanager | `prom/alertmanager:v0.34.1` | Delivers firing alerts to webhook-sink by severity: `page` to `/alert/on-call`, `notify` to `/alert/owner` (section 7) |
+| grafana | `grafana/grafana:13.1.5` | File-provisioned Prometheus datasource + the "mbt Model Health" dashboard (gate margins, realized metrics, shift vs threshold, node durations) |
 | webhook-sink | ~60-line python recorder with `GET /requests` (the `obs` profile) | The one alert inbox: records the alerts `scripts/run_mbt.sh` posts to `MBT_ALERT_WEBHOOK` and the ones Alertmanager delivers; human-readable in demos, assertable in tests |
-| bootstrap (host + one-shot scripts) | `scripts/ci_bootstrap.py` on the host; `bootstrap/churn_panel.py` in the runner | `make ci`: Gitea users, org, repos, token, OAuth app, deploy repo, Woodpecker login + repo activation + secrets. `make seed`: buckets (no TTL/retention, section 9) and the generated lake table. The images are built by `make image` |
+| bootstrap (host + one-shot scripts) | `scripts/ci_bootstrap.py` on the host; `bootstrap/churn_panel.py` in the runner | `make ci`: Gitea users, org, repos, token, OAuth app, deploy repo, Woodpecker login + repo activation + secrets. `make seed`: buckets (no TTL/retention, section 9) and the generated lake table. The image is built by `make image` |
 
 ## 4. The demo project and its one table
 
@@ -189,7 +185,7 @@ Anchor time travel is also what makes monitoring demoable: `mbt monitor --anchor
 
 ## 5. Golden path (the demo narrative)
 
-1. `make up`: `make doctor` (docker memory and disk, the socket group, ports, leftover networks), build the stack's images (`make image`; cache hits when nothing changed), stage the workspace, start the `core spark dev obs` profiles, generate the lake table; the terminal prints every UI URL. `make ci` starts the `ci` and `orch` profiles (the forge, and the scheduler the deploy repo feeds).
+1. `make up`: `make doctor` (docker memory and disk, the socket group, ports, leftover networks), pull the prebuilt runner image for this checkout's content hash or build it, stage the workspace, start the `core spark dev obs` profiles, generate the lake table; the terminal prints every UI URL. `make ci` starts the `ci` and `orch` profiles (the forge, and the scheduler the deploy repo feeds).
 2. **DS inner loop**: open `project/notebooks/ds_inner_loop.ipynb` in JupyterLab - look at the lake table (reading only the columns asked about), review the YAML, `mbt build --target dev`, analyze the run artifacts, try a hash-sampled what-if with `--vars`. (`make demo` step 1 is the same `mbt build --target dev` over both models.)
 3. **DS scales out**: `mbt build --target prod`; pushdown sampling runs on the cluster and sparkling H2O trains inside the executors (Spark UI shows the apps); models register and the `staging` alias moves.
    **A weaker challenger is refused** (`make demo` step 4, `make challenger`): a working copy drops the eight activity features and retrains on the shared registry; the champion gate re-scores production's model on the challenger's test split, the paired-bootstrap lower bound of the PR-AUC delta is negative, `mbt build` exits 2, nothing is staged, and production is untouched.
@@ -207,7 +203,7 @@ Anchor time travel is also what makes monitoring demoable: `mbt monitor --anchor
 Pipelines live in `.woodpecker/` of the project repo.
 They were authored here first and proved the port; `mbt init --forge gitea` now ships the general version of the same CI to any project (open question 3), while these keep the showcase's own needs - the runner image, the trusted bake step, the deploy repo.
 
-- **Two URLs for one Gitea**: Gitea's `ROOT_URL` is the browser-facing `http://localhost:3305/`, so every link it hands out (Woodpecker's repository and avatar links, push hints, PR pages) opens from the host; a step container cannot reach that address, so each pipeline's `clone:` block points plugin-git's `remote` at `http://gitea:3000/${CI_REPO}.git`, and the scripts name `gitea:3000` themselves. Before, ROOT_URL was the in-network address and every link Woodpecker showed was dead from the host. The override names the local `localhost/mbt-showcase-plugin-git:2.10.0` build, which compose makes Woodpecker's default clone plugin (`WOODPECKER_DEFAULT_CLONE_PLUGIN`) and so a trusted one; even so it gets no credentials for a PRIVATE repo, because Woodpecker writes the netrc for the clone URL's host (now `localhost`), so the showcase's repos stay public.
+- **Two URLs for one Gitea**: Gitea's `ROOT_URL` is the browser-facing `http://localhost:3305/`, so every link it hands out (Woodpecker's repository and avatar links, push hints, PR pages) opens from the host; a step container cannot reach that address, so each pipeline's `clone:` block points plugin-git's `remote` at `http://gitea:3000/${CI_REPO}.git`, and the scripts name `gitea:3000` themselves. Before, ROOT_URL was the in-network address and every link Woodpecker showed was dead from the host. The override names the fully qualified `docker.io/woodpeckerci/plugin-git` image, which Woodpecker trusts as a clone plugin; even so it gets no credentials for a PRIVATE repo, because Woodpecker writes the netrc for the clone URL's host (now `localhost`), so the showcase's repos stay public.
 - **Anchor**: each executing step runs `scripts/lake_anchor.py` before it compiles (section 4.6).
 
 - **Exit-code fidelity**: Woodpecker collapses any nonzero exit to "failed", erasing mbt's 1-vs-2 contract.
@@ -220,7 +216,7 @@ They were authored here first and proved the port; `mbt init --forge gitea` now 
 - **PR comment**: `gitea_pr_comment.py`, a faithful port of `pr_comment.js` to Gitea's `issues/{index}/comments` API, same marker, rendered purely from `run_results.json` + `state_diff.json`; the GitHub runner cost line is replaced with total execution time.
   PR builds register into the per-run `ci` registry, so champion gates render "none (bootstrap)" there - the comment shows the PR's own metrics and gates, not a comparison against the shared production champion.
 - **promotions.yml lint step**: rejects entries without a pinned `version:` pre-merge (unpinned staging-to-production replays exit 1 by design, because promotion vacates the staging alias).
-- **Image bake**: a `localhost/mbt-showcase-docker-cli:29.8.0` step (the static docker CLI + buildx) drives the host daemon through the mounted socket (which is why the repo is marked trusted): `docker build -f deploy/Dockerfile`, push to zot over the published localhost port, digest read back from `RepoDigests`, then the `deploy-digest` step commits it to the deploy repo's `images.env` and `k8s/score-cronjob.yaml` as the CI bot. Gated on "this merge retrained something" (see the implementation notes at the top).
+- **Image bake**: a `docker:29.8.0-cli` step drives the host daemon through the mounted socket (which is why the repo is marked trusted): `docker build -f deploy/Dockerfile`, push to zot over the published localhost port, digest read back from `RepoDigests`, then the `deploy-digest` step commits it to the deploy repo's `images.env` and `k8s/score-cronjob.yaml` as the CI bot. Gated on "this merge retrained something" (see the implementation notes at the top).
 
 ## 7. Observability design
 
@@ -251,7 +247,7 @@ Each row states what the tier ASSERTS today; nothing below is aspirational.
 | ID | Kind | What it proves |
 |---|---|---|
 | SHOW-01 | infra smoke | `compose up --wait` brings every healthchecked service up; MLflow answers `/health` over HTTP; the Spark master reports an ALIVE worker; boto3 round-trips an object against SeaweedFS from inside the runner; the lake holds exactly one table, `churn_panel`; the filer UI lists both buckets and that table without credentials while the raw S3 port refuses an unsigned request with 403; and with the registry stopped, `mbt build` exits 1 - the infra half of the exit-code contract, never 2 |
-| SHOW-02 | env sanity | `mbt --version` and `git` work in the runner image; **h2o python client version == pysparkling-embedded H2O version** (H2O requires an exact match; `images/runner/stage.sh` pins `h2o==3.46.0.6` to match `h2o-pysparkling-3-5`, and `tests/test_showcase_image_pins.py` holds that pin against mbt-h2o's declared range in the fast suite) |
+| SHOW-02 | env sanity | `mbt --version` and `git` work in the runner image; **h2o python client version == pysparkling-embedded H2O version** (H2O requires an exact match; `build_image.sh` pins `h2o==3.46.0.6` to match `h2o-pysparkling-3-5`, and `tests/test_showcase_image_pins.py` holds that pin against mbt-h2o's declared range in the fast suite) |
 | SHOW-03 | DS loop | `mbt parse` and `mbt build --target dev` exit 0; `churn_automl` registers to `staging` and the alias, read back over HTTP MLflow, carries `mbt.gates_passed=true`; `churn_baseline_xgb` succeeds; model artifacts exist under `s3://mbt-artifacts/churn_lake/` |
 | SHOW-04 | cluster training | `mbt build --target prod --select +churn_automl` (pushdown on `spark://spark-master:7077`, sparkling H2O in the executors) succeeds, registers a newer version that takes the `staging` alias, and the Spark master API shows the application |
 | SHOW-05 | slim CI | A one-gate-edit PR: pipeline green; the PR comment's modified lines are exactly `churn_automl` (config) plus its scoring node (upstream), with no dataset and nothing added across fresh clones (URI snapshot stability); the shared registry is untouched. Merging it retrains only `churn_automl` (v2 takes `staging`; the xgboost baseline keeps one version) and pins a freshly baked unit |
@@ -279,11 +275,11 @@ Each row states what the tier ASSERTS today; nothing below is aspirational.
 - Switching an existing target's artifact-store scheme strands registered champions (fetch rejects cross-scheme refs); the showcase never flips schemes mid-life.
 - On an s3:// artifact store MLflow holds pointers (`mbt.artifact.*` tags) and mbt's small documents such as `inference_config.json`, never the model binaries (mbt uploads a model file to MLflow only from a file:// store); the MOJOs live in `s3://mbt-artifacts/`, and the README points humans at the filer UI to see them.
 - The dev uv lock resolves pyspark 4.x; the runner image builds the sparkling fork (`mbt-h2o[sparkling]` pins pyspark 3.5.x) in its own resolution with `uv export --frozen` constraints, and the cluster runs the matching Spark 3.5.8 binaries.
-- The image build resolves NOTHING fresh, and that is load-bearing rather than tidiness: the base is a checksummed rootfs with apt on a dated snapshot, CPython and every release artifact are checksummed, mbt's dependencies come from `uv.lock`, and the deps that are neither (jupyterlab, and setuptools for the `pkg_resources` h2o-pysparkling imports) have their closure pinned in the committed `images/runner/image-extras.txt`.
+- The image build resolves NOTHING fresh, and that is load-bearing rather than tidiness: the base is digest-pinned, mbt's dependencies come from `uv.lock`, and the one dep that is neither (jupyterlab) has its closure pinned in the committed `images/runner/image-extras.txt`.
   Before that file existed, the pip layer resolved against live PyPI on every build, so an upstream release minutes earlier could break it - which is exactly what happened on 2026-08-27, when statsmodels 0.15.0 shipped macOS wheels at 10:34 UTC and Linux cp311 wheels at 14:30, and the 14:12 nightly fell back to the sdist against an image that carries no compiler.
   `scripts/lock_image_extras.sh` regenerates the closure against uv.lock's pins; `tests/test_showcase_image_pins.py` fails in the fast tier if the two drift apart.
 - Woodpecker trusted-repo volumes, the docker socket on the agent, and insecure-registry config are demo-tier security postures; the README says so.
-- Every service image is pinned to an exact version (its Dockerfile's `ARG VERSION=` and checksums), and bumps are verified by running the tier, never taken on faith: Renovate is not active on this repo, so nothing moves these pins automatically, and a rolling tag would let upstream change the stack overnight with no diff (Gitea >= 1.26's `PUBLIC_URL_DETECTION` default flip was exactly that). `zot` stays on v2.1.16 on purpose until project-zot/zot#4140 is fixed in a release (the compose file carries the reason).
+- Every service image is pinned to an exact version, and bumps are verified by running the tier, never taken on faith: Renovate is not active on this repo, so nothing moves these pins automatically, and a rolling tag would let upstream change the stack overnight with no diff (Gitea >= 1.26's `PUBLIC_URL_DETECTION` default flip was exactly that). `zot` stays on v2.1.16 on purpose until project-zot/zot#4140 is fixed in a release (the compose file carries the reason).
 
 ## 10. Repo layout
 
@@ -296,20 +292,21 @@ examples/showcase/
   DESIGN.md                    # this file
   Makefile                     # help, image, workspace, up, seed, urls, demo, ci, score, outcomes,
                                # monitor, inject-drift, reset, down, clean
-  .env.example                 # host ports, S3 credentials, workspace, DOCKER_SOCK_GID
-  images/<name>/Dockerfile     # every image the stack runs, built by scripts/build_images.sh:
-                               #   ubuntu, base, python, runner, and one per service and CI step
+  .env.example                 # host ports, S3 credentials, workspace, image tag, DOCKER_SOCK_GID
   images/runner/{Dockerfile,entrypoint.sh}
   images/runner/image-extras.{in,txt}  # the non-mbt image deps and their pinned closure
-  images/runner/stage.sh       # stages the runner's build context: workspace wheels and
-                               # constraints.txt, derived from uv.lock at build time
-                               # with the sparkling pins - it is not a committed file
+  images/airflow/{Dockerfile,stage.sh}  # upstream's apache/airflow + mbt-airflow from this
+                               # checkout's wheels (stage.sh stages them; built by
+                               # scripts/build_airflow_image.sh)
+                               # (constraints.txt is derived from uv.lock at build time,
+                               #  by scripts/build_image.sh - it is not a committed file)
   compose/docker-compose.yml   # profiles: core, spark, dev, obs, ci, orch
   compose/{seaweedfs,prometheus,alertmanager,grafana}/...
   bootstrap/churn_panel.py     # the one lake table: seed, land-outcomes, inject-drift, reset, advance
   bootstrap/weaker_challenger.py  # the challenger the champion gate refuses (make challenger)
   bootstrap/webhook_sink.py    # the alert inbox: CI's classified alerts + Alertmanager's
-  scripts/                     # host-side: build_images.sh, lock_image_extras.sh, ci_bootstrap.py,
+  scripts/                     # host-side: build_image.sh, build_airflow_image.sh,
+                               #   lock_image_extras.sh, ci_bootstrap.py,
                                #   docker_sock_gid.sh, doctor.py, lifecycle.py
   project/                     # the churn_lake mbt project (source of truth; pushed into Gitea)
     .woodpecker/{pr-check.yml,prod-build.yml,promote.yml}
@@ -331,7 +328,6 @@ tests/
   test_showcase_drivers.py     # hermetic: the Makefile and scripts/lifecycle.py
   test_showcase_gates.py       # SHOW-15 (hermetic: fast suite)
   test_showcase_image_pins.py  # hermetic: runner image pins, extras closure, S3 credentials
-  test_showcase_images.py      # hermetic: every image is built here, none pulled, downloads checksummed
   test_showcase_panel.py       # hermetic: the lake table's generator and the project's use of it
   showcase_utils.py
 ```
@@ -362,12 +358,6 @@ A review of the showcase found it showed one frozen week, once: anchors were con
 So the lake got a clock - its newest cohort - and `advance` to move it a week at a time (refusing to pass today unless told to simulate), every anchor derives from it through `lake_anchor.py`, the dataset's split windows became relative, and `make week` runs a week of operations.
 Around that: the demo shows the champion gate refusing a weaker challenger (the one thing mbt does that a generic stack does not was never shown saying no); `make lifecycle` promotes through the reviewed `promotions.yml` PR instead of `mbt promote` by hand; Alertmanager delivers alerts into the inbox CI already used; Woodpecker keeps its history across `make ci`; Gitea's links open from the host; `make up` starts only the core and observability, pulls a prebuilt runner image when one is published for the checkout, and runs `make doctor` first; the k3d tier runs nightly; and `mbt monitor` stopped reading the whole table to take three columns.
 The seeded bytes did not change: `seed` writes exactly what it wrote before, so every captured output in the docs stays true.
-
-**Built here, pulled from nowhere (2026-10-17).**
-The stack used to pull sixteen upstream images, thirteen of them from Docker Hub, and Docker Hub is what fails first on a locked-down network: behind an office's TLS-intercepting proxy, the daemon's token fetch from `auth.docker.io` dies with `x509: certificate signed by unknown authority`.
-Now every image the showcase runs is built from this repo by `scripts/build_images.sh` (section 3), and nothing names an image it does not build: compose sets `pull_policy: never`, the scripts' `docker run`s pass `--pull never`, and Woodpecker's default clone plugin is the local plugin-git.
-The k3d tier followed: its k3s node carries the release's airgap bundle, k3d's tools container and ArgoCD with its Redis are local builds too, and the node runs with k3s's default registry endpoint disabled, so the stack's own zot is the only registry anything pulls from.
-The prebuilt runner on ghcr.io and the workflow that published it went with it; a first `make up` builds for about 20 minutes instead.
 
 ## 12. Open questions
 

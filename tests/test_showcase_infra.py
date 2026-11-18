@@ -104,7 +104,7 @@ def test_runner_env_sanity_and_sparkling_version_matrix(showcase_stack) -> None:
 
     # The CI tier's state-branch scripts run git inside the runner image; a
     # stale locally cached image without it fails distantly in publish_state
-    # (rebuild with scripts/build_images.sh --force runner after image changes).
+    # (rebuild with scripts/build_image.sh --force after image changes).
     git_probe = stack.exec("git", "--version", workdir="/workspace")
     assert git_probe.stdout.startswith("git version"), git_probe.stdout
 

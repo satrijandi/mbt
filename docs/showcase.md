@@ -19,7 +19,6 @@ Its data is deliberately the simplest realistic shape: ONE big table that alread
 | k3d + ArgoCD (`MBT_LIVE_SHOWCASE_K3D=1`) | CD fidelity: ArgoCD core syncs the same deploy repo into CronJobs on a k3d cluster attached to the compose network, pulling from zot over insecure HTTP |
 
 Everything mbt-related runs inside one runner image (Jupyter kernel, Spark master and worker, every `mbt` invocation), which makes ADR-19 `env_digest` verification hold by construction.
-Every image the stack runs, the runner and each service alike, is built on your machine from the showcase's `images/` directory; nothing is pulled from Docker Hub or any other registry.
 
 ## The one table
 
@@ -53,7 +52,7 @@ Requirements: docker with ~10GB of RAM to spare, `make`, `rsync`, `uv`, and a ch
 ```bash
 cd examples/showcase
 make doctor    # preflight: docker memory and disk, the socket group, ports, leftover networks
-make up        # build the stack's images, boot the core + observability, generate the lake table
+make up        # get the runner image (prebuilt when published), boot the core + observability, generate the lake table
 make demo      # the whole lifecycle, narrated: build dev -> build prod -> promote -> a refused challenger -> score -> outcomes -> monitor
 make week      # a week passes, then that week's operations: monitor -> retrain -> promote -> score
 make ci        # boot Gitea + Woodpecker + Airflow and seed them: org, churn repo, OAuth app, repo activation
@@ -125,4 +124,4 @@ It follows the live-tier double gate: skipped everywhere unless `MBT_LIVE_SHOWCA
 Two modules carry one more gate and run in their own invocation: the runbook module (`MBT_LIVE_SHOWCASE_MAKE=1`) drives the README's `make` targets on a second stack, and the k3d/ArgoCD module (`MBT_LIVE_SHOWCASE_K3D=1`, needs `k3d` and `kubectl`) boots a third; the nightly job runs all three.
 The [showcase README](https://github.com/satrijandi/mbt/blob/main/examples/showcase/README.md#the-e2e-test-tier-the-honest-version-of-the-demo) gives each tier's wall time and lists every module and what it asserts.
 
-The gated tier cannot see a broken showcase spec from the ordinary test battery, so hermetic modules guard it in the fast suite: every gated module keeps its gate, the runner image's hand pins agree with the declared metadata, everything that names an image names one the showcase builds itself (and every download in its Dockerfiles is pinned by checksum), and the table's generator and the project's use of it hold - a week passing labels the newest cohort and leaves every earlier byte alone, no file pins an anchor, at every week the dataset trains a month and never reaches the open cohort, every node reads the one table, ground truth joins on key and cohort, and every string feature is declared categorical.
+The gated tier cannot see a broken showcase spec from the ordinary test battery, so hermetic modules guard it in the fast suite: every gated module keeps its gate, the runner image's hand pins agree with the declared metadata, and the table's generator and the project's use of it hold - a week passing labels the newest cohort and leaves every earlier byte alone, no file pins an anchor, at every week the dataset trains a month and never reaches the open cohort, every node reads the one table, ground truth joins on key and cohort, and every string feature is declared categorical.

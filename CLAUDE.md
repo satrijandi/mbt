@@ -70,8 +70,6 @@ uv run python scripts/audit_dependencies.py   # dependency advisories; needs net
 - Champion gates use a paired bootstrap lower bound (ADR-18). The seed ladder lives in `mbt/execute/seeds.py` (`SeedRung` + one named accessor per rung) and is the only place it is written down executably; a new seeded stage adds a rung with the next free offset and its accessor, never reuses or renumbers one, and `test_seeds_unit.py` fails if two stages share an offset.
 - Path semantics: the CLI coordinator chdirs to `--project-dir` in `make_ctx` (jobs already run with cwd=project), so config-relative paths are project-relative; paths typed on the command line are absolutized against the invocation cwd via `ctx.resolve_cli_path` BEFORE use. New CLI path options must go through `resolve_cli_path`.
 - Manifests verify `env_digest` on `--manifest` execution (ADR-19); `generated_at == anchor` keeps same-anchor compiles byte-identical.
-- The showcase pulls no image from any registry (Docker Hub fails behind TLS-intercepting proxies): every image it runs, k3d tier included, is built by `examples/showcase/scripts/build_images.sh` from `examples/showcase/images/<name>/Dockerfile` as `localhost/mbt-showcase-<name>:<ARG VERSION>`, on one Ubuntu rootfs with apt pinned to a dated snapshot, every download `ADD --checksum`.
-  A new service or step image gets an `images/<name>/Dockerfile`, never an upstream `image:`; `tests/test_showcase_images.py` fails otherwise.
 
 ## Test-suite conventions
 

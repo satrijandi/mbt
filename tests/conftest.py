@@ -43,7 +43,8 @@ def showcase_stack(tmp_path_factory: pytest.TempPathFactory):
     import showcase_utils
 
     showcase_utils.require_docker()
-    showcase_utils.build_images()
+    showcase_utils.build_runner_image()
+    showcase_utils.build_airflow_image()
     stack = showcase_utils.ComposeStack(tmp_path_factory.mktemp("showcase-ws"))
     try:
         stack.up()

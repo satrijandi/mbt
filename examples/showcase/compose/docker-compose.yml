@@ -14,13 +14,6 @@
 #           scheduling/CD half): DAGs live in the Gitea `deploy` repo,
 #           git-sync reconciles them, tasks run the pinned deployable unit.
 #
-# Images: every service runs a localhost/mbt-showcase-* image that
-# scripts/build_images.sh (`make image`, part of `make up`) builds from
-# ../images/<name>/Dockerfile, and `pull_policy: never` keeps compose from
-# ever asking a registry for one: a missing image fails here, locally, with
-# "No such image", instead of reaching for Docker Hub. Each tag is the
-# upstream version that image packages.
-#
 # Required env (set by the Makefile or the pytest fixture):
 #   SHOWCASE_WORKSPACE - host dir bind-mounted at /workspace into every
 #     container that trains or reads data. The Spark adapters stage split
@@ -55,10 +48,14 @@ x-airflow-env: &airflow-env
   AIRFLOW__API_AUTH__JWT_SECRET: mbt-showcase-airflow-jwt-secret
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
 
+# Airflow runs images/airflow, built by `make image` (scripts/build_airflow_image.sh):
+# upstream's apache/airflow with mbt-airflow and the docker SDK it drives the daemon
+# with installed, from this checkout's wheels. pull_policy: never keeps compose from
+# looking for it in a registry - it exists only in the local daemon - so a stack
+# started without `make image` fails with "No such image" at once.
 services:
   seaweedfs:
-    image: localhost/mbt-showcase-seaweedfs:4.47
-    pull_policy: never
+    image: chrislusf/seaweedfs:4.47
     profiles: [core]
     # -ip.bind: weed binds the container IP by default, which breaks
     # localhost healthchecks.
@@ -86,14 +83,13 @@ services:
       - "${SHOWCASE_S3_PORT:-8333}:8333"
       - "${SHOWCASE_FILER_PORT:-8388}:8888"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:9333/cluster/healthz"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9333/cluster/healthz"]
       interval: 3s
       timeout: 5s
       retries: 30
 
   mlflow:
-    image: localhost/mbt-showcase-runner:dev
-    pull_policy: never
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [core]
     # --allowed-hosts: mlflow 3.x rejects non-localhost Host headers (DNS
     # rebinding protection); in-network clients send Host: mlflow:5000.
@@ -112,8 +108,7 @@ services:
       retries: 60
 
   spark-master:
-    image: localhost/mbt-showcase-runner:dev
-    pull_policy: never
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [spark]
     command: spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080
     ports:
@@ -125,8 +120,7 @@ services:
       retries: 30
 
   spark-worker:
-    image: localhost/mbt-showcase-runner:dev
-    pull_policy: never
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [spark]
     command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --cores 4 --memory 4g --webui-port 8081
     environment:
@@ -143,8 +137,7 @@ services:
       retries: 30
 
   jupyterlab:
-    image: localhost/mbt-showcase-runner:dev
-    pull_policy: never
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     profiles: [dev]
     command: jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''
     working_dir: /workspace
@@ -163,12 +156,11 @@ services:
       retries: 30
 
   gitea:
-    # Pinned exact deliberately (like every service here, in its
-    # Dockerfile): a rolling version lets upstream behavior change under the
-    # suite overnight with no repo diff - Gitea >= 1.26's
-    # PUBLIC_URL_DETECTION default flip was exactly that shape of breakage.
-    image: localhost/mbt-showcase-gitea:1.27.3
-    pull_policy: never
+    # Pinned exact deliberately (like every service here): a rolling tag
+    # lets upstream behavior change under the suite overnight with no repo
+    # diff - Gitea >= 1.26's PUBLIC_URL_DETECTION default flip was exactly
+    # that shape of breakage.
+    image: gitea/gitea:1.27.3-rootless
     profiles: [ci]
     environment:
       # Headless init: skip the web installer entirely.
@@ -197,8 +189,7 @@ services:
       retries: 30
 
   woodpecker-server:
-    image: localhost/mbt-showcase-woodpecker-server:3.18.1
-    pull_policy: never
+    image: woodpeckerci/woodpecker-server:v3.18.1
     profiles: [ci]
     environment:
       WOODPECKER_OPEN: "true"
@@ -220,11 +211,6 @@ services:
       WOODPECKER_ADMIN: mbtops
       WOODPECKER_GITEA: "true"
       WOODPECKER_GITEA_URL: http://gitea:3000
-      # The clone image every pipeline's `clone:` block names. As the default
-      # clone plugin it is also a trusted one, so Woodpecker neither flags
-      # each clone step "does not match allow list" nor withholds the netrc;
-      # its own default is upstream's docker.io/woodpeckerci/plugin-git.
-      WOODPECKER_DEFAULT_CLONE_PLUGIN: localhost/mbt-showcase-plugin-git:2.10.0
       # The default sqlite datasource fails a write the moment the file is
       # busy. Under the stack's load (a bake running Spark beside Airflow)
       # the agent's workflow-lease extensions failed with "database is
@@ -247,8 +233,7 @@ services:
       - "${SHOWCASE_WOODPECKER_PORT:-8305}:8000"
 
   woodpecker-agent:
-    image: localhost/mbt-showcase-woodpecker-agent:3.18.1
-    pull_policy: never
+    image: woodpeckerci/woodpecker-agent:v3.18.1
     profiles: [ci]
     environment:
       WOODPECKER_SERVER: woodpecker-server:9000
@@ -271,8 +256,7 @@ services:
     # the ~5GB runner-image layer's push died mid-upload on ubuntu-latest
     # (docker retried then "use of closed network connection"). Do not bump
     # past v2.1.16 until project-zot/zot#4140 / #4149 land in a release.
-    image: localhost/mbt-showcase-zot:2.1.16
-    pull_policy: never
+    image: ghcr.io/project-zot/zot:v2.1.16
     profiles: [ci]
     # OCI registry for the deployable unit + oras provenance artifacts.
     # In-network pushes (oras) use zot:5000 over plain HTTP; the docker
@@ -283,8 +267,7 @@ services:
       - "127.0.0.1:${SHOWCASE_ZOT_PORT:-15000}:5000"
 
   webhook-sink:
-    image: localhost/mbt-showcase-runner:dev
-    pull_policy: never
+    image: ${SHOWCASE_RUNNER_IMAGE:-localhost/mbt-showcase-runner:dev}
     # The one alert inbox: CI's exit-code wrapper curls it, and Alertmanager
     # delivers model alerts to it. Observability's, so it runs whenever the
     # alerts it receives can fire, forge or no forge.
@@ -301,8 +284,7 @@ services:
       retries: 30
 
   airflow-db:
-    image: localhost/mbt-showcase-postgres:18.6
-    pull_policy: never
+    image: postgres:18.6-alpine
     profiles: [orch]
     environment:
       POSTGRES_USER: airflow
@@ -318,19 +300,16 @@ services:
     image: localhost/mbt-showcase-airflow:3.3.1
     pull_policy: never
     profiles: [orch]
-    # The one-shot init of the split-component 3.x setup: migrate the
-    # metadata DB (core + the FAB auth manager's tables), then create the
-    # admin login. Both are idempotent - `users create` leaves an existing
-    # admin alone - because compose reruns this on every `up`.
+    # The image entrypoint handles db migration (core + FAB provider tables)
+    # and admin-user creation when these _AIRFLOW_* vars are set - the
+    # supported one-shot init flow for the split-component 3.x setup.
     environment:
       <<: *airflow-env
-    command:
-      - bash
-      - -c
-      - >-
-        airflow db migrate &&
-        airflow users create --username admin --password admin --role Admin
-        --firstname Airflow --lastname Admin --email airflowadmin@example.com
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    command: airflow version
     depends_on:
       airflow-db:
         condition: service_healthy
@@ -341,15 +320,16 @@ services:
     pull_policy: never
     profiles: [orch]
     # The DAG tasks drive the docker daemon (LocalExecutor runs them
-    # in-scheduler) as the image's non-root airflow user, so the container
-    # joins the socket's owning group. That group differs per runtime (0 on
-    # Docker Desktop and OrbStack, a `docker` group on Rancher Desktop and
-    # native Linux); the Makefile and the test harness ask the daemon via
-    # scripts/docker_sock_gid.sh.
+    # in-scheduler), and the image's airflow user must stay non-root (the
+    # official entrypoint misbehaves under root), so the container joins the
+    # socket's owning group. That group differs per
+    # runtime (0 on Docker Desktop and OrbStack, a `docker` group on Rancher
+    # Desktop and native Linux); the Makefile and the test harness ask the
+    # daemon via scripts/docker_sock_gid.sh.
     group_add: ["${DOCKER_SOCK_GID:-0}"]
     environment:
       <<: *airflow-env
-    command: airflow scheduler
+    command: scheduler
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - airflow-dags:/gitsync:ro
@@ -373,7 +353,7 @@ services:
     profiles: [orch]
     environment:
       <<: *airflow-env
-    command: airflow dag-processor
+    command: dag-processor
     volumes:
       - airflow-dags:/gitsync:ro
       - airflow-logs:/opt/airflow/logs
@@ -387,7 +367,7 @@ services:
     profiles: [orch]
     environment:
       <<: *airflow-env
-    command: airflow api-server
+    command: api-server
     volumes:
       - airflow-dags:/gitsync:ro
       - airflow-logs:/opt/airflow/logs
@@ -403,8 +383,7 @@ services:
       retries: 60
 
   git-sync:
-    image: localhost/mbt-showcase-git-sync:4.7.1
-    pull_policy: never
+    image: registry.k8s.io/git-sync/git-sync:v4.7.1
     profiles: [orch]
     # Root so it can write the shared named volume; --max-failures=-1 keeps
     # it retrying until ci_bootstrap.py has seeded the deploy repo.
@@ -420,15 +399,13 @@ services:
       - airflow-dags:/gitsync
 
   pushgateway:
-    image: localhost/mbt-showcase-pushgateway:1.11.3
-    pull_policy: never
+    image: prom/pushgateway:v1.11.3
     profiles: [obs]
     ports:
       - "${SHOWCASE_PUSHGW_PORT:-9491}:9091"
 
   prometheus:
-    image: localhost/mbt-showcase-prometheus:3.13.3
-    pull_policy: never
+    image: prom/prometheus:v3.13.3
     profiles: [obs]
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -437,8 +414,7 @@ services:
       - "${SHOWCASE_PROMETHEUS_PORT:-9490}:9090"
 
   alertmanager:
-    image: localhost/mbt-showcase-alertmanager:0.34.1
-    pull_policy: never
+    image: prom/alertmanager:v0.34.1
     profiles: [obs]
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
@@ -446,8 +422,7 @@ services:
       - "${SHOWCASE_ALERTMANAGER_PORT:-9493}:9093"
 
   grafana:
-    image: localhost/mbt-showcase-grafana:13.1.5
-    pull_policy: never
+    image: grafana/grafana:13.1.5
     profiles: [obs]
     environment:
       GF_SECURITY_ADMIN_USER: admin

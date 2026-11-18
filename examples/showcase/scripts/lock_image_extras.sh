@@ -25,13 +25,6 @@
 # --universal: the image is built for whatever the builder's platform is
 # (arm64 on a developer Mac, x86_64 in CI), so the closure carries markers for
 # both rather than baking one in.
-#
-# A rerun keeps every pin it can: uv prefers the versions already in its
-# output file, which starts as the committed closure, so adding a package to
-# image-extras.in changes that package's lines and nothing else. --upgrade
-# re-resolves the whole closure to the newest versions instead.
-#
-# Usage: lock_image_extras.sh [--upgrade]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -40,28 +33,22 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # The same constraint set the Dockerfile installs under: uv.lock, with the dev
-# fork's JVM pins swapped for the sparkling fork's (images/runner/stage.sh does this
+# fork's JVM pins swapped for the sparkling fork's (build_image.sh does this
 # transform too - keep the two in step).
 echo "==> exporting uv.lock pins"
 (cd "$REPO_ROOT" && uv export --frozen --no-emit-workspace --no-hashes --no-annotate --no-header \
     -o "$WORK/constraints-full.txt" >/dev/null)
 grep -vE '^(pyspark|h2o|h2o-pysparkling-3-5)==' "$WORK/constraints-full.txt" > "$WORK/constraints.txt"
 {
-    grep -E '^(PYSPARK_PIN|H2O_PIN|PYSPARKLING_PIN)=' "$REPO_ROOT/examples/showcase/images/runner/stage.sh" \
+    grep -E '^(PYSPARK_PIN|H2O_PIN|PYSPARKLING_PIN)=' "$REPO_ROOT/examples/showcase/scripts/build_image.sh" \
         | sed -E 's/^[A-Z0-9_]+="([^"]+)"/\1/'
 } >> "$WORK/constraints.txt"
 
 echo "==> resolving image-extras.in against those pins"
-upgrade=()
-if [ "${1:-}" = "--upgrade" ]; then
-    upgrade=(--upgrade)
-else
-    grep -vE '^#' "$RUNNER_DIR/image-extras.txt" > "$WORK/resolved.txt"
-fi
 (cd "$REPO_ROOT" && uv pip compile "$RUNNER_DIR/image-extras.in" \
     --universal --python-version 3.11 \
     --constraint "$WORK/constraints.txt" \
-    --no-header --no-annotate ${upgrade[@]+"${upgrade[@]}"} \
+    --no-header --no-annotate \
     -o "$WORK/resolved.txt" >/dev/null)
 
 {

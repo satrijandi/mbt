@@ -17,7 +17,7 @@ Run every `make` command from `examples/showcase`:
 cd examples/showcase
 ```
 
-`make up` builds the stack's images from this checkout (about 20 minutes the first time, nothing pulled from a registry) and afterwards rebuilds only what changed; `scripts/build_images.sh --force runner` rebuilds the runner even when nothing did.
+`make up` rebuilds the runner and Airflow images only when their inputs changed; `scripts/build_image.sh --force` rebuilds the runner even when nothing did (10-15 minutes on a cold cache).
 
 ## 1. Start from nothing
 
@@ -34,7 +34,7 @@ Gitea, Woodpecker, MLflow, the lake and Airflow all start empty, so nothing from
 make up
 ```
 
-Builds the stack's images if needed (among them the runner, the one image that holds mbt, Spark, H2O and JupyterLab), stages the workspace, starts every service, and generates the lake table `s3://mbt-lake/churn_panel`: nine weekly cohorts, the newest of which (2026-09-28) has no labels yet.
+Builds the runner image if needed (the one image that holds mbt, Spark, H2O and JupyterLab) and Airflow's, stages the workspace, starts every service, and generates the lake table `s3://mbt-lake/churn_panel`: nine weekly cohorts, the newest of which (2026-09-28) has no labels yet.
 It takes about 3 minutes and ends with every UI URL, the last of them:
 
 ```text

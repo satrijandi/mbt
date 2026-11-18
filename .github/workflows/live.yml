@@ -57,9 +57,8 @@ jobs:
         if: env.SNOWFLAKE_ACCOUNT == ''
         run: echo "SNOWFLAKE_* secrets are not configured - live Snowflake suite was not run."
 
-  # The docker-compose showcase stack (examples/showcase): builds every image
-  # it runs from this repo (scripts/build_images.sh; nothing is pulled from a
-  # registry), boots SeaweedFS + MLflow + Spark + Gitea/Woodpecker + Zot +
+  # The docker-compose showcase stack (examples/showcase): builds the runner
+  # image, boots SeaweedFS + MLflow + Spark + Gitea/Woodpecker + Zot +
   # Airflow + observability, and runs the lifecycle, CI-loop, provenance,
   # and scheduling tiers, then the runbook tier and the k3d + ArgoCD tier,
   # each on a stack of its own. No secrets needed - docker ships on

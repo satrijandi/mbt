@@ -1,15 +1,9 @@
 """The optional k3d + ArgoCD CD-fidelity tier (SHOW-16, DESIGN.md P6).
 
-DOUBLY opt-in (MBT_LIVE_SHOWCASE=1 AND MBT_LIVE_SHOWCASE_K3D=1; live.yml runs
-it nightly as its own step): a k3d cluster attached to the compose network,
-ArgoCD core syncing the Gitea `deploy` repo's k8s/ dir, zot marked insecure
-via registries.yaml. Like the stack, it pulls no image from a registry but
-the stack's own zot: the k3s node, k3d's tools container, ArgoCD and its
-Redis are images build_images.sh builds from this repo, k3s's system images
-come from the release's airgap bundle inside the node image, and the node
-runs with k3s's default registry endpoint disabled, so anything else it
-tried to pull would fail instead of reaching Docker Hub. Proves the
-literal-fidelity CD claims:
+Local-only and DOUBLY opt-in (MBT_LIVE_SHOWCASE=1 AND MBT_LIVE_SHOWCASE_K3D=1;
+the nightly job sets only the former): a k3d cluster attached to the compose
+network, ArgoCD core syncing the Gitea `deploy` repo's k8s/ dir, zot marked
+insecure via registries.yaml. Proves the literal-fidelity CD claims:
 
 - ArgoCD renders the deploy repo into the mbt namespace (CronJob pinned to
   the baked digest);
@@ -22,10 +16,8 @@ literal-fidelity CD claims:
 import os
 import shutil
 import subprocess
-import urllib.request
 
 import pytest
-import showcase_utils
 from showcase_utils import SHOWCASE_MARKS, run_git
 
 pytestmark = [
@@ -39,30 +31,6 @@ pytestmark = [
 ARGOCD_CORE = (
     "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.9/manifests/core-install.yaml"
 )
-#: The images ArgoCD's manifest names, and the local builds that replace them.
-ARGOCD_UPSTREAM_IMAGE = "quay.io/argoproj/argocd:v3.4.9"
-REDIS_UPSTREAM_IMAGE = "public.ecr.aws/docker/library/redis:8.2.3-alpine"
-#: The tier's images, built by name: `make image` leaves them out (ON_DEMAND).
-K3D_TIER_IMAGES = ("k3s", "k3d-tools", "argocd", "redis")
-
-
-def argocd_core_manifest(tags: dict[str, str]) -> str:
-    """ArgoCD's core install, with its images swapped for the local builds
-    (imported into the node beforehand) and `imagePullPolicy: Always`, which
-    would make the kubelet ask a registry anyway, relaxed to IfNotPresent."""
-    with urllib.request.urlopen(ARGOCD_CORE, timeout=120) as response:
-        manifest = response.read().decode()
-    for upstream in (ARGOCD_UPSTREAM_IMAGE, REDIS_UPSTREAM_IMAGE):
-        assert f"image: {upstream}" in manifest, (
-            f"{ARGOCD_CORE} no longer names {upstream}; update this test with the bump"
-        )
-    return (
-        manifest.replace(f"image: {ARGOCD_UPSTREAM_IMAGE}", f"image: {tags['argocd']}")
-        .replace(f"image: {REDIS_UPSTREAM_IMAGE}", f"image: {tags['redis']}")
-        .replace("imagePullPolicy: Always", "imagePullPolicy: IfNotPresent")
-    )
-
-
 # The core install ships no API server, and it is the API server that
 # normally creates the `default` AppProject - without this, the Application
 # sits at InvalidSpecError("project default which does not exist") forever.
@@ -104,21 +72,15 @@ spec:
 
 
 class K3d:
-    def __init__(
-        self, name: str, network: str, workdir, host_aliases: dict, tags: dict[str, str]
-    ) -> None:
+    def __init__(self, name: str, network: str, workdir, host_aliases: dict) -> None:
         self.name = name
         self.network = network
         self.workdir = workdir
         self.host_aliases = host_aliases
-        self.tags = tags
         self.kubeconfig = None
 
     def sh(self, *cmd: str, timeout: int = 600, check: bool = True, input: str | None = None):
         env = os.environ.copy()
-        # k3d starts a helper container on every cluster create; by default
-        # it is ghcr.io/k3d-io/k3d-tools.
-        env["K3D_IMAGE_TOOLS"] = self.tags["k3d-tools"]
         if self.kubeconfig:
             env["KUBECONFIG"] = self.kubeconfig
         proc = subprocess.run(
@@ -154,13 +116,6 @@ class K3d:
             "--servers",
             "1",
             "--no-lb",
-            "--image",
-            self.tags["k3s"],
-            # Without a mirror for a registry, containerd falls back to that
-            # registry's own endpoint (docker.io for every system image);
-            # disabled, the node can pull from the zot mirror and nothing else.
-            "--k3s-arg",
-            "--disable-default-registry-endpoint@server:*",
             *alias_flags,
             "--registry-config",
             str(registries),
@@ -171,18 +126,18 @@ class K3d:
         )
         kubeconfig = self.sh("k3d", "kubeconfig", "write", self.name).stdout.strip()
         self.kubeconfig = kubeconfig
-        # The local ArgoCD and Redis builds, copied from the host daemon into
-        # the node's containerd; the patched manifest names exactly these.
+        # Copy the ArgoCD images from the host daemon into the cluster's
+        # containerd when present - best-effort (a cold host pulls from quay
+        # inside the cluster instead, just slower).
         self.sh(
             "k3d",
             "image",
             "import",
             "-c",
             self.name,
-            "--mode",
-            "direct",
-            self.tags["argocd"],
-            self.tags["redis"],
+            "quay.io/argoproj/argocd:v3.4.9",
+            "public.ecr.aws/docker/library/redis:8.2.3-alpine",
+            check=False,
             timeout=600,
         )
 
@@ -217,8 +172,6 @@ def cd(showcase_ci, tmp_path_factory: pytest.TempPathFactory):
 
     ci = showcase_ci
     ci.ensure_seeded()
-    showcase_utils.build_images(*K3D_TIER_IMAGES)
-    tags = showcase_utils.image_tags(*K3D_TIER_IMAGES)
 
     def container_ip(service: str) -> str:
         proc = subprocess.run(
@@ -242,7 +195,6 @@ def cd(showcase_ci, tmp_path_factory: pytest.TempPathFactory):
         network=ci.stack.env["SHOWCASE_NETWORK"],
         workdir=tmp_path_factory.mktemp("showcase-k3d"),
         host_aliases={s: container_ip(s) for s in ("gitea", "zot", "seaweedfs", "mlflow")},
-        tags=tags,
     )
     try:
         cluster.up()
@@ -250,16 +202,7 @@ def cd(showcase_ci, tmp_path_factory: pytest.TempPathFactory):
         # --server-side: ArgoCD v3's applicationsets CRD blows past the
         # 262144-byte last-applied-configuration annotation limit that
         # client-side apply would write.
-        cluster.kubectl(
-            "apply",
-            "--server-side",
-            "-n",
-            "argocd",
-            "-f",
-            "-",
-            input=argocd_core_manifest(tags),
-            timeout=600,
-        )
+        cluster.kubectl("apply", "--server-side", "-n", "argocd", "-f", ARGOCD_CORE, timeout=600)
         cluster.wait_for(
             "get",
             "-n",

@@ -1,0 +1,150 @@
+# Publishes the showcase runner image (examples/showcase/images/runner) to
+# GHCR for amd64 and arm64, tagged by its content hash - the same hash
+# scripts/build_image.sh labels a local build with. `make up` and the live
+# tier pull it instead of spending 10-15 minutes building, whenever the
+# checkout matches a published commit; any local edit to what shapes the
+# image changes the hash, and the script then builds as before.
+#
+# Each architecture builds natively (no QEMU: the pip layer compiles JVM
+# sdists that would take hours emulated), then one job joins the two into a
+# multi-arch tag. A hash that is already published is never rebuilt.
+name: Showcase runner image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "uv.lock"
+      - "examples/showcase/images/runner/**"
+      - "examples/showcase/scripts/build_image.sh"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REMOTE_IMAGE: ghcr.io/${{ github.repository_owner }}/mbt-showcase-runner
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      hash: ${{ steps.hash.outputs.hash }}
+      published: ${{ steps.hash.outputs.published }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - name: Content hash, and whether it is already published
+        id: hash
+        run: |
+          hash=$(bash examples/showcase/scripts/build_image.sh --print-hash)
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          if docker manifest inspect "$REMOTE_IMAGE:$hash" > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$REMOTE_IMAGE:$hash is already published"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.published != 'true'
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d   # v10.0.1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Free runner disk space (the image is ~6GB unpacked)
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Build
+        env:
+          MBT_SHOWCASE_PULL: "0"
+          MBT_SHOWCASE_RUNNER_IMAGE: ${{ env.REMOTE_IMAGE }}:${{ needs.plan.outputs.hash }}-${{ matrix.arch }}
+          PLANNED: ${{ needs.plan.outputs.hash }}
+        run: |
+          bash examples/showcase/scripts/build_image.sh
+          built=$(bash examples/showcase/scripts/build_image.sh --print-hash)
+          test "$built" = "$PLANNED"
+      - name: Push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          TAG: ${{ env.REMOTE_IMAGE }}:${{ needs.plan.outputs.hash }}-${{ matrix.arch }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker push "$TAG"
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Join the architectures under the content-hash tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          HASH: ${{ needs.plan.outputs.hash }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker buildx imagetools create -t "$REMOTE_IMAGE:$HASH" \
+            "$REMOTE_IMAGE:$HASH-amd64" "$REMOTE_IMAGE:$HASH-arm64"
+          docker buildx imagetools inspect "$REMOTE_IMAGE:$HASH"
+
+  notify:
+    # A failed publish degrades quietly - every `make up` falls back to a
+    # 10-15 minute local build - so it files one tracking issue like the other
+    # unattended workflows, and closes it when a publish succeeds again.
+    needs: [plan, build, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Raise or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "Showcase runner image publish is failing"
+          OUTCOMES: ${{ needs.plan.result }} ${{ needs.build.result }} ${{ needs.publish.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == env.TITLE)][0].number // empty")
+          case " $OUTCOMES " in
+            *" failure "*) ;;
+            *)
+              if [ -n "$existing" ]; then
+                gh issue close "$existing" --comment "The runner image publishes again: $RUN_URL"
+              fi
+              exit 0
+              ;;
+          esac
+          body="The runner image did not publish ($OUTCOMES); make up builds locally until it does: $RUN_URL"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi

@@ -7,7 +7,7 @@
 # construction: `mbt run --manifest` inside this image sees the environment
 # the manifest was compiled in, byte for byte.
 #
-# localhost/ keeps the base off every registry: see scripts/build_images.sh.
+# localhost/ keeps the base off every registry: see scripts/build_image.sh.
 FROM localhost/mbt-showcase-runner:dev
 
 COPY . /app/project
